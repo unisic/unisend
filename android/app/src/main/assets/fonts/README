@@ -1,0 +1,4 @@
+NotoColorEmoji.ttf: Noto Color Emoji 2.042 (CBDT), copied from gpui-mobile's
+example app. SIL Open Font License 1.1, https://openfontlicense.org.
+Android 13+ ships only a COLRv1 emoji font, which gpui-mobile cannot draw; it
+falls back to this asset.
