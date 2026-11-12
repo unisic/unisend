@@ -20,6 +20,7 @@ use matrix_sdk::{
         recovery::{RecoveryError, RecoveryState},
         secret_storage::SecretStorageError,
     },
+    notification_settings::{NotificationSettings, RoomNotificationMode},
     media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings},
     reqwest,
     room::{Messages, MessagesOptions},
@@ -42,7 +43,7 @@ use matrix_sdk::{
             },
         },
         media::Method,
-        serde::JsonObject,
+        serde::{JsonObject, Raw},
         uint,
     },
     store::RoomLoadSettings,
@@ -69,6 +70,7 @@ pub enum Cmd {
     Recover(String),
     Open(OwnedRoomId),
     LoadOlder,
+    Chat(OwnedRoomId, ChatAction),
     Avatars(Vec<OwnedRoomId>),
     /// Re-read the latest message of rooms whose preview is missing or undecryptable.
     Previews(Vec<OwnedRoomId>),
@@ -91,6 +93,21 @@ pub enum Ev {
     Error(String),
 }
 
+/// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
+#[derive(Clone, Copy, Debug)]
+pub enum ChatAction {
+    /// `com.beeper.inbox.done` room account data.
+    Archive(bool),
+    /// `m.favourite` tag.
+    Pin(bool),
+    /// `m.lowpriority` tag.
+    LowPriority(bool),
+    /// Room push rule without a notify action.
+    Mute(bool),
+    /// `m.marked_unread`; clearing it also sends a read receipt.
+    Unread(bool),
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RoomSummary {
     pub id: OwnedRoomId,
@@ -105,6 +122,25 @@ pub struct RoomSummary {
     /// One-to-one chat: bubbles need no sender names.
     #[serde(default)]
     pub dm: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub low_priority: bool,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub marked_unread: bool,
+    #[serde(default)]
+    pub archived: bool,
+    /// Beeper's server-side order of the newest message from someone else; 0 when unknown.
+    #[serde(default)]
+    pub order: i64,
+}
+
+impl RoomSummary {
+    pub fn is_unread(&self) -> bool {
+        self.unread > 0 || self.marked_unread
+    }
 }
 
 #[derive(Clone)]
@@ -116,6 +152,8 @@ pub struct Msg {
     pub own: bool,
     /// Origin server time, ms since the epoch.
     pub ts: u64,
+    /// `com.beeper.hs.order`; 0 on other homeservers.
+    pub order: i64,
 }
 
 pub enum Item {
@@ -165,6 +203,8 @@ struct State {
     open: Option<(OwnedRoomId, Option<String>)>,
     rooms: Rooms,
     fetches: Arc<tokio::sync::Semaphore>,
+    /// Push rules, kept current by the SDK. One instance: each registers an event handler.
+    notif: Option<NotificationSettings>,
 }
 
 /// Room summaries, shared by the sync loop and preview refreshes. Never held across an await.
@@ -184,7 +224,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         .filter(|_| cfg!(debug_assertions))
         .unwrap_or_else(|| beeper::HOMESERVER_URL.to_owned());
     let mut st = State { dir, homeserver, http, ev, client: None, login_request: None, open: None,
-        rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)) };
+        rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None };
     match st.restore().await {
         Ok(true) => {}
         Ok(false) => st.emit(Ev::NeedLogin).await,
@@ -248,7 +288,9 @@ impl State {
 
     async fn go_live(&mut self, client: Client) {
         tokio::spawn(watch_recovery(client.clone(), self.ev.clone()));
-        tokio::spawn(sync_loop(client.clone(), self.dir.clone(), self.rooms.clone(), self.ev.clone()));
+        let notif = client.notification_settings().await;
+        tokio::spawn(sync_loop(client.clone(), notif.clone(), self.dir.clone(), self.rooms.clone(), self.ev.clone()));
+        self.notif = Some(notif);
         self.client = Some(client);
         self.emit(Ev::Ready).await;
     }
@@ -315,22 +357,52 @@ impl State {
             }
             Cmd::Open(room_id) => {
                 self.open = Some((room_id.clone(), None));
-                if let Some(newest) = self.page(room_id.clone(), true).await? {
-                    // Private receipt: clears the unread count without telling the other side (or the bridged network).
-                    let room = self.room(&room_id)?;
-                    let receipt = room.send_single_receipt(
-                        create_receipt::v3::ReceiptType::ReadPrivate,
-                        ReceiptThread::Unthreaded,
-                        newest,
-                    );
-                    if let Err(e) = receipt.await {
-                        log::warn!("read receipt for {room_id}: {e}");
-                    }
+                let newest = self.page(room_id.clone(), true).await?;
+                if let Err(e) = mark_read(&self.room(&room_id)?, newest).await {
+                    log::warn!("mark {room_id} read: {e:#}");
                 }
             }
             Cmd::LoadOlder => {
                 if let Some((room_id, Some(_))) = &self.open {
                     self.page(room_id.clone(), false).await?;
+                }
+            }
+            Cmd::Chat(room_id, action) => {
+                let room = self.room(&room_id)?;
+                match action {
+                    ChatAction::Pin(on) => room.set_is_favourite(on, Some(1.0)).await?,
+                    ChatAction::LowPriority(on) => room.set_is_low_priority(on, Some(0.0)).await?,
+                    ChatAction::Unread(true) => room.set_unread_flag(true).await?,
+                    ChatAction::Unread(false) => {
+                        let resp = room.messages(MessagesOptions::backward()).await?;
+                        mark_read(&room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned)).await?;
+                    }
+                    ChatAction::Mute(on) => {
+                        let notif = self.notif.as_ref().context("Not signed in")?;
+                        if on {
+                            notif.set_room_notification_mode(&room_id, RoomNotificationMode::MentionsAndKeywordsOnly).await?;
+                        } else {
+                            notif.delete_user_defined_room_rules(&room_id).await?;
+                        }
+                    }
+                    ChatAction::Archive(false) => {
+                        room.set_account_data_raw(DONE.into(), Raw::new(&Done::default())?.cast_unchecked()).await?;
+                    }
+                    ChatAction::Archive(true) => {
+                        if room.is_favourite() {
+                            return Err(anyhow!("Pinned chats can't be archived"));
+                        }
+                        // Like Beeper: archived up to the newest event, by the server's own order.
+                        let resp = room.messages(MessagesOptions::backward()).await?;
+                        let newest = resp.chunk.first();
+                        let order = newest.and_then(hs_order).filter(|o| *o != 0);
+                        let done = Done { updated_ts: Some(now_ms()), at_order: order };
+                        room.set_account_data_raw(DONE.into(), Raw::new(&done)?.cast_unchecked()).await?;
+                        // Without a server order the rule compares timestamps, which never archive an unread chat.
+                        if order.is_none() || mark_read_on_archive(self.client()?).await {
+                            mark_read(&room, newest.and_then(|e| e.event_id()).map(ToOwned::to_owned)).await?;
+                        }
+                    }
                 }
             }
             Cmd::Avatars(ids) => {
@@ -494,31 +566,110 @@ async fn watch_recovery(client: Client, ev: mpsc::Sender<Ev>) {
     }
 }
 
+const DONE: &str = "com.beeper.inbox.done";
+
+/// Beeper's archive mark: the chat is done up to this point of its timeline.
+#[derive(Default, Serialize, Deserialize)]
+struct Done {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_ts: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    at_order: Option<i64>,
+}
+
+/// Clears the unread state. The receipt is private: the other side, or the bridged network, is not told.
+async fn mark_read(room: &Room, newest: Option<OwnedEventId>) -> Result<()> {
+    room.set_unread_flag(false).await?;
+    if let Some(id) = newest {
+        room.send_single_receipt(create_receipt::v3::ReceiptType::ReadPrivate, ReceiptThread::Unthreaded, id).await?;
+    }
+    Ok(())
+}
+
+/// Beeper's "mark as read when archiving" setting; on unless the account turned it off.
+async fn mark_read_on_archive(client: &Client) -> bool {
+    #[derive(Deserialize)]
+    struct Pref {
+        enabled: Option<bool>,
+    }
+    match client.account().account_data_raw("com.beeper.mark_read_when_archive".into()).await {
+        Ok(Some(raw)) => raw.deserialize_as_unchecked::<Pref>().ok().and_then(|p| p.enabled).unwrap_or(false),
+        _ => true,
+    }
+}
+
+fn hs_order(event: &TimelineEvent) -> Option<i64> {
+    #[derive(Deserialize)]
+    struct Unsigned {
+        #[serde(rename = "com.beeper.hs.order")]
+        order: Option<i64>,
+    }
+    event.raw().get_field::<Unsigned>("unsigned").ok().flatten()?.order
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// Same rule as Beeper Desktop: a pinned chat is never archived, and a message newer than the mark
+/// brings the chat back. `at_order` wins when both sides know the server order; else timestamps.
+fn is_done(done: &Done, s: &RoomSummary, now: i64) -> bool {
+    if s.pinned {
+        return false;
+    }
+    if let Some(at) = done.at_order.filter(|o| *o != 0) {
+        return at >= if s.order != 0 { s.order } else { i64::MIN };
+    }
+    done.updated_ts.is_some_and(|upto| upto > 0 && upto >= s.ts as i64 && upto < now && !s.is_unread())
+}
+
+/// Everything the local store knows about a room. `preview`, `ts`, `order` and `dm` are the
+/// caller's (the preview's wording depends on `dm`); the rest is read here.
+async fn summarize(room: &Room, notif: &NotificationSettings, seen: RoomSummary) -> RoomSummary {
+    let name = room.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| seen.id.to_string());
+    let network = match seen.network {
+        Some(n) => Some(n),
+        None => network(room).await,
+    };
+    let mode = notif.get_user_defined_room_notification_mode(room.room_id()).await;
+    let done = match room.account_data(DONE.into()).await {
+        Ok(Some(raw)) => raw.get_field::<Done>("content").ok().flatten().unwrap_or_default(),
+        _ => Done::default(),
+    };
+    let mut s = RoomSummary {
+        name,
+        network,
+        unread: room.unread_notification_counts().notification_count,
+        pinned: room.is_favourite(),
+        low_priority: room.is_low_priority(),
+        muted: matches!(mode, Some(RoomNotificationMode::Mute | RoomNotificationMode::MentionsAndKeywordsOnly)),
+        marked_unread: room.is_marked_unread(),
+        ..seen
+    };
+    s.archived = is_done(&done, &s, now_ms());
+    s
+}
+
 /// Rooms without new events never pass through the sync loop, so their cached summaries miss
-/// fields added since and changed unread counts. Store reads only.
-async fn refresh_cached(client: &Client, rooms: &Rooms) -> Vec<RoomSummary> {
-    let ids: Vec<OwnedRoomId> = rooms.lock().unwrap().keys().cloned().collect();
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        let Some(room) = client.get_room(&id) else { continue };
-        let unread = room.unread_notification_counts().notification_count;
+/// fields added since and changes made on other devices. Store reads only.
+async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &Rooms) -> Vec<RoomSummary> {
+    let cached: Vec<RoomSummary> = rooms.lock().unwrap().values().cloned().collect();
+    let mut out = Vec::with_capacity(cached.len());
+    for seen in cached {
+        let Some(room) = client.get_room(&seen.id) else { continue };
         let dm = other_person(&room).await.is_some();
-        let known = rooms.lock().unwrap().get(&id).and_then(|r| r.network.clone());
-        let network = match known {
-            Some(n) => Some(n),
-            None => network(&room).await,
-        };
-        // Field by field: a preview refresh may have updated the entry meanwhile.
-        if let Some(r) = rooms.lock().unwrap().get_mut(&id) {
-            (r.unread, r.dm, r.network) = (unread, dm, network);
+        let fresh = summarize(&room, notif, RoomSummary { dm, ..seen }).await;
+        if let Some(r) = rooms.lock().unwrap().get_mut(&fresh.id) {
+            // A preview refresh may have updated the entry meanwhile.
+            *r = RoomSummary { preview: r.preview.clone(), ..fresh };
             out.push(r.clone());
         }
     }
     out
 }
 
-async fn sync_loop(client: Client, dir: PathBuf, rooms: Rooms, ev: mpsc::Sender<Ev>) {
-    let cached = refresh_cached(&client, &rooms).await;
+async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, rooms: Rooms, ev: mpsc::Sender<Ev>) {
+    let cached = refresh_cached(&client, &notif, &rooms).await;
     if !cached.is_empty() && ev.send(Ev::Rooms(cached)).await.is_err() {
         return;
     }
@@ -556,18 +707,28 @@ async fn sync_loop(client: Client, dir: PathBuf, rooms: Rooms, ev: mpsc::Sender<
             }
             let items = to_items(&room, &update.timeline.events).await;
             let prev = rooms.lock().unwrap().get(id).cloned();
-            let prev = prev.as_ref();
-            let newest = update.timeline.events.iter().filter_map(|e| e.timestamp()).max();
-            let ts = newest.map(|t| u64::from(t.0)).max(prev.map(|p| p.ts)).unwrap_or(0);
+            let newest = update.timeline.events.iter().filter_map(|e| e.timestamp()).map(|t| u64::from(t.0)).max();
             let dm = other_person(&room).await.is_some();
-            let preview = preview(&items, dm).or_else(|| prev.and_then(|p| p.preview.clone()));
-            let name = room.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| id.to_string());
-            let network = match prev {
-                Some(p) if p.network.is_some() => p.network.clone(),
-                _ => network(&room).await,
+            let order = items.iter().filter_map(|i| match i {
+                Item::Msg(m) if !m.own => Some(m.order),
+                _ => None,
+            });
+            let seen = RoomSummary {
+                id: id.clone(),
+                name: String::new(),
+                preview: preview(&items, dm).or_else(|| prev.as_ref().and_then(|p| p.preview.clone())),
+                ts: newest.max(prev.as_ref().map(|p| p.ts)).unwrap_or(0),
+                network: prev.as_ref().and_then(|p| p.network.clone()),
+                order: order.max().max(prev.as_ref().map(|p| p.order)).unwrap_or(0),
+                unread: 0,
+                dm,
+                pinned: false,
+                low_priority: false,
+                muted: false,
+                marked_unread: false,
+                archived: false,
             };
-            let unread = room.unread_notification_counts().notification_count;
-            let summary = RoomSummary { id: id.clone(), name, preview, ts, network, unread, dm };
+            let summary = summarize(&room, &notif, seen).await;
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
             changed.push(summary);
             if !items.is_empty() && ev.send(Ev::Live { room: id.clone(), items }).await.is_err() {
@@ -586,6 +747,11 @@ async fn sync_loop(client: Client, dir: PathBuf, rooms: Rooms, ev: mpsc::Sender<
             if let Err(e) = saved.and_then(|b| write_private(&rooms_path(&dir), &b)) {
                 log::warn!("rooms.json: {e:#}");
             }
+        }
+        // Mutes are push rules: one global event changes any number of rooms.
+        let rules_changed = resp.account_data.iter().any(|e| e.get_field::<String>("type").ok().flatten().as_deref() == Some("m.push_rules"));
+        if rules_changed {
+            changed = refresh_cached(&client, &notif, &rooms).await;
         }
         if !changed.is_empty() && ev.send(Ev::Rooms(changed)).await.is_err() {
             return;
@@ -631,7 +797,8 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
             }
         };
         let ts = event.timestamp().map_or(0, |t| u64::from(t.0));
-        out.push(Item::Msg(Msg { id, sender: name, own: sender == own, from: sender, body, ts }));
+        let order = hs_order(event).unwrap_or(0);
+        out.push(Item::Msg(Msg { id, sender: name, own: sender == own, from: sender, body, ts, order }));
     }
     out
 }

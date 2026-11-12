@@ -32,6 +32,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, mpsc::Receiver<Ev>) {
         open: None,
         rooms: Rooms::default(),
         fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)),
+        notif: None,
     };
     (st, rx)
 }
@@ -193,9 +194,45 @@ async fn login_sync_decrypt_send_recover() {
     // A summary cached by an older build: no `dm`, an unread count that has since changed.
     let stale = alice2.rooms.lock().unwrap().get_mut(&room_id).map(|r| (r.dm, r.unread) = (false, 99));
     assert!(stale.is_some());
-    let fixed = refresh_cached(alice2.client().unwrap(), &alice2.rooms).await;
+    let notif = alice2.notif.clone().unwrap();
+    let fixed = refresh_cached(alice2.client().unwrap(), &notif, &alice2.rooms).await;
     let fixed = fixed.iter().find(|s| s.id == room_id).unwrap();
     assert!(fixed.dm && fixed.unread == 0, "dm {} unread {}", fixed.dm, fixed.unread);
+
+    // Chat actions round-trip through the server and come back in the summary.
+    for (action, check) in [
+        (ChatAction::Pin(true), (|s| s.pinned) as fn(&RoomSummary) -> bool),
+        (ChatAction::Pin(false), |s| !s.pinned),
+        (ChatAction::LowPriority(true), |s| s.low_priority),
+        (ChatAction::LowPriority(false), |s| !s.low_priority),
+        (ChatAction::Mute(true), |s| s.muted),
+        (ChatAction::Mute(false), |s| !s.muted),
+        (ChatAction::Unread(true), |s| s.marked_unread && s.is_unread()),
+        (ChatAction::Unread(false), |s| !s.is_unread()),
+        (ChatAction::Archive(true), |s| s.archived),
+        (ChatAction::Archive(false), |s| !s.archived),
+    ] {
+        alice2.handle(Cmd::Chat(room_id.clone(), action)).await.unwrap();
+        wait_for(&mut alice2_rx, &format!("{action:?}"), |e| match e {
+            Ev::Rooms(r) => r.iter().any(|s| s.id == room_id && check(s)).then_some(()),
+            _ => None,
+        })
+        .await;
+    }
+
+    // A message from someone else brings an archived chat back.
+    alice2.handle(Cmd::Chat(room_id.clone(), ChatAction::Archive(true))).await.unwrap();
+    wait_for(&mut alice2_rx, "archived", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id && s.archived).then_some(()),
+        _ => None,
+    })
+    .await;
+    bob_room.send(RoomMessageEventContent::text_plain("are you there?")).await.unwrap();
+    wait_for(&mut alice2_rx, "unarchived by a new message", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id && !s.archived).then_some(()),
+        _ => None,
+    })
+    .await;
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -294,4 +331,38 @@ async fn gui_fixture() {
     std::fs::write(out.join("session.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
     std::fs::write(out.join("recovery-key"), &key).unwrap();
     let _ = std::fs::remove_dir_all(&store);
+}
+
+#[test]
+fn archive_rule_matches_beeper() {
+    let room = |ts, order, unread, pinned| RoomSummary {
+        id: matrix_sdk::ruma::room_id!("!r:example.org").to_owned(),
+        name: String::new(),
+        preview: None,
+        ts,
+        network: None,
+        unread,
+        dm: false,
+        pinned,
+        low_priority: false,
+        muted: false,
+        marked_unread: false,
+        archived: false,
+        order,
+    };
+    let done = |updated_ts, at_order| Done { updated_ts, at_order };
+    let now = 10_000;
+    assert!(!is_done(&done(None, None), &room(100, 0, 0, false), now));
+    // Server order: archived until a newer message arrives.
+    assert!(is_done(&done(Some(500), Some(7)), &room(100, 7, 0, false), now));
+    assert!(!is_done(&done(Some(500), Some(7)), &room(900, 8, 0, false), now));
+    // Order unknown on our side: trust the mark.
+    assert!(is_done(&done(Some(500), Some(7)), &room(100, 0, 3, false), now));
+    // No order in the mark: timestamps, and an unread chat is never done.
+    assert!(is_done(&done(Some(500), None), &room(100, 0, 0, false), now));
+    assert!(!is_done(&done(Some(500), None), &room(600, 0, 0, false), now));
+    assert!(!is_done(&done(Some(500), None), &room(100, 0, 1, false), now));
+    assert!(!is_done(&done(Some(20_000), None), &room(100, 0, 0, false), now));
+    // Pinned chats stay in the inbox.
+    assert!(!is_done(&done(Some(500), Some(7)), &room(100, 7, 0, true), now));
 }

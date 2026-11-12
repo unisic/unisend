@@ -7,6 +7,8 @@ Login uses Beeper's email-code flow (`api.beeper.com/user/login`, same as
 `bbctl`), then Matrix JWT login. Encrypted history is unlocked with the Beeper
 recovery code.
 
+What works and what Beeper has that this does not yet: [docs/parity.md](docs/parity.md).
+
 ## Desktop (Linux)
 
     cargo run --release

@@ -2,12 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{Datelike as _, Local, TimeZone as _};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _,
     avatar::Avatar,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
+    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
+    tab::{Tab, TabBar},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -16,11 +19,25 @@ use matrix_sdk::ruma::OwnedRoomId;
 use tokio::sync::mpsc;
 
 use crate::Keyboard;
-use crate::backend::{Cmd, Ev, Item, Msg, RoomSummary, UTD};
+use crate::backend::{ChatAction, Cmd, Ev, Item, Msg, RoomSummary, UTD};
 
 const NARROW: f32 = 720.;
 const ROOM_ROW_H: f32 = 68.;
 const AVATAR: f32 = 44.;
+
+/// Chat list sections, as in Beeper.
+#[derive(Clone, Copy, PartialEq)]
+enum View {
+    Inbox,
+    Archive,
+    LowPriority,
+}
+
+const VIEWS: [(View, &str, &str); 3] = [
+    (View::Inbox, "Inbox", "You've hit inbox zero!"),
+    (View::Archive, "Archive", "Your Archive is empty"),
+    (View::LowPriority, "Low Priority", "No messages in Low Priority"),
+];
 
 #[derive(PartialEq)]
 enum Screen {
@@ -40,7 +57,13 @@ pub struct BeeperApp {
     recovery: Entity<InputState>,
     composer: Entity<InputState>,
     need_recovery: bool,
+    search: Entity<InputState>,
+    view: View,
+    only_unread: bool,
+    /// Pinned first, then newest first.
     rooms: Vec<RoomSummary>,
+    /// Indices into `rooms` that pass the current view, filter and search.
+    shown: Vec<usize>,
     open: Option<OwnedRoomId>,
     msgs: Vec<Msg>,
     more: bool,
@@ -66,6 +89,7 @@ impl BeeperApp {
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("123456"));
         let recovery = cx.new(|cx| InputState::new(window, cx).placeholder("Recovery code"));
         let composer = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search chats"));
 
         let mut subs = Vec::new();
         for (input, on_enter, keyboard) in [
@@ -81,6 +105,13 @@ impl BeeperApp {
                 _ => {}
             }));
         }
+
+        subs.push(cx.subscribe_in(&search, window, |this, _, ev: &InputEvent, _, cx| match ev {
+            InputEvent::Change => this.refilter(cx),
+            InputEvent::Focus => crate::show_keyboard(Keyboard::Text),
+            InputEvent::Blur => crate::hide_keyboard(),
+            InputEvent::PressEnter { .. } => {}
+        }));
 
         let timeline = ListState::new(0, ListAlignment::Bottom, px(800.));
         let weak = cx.entity().downgrade();
@@ -108,7 +139,11 @@ impl BeeperApp {
             recovery,
             composer,
             need_recovery: false,
+            search,
+            view: View::Inbox,
+            only_unread: false,
             rooms: Vec::new(),
+            shown: Vec::new(),
             open: None,
             msgs: Vec::new(),
             more: false,
@@ -167,10 +202,12 @@ impl BeeperApp {
                 let mut by_id: HashMap<_, _> = self.rooms.drain(..).map(|r| (r.id.clone(), r)).collect();
                 by_id.extend(changed.into_iter().map(|r| (r.id.clone(), r)));
                 self.rooms = by_id.into_values().collect();
-                self.rooms.sort_unstable_by_key(|r| std::cmp::Reverse(r.ts));
+                self.rooms.sort_unstable_by_key(|r| (!r.pinned, std::cmp::Reverse(r.ts)));
+                self.refilter(cx);
             }
             Ev::RoomGone(id) => {
                 self.rooms.retain(|r| r.id != id);
+                self.refilter(cx);
                 if self.open.as_ref() == Some(&id) {
                     self.close_room();
                 }
@@ -266,13 +303,75 @@ impl BeeperApp {
         cx.notify();
     }
 
+    fn refilter(&mut self, cx: &mut Context<Self>) {
+        let query = self.search.read(cx).value().trim().to_lowercase();
+        let passes = |r: &RoomSummary| {
+            // A search looks through every section.
+            if !query.is_empty() {
+                return r.name.to_lowercase().contains(&query);
+            }
+            let in_view = match self.view {
+                View::Inbox => !r.archived && !r.low_priority,
+                View::Archive => r.archived,
+                View::LowPriority => r.low_priority && !r.archived,
+            };
+            in_view && (!self.only_unread || r.is_unread())
+        };
+        self.shown = self.rooms.iter().enumerate().filter(|(_, r)| passes(r)).map(|(ix, _)| ix).collect();
+        cx.notify();
+    }
+
+    /// Menu of what can be done to a chat; shared by the row's context menu and the chat header.
+    fn chat_menu(
+        room: &RoomSummary,
+        this: WeakEntity<Self>,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let unread = room.is_unread();
+        let entries = [
+            if unread {
+                ("Mark as Read", IconName::MailOpen, ChatAction::Unread(false))
+            } else {
+                ("Mark as Unread", IconName::Mail, ChatAction::Unread(true))
+            },
+            if room.pinned {
+                ("Unpin", IconName::PinOff, ChatAction::Pin(false))
+            } else {
+                ("Pin", IconName::Pin, ChatAction::Pin(true))
+            },
+            if room.muted {
+                ("Unmute", IconName::Bell, ChatAction::Mute(false))
+            } else {
+                ("Mute", IconName::BellOff, ChatAction::Mute(true))
+            },
+            if room.archived {
+                ("Unarchive", IconName::ArchiveRestore, ChatAction::Archive(false))
+            } else {
+                ("Archive", IconName::Archive, ChatAction::Archive(true))
+            },
+            if room.low_priority {
+                ("Move to Inbox", IconName::Inbox, ChatAction::LowPriority(false))
+            } else {
+                ("Move to Low Priority", IconName::ChevronsDown, ChatAction::LowPriority(true))
+            },
+        ];
+        let id = room.id.clone();
+        move |menu, _, _| {
+            entries.iter().fold(menu, |menu, &(label, icon, action)| {
+                let (this, id) = (this.clone(), id.clone());
+                menu.item(PopupMenuItem::new(label).icon(icon).on_click(move |_, _, cx| {
+                    let _ = this.update(cx, |this, cx| this.send(Cmd::Chat(id.clone(), action), cx));
+                }))
+            })
+        }
+    }
+
     /// Asks the backend for avatars and previews of rows that just became visible.
     /// Uses at most half the command channel so user actions always fit.
     fn fetch_rows(&mut self, range: std::ops::Range<usize>) {
         if self.cmd.capacity() < self.cmd.max_capacity() / 2 {
             return;
         }
-        let rows = &self.rooms[range];
+        let rows: Vec<&RoomSummary> = self.shown[range].iter().map(|&ix| &self.rooms[ix]).collect();
         let avatars: Vec<_> = rows.iter().filter(|r| !self.avatars.contains_key(&r.id)).map(|r| r.id.clone()).collect();
         let previews: Vec<_> = rows
             .iter()
@@ -366,20 +465,22 @@ impl BeeperApp {
     }
 
     fn render_rooms(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let weak = cx.entity().downgrade();
         let list = uniform_list(
             "rooms",
-            self.rooms.len(),
-            cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+            self.shown.len(),
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                 this.fetch_rows(range.clone());
                 range
                     .map(|ix| {
-                        let room = &this.rooms[ix];
+                        let room = &this.rooms[this.shown[ix]];
                         let selected = this.open.as_ref() == Some(&room.id);
                         let id = room.id.clone();
-                        let unread = room.unread > 0;
+                        let unread = room.is_unread();
                         let muted = cx.theme().muted_foreground;
+                        let mark = |icon: IconName| Icon::new(icon).size_3().flex_none().text_color(muted);
                         h_flex()
-                            .id(ix)
+                            .id(SharedString::from(room.id.to_string()))
                             .w_full()
                             .h(px(ROOM_ROW_H))
                             .px_3()
@@ -417,6 +518,8 @@ impl BeeperApp {
                                                     .text_color(muted)
                                                     .child(n)
                                             }))
+                                            .when(room.pinned, |el| el.child(mark(IconName::Pin)))
+                                            .when(room.muted, |el| el.child(mark(IconName::BellOff)))
                                             .child(
                                                 div()
                                                     .flex_none()
@@ -437,9 +540,10 @@ impl BeeperApp {
                                                     .text_color(if unread { cx.theme().foreground } else { muted })
                                                     .child(room.preview.clone().unwrap_or_default()),
                                             )
-                                            .when(unread, |el| el.child(count_pill(room.unread, cx))),
+                                            .when(unread, |el| el.child(count_pill(room.unread, room.muted, cx))),
                                     ),
                             )
+                            .context_menu(Self::chat_menu(room, weak.clone()))
                     })
                     .collect()
             }),
@@ -447,11 +551,58 @@ impl BeeperApp {
         .track_scroll(&self.rooms_scroll)
         .size_full();
 
+        let view_ix = VIEWS.iter().position(|v| v.0 == self.view).unwrap_or(0);
+        let searching = !self.search.read(cx).value().trim().is_empty();
+        let empty = if self.rooms.is_empty() {
+            "Syncing chats..."
+        } else if searching {
+            "No results found"
+        } else if self.only_unread {
+            "No unread chats"
+        } else {
+            VIEWS[view_ix].2
+        };
         v_flex()
             .size_full()
-            .child(header(cx).child(div().font_weight(FontWeight::SEMIBOLD).child("Chats")))
-            .child(if self.rooms.is_empty() {
-                div().p_4().text_sm().text_color(cx.theme().muted_foreground).child("Syncing chats...").into_any_element()
+            .child(
+                v_flex()
+                    .flex_none()
+                    .gap_2()
+                    .p_2()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(Input::new(&self.search).prefix(Icon::new(IconName::Search).size_4()).cleanable(true))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                TabBar::new("views")
+                                    .segmented()
+                                    .small()
+                                    .selected_index(view_ix)
+                                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                        this.view = VIEWS[*ix].0;
+                                        this.refilter(cx);
+                                    }))
+                                    .children(VIEWS.map(|v| Tab::new().label(v.1))),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                Button::new("only-unread")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Mail)
+                                    .tooltip("Unread only")
+                                    .selected(self.only_unread)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.only_unread = !this.only_unread;
+                                        this.refilter(cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .child(if self.shown.is_empty() {
+                div().p_4().text_sm().text_color(cx.theme().muted_foreground).child(empty).into_any_element()
             } else {
                 div().flex_1().min_h_0().child(list).into_any_element()
             })
@@ -462,6 +613,7 @@ impl BeeperApp {
         let name = room.map(|r| r.name.clone()).unwrap_or_default();
         let network = room.and_then(|r| r.network.clone());
         let header_avatar = room.map(|r| avatar(r, self.avatars.get(&r.id)).with_size(px(32.)));
+        let menu = room.map(|r| Self::chat_menu(r, cx.entity().downgrade()));
         let dm = room.is_some_and(|r| r.dm);
         let timeline = list(
             self.timeline.clone(),
@@ -506,21 +658,31 @@ impl BeeperApp {
                     .gap_2()
                     .when(narrow, |el| {
                         el.child(
-                            Button::new("back").ghost().label("Back").on_click(cx.listener(|this, _, _, cx| {
-                                this.close_room();
-                                cx.notify();
-                            })),
+                            Button::new("back").ghost().icon(IconName::ArrowLeft).tooltip("Back").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.close_room();
+                                    cx.notify();
+                                },
+                            )),
                         )
                     })
                     .children(header_avatar)
                     .child(
                         v_flex()
+                            .flex_1()
                             .min_w_0()
                             .child(div().font_weight(FontWeight::SEMIBOLD).truncate().child(name))
                             .children(
                                 network.map(|n| div().text_xs().text_color(cx.theme().muted_foreground).child(n)),
                             ),
-                    ),
+                    )
+                    .children(menu.map(|menu| {
+                        Button::new("chat-menu")
+                            .ghost()
+                            .icon(IconName::Ellipsis)
+                            .tooltip("Chat actions")
+                            .dropdown_menu_with_anchor(Anchor::TopRight, menu)
+                    })),
             )
             .child(
                 div()
@@ -542,7 +704,8 @@ impl BeeperApp {
                     .child(
                         Button::new("send")
                             .primary()
-                            .label("Send")
+                            .icon(IconName::SendHorizontal)
+                            .tooltip("Send")
                             .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx))),
                     ),
             )
@@ -607,7 +770,8 @@ fn avatar(room: &RoomSummary, image: Option<&Option<Arc<Image>>>) -> Avatar {
     Avatar::new().name(room.name.clone()).with_size(px(AVATAR)).when_some(image.cloned().flatten(), |a, img| a.src(img))
 }
 
-fn count_pill(n: u64, cx: &App) -> Div {
+/// Unread count; a bare dot for a chat marked unread by hand, greyed when muted.
+fn count_pill(n: u64, muted: bool, cx: &App) -> Div {
     div()
         .flex_none()
         .min_w(px(20.))
@@ -617,11 +781,11 @@ fn count_pill(n: u64, cx: &App) -> Div {
         .items_center()
         .justify_center()
         .rounded_full()
-        .bg(cx.theme().primary)
+        .bg(if muted { cx.theme().muted_foreground } else { cx.theme().primary })
         .text_color(cx.theme().primary_foreground)
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
-        .child(if n > 99 { "99+".to_string() } else { n.to_string() })
+        .children((n > 0).then(|| if n > 99 { "99+".to_string() } else { n.to_string() }))
 }
 
 fn local(ts_ms: u64) -> Option<chrono::DateTime<Local>> {

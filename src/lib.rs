@@ -10,6 +10,29 @@ use std::path::PathBuf;
 use gpui_kit::component::Theme;
 use gpui_kit::*;
 
+// Icons beyond the 101 the component library embeds; each costs its SVG, about 400 bytes.
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [Archive, ArchiveRestore, BellOff, ChevronsDown, ClipboardPaste, Mail, MailOpen, Pin, PinOff, SendHorizontal]
+);
+
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        match ExtraIcons.load(path)? {
+            Some(bytes) => Ok(Some(bytes)),
+            None => gpui_kit::assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        Ok(paths)
+    }
+}
+
 fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::init(cx);
     Theme::sync_system_appearance(None, cx);
@@ -42,7 +65,7 @@ pub fn run_desktop() {
         .or_else(|| dirs::data_dir().map(|d| d.join("beeper-gpui")))
         .expect("no data directory");
     private_dir(&dir).expect("create data directory");
-    gpui_kit::application().run(move |cx| {
+    gpui_kit::application().with_assets(Assets).run(move |cx| {
         let bounds = WindowBounds::Windowed(Bounds::centered(None, size(px(1000.), px(700.)), cx));
         open(cx, dir, Some(bounds));
         cx.on_window_closed(|cx, _| {
@@ -73,7 +96,7 @@ fn android_main(app: android_activity::AndroidApp) {
         return;
     };
     // Blocks on the Android event loop; the closure runs once the native window exists.
-    Application::with_platform(platform.into_rc()).run(move |cx| open(cx, dir, None));
+    Application::with_platform(platform.into_rc()).with_assets(Assets).run(move |cx| open(cx, dir, None));
 }
 
 #[derive(Clone, Copy)]
