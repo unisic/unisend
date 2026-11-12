@@ -76,9 +76,37 @@ fn android_main(app: android_activity::AndroidApp) {
     Application::with_platform(platform.into_rc()).run(move |cx| open(cx, dir, None));
 }
 
-pub(crate) fn show_keyboard() {
+#[derive(Clone, Copy)]
+pub(crate) enum Keyboard {
+    Text,
+    Email,
+    /// Codes and recovery keys: no auto-capitalisation or autocorrect, which would corrupt base58.
+    Key,
+}
+
+pub(crate) fn show_keyboard(kind: Keyboard) {
     #[cfg(target_os = "android")]
-    gpui_mobile::show_keyboard();
+    gpui_mobile::show_keyboard_with_type(match kind {
+        Keyboard::Text => gpui_mobile::KeyboardType::Default,
+        Keyboard::Email => gpui_mobile::KeyboardType::EmailAddress,
+        Keyboard::Key => gpui_mobile::KeyboardType::URL,
+    });
+    #[cfg(not(target_os = "android"))]
+    let _ = kind;
+}
+
+/// System clipboard text. gpui-mobile's platform clipboard is an in-process stub, so Android goes through JNI.
+pub(crate) fn paste(cx: &gpui_kit::App) -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = cx;
+        gpui_mobile::packages::clipboard::get_text().unwrap_or_else(|e| {
+            log::warn!("clipboard: {e}");
+            None
+        })
+    }
+    #[cfg(not(target_os = "android"))]
+    cx.read_from_clipboard().and_then(|c| c.text())
 }
 
 pub(crate) fn hide_keyboard() {

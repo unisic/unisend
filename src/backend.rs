@@ -2,35 +2,52 @@
 //! talks to it only through two bounded channels (`Cmd` in, `Ev` out).
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use anyhow::{Context as _, Result, anyhow};
 use futures_util::StreamExt as _;
 use matrix_sdk::{
-    Client, Room,
+    Client, Room, RoomMemberships,
     authentication::matrix::MatrixSession,
     config::{SyncSettings, SyncToken},
-    deserialized_responses::TimelineEvent,
-    encryption::{BackupDownloadStrategy, EncryptionSettings, recovery::RecoveryState},
+    deserialized_responses::{RawAnySyncOrStrippedState, TimelineEvent, TimelineEventKind},
+    encryption::{
+        BackupDownloadStrategy, EncryptionSettings,
+        recovery::{RecoveryError, RecoveryState},
+        secret_storage::SecretStorageError,
+    },
+    media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings},
     reqwest,
-    room::MessagesOptions,
+    room::{Messages, MessagesOptions},
     ruma::{
-        OwnedRoomId, OwnedUserId, UInt, UserId,
+        EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
         api::{
-            client::filter::{FilterDefinition, RoomFilter},
+            client::{
+                filter::{FilterDefinition, RoomFilter},
+                profile::AvatarUrl,
+                receipt::create_receipt,
+            },
             error::ErrorKind,
         },
         events::{
-            AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
-            room::message::{MessageType, Relation, RoomMessageEventContent},
+            AnySyncMessageLikeEvent, AnySyncTimelineEvent, StateEventType, SyncMessageLikeEvent,
+            receipt::ReceiptThread,
+            room::{
+                MediaSource,
+                message::{MessageType, Relation, RoomMessageEventContent},
+            },
         },
+        media::Method,
         serde::JsonObject,
+        uint,
     },
     store::RoomLoadSettings,
 };
+use matrix_sdk_crypto::secret_storage::DecodeError;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -41,6 +58,10 @@ const PAGE: u32 = 40;
 const MIN_ITEMS: usize = 15;
 const MAX_PAGES_PER_REQUEST: usize = 5;
 const SYNC_TIMELINE_LIMIT: u32 = 10;
+/// Avatar and preview fetches in flight at once.
+const ROW_FETCHES: usize = 4;
+/// Backup key downloads per history page.
+const MAX_KEY_FETCHES: usize = 8;
 
 pub enum Cmd {
     SendCode(String),
@@ -48,6 +69,9 @@ pub enum Cmd {
     Recover(String),
     Open(OwnedRoomId),
     LoadOlder,
+    Avatars(Vec<OwnedRoomId>),
+    /// Re-read the latest message of rooms whose preview is missing or undecryptable.
+    Previews(Vec<OwnedRoomId>),
     Send(OwnedRoomId, String),
 }
 
@@ -62,6 +86,8 @@ pub enum Ev {
     /// History page for `room`, oldest first. `reset` replaces the timeline.
     History { room: OwnedRoomId, items: Vec<Item>, reset: bool, more: bool },
     Live { room: OwnedRoomId, items: Vec<Item> },
+    /// Thumbnail bytes as served (PNG, JPEG, ...).
+    Avatar(OwnedRoomId, Vec<u8>),
     Error(String),
 }
 
@@ -71,14 +97,25 @@ pub struct RoomSummary {
     pub name: String,
     pub preview: Option<String>,
     pub ts: u64,
+    /// Bridge network, e.g. "WhatsApp"; none for native Matrix rooms.
+    #[serde(default)]
+    pub network: Option<String>,
+    #[serde(default)]
+    pub unread: u64,
+    /// One-to-one chat: bubbles need no sender names.
+    #[serde(default)]
+    pub dm: bool,
 }
 
 #[derive(Clone)]
 pub struct Msg {
     pub id: String,
     pub sender: String,
+    pub from: OwnedUserId,
     pub body: String,
     pub own: bool,
+    /// Origin server time, ms since the epoch.
+    pub ts: u64,
 }
 
 pub enum Item {
@@ -126,7 +163,12 @@ struct State {
     login_request: Option<String>,
     /// Room whose history is open and its pagination token.
     open: Option<(OwnedRoomId, Option<String>)>,
+    rooms: Rooms,
+    fetches: Arc<tokio::sync::Semaphore>,
 }
+
+/// Room summaries, shared by the sync loop and preview refreshes. Never held across an await.
+type Rooms = Arc<Mutex<HashMap<OwnedRoomId, RoomSummary>>>;
 
 async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) {
     let http = match http_client() {
@@ -141,7 +183,8 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         .ok()
         .filter(|_| cfg!(debug_assertions))
         .unwrap_or_else(|| beeper::HOMESERVER_URL.to_owned());
-    let mut st = State { dir, homeserver, http, ev, client: None, login_request: None, open: None };
+    let mut st = State { dir, homeserver, http, ev, client: None, login_request: None, open: None,
+        rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)) };
     match st.restore().await {
         Ok(true) => {}
         Ok(false) => st.emit(Ev::NeedLogin).await,
@@ -152,6 +195,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     }
     while let Some(cmd) = cmds.recv().await {
         if let Err(e) = st.handle(cmd).await {
+            log::warn!("{e:#}");
             st.emit(Ev::Error(format!("{e:#}"))).await;
         }
     }
@@ -194,7 +238,9 @@ impl State {
         let client = self.build_client().await?;
         client.matrix_auth().restore_session(saved.session, RoomLoadSettings::default()).await?;
         if let Some(rooms) = load_rooms(&self.dir) {
-            self.emit(Ev::Rooms(rooms.into_values().collect())).await;
+            let list = rooms.values().cloned().collect();
+            *self.rooms.lock().unwrap() = rooms;
+            self.emit(Ev::Rooms(list)).await;
         }
         self.go_live(client).await;
         Ok(true)
@@ -202,7 +248,7 @@ impl State {
 
     async fn go_live(&mut self, client: Client) {
         tokio::spawn(watch_recovery(client.clone(), self.ev.clone()));
-        tokio::spawn(sync_loop(client.clone(), self.dir.clone(), self.ev.clone()));
+        tokio::spawn(sync_loop(client.clone(), self.dir.clone(), self.rooms.clone(), self.ev.clone()));
         self.client = Some(client);
         self.emit(Ev::Ready).await;
     }
@@ -246,7 +292,20 @@ impl State {
             }
             Cmd::Recover(key) => {
                 let recovery = self.client()?.encryption().recovery();
-                recovery.recover(key.trim()).await.context("Recovery code was not accepted")?;
+                if let Err(e) = recovery.recover(key.trim()).await {
+                    return Err(match e {
+                        RecoveryError::SecretStorage(SecretStorageError::SecretStorageKey(DecodeError::Mac(_))) => {
+                            anyhow!(
+                                "This recovery code is valid but does not match your account's current key. \
+                                 It may be an older code; get the current one from a Beeper app where you are signed in."
+                            )
+                        }
+                        RecoveryError::SecretStorage(SecretStorageError::SecretStorageKey(_)) => {
+                            anyhow!("This is not a recovery code. Check it for typos: {e}")
+                        }
+                        e => anyhow::Error::new(e).context("Recovery code was not accepted"),
+                    });
+                }
                 let incomplete = recovery.state() == RecoveryState::Incomplete;
                 self.emit(Ev::NeedRecovery(incomplete)).await;
                 if incomplete {
@@ -256,11 +315,64 @@ impl State {
             }
             Cmd::Open(room_id) => {
                 self.open = Some((room_id.clone(), None));
-                self.page(room_id, true).await?;
+                if let Some(newest) = self.page(room_id.clone(), true).await? {
+                    // Private receipt: clears the unread count without telling the other side (or the bridged network).
+                    let room = self.room(&room_id)?;
+                    let receipt = room.send_single_receipt(
+                        create_receipt::v3::ReceiptType::ReadPrivate,
+                        ReceiptThread::Unthreaded,
+                        newest,
+                    );
+                    if let Err(e) = receipt.await {
+                        log::warn!("read receipt for {room_id}: {e}");
+                    }
+                }
             }
             Cmd::LoadOlder => {
                 if let Some((room_id, Some(_))) = &self.open {
                     self.page(room_id.clone(), false).await?;
+                }
+            }
+            Cmd::Avatars(ids) => {
+                for room_id in ids {
+                    let client = self.client()?.clone();
+                    let (ev, permits) = (self.ev.clone(), self.fetches.clone());
+                    tokio::spawn(async move {
+                        let Ok(_permit) = permits.acquire().await else { return };
+                        match avatar(&client, &room_id).await {
+                            Ok(Some(bytes)) => {
+                                let _ = ev.send(Ev::Avatar(room_id, bytes)).await;
+                            }
+                            Ok(None) => {}
+                            Err(e) => log::debug!("avatar {room_id}: {e:#}"),
+                        }
+                    });
+                }
+            }
+            Cmd::Previews(ids) => {
+                for room_id in ids {
+                    let room = self.room(&room_id)?;
+                    let (ev, permits, rooms) = (self.ev.clone(), self.fetches.clone(), self.rooms.clone());
+                    tokio::spawn(async move {
+                        let Ok(_permit) = permits.acquire().await else { return };
+                        let resp = match messages(&room, None, SYNC_TIMELINE_LIMIT * 2).await {
+                            Ok(r) => r,
+                            Err(e) => return log::debug!("preview {room_id}: {e:#}"),
+                        };
+                        let mut chunk = resp.chunk;
+                        chunk.reverse();
+                        let Some(text) = preview(&to_items(&room, &chunk).await, other_person(&room).await.is_some()) else {
+                            return;
+                        };
+                        // rooms.json picks this up on the next sync that changes anything.
+                        let summary = rooms.lock().unwrap().get_mut(&room_id).map(|r| {
+                            r.preview = Some(text);
+                            r.clone()
+                        });
+                        if let Some(summary) = summary {
+                            let _ = ev.send(Ev::Rooms(vec![summary])).await;
+                        }
+                    });
                 }
             }
             Cmd::Send(room_id, body) => {
@@ -280,15 +392,14 @@ impl State {
         self.client()?.get_room(id).ok_or_else(|| anyhow!("Unknown room {id}"))
     }
 
-    async fn page(&mut self, room_id: OwnedRoomId, reset: bool) -> Result<()> {
+    /// Emits the next older page; returns the newest message's ID.
+    async fn page(&mut self, room_id: OwnedRoomId, reset: bool) -> Result<Option<OwnedEventId>> {
         let room = self.room(&room_id)?;
         let mut token = self.open.as_ref().and_then(|(_, t)| t.clone());
         let mut items = Vec::new();
         // Pages of only state events would leave the view blank with nothing to scroll.
         for _ in 0..MAX_PAGES_PER_REQUEST {
-            let mut opts = MessagesOptions::backward().from(token.as_deref());
-            opts.limit = UInt::from(PAGE);
-            let resp = room.messages(opts).await?;
+            let resp = messages(&room, token.as_deref(), PAGE).await?;
             let mut chunk = resp.chunk;
             chunk.reverse();
             let mut older = to_items(&room, &chunk).await;
@@ -301,9 +412,54 @@ impl State {
         }
         let more = token.is_some();
         self.open = Some((room_id.clone(), token));
+        let newest = items.iter().rev().find_map(|i| match i {
+            Item::Msg(m) => EventId::parse(&m.id).ok(),
+            Item::Edit { .. } => None,
+        });
         self.emit(Ev::History { room: room_id, items, reset, more }).await;
-        Ok(())
+        Ok(newest)
     }
+}
+
+/// One backward `/messages` page. Undecryptable events get their keys from the server-side backup
+/// (a no-op until recovery has imported the backup key), then the page is fetched again.
+async fn messages(room: &Room, from: Option<&str>, limit: u32) -> Result<Messages> {
+    let opts = || {
+        let mut o = MessagesOptions::backward().from(from);
+        o.limit = UInt::from(limit);
+        o
+    };
+    let resp = room.messages(opts()).await?;
+    let sessions: BTreeSet<String> = resp
+        .chunk
+        .iter()
+        .filter_map(|e| match &e.kind {
+            TimelineEventKind::UnableToDecrypt { utd_info, .. } => utd_info.session_id.clone(),
+            _ => None,
+        })
+        .collect();
+    let backups = room.client().encryption().backups();
+    let mut found = false;
+    for session in sessions.iter().take(MAX_KEY_FETCHES) {
+        match backups.download_room_key(room.room_id(), session).await {
+            Ok(f) => found |= f,
+            Err(e) => {
+                log::warn!("backup key for {}: {e}", room.room_id());
+                break;
+            }
+        }
+    }
+    Ok(if found { room.messages(opts()).await? } else { resp })
+}
+
+/// List preview: the newest message, prefixed with its sender outside one-to-one chats.
+fn preview(items: &[Item], dm: bool) -> Option<String> {
+    items.iter().rev().find_map(|i| match i {
+        Item::Msg(m) if m.own => Some(format!("You: {}", m.body)),
+        Item::Msg(m) if dm => Some(m.body.clone()),
+        Item::Msg(m) => Some(format!("{}: {}", m.sender, m.body)),
+        Item::Edit { .. } => None,
+    })
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -338,14 +494,13 @@ async fn watch_recovery(client: Client, ev: mpsc::Sender<Ev>) {
     }
 }
 
-async fn sync_loop(client: Client, dir: PathBuf, ev: mpsc::Sender<Ev>) {
-    let mut rooms = load_rooms(&dir).unwrap_or_default();
+async fn sync_loop(client: Client, dir: PathBuf, rooms: Rooms, ev: mpsc::Sender<Ev>) {
     let mut filter = RoomFilter::with_lazy_loading();
     filter.timeline.limit = Some(UInt::from(SYNC_TIMELINE_LIMIT));
     let mut def = FilterDefinition::default();
     def.room = filter;
     // Without a summary cache the stored sync token would skip rooms with no new events.
-    let token = if rooms.is_empty() { SyncToken::NoToken } else { SyncToken::ReusePrevious };
+    let token = if rooms.lock().unwrap().is_empty() { SyncToken::NoToken } else { SyncToken::ReusePrevious };
     let settings = SyncSettings::default().filter(def.into()).token(token);
 
     let mut stream = std::pin::pin!(client.sync_stream(settings).await);
@@ -373,20 +528,20 @@ async fn sync_loop(client: Client, dir: PathBuf, ev: mpsc::Sender<Ev>) {
                 continue;
             }
             let items = to_items(&room, &update.timeline.events).await;
-            let prev = rooms.get(id);
+            let prev = rooms.lock().unwrap().get(id).cloned();
+            let prev = prev.as_ref();
             let newest = update.timeline.events.iter().filter_map(|e| e.timestamp()).max();
             let ts = newest.map(|t| u64::from(t.0)).max(prev.map(|p| p.ts)).unwrap_or(0);
-            let preview = items
-                .iter()
-                .rev()
-                .find_map(|i| match i {
-                    Item::Msg(m) => Some(format!("{}: {}", m.sender, m.body)),
-                    Item::Edit { .. } => None,
-                })
-                .or_else(|| prev.and_then(|p| p.preview.clone()));
+            let dm = other_person(&room).await.is_some();
+            let preview = preview(&items, dm).or_else(|| prev.and_then(|p| p.preview.clone()));
             let name = room.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| id.to_string());
-            let summary = RoomSummary { id: id.clone(), name, preview, ts };
-            rooms.insert(id.clone(), summary.clone());
+            let network = match prev {
+                Some(p) if p.network.is_some() => p.network.clone(),
+                _ => network(&room).await,
+            };
+            let unread = room.unread_notification_counts().notification_count;
+            let summary = RoomSummary { id: id.clone(), name, preview, ts, network, unread, dm };
+            rooms.lock().unwrap().insert(id.clone(), summary.clone());
             changed.push(summary);
             if !items.is_empty() && ev.send(Ev::Live { room: id.clone(), items }).await.is_err() {
                 return;
@@ -394,13 +549,13 @@ async fn sync_loop(client: Client, dir: PathBuf, ev: mpsc::Sender<Ev>) {
         }
         let mut gone = false;
         for id in resp.rooms.left.keys() {
-            if rooms.remove(id).is_some() {
+            if rooms.lock().unwrap().remove(id).is_some() {
                 gone = true;
                 let _ = ev.send(Ev::RoomGone(id.clone())).await;
             }
         }
         if !changed.is_empty() || gone {
-            let saved = serde_json::to_vec(&rooms).map_err(anyhow::Error::from);
+            let saved = serde_json::to_vec(&*rooms.lock().unwrap()).map_err(anyhow::Error::from);
             if let Err(e) = saved.and_then(|b| write_private(&rooms_path(&dir), &b)) {
                 log::warn!("rooms.json: {e:#}");
             }
@@ -411,7 +566,7 @@ async fn sync_loop(client: Client, dir: PathBuf, ev: mpsc::Sender<Ev>) {
     }
 }
 
-const UTD: &str = "Unable to decrypt this message yet";
+pub(crate) const UTD: &str = "Unable to decrypt this message yet";
 
 /// Converts timeline events (oldest first) into displayable items.
 async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
@@ -421,39 +576,35 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
     for event in events {
         let Some(id) = event.event_id().map(|e| e.to_string()) else { continue };
         let Some(sender) = event.sender() else { continue };
-        let item = if event.kind.is_utd() {
-            Some(Item::Msg(Msg { id, sender: String::new(), body: UTD.into(), own: sender == own }))
+        let body = if event.kind.is_utd() {
+            UTD.to_owned()
         } else {
             match event.raw().deserialize() {
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
                     SyncMessageLikeEvent::Original(m),
-                ))) => Some(match m.content.relates_to {
+                ))) => match m.content.relates_to {
                     Some(Relation::Replacement(r)) => {
-                        Item::Edit { target: r.event_id.to_string(), body: r.new_content.msgtype.body().to_owned() }
+                        let body = r.new_content.msgtype.body().to_owned();
+                        out.push(Item::Edit { target: r.event_id.to_string(), body });
+                        continue;
                     }
-                    _ => Item::Msg(Msg { id, sender: String::new(), body: describe(&m.content.msgtype), own: sender == own }),
-                }),
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Sticker(_))) => {
-                    Some(Item::Msg(Msg { id, sender: String::new(), body: "Sticker".into(), own: sender == own }))
-                }
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(_))) => {
-                    Some(Item::Msg(Msg { id, sender: String::new(), body: UTD.into(), own: sender == own }))
-                }
-                _ => None,
+                    _ => describe(&m.content.msgtype),
+                },
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Sticker(_))) => "Sticker".into(),
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(_))) => UTD.into(),
+                _ => continue,
             }
         };
-        let Some(mut item) = item else { continue };
-        if let Item::Msg(m) = &mut item {
-            m.sender = match names.get(&sender) {
-                Some(n) => n.clone(),
-                None => {
-                    let n = display_name(room, &sender).await;
-                    names.insert(sender.clone(), n.clone());
-                    n
-                }
-            };
-        }
-        out.push(item);
+        let name = match names.get(&sender) {
+            Some(n) => n.clone(),
+            None => {
+                let n = display_name(room, &sender).await;
+                names.insert(sender.clone(), n.clone());
+                n
+            }
+        };
+        let ts = event.timestamp().map_or(0, |t| u64::from(t.0));
+        out.push(Item::Msg(Msg { id, sender: name, own: sender == own, from: sender, body, ts }));
     }
     out
 }
@@ -463,6 +614,60 @@ async fn display_name(room: &Room, user: &UserId) -> String {
         Ok(Some(m)) => m.name().to_owned(),
         _ => user.localpart().to_owned(),
     }
+}
+
+/// The other person in a one-to-one chat. Bridged DMs also hold a bridge bot, listed as a service member.
+async fn other_person(room: &Room) -> Option<OwnedUserId> {
+    let own = room.own_user_id();
+    let service = room.service_members().unwrap_or_default();
+    // Lazy loading leaves most members unloaded, so the size comes from the room summary.
+    if room.joined_members_count() > 2 + service.len() as u64 {
+        return None;
+    }
+    // Synapse sends heroes only for unnamed rooms; bridged DMs are named.
+    let mut ids: Vec<OwnedUserId> = room.clone_info().heroes().iter().map(|h| h.user_id.clone()).collect();
+    if ids.is_empty() {
+        ids = room.members_no_sync(RoomMemberships::JOIN).await.ok()?.iter().map(|m| m.user_id().to_owned()).collect();
+    }
+    let mut people = ids.into_iter().filter(|u| u != own && !service.contains(u));
+    let first = people.next()?;
+    people.next().is_none().then_some(first)
+}
+
+async fn network(room: &Room) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Protocol {
+        id: String,
+        displayname: Option<String>,
+    }
+    let events = room.get_state_events(StateEventType::from("m.bridge")).await.ok()?;
+    events.iter().find_map(|e| {
+        let RawAnySyncOrStrippedState::Sync(raw) = e else { return None };
+        let content: serde_json::Value = raw.get_field("content").ok()??;
+        let p: Protocol = serde_json::from_value(content.get("protocol")?.clone()).ok()?;
+        Some(p.displayname.unwrap_or(p.id))
+    })
+}
+
+/// Room avatar, or for a one-to-one chat the other person's, as a small thumbnail.
+async fn avatar(client: &Client, room_id: &RoomId) -> Result<Option<Vec<u8>>> {
+    let Some(room) = client.get_room(room_id) else { return Ok(None) };
+    let url = match room.avatar_url() {
+        Some(url) => url,
+        None => {
+            let Some(person) = other_person(&room).await else { return Ok(None) };
+            let member = room.get_member_no_sync(&person).await?.and_then(|m| m.avatar_url().map(ToOwned::to_owned));
+            let url = match member {
+                Some(url) => Some(url),
+                None => client.account().fetch_user_profile_of(&person).await?.get_static::<AvatarUrl>()?,
+            };
+            let Some(url) = url else { return Ok(None) };
+            url
+        }
+    };
+    let format = MediaFormat::Thumbnail(MediaThumbnailSettings::with_method(Method::Crop, uint!(96), uint!(96)));
+    let request = MediaRequestParameters { source: MediaSource::Plain(url), format };
+    Ok(Some(client.media().get_media_content(&request, true).await?))
 }
 
 fn describe(msgtype: &MessageType) -> String {

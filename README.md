@@ -35,10 +35,19 @@ gpui-mobile (Apache-2.0, see the README there).
 ## Tests
 
 `src/backend/tests.rs` runs login, sync, E2EE send/decrypt and key recovery
+(wrong key, malformed key, history and previews decrypted from the key backup)
 against a local Synapse with JWT login enabled:
 
     MATRIX_TEST_HS=http://127.0.0.1:8008 MATRIX_TEST_JWT_SECRET=... \
-      cargo test --lib -- --ignored
+      cargo test --lib login_sync -- --ignored
+
+`gui_fixture` seeds the same server for manual GUI runs: encrypted chats with a
+key backup, a room avatar, a bridged room. It reads `avatar.png` from
+`GUI_FIXTURE_DIR` and writes `session.json` (a new device) and `recovery-key`
+there:
+
+    GUI_FIXTURE_DIR=/tmp/fixture MATRIX_TEST_HS=... MATRIX_TEST_JWT_SECRET=... \
+      cargo test --lib gui_fixture -- --ignored
 
 Debug desktop builds read `BEEPER_GPUI_HOMESERVER` to point at such a server;
 `BEEPER_GPUI_DATA_DIR` picks the data directory (with a pre-seeded `session.json`).
