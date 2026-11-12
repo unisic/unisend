@@ -10,7 +10,9 @@ android {
     defaultConfig {
         applicationId = "dev.gpui.beeper"
         minSdk = 26
-        targetSdk = 35
+        // shortcut: targetSdk 35 enforces edge-to-edge, so adjustResize stops shrinking the content
+        // rect and the keyboard covers the composer; raise it once IME insets are read via WindowInsets.
+        targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
         ndk {
