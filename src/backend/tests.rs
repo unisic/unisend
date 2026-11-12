@@ -190,6 +190,13 @@ async fn login_sync_decrypt_send_recover() {
     .await;
     assert_eq!(preview.preview.as_deref(), Some("You: hi bob"));
 
+    // A summary cached by an older build: no `dm`, an unread count that has since changed.
+    let stale = alice2.rooms.lock().unwrap().get_mut(&room_id).map(|r| (r.dm, r.unread) = (false, 99));
+    assert!(stale.is_some());
+    let fixed = refresh_cached(alice2.client().unwrap(), &alice2.rooms).await;
+    let fixed = fixed.iter().find(|s| s.id == room_id).unwrap();
+    assert!(fixed.dm && fixed.unread == 0, "dm {} unread {}", fixed.dm, fixed.unread);
+
     let _ = std::fs::remove_dir_all(&root);
 }
 

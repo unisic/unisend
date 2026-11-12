@@ -494,7 +494,34 @@ async fn watch_recovery(client: Client, ev: mpsc::Sender<Ev>) {
     }
 }
 
+/// Rooms without new events never pass through the sync loop, so their cached summaries miss
+/// fields added since and changed unread counts. Store reads only.
+async fn refresh_cached(client: &Client, rooms: &Rooms) -> Vec<RoomSummary> {
+    let ids: Vec<OwnedRoomId> = rooms.lock().unwrap().keys().cloned().collect();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(room) = client.get_room(&id) else { continue };
+        let unread = room.unread_notification_counts().notification_count;
+        let dm = other_person(&room).await.is_some();
+        let known = rooms.lock().unwrap().get(&id).and_then(|r| r.network.clone());
+        let network = match known {
+            Some(n) => Some(n),
+            None => network(&room).await,
+        };
+        // Field by field: a preview refresh may have updated the entry meanwhile.
+        if let Some(r) = rooms.lock().unwrap().get_mut(&id) {
+            (r.unread, r.dm, r.network) = (unread, dm, network);
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
 async fn sync_loop(client: Client, dir: PathBuf, rooms: Rooms, ev: mpsc::Sender<Ev>) {
+    let cached = refresh_cached(&client, &rooms).await;
+    if !cached.is_empty() && ev.send(Ev::Rooms(cached)).await.is_err() {
+        return;
+    }
     let mut filter = RoomFilter::with_lazy_loading();
     filter.timeline.limit = Some(UInt::from(SYNC_TIMELINE_LIMIT));
     let mut def = FilterDefinition::default();
