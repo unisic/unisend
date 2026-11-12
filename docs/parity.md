@@ -32,7 +32,6 @@ is not started.
 | Mark read / unread | done | `m.marked_unread`, `m.read.private` receipt |
 | Unread counts | done | server notification counts |
 | Search chats by name | part | names only; Beeper also searches messages, contacts, networks |
-| Emoji rendering | done | bundled bitmap Noto Color Emoji (GPUI cannot draw COLRv1) |
 | Unread filter | done | local |
 | DMs / Groups / Drafts / Unanswered filters | todo | local |
 | Avatars, network label, last message, time | done | `m.room.avatar`, `m.bridge` |
@@ -96,6 +95,7 @@ is not started.
 | Tray icon, launch at login, deep links | todo | local |
 | Media viewer, PDF preview, storage manager | todo | local |
 | Feedback, help hub, subscription banners | todo | Beeper services |
+| Emoji rendering | done | bundled bitmap Noto Color Emoji (GPUI cannot draw COLRv1) |
 | Windows, macOS builds | todo | GPUI targets, not built or tested |
 
 ## How Beeper stores chat state
