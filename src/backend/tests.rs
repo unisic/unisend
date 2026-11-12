@@ -53,12 +53,20 @@ async fn wait_for<T>(rx: &mut mpsc::Receiver<Ev>, what: &str, mut pick: impl FnM
     }
 }
 
+async fn next_live(rx: &mut mpsc::Receiver<Ev>, room_id: &OwnedRoomId) -> Vec<Item> {
+    wait_for(rx, "live items", |e| match e {
+        Ev::Live { room, items } if room == *room_id => Some(items),
+        _ => None,
+    })
+    .await
+}
+
 fn bodies(items: &[Item]) -> Vec<String> {
     items
         .iter()
         .filter_map(|i| match i {
             Item::Msg(m) => Some(m.body.clone()),
-            Item::Edit { .. } => None,
+            _ => None,
         })
         .collect()
 }
@@ -126,7 +134,7 @@ async fn login_sync_decrypt_send_recover() {
     assert!(!bodies(&history).iter().any(|b| b == UTD));
 
     // Send path: Bob receives Alice's message decrypted.
-    alice.handle(Cmd::Send(room_id.clone(), "hi bob".into())).await.unwrap();
+    alice.handle(Cmd::Send { room: room_id.clone(), body: "hi bob".into(), reply_to: None, edit: None }).await.unwrap();
     let mut got = false;
     for _ in 0..20 {
         let resp = bob.sync_once(SyncSettings::default().timeout(Duration::from_secs(2))).await.unwrap();
@@ -227,12 +235,58 @@ async fn login_sync_decrypt_send_recover() {
         _ => None,
     })
     .await;
-    bob_room.send(RoomMessageEventContent::text_plain("are you there?")).await.unwrap();
+    let ping = bob_room.send(RoomMessageEventContent::text_plain("are you there?")).await.unwrap().response.event_id;
     wait_for(&mut alice2_rx, "unarchived by a new message", |e| match e {
         Ev::Rooms(r) => r.iter().any(|s| s.id == room_id && !s.archived).then_some(()),
         _ => None,
     })
     .await;
+
+    // React, reply, edit, delete: each comes back through sync as the item the UI applies.
+    let room = room_id.clone();
+    alice2.handle(Cmd::React { room: room.clone(), target: ping.to_string(), key: "👍".into() }).await.unwrap();
+    let reaction_id = loop {
+        let found = next_live(&mut alice2_rx, &room_id).await.into_iter().find_map(|i| match i {
+            Item::Reaction { target, reaction } if target == ping.as_str() && reaction.key == "👍" && reaction.own => Some(reaction.id),
+            _ => None,
+        });
+        if let Some(id) = found {
+            break id;
+        }
+    };
+    alice2.handle(Cmd::Send { room: room.clone(), body: "yes".into(), reply_to: Some(ping.to_string()), edit: None }).await.unwrap();
+    let reply_id = loop {
+        let found = next_live(&mut alice2_rx, &room_id).await.into_iter().find_map(|i| match i {
+            Item::Msg(m) if m.body == "yes" && m.reply_to.as_deref() == Some(ping.as_str()) => Some(m.id),
+            _ => None,
+        });
+        if let Some(id) = found {
+            break id;
+        }
+    };
+    alice2.handle(Cmd::Send { room: room.clone(), body: "yes!".into(), reply_to: None, edit: Some(reply_id.clone()) }).await.unwrap();
+    loop {
+        if next_live(&mut alice2_rx, &room_id).await.iter().any(|i| matches!(i, Item::Edit { target, body } if *target == reply_id && body == "yes!")) {
+            break;
+        }
+    }
+    for target in [reaction_id, reply_id.clone()] {
+        alice2.handle(Cmd::Delete { room: room.clone(), target: target.clone() }).await.unwrap();
+        loop {
+            if next_live(&mut alice2_rx, &room_id).await.iter().any(|i| matches!(i, Item::Redact { target: t } if *t == target)) {
+                break;
+            }
+        }
+    }
+    // After a reload the deleted reply and reaction are gone, not "unable to decrypt".
+    alice2.handle(Cmd::Open(room.clone())).await.unwrap();
+    let items = wait_for(&mut alice2_rx, "history after deletions", |e| match e {
+        Ev::History { room, items, .. } if room == room_id => Some(items),
+        _ => None,
+    })
+    .await;
+    assert!(!items.iter().any(|i| matches!(i, Item::Msg(m) if m.id == reply_id)));
+    assert!(!bodies(&items).iter().any(|b| b == UTD), "{:?}", bodies(&items));
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -287,8 +341,8 @@ async fn gui_fixture() {
         who.sync_once(SyncSettings::default()).await.unwrap();
         who.get_room(room).unwrap()
     }
-    async fn say(room: &Room, text: &str) {
-        room.send(RoomMessageEventContent::text_plain(text)).await.unwrap();
+    async fn say(room: &Room, text: &str) -> OwnedEventId {
+        room.send(RoomMessageEventContent::text_plain(text)).await.unwrap().response.event_id
     }
 
     let dm = alice.create_dm(bob.user_id().unwrap()).await.unwrap();
@@ -305,8 +359,13 @@ async fn gui_fixture() {
     group.send_state_event_raw("m.room.avatar", "", serde_json::json!({ "url": upload["content_uri"] })).await.unwrap();
     let (bob_group, carol_group) = (join(&bob, group.room_id()).await, join(&carol, group.room_id()).await);
     say(&carol_group, "Booked the cabin").await;
-    say(&bob_group, "Who drives?").await;
-    say(&carol_group, "I can, my car fits four").await;
+    let question = say(&bob_group, "Who drives?").await;
+    let reply = Reply { event_id: question.clone(), enforce_thread: EnforceThread::MaybeThreaded, add_mentions: AddMentions::Yes };
+    let answer = RoomMessageEventContent::text_plain("I can, my car fits four");
+    carol_group.send(carol_group.make_reply_event(answer.into(), reply).await.unwrap()).await.unwrap();
+    for who in [&carol_group, &group] {
+        who.send(ReactionEventContent::new(Annotation::new(question.clone(), "👍".into()))).await.unwrap();
+    }
 
     let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     req.name = Some("Mum".into());

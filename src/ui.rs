@@ -19,11 +19,22 @@ use matrix_sdk::ruma::OwnedRoomId;
 use tokio::sync::mpsc;
 
 use crate::Keyboard;
-use crate::backend::{ChatAction, Cmd, Ev, Item, Msg, RoomSummary, UTD};
+use crate::backend::{ChatAction, Cmd, DELETED, Ev, Item, Msg, RoomSummary, UTD};
 
 const NARROW: f32 = 720.;
 const ROOM_ROW_H: f32 = 68.;
 const AVATAR: f32 = 44.;
+/// Edits, reactions and deletions kept until the message they target is paged in.
+const MAX_PENDING: usize = 512;
+const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
+/// What the composer's next send does.
+#[derive(Clone, PartialEq)]
+enum Compose {
+    New,
+    Reply(String),
+    Edit(String),
+}
 
 /// Chat list sections, as in Beeper.
 #[derive(Clone, Copy, PartialEq)]
@@ -66,6 +77,10 @@ pub struct BeeperApp {
     shown: Vec<usize>,
     open: Option<OwnedRoomId>,
     msgs: Vec<Msg>,
+    pending: Vec<Item>,
+    /// Message whose actions are showing.
+    picked: Option<String>,
+    compose: Compose,
     more: bool,
     loading: bool,
     timeline: ListState,
@@ -146,6 +161,9 @@ impl BeeperApp {
             shown: Vec::new(),
             open: None,
             msgs: Vec::new(),
+            pending: Vec::new(),
+            picked: None,
+            compose: Compose::New,
             more: false,
             loading: false,
             timeline,
@@ -218,28 +236,31 @@ impl BeeperApp {
                 }
                 self.loading = false;
                 self.more = more;
-                let mut page = Vec::new();
+                let (mut page, mut relations) = (Vec::new(), Vec::new());
                 for item in items {
                     match item {
                         Item::Msg(m) => page.push(m),
-                        Item::Edit { target, body } => {
-                            apply_edit(&mut page, &target, body);
-                        }
+                        other => relations.push(other),
                     }
                 }
                 if reset {
                     self.timeline.reset(page.len());
                     self.msgs = page;
+                    self.pending.clear();
                 } else {
                     self.timeline.splice(0..0, page.len());
                     page.append(&mut self.msgs);
                     self.msgs = page;
+                    // The page may hold the messages that earlier relations were waiting for.
+                    relations.splice(0..0, self.pending.drain(..));
                 }
+                self.relate(relations);
             }
             Ev::Live { room, items } => {
                 if self.open.as_ref() != Some(&room) || self.loading && self.msgs.is_empty() {
                     return;
                 }
+                let mut relations = Vec::new();
                 for item in items {
                     match item {
                         Item::Msg(m) => {
@@ -251,13 +272,10 @@ impl BeeperApp {
                             self.msgs.push(m);
                             self.timeline.splice(at..at, 1);
                         }
-                        Item::Edit { target, body } => {
-                            if let Some(ix) = apply_edit(&mut self.msgs, &target, body) {
-                                self.timeline.splice(ix..ix + 1, 1);
-                            }
-                        }
+                        other => relations.push(other),
                     }
                 }
+                self.relate(relations);
             }
             Ev::Error(e) => {
                 self.error = Some(e.into());
@@ -387,15 +405,58 @@ impl BeeperApp {
         }
     }
 
+    /// Applies edits, reactions and deletions to loaded messages; the rest wait in `pending`.
+    fn relate(&mut self, items: Vec<Item>) {
+        for item in items {
+            match apply(&mut self.msgs, &item) {
+                Some(ix) => self.timeline.splice(ix..ix + 1, 1),
+                None if self.pending.len() < MAX_PENDING => self.pending.push(item),
+                None => {}
+            }
+        }
+    }
+
     fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let body = self.composer.read(cx).value().trim().to_string();
         let Some(room) = self.open.clone() else { return };
         if body.is_empty() {
             return;
         }
-        if self.send(Cmd::Send(room, body), cx) {
+        let (reply_to, edit) = match self.compose.clone() {
+            Compose::New => (None, None),
+            Compose::Reply(id) => (Some(id), None),
+            Compose::Edit(id) => (None, Some(id)),
+        };
+        if self.send(Cmd::Send { room, body, reply_to, edit }, cx) {
+            self.compose = Compose::New;
             self.composer.update(cx, |c, cx| c.set_value("", window, cx));
         }
+    }
+
+    fn start_compose(&mut self, compose: Compose, window: &mut Window, cx: &mut Context<Self>) {
+        let text = match &compose {
+            Compose::Edit(id) => self.msgs.iter().find(|m| &m.id == id).map(|m| m.body.clone()).unwrap_or_default(),
+            _ => String::new(),
+        };
+        if matches!(compose, Compose::Edit(_)) || matches!(self.compose, Compose::Edit(_)) {
+            self.composer.update(cx, |c, cx| c.set_value(text, window, cx));
+        }
+        self.compose = compose;
+        self.picked = None;
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Adds the reaction, or removes it when it is already ours.
+    fn toggle_reaction(&mut self, target: &str, key: &str, cx: &mut Context<Self>) {
+        let Some(room) = self.open.clone() else { return };
+        let mine = self.msgs.iter().find(|m| m.id == target).and_then(|m| m.reactions.iter().find(|r| r.own && r.key == key));
+        let cmd = match mine {
+            Some(r) => Cmd::Delete { room, target: r.id.clone() },
+            None => Cmd::React { room, target: target.to_owned(), key: key.to_owned() },
+        };
+        self.picked = None;
+        self.send(cmd, cx);
     }
 
     fn open_room(&mut self, id: OwnedRoomId, cx: &mut Context<Self>) {
@@ -410,6 +471,9 @@ impl BeeperApp {
     fn close_room(&mut self) {
         self.open = None;
         self.msgs.clear();
+        self.pending.clear();
+        self.picked = None;
+        self.compose = Compose::New;
         self.timeline.reset(0);
         self.more = false;
         self.loading = false;
@@ -619,13 +683,28 @@ impl BeeperApp {
             self.timeline.clone(),
             cx.processor(move |this, ix: usize, _, cx| {
                 let m = &this.msgs[ix];
-                let first = ix == 0 || this.msgs[ix - 1].from != m.from;
-                let locked = m.body == UTD;
+                let prev = ix.checked_sub(1).map(|p| &this.msgs[p]);
+                let new_day = prev.is_none_or(|p| day(p.ts) != day(m.ts));
+                let first = new_day || prev.is_none_or(|p| p.from != m.from);
+                let faded = m.deleted || m.body == UTD;
+                let picked = this.picked.as_deref() == Some(m.id.as_str());
+                let quote = m.reply_to.as_ref().map(|id| match this.msgs.iter().rfind(|x| &x.id == id) {
+                    Some(q) => (q.sender.clone(), q.body.clone()),
+                    None => (String::new(), "Message unavailable".to_owned()),
+                });
+                let id = m.id.clone();
                 let bubble = v_flex()
+                    .id(SharedString::from(m.id.clone()))
                     .max_w(relative(0.8))
                     .px_3()
                     .py_1p5()
                     .rounded_xl()
+                    .cursor_pointer()
+                    .when(picked, |el| el.border_2().border_color(cx.theme().ring))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.picked = (this.picked.as_ref() != Some(&id)).then(|| id.clone());
+                        cx.notify();
+                    }))
                     .when(!m.own, |el| {
                         el.bg(cx.theme().muted).when(first && !dm, |el| {
                             el.child(
@@ -638,14 +717,76 @@ impl BeeperApp {
                         })
                     })
                     .when(m.own, |el| el.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
-                    .child(div().text_sm().when(locked, |el| el.italic().opacity(0.7)).child(m.body.clone()))
-                    .child(div().flex().justify_end().text_xs().opacity(0.6).child(clock(m.ts)));
-                h_flex()
+                    .children(quote.map(|(who, text)| {
+                        v_flex()
+                            .my_1()
+                            .pl_2()
+                            .border_l_2()
+                            .border_color(cx.theme().ring)
+                            .text_xs()
+                            .opacity(0.8)
+                            .when(!who.is_empty(), |el| el.child(div().font_weight(FontWeight::SEMIBOLD).child(who)))
+                            .child(div().line_clamp(2).child(text))
+                    }))
+                    .child(div().text_sm().when(faded, |el| el.italic().opacity(0.7)).child(m.body.clone()))
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_1()
+                            .text_xs()
+                            .opacity(0.6)
+                            .when(m.edited && !m.deleted, |el| el.child("Edited"))
+                            .child(clock(m.ts)),
+                    );
+                // One chip per emoji, in order of first use.
+                let mut chips: Vec<(&str, usize, bool)> = Vec::new();
+                for r in &m.reactions {
+                    match chips.iter_mut().find(|c| c.0 == r.key) {
+                        Some(c) => (c.1, c.2) = (c.1 + 1, c.2 || r.own),
+                        None => chips.push((&r.key, 1, r.own)),
+                    }
+                }
+                let reactions = (!chips.is_empty()).then(|| {
+                    h_flex().flex_wrap().gap_1().pt_0p5().children(chips.into_iter().enumerate().map(|(n, (key, count, mine))| {
+                        let (id, key_owned) = (m.id.clone(), key.to_owned());
+                        h_flex()
+                            .id(SharedString::from(format!("{}-reaction-{n}", m.id)))
+                            .gap_1()
+                            .px_1p5()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(if mine { cx.theme().ring } else { cx.theme().border })
+                            .bg(cx.theme().secondary)
+                            .text_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, &key_owned, cx)))
+                            .child(key.to_owned())
+                            .when(count > 1, |el| el.child(count.to_string()))
+                    }))
+                });
+                v_flex()
                     .w_full()
                     .px_3()
                     .pt(if first { px(8.) } else { px(2.) })
-                    .when(m.own, |el| el.justify_end())
-                    .child(bubble)
+                    .when(new_day, |el| {
+                        el.child(
+                            div()
+                                .w_full()
+                                .py_2()
+                                .flex()
+                                .justify_center()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(day_label(m.ts)),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .map(|el| if m.own { el.items_end() } else { el.items_start() })
+                            .child(bubble)
+                            .children(reactions),
+                    )
                     .into_any_element()
             }),
         )
@@ -694,6 +835,8 @@ impl BeeperApp {
                         el.child(div().p_4().text_sm().text_color(cx.theme().muted_foreground).child("Loading messages..."))
                     }),
             )
+            .children(self.render_message_actions(cx))
+            .children(self.render_compose_strip(cx))
             .child(
                 h_flex()
                     .gap_2()
@@ -709,6 +852,83 @@ impl BeeperApp {
                             .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx))),
                     ),
             )
+    }
+
+    /// Actions for the picked message. A bar rather than a context menu: touch has no right-click.
+    fn render_message_actions(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let m = self.msgs.iter().find(|m| Some(&m.id) == self.picked.as_ref())?;
+        if m.deleted {
+            return None;
+        }
+        let (id, body, own) = (m.id.clone(), m.body.clone(), m.own);
+        let action = |name: &'static str, icon: IconName, tip: &'static str| Button::new(name).ghost().icon(icon).tooltip(tip);
+        Some(
+            h_flex()
+                .flex_wrap()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .children(QUICK_REACTIONS.iter().enumerate().map(|(n, key)| {
+                    let id = id.clone();
+                    Button::new(("quick-reaction", n))
+                        .ghost()
+                        .label(*key)
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, key, cx)))
+                }))
+                .child(div().flex_1())
+                .child(action("reply", IconName::Reply, "Reply").on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _, window, cx| this.start_compose(Compose::Reply(id.clone()), window, cx)
+                })))
+                .child(action("copy", IconName::Copy, "Copy").on_click(cx.listener(move |this, _, _, cx| {
+                    crate::copy(cx, body.clone());
+                    this.picked = None;
+                    cx.notify();
+                })))
+                .when(own, |el| {
+                    el.child(action("edit", IconName::Pencil, "Edit").on_click(cx.listener({
+                        let id = id.clone();
+                        move |this, _, window, cx| this.start_compose(Compose::Edit(id.clone()), window, cx)
+                    })))
+                    .child(action("delete", IconName::Trash, "Delete").on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(room) = this.open.clone() {
+                            this.send(Cmd::Delete { room, target: id.clone() }, cx);
+                        }
+                        this.picked = None;
+                    })))
+                }),
+        )
+    }
+
+    /// What the composer is replying to or editing, with a way out.
+    fn render_compose_strip(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let (title, id) = match &self.compose {
+            Compose::New => return None,
+            Compose::Reply(id) => ("Replying to:", id),
+            Compose::Edit(id) => ("Edit message", id),
+        };
+        let quoted = self.msgs.iter().find(|m| &m.id == id).map(|m| format!("{}: {}", m.sender, m.body)).unwrap_or_default();
+        Some(
+            h_flex()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
+                        .child(div().truncate().text_color(cx.theme().muted_foreground).child(quoted)),
+                )
+                .child(Button::new("cancel-compose").ghost().icon(IconName::Close).tooltip("Cancel").on_click(cx.listener(
+                    |this, _, window, cx| this.start_compose(Compose::New, window, cx),
+                ))),
+        )
     }
 
     fn render_banners(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -792,6 +1012,23 @@ fn local(ts_ms: u64) -> Option<chrono::DateTime<Local>> {
     Local.timestamp_millis_opt(i64::try_from(ts_ms).ok()?).single()
 }
 
+fn day(ts_ms: u64) -> Option<chrono::NaiveDate> {
+    local(ts_ms).map(|t| t.date_naive())
+}
+
+/// Separator between days: Today, Yesterday, the weekday within a week, else the date.
+fn day_label(ts_ms: u64) -> String {
+    let Some(t) = local(ts_ms) else { return String::new() };
+    let today = Local::now().date_naive();
+    match (today - t.date_naive()).num_days() {
+        0 => "Today".to_owned(),
+        1 => "Yesterday".to_owned(),
+        2..=6 => t.format("%A").to_string(),
+        _ if t.year() == today.year() => t.format("%-d %B").to_string(),
+        _ => t.format("%-d %B %Y").to_string(),
+    }
+}
+
 fn clock(ts_ms: u64) -> String {
     local(ts_ms).map(|t| t.format("%H:%M").to_string()).unwrap_or_default()
 }
@@ -821,11 +1058,36 @@ fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
     }
 }
 
-/// Replaces the body of `target` in `msgs`; returns its index.
-fn apply_edit(msgs: &mut [Msg], target: &str, body: String) -> Option<usize> {
-    let ix = msgs.iter().rposition(|m| m.id == target)?;
-    msgs[ix].body = body;
-    Some(ix)
+/// Applies an edit, reaction or deletion to its loaded target and returns the row to redraw;
+/// `None` when the target is not loaded.
+fn apply(msgs: &mut [Msg], item: &Item) -> Option<usize> {
+    let find = |msgs: &[Msg], id: &str| msgs.iter().rposition(|m| m.id == id);
+    match item {
+        Item::Edit { target, body } => {
+            let ix = find(msgs, target)?;
+            (msgs[ix].body, msgs[ix].edited) = (body.clone(), true);
+            Some(ix)
+        }
+        Item::Reaction { target, reaction } => {
+            let ix = find(msgs, target)?;
+            if !msgs[ix].reactions.iter().any(|r| r.id == reaction.id) {
+                msgs[ix].reactions.push(reaction.clone());
+            }
+            Some(ix)
+        }
+        Item::Redact { target } => {
+            if let Some(ix) = find(msgs, target) {
+                let m = &mut msgs[ix];
+                (m.body, m.deleted, m.reply_to) = (DELETED.to_owned(), true, None);
+                m.reactions.clear();
+                return Some(ix);
+            }
+            let ix = msgs.iter().rposition(|m| m.reactions.iter().any(|r| &r.id == target))?;
+            msgs[ix].reactions.retain(|r| &r.id != target);
+            Some(ix)
+        }
+        Item::Msg(_) => None,
+    }
 }
 
 impl Render for BeeperApp {

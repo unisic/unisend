@@ -23,7 +23,11 @@ use matrix_sdk::{
     notification_settings::{NotificationSettings, RoomNotificationMode},
     media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings},
     reqwest,
-    room::{Messages, MessagesOptions},
+    room::{
+        Messages, MessagesOptions,
+        edit::EditedContent,
+        reply::{EnforceThread, Reply},
+    },
     ruma::{
         EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
         api::{
@@ -37,9 +41,15 @@ use matrix_sdk::{
         events::{
             AnySyncMessageLikeEvent, AnySyncTimelineEvent, StateEventType, SyncMessageLikeEvent,
             receipt::ReceiptThread,
+            AnyMessageLikeEventContent,
+            reaction::ReactionEventContent,
+            relation::Annotation,
             room::{
                 MediaSource,
-                message::{MessageType, Relation, RoomMessageEventContent},
+                message::{
+                    AddMentions, MessageType, Relation, RoomMessageEventContent,
+                    sanitize::remove_plain_reply_fallback,
+                },
             },
         },
         media::Method,
@@ -74,7 +84,11 @@ pub enum Cmd {
     Avatars(Vec<OwnedRoomId>),
     /// Re-read the latest message of rooms whose preview is missing or undecryptable.
     Previews(Vec<OwnedRoomId>),
-    Send(OwnedRoomId, String),
+    /// `reply_to` and `edit` are event IDs; an edit replaces that message's text.
+    Send { room: OwnedRoomId, body: String, reply_to: Option<String>, edit: Option<String> },
+    React { room: OwnedRoomId, target: String, key: String },
+    /// Redacts a message or a reaction.
+    Delete { room: OwnedRoomId, target: String },
 }
 
 pub enum Ev {
@@ -154,11 +168,28 @@ pub struct Msg {
     pub ts: u64,
     /// `com.beeper.hs.order`; 0 on other homeservers.
     pub order: i64,
+    /// Event ID this message replies to.
+    pub reply_to: Option<String>,
+    pub deleted: bool,
+    pub edited: bool,
+    /// Filled by the UI from `Item::Reaction`.
+    pub reactions: Vec<Reaction>,
+}
+
+#[derive(Clone)]
+pub struct Reaction {
+    /// The reaction event, which is what removing it redacts.
+    pub id: String,
+    pub key: String,
+    pub own: bool,
 }
 
 pub enum Item {
     Msg(Msg),
     Edit { target: String, body: String },
+    Reaction { target: String, reaction: Reaction },
+    /// A message or a reaction was deleted.
+    Redact { target: String },
 }
 
 pub fn start(dir: PathBuf) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Ev>) {
@@ -234,7 +265,8 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         }
     }
     while let Some(cmd) = cmds.recv().await {
-        if let Err(e) = st.handle(cmd).await {
+        // Boxed: the handler's future holds every command's state and is too large for the stack.
+        if let Err(e) = Box::pin(st.handle(cmd)).await {
             log::warn!("{e:#}");
             st.emit(Ev::Error(format!("{e:#}"))).await;
         }
@@ -447,14 +479,36 @@ impl State {
                     });
                 }
             }
-            Cmd::Send(room_id, body) => {
-                let room = self.room(&room_id)?;
+            Cmd::Send { room, body, reply_to, edit } => {
+                let room = self.room(&room)?;
+                let text = RoomMessageEventContent::text_plain(body);
+                let content: AnyMessageLikeEventContent = match (edit, reply_to) {
+                    (Some(id), _) => {
+                        room.make_edit_event(&EventId::parse(id)?, EditedContent::RoomMessage(text.into())).await?
+                    }
+                    (None, Some(id)) => {
+                        let reply = Reply {
+                            event_id: EventId::parse(id)?,
+                            enforce_thread: EnforceThread::MaybeThreaded,
+                            add_mentions: AddMentions::Yes,
+                        };
+                        room.make_reply_event(text.into(), reply).await?.into()
+                    }
+                    (None, None) => text.into(),
+                };
                 let ev = self.ev.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = room.send(RoomMessageEventContent::text_plain(body)).await {
+                    if let Err(e) = room.send(content).await {
                         let _ = ev.send(Ev::Error(format!("Message not sent: {e}"))).await;
                     }
                 });
+            }
+            Cmd::React { room, target, key } => {
+                let content = ReactionEventContent::new(Annotation::new(EventId::parse(target)?, key));
+                self.room(&room)?.send(content).await?;
+            }
+            Cmd::Delete { room, target } => {
+                self.room(&room)?.redact(&EventId::parse(target)?, None, None).await?;
             }
         }
         Ok(())
@@ -486,7 +540,7 @@ impl State {
         self.open = Some((room_id.clone(), token));
         let newest = items.iter().rev().find_map(|i| match i {
             Item::Msg(m) => EventId::parse(&m.id).ok(),
-            Item::Edit { .. } => None,
+            _ => None,
         });
         self.emit(Ev::History { room: room_id, items, reset, more }).await;
         Ok(newest)
@@ -530,7 +584,7 @@ fn preview(items: &[Item], dm: bool) -> Option<String> {
         Item::Msg(m) if m.own => Some(format!("You: {}", m.body)),
         Item::Msg(m) if dm => Some(m.body.clone()),
         Item::Msg(m) => Some(format!("{}: {}", m.sender, m.body)),
-        Item::Edit { .. } => None,
+        _ => None,
     })
 }
 
@@ -596,6 +650,14 @@ async fn mark_read_on_archive(client: &Client) -> bool {
         Ok(Some(raw)) => raw.deserialize_as_unchecked::<Pref>().ok().and_then(|p| p.enabled).unwrap_or(false),
         _ => true,
     }
+}
+
+fn is_redacted(event: &TimelineEvent) -> bool {
+    #[derive(Deserialize)]
+    struct Unsigned {
+        redacted_because: Option<serde::de::IgnoredAny>,
+    }
+    event.raw().get_field::<Unsigned>("unsigned").ok().flatten().is_some_and(|u| u.redacted_because.is_some())
 }
 
 fn hs_order(event: &TimelineEvent) -> Option<i64> {
@@ -760,6 +822,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
 }
 
 pub(crate) const UTD: &str = "Unable to decrypt this message yet";
+pub(crate) const DELETED: &str = "Message deleted";
 
 /// Converts timeline events (oldest first) into displayable items.
 async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
@@ -769,7 +832,13 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
     for event in events {
         let Some(id) = event.event_id().map(|e| e.to_string()) else { continue };
         let Some(sender) = event.sender() else { continue };
+        let (mut reply_to, mut deleted) = (None, false);
+        // A deleted event in an encrypted room is an empty `m.room.encrypted`: nothing says whether
+        // it was a message or a reaction, so it gets no placeholder.
         let body = if event.kind.is_utd() {
+            if is_redacted(event) {
+                continue;
+            }
             UTD.to_owned()
         } else {
             match event.raw().deserialize() {
@@ -781,10 +850,45 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
                         out.push(Item::Edit { target: r.event_id.to_string(), body });
                         continue;
                     }
+                    Some(Relation::Reply(reply)) => {
+                        reply_to = Some(reply.in_reply_to.event_id.to_string());
+                        // Older clients and bridges prepend the quoted message to the body.
+                        remove_plain_reply_fallback(&describe(&m.content.msgtype)).to_owned()
+                    }
                     _ => describe(&m.content.msgtype),
                 },
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+                    SyncMessageLikeEvent::Redacted(_),
+                ))) => {
+                    deleted = true;
+                    DELETED.to_owned()
+                }
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Reaction(
+                    SyncMessageLikeEvent::Original(r),
+                ))) => {
+                    let Annotation { event_id, key, .. } = r.content.relates_to;
+                    let reaction = Reaction { id, key, own: sender == own };
+                    out.push(Item::Reaction { target: event_id.to_string(), reaction });
+                    continue;
+                }
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(_))) => {
+                    // The target moved from the event to its content in room version 11.
+                    #[derive(Deserialize)]
+                    struct Redacts {
+                        redacts: Option<String>,
+                    }
+                    let raw = event.raw();
+                    let top = raw.get_field::<String>("redacts").ok().flatten();
+                    let inner = || raw.get_field::<Redacts>("content").ok().flatten().and_then(|c| c.redacts);
+                    if let Some(target) = top.or_else(inner) {
+                        out.push(Item::Redact { target });
+                    }
+                    continue;
+                }
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Sticker(_))) => "Sticker".into(),
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(_))) => UTD.into(),
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(_))) if !is_redacted(event) => {
+                    UTD.into()
+                }
                 _ => continue,
             }
         };
@@ -798,7 +902,20 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
         };
         let ts = event.timestamp().map_or(0, |t| u64::from(t.0));
         let order = hs_order(event).unwrap_or(0);
-        out.push(Item::Msg(Msg { id, sender: name, own: sender == own, from: sender, body, ts, order }));
+        let own = sender == own;
+        out.push(Item::Msg(Msg {
+            id,
+            sender: name,
+            own,
+            from: sender,
+            body,
+            ts,
+            order,
+            reply_to,
+            deleted,
+            edited: false,
+            reactions: Vec::new(),
+        }));
     }
     out
 }

@@ -1,6 +1,9 @@
 //! Beeper client: Matrix (matrix-sdk) against Beeper's homeserver, UI in GPUI.
 //! Desktop enters through `run_desktop`, Android through `android_main`.
 
+// The matrix-sdk futures nested in the command handler exceed the default layout query depth.
+#![recursion_limit = "256"]
+
 mod backend;
 mod beeper;
 mod ui;
@@ -13,7 +16,7 @@ use gpui_kit::*;
 // Icons beyond the 101 the component library embeds; each costs its SVG, about 400 bytes.
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
-    [Archive, ArchiveRestore, BellOff, ChevronsDown, ClipboardPaste, Mail, MailOpen, Pin, PinOff, SendHorizontal]
+    [Archive, ArchiveRestore, BellOff, ChevronsDown, ClipboardPaste, Mail, MailOpen, Pencil, Pin, PinOff, Reply, SendHorizontal, Trash]
 );
 
 struct Assets;
@@ -35,6 +38,8 @@ impl AssetSource for Assets {
 
 fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::init(cx);
+    #[cfg(not(target_os = "android"))]
+    bundled_emoji(cx);
     Theme::sync_system_appearance(None, cx);
     let (cmd, events) = backend::start(dir);
     let options = WindowOptions {
@@ -45,6 +50,19 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, window, cx)))
         .expect("open main window");
     cx.activate(true);
+}
+
+/// Makes emoji draw on desktops whose "Noto Color Emoji" is the COLRv1 build (Fedora, others):
+/// GPUI's shaper draws bitmap emoji only, and it picks the emoji font by that family name.
+/// shortcut: leans on GPUI dropping faces without a Latin 'm' when a family is requested, which
+/// removes the system face before ours is added; replace once GPUI can draw COLRv1.
+#[cfg(not(target_os = "android"))]
+fn bundled_emoji(cx: &mut App) {
+    let emoji: &[u8] = include_bytes!("../android/app/src/main/assets/fonts/NotoColorEmoji.ttf");
+    let _ = cx.text_system().resolve_font(&font("Noto Color Emoji"));
+    if let Err(e) = cx.text_system().add_fonts(vec![emoji.into()]) {
+        log::warn!("emoji font: {e}");
+    }
 }
 
 fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
@@ -130,6 +148,18 @@ pub(crate) fn paste(cx: &gpui_kit::App) -> Option<String> {
     }
     #[cfg(not(target_os = "android"))]
     cx.read_from_clipboard().and_then(|c| c.text())
+}
+
+pub(crate) fn copy(cx: &mut gpui_kit::App, text: String) {
+    #[cfg(target_os = "android")]
+    {
+        let _ = cx;
+        if let Err(e) = gpui_mobile::packages::clipboard::set_text(&text) {
+            log::warn!("clipboard: {e}");
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    cx.write_to_clipboard(ClipboardItem::new_string(text));
 }
 
 pub(crate) fn hide_keyboard() {

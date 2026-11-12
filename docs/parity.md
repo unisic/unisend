@@ -32,6 +32,7 @@ is not started.
 | Mark read / unread | done | `m.marked_unread`, `m.read.private` receipt |
 | Unread counts | done | server notification counts |
 | Search chats by name | part | names only; Beeper also searches messages, contacts, networks |
+| Emoji rendering | done | bundled bitmap Noto Color Emoji (GPUI cannot draw COLRv1) |
 | Unread filter | done | local |
 | DMs / Groups / Drafts / Unanswered filters | todo | local |
 | Avatars, network label, last message, time | done | `m.room.avatar`, `m.bridge` |
@@ -49,12 +50,13 @@ is not started.
 | Feature | Status | Protocol |
 |---|---|---|
 | Text messages, history paging, live updates | done | `m.room.message` |
-| Edits applied | part | `m.replace`; no "edited" mark or edit history |
+| Edits applied, "Edited" mark | part | `m.replace`; no edit history |
 | Sender grouping, timestamps | done | local |
-| Day separators, unread divider | todo | local, `m.fully_read` |
-| Replies (quote, jump to message) | todo | `m.in_reply_to` |
-| Reactions (show, add, remove) | todo | `m.reaction`, `com.beeper.reaction.shortcode` |
-| Deleted messages | todo | `m.room.redaction` |
+| Day separators | done | local |
+| Unread divider | todo | `m.fully_read` |
+| Replies (quote shown) | part | `m.in_reply_to`; no jump to the quoted message |
+| Reactions (show, add, remove) | part | `m.reaction`; six quick emoji, no picker, no custom emoji |
+| Deleted messages | part | `m.room.redaction`; in encrypted rooms a deleted message disappears after reload (it cannot be told from a deleted reaction) |
 | Images, video, audio, files, voice notes | part | shown as a text label; no media |
 | Stickers, GIFs, custom emoji | todo | `m.sticker`, `fi.mau.gif`, `m.image_pack` |
 | Link previews | todo | `com.beeper.linkpreviews` |
@@ -73,7 +75,8 @@ is not started.
 | Feature | Status | Protocol |
 |---|---|---|
 | Send text | done | `m.room.message` |
-| Reply, edit, delete, forward | todo | relations, redaction |
+| Reply, edit, delete, copy | done | relations, redaction |
+| Forward | todo | new event in the target chat |
 | Attachments, paste image, drag and drop, camera | todo | media upload, encrypted files |
 | Voice notes | todo | `org.matrix.msc3245.voice` |
 | Emoji / GIF / sticker pickers | todo | local, `fi.mau.gif` |
