@@ -16,7 +16,24 @@ use gpui_kit::*;
 // Icons beyond the 101 the component library embeds; each costs its SVG, about 400 bytes.
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
-    [Archive, ArchiveRestore, BellOff, ChevronsDown, ClipboardPaste, Mail, MailOpen, Pencil, Pin, PinOff, Reply, SendHorizontal, Trash]
+    [
+        Archive,
+        ArchiveRestore,
+        BellOff,
+        ChevronsDown,
+        ClipboardPaste,
+        ListFilter,
+        Mail,
+        MailOpen,
+        MessageCircle,
+        Pencil,
+        Pin,
+        PinOff,
+        Reply,
+        SendHorizontal,
+        Trash,
+        X
+    ]
 );
 
 struct Assets;
@@ -40,7 +57,9 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::init(cx);
     #[cfg(not(target_os = "android"))]
     bundled_emoji(cx);
-    Theme::sync_system_appearance(None, cx);
+    #[cfg(target_os = "android")]
+    extra_fonts(cx);
+    sync_theme(None, cx);
     let (cmd, events) = backend::start(dir);
     let options = WindowOptions {
         window_bounds,
@@ -62,6 +81,51 @@ fn bundled_emoji(cx: &mut App) {
     let _ = cx.text_system().resolve_font(&font("Noto Color Emoji"));
     if let Err(e) = cx.text_system().add_fonts(vec![emoji.into()]) {
         log::warn!("emoji font: {e}");
+    }
+}
+
+/// Follows the system's light or dark mode and puts Beeper's colors over the library's.
+pub(crate) fn sync_theme(window: Option<&mut Window>, cx: &mut App) {
+    if cfg!(debug_assertions) && std::env::var_os("BEEPER_GPUI_DARK").is_some() {
+        Theme::change(gpui_kit::component::ThemeMode::Dark, window, cx);
+    } else {
+        Theme::sync_system_appearance(window, cx);
+    }
+    apply_palette(cx);
+}
+
+/// Beeper's colors. The dark set is sampled from Beeper Android 4.64; the light set mirrors it in
+/// the same hue. The accent is this project's choice: Beeper's could not be read from the apps.
+fn apply_palette(cx: &mut App) {
+    let c = |hex: u32| -> Hsla { rgb(hex).into() };
+    let (bg, fg, dim, raised, raised_2, bar) = if Theme::global(cx).is_dark() {
+        (0x110b1a, 0xefe0ff, 0xb4a5c8, 0x231c2c, 0x2d2539, 0x171022)
+    } else {
+        (0xffffff, 0x1b1326, 0x6f637f, 0xf3eef9, 0xe6ddf1, 0xf7f3fb)
+    };
+    let (accent, accent_hover, on_accent) = (0x6d5ef5, 0x7b6df7, 0xffffff);
+    Theme::update(cx, |theme| {
+        let k = &mut theme.colors;
+        (k.background, k.foreground, k.muted_foreground) = (c(bg), c(fg), c(dim));
+        (k.muted, k.secondary, k.secondary_hover, k.secondary_active) = (c(raised), c(raised), c(raised_2), c(raised_2));
+        (k.secondary_foreground, k.accent, k.accent_foreground) = (c(fg), c(raised), c(fg));
+        (k.list, k.list_hover, k.list_active, k.list_even) = (c(bg), c(raised), c(raised_2), c(bg));
+        (k.border, k.input, k.title_bar, k.title_bar_border) = (c(raised_2), c(raised_2), c(bar), c(raised_2));
+        (k.popover, k.popover_foreground, k.sidebar, k.sidebar_foreground) = (c(bar), c(fg), c(bg), c(fg));
+        (k.primary, k.primary_hover, k.primary_active, k.primary_foreground) = (c(accent), c(accent_hover), c(accent), c(on_accent));
+        (k.button_primary, k.button_primary_hover, k.button_primary_active) = (c(accent), c(accent_hover), c(accent));
+        (k.button_primary_foreground, k.ring, k.caret) = (c(on_accent), c(accent), c(fg));
+    });
+}
+
+/// Fonts for letters outside the list gpui-mobile loads: mathematical alphanumerics (names typed
+/// in "fancy" letters), circled letters, arrows. About 0.75 MB of font data.
+#[cfg(target_os = "android")]
+fn extra_fonts(cx: &mut App) {
+    let files = ["NotoSansSymbols-Regular-Subsetted.ttf", "NotoSansSymbols-Regular-Subsetted2.ttf", "SECFallback.ttf"];
+    let fonts = files.iter().filter_map(|f| std::fs::read(format!("/system/fonts/{f}")).ok()).map(Into::into).collect();
+    if let Err(e) = cx.text_system().add_fonts(fonts) {
+        log::warn!("extra fonts: {e}");
     }
 }
 

@@ -578,14 +578,15 @@ async fn messages(room: &Room, from: Option<&str>, limit: u32) -> Result<Message
     Ok(if found { room.messages(opts()).await? } else { resp })
 }
 
-/// List preview: the newest message, prefixed with its sender outside one-to-one chats.
+/// List preview: the newest message on one line, prefixed with its sender outside one-to-one chats.
 fn preview(items: &[Item], dm: bool) -> Option<String> {
-    items.iter().rev().find_map(|i| match i {
+    let text = items.iter().rev().find_map(|i| match i {
         Item::Msg(m) if m.own => Some(format!("You: {}", m.body)),
         Item::Msg(m) if dm => Some(m.body.clone()),
         Item::Msg(m) => Some(format!("{}: {}", m.sender, m.body)),
         _ => None,
-    })
+    })?;
+    Some(text.replace('\n', " "))
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -685,10 +686,20 @@ fn is_done(done: &Done, s: &RoomSummary, now: i64) -> bool {
     done.updated_ts.is_some_and(|upto| upto > 0 && upto >= s.ts as i64 && upto < now && !s.is_unread())
 }
 
-/// Everything the local store knows about a room. `preview`, `ts`, `order` and `dm` are the
-/// caller's (the preview's wording depends on `dm`); the rest is read here.
-async fn summarize(room: &Room, notif: &NotificationSettings, seen: RoomSummary) -> RoomSummary {
-    let name = room.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| seen.id.to_string());
+/// Everything the local store knows about a room. `preview`, `ts` and `order` come from the
+/// timeline, so the caller passes what it saw; the rest is read here.
+async fn summarize(
+    room: &Room,
+    notif: &NotificationSettings,
+    peer: Option<OwnedUserId>,
+    seen: RoomSummary,
+) -> RoomSummary {
+    let name = match &peer {
+        // A bridged one-to-one room also holds the bridge bot, which the SDK's computed name
+        // counts: "Ann, and 2 others". Beeper titles it with the other person alone.
+        Some(peer) if room.name().is_none() => display_name(room, peer).await,
+        _ => room.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| seen.id.to_string()),
+    };
     let network = match seen.network {
         Some(n) => Some(n),
         None => network(room).await,
@@ -701,6 +712,9 @@ async fn summarize(room: &Room, notif: &NotificationSettings, seen: RoomSummary)
     let mut s = RoomSummary {
         name,
         network,
+        dm: peer.is_some(),
+        // Cached before previews were kept to one paragraph.
+        preview: seen.preview.map(|p| p.replace('\n', " ")),
         unread: room.unread_notification_counts().notification_count,
         pinned: room.is_favourite(),
         low_priority: room.is_low_priority(),
@@ -719,8 +733,7 @@ async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &R
     let mut out = Vec::with_capacity(cached.len());
     for seen in cached {
         let Some(room) = client.get_room(&seen.id) else { continue };
-        let dm = other_person(&room).await.is_some();
-        let fresh = summarize(&room, notif, RoomSummary { dm, ..seen }).await;
+        let fresh = summarize(&room, notif, other_person(&room).await, seen).await;
         if let Some(r) = rooms.lock().unwrap().get_mut(&fresh.id) {
             // A preview refresh may have updated the entry meanwhile.
             *r = RoomSummary { preview: r.preview.clone(), ..fresh };
@@ -770,7 +783,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
             let items = to_items(&room, &update.timeline.events).await;
             let prev = rooms.lock().unwrap().get(id).cloned();
             let newest = update.timeline.events.iter().filter_map(|e| e.timestamp()).map(|t| u64::from(t.0)).max();
-            let dm = other_person(&room).await.is_some();
+            let peer = other_person(&room).await;
+            let dm = peer.is_some();
             let order = items.iter().filter_map(|i| match i {
                 Item::Msg(m) if !m.own => Some(m.order),
                 _ => None,
@@ -790,7 +804,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 marked_unread: false,
                 archived: false,
             };
-            let summary = summarize(&room, &notif, seen).await;
+            let summary = summarize(&room, &notif, peer, seen).await;
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
             changed.push(summary);
             if !items.is_empty() && ev.send(Ev::Live { room: id.clone(), items }).await.is_err() {
@@ -885,7 +899,7 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
                     }
                     continue;
                 }
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Sticker(_))) => "Sticker".into(),
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Sticker(_))) => "🖼 Sticker".into(),
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(_))) if !is_redacted(event) => {
                     UTD.into()
                 }
@@ -981,16 +995,21 @@ async fn avatar(client: &Client, room_id: &RoomId) -> Result<Option<Vec<u8>>> {
     Ok(Some(client.media().get_media_content(&request, true).await?))
 }
 
+/// Text for a message; media gets Beeper's label and its caption, not its file name.
 fn describe(msgtype: &MessageType) -> String {
-    let label = match msgtype {
-        MessageType::Image(_) => "Photo",
-        MessageType::Video(_) => "Video",
-        MessageType::Audio(_) => "Audio",
-        MessageType::File(_) => "File",
-        MessageType::Location(_) => "Location",
+    let (label, caption) = match msgtype {
+        MessageType::Image(c) => ("📷 Photo", c.caption()),
+        MessageType::Video(c) => ("🎬 Video", c.caption()),
+        MessageType::Audio(c) if c.voice.is_some() => ("🎤 Voice Note", c.caption()),
+        MessageType::Audio(c) => ("🎵 Audio", c.caption()),
+        MessageType::File(c) => return format!("📎 {}", c.filename()),
+        MessageType::Location(_) => ("📍 Location", None),
         _ => return msgtype.body().to_owned(),
     };
-    format!("[{label}] {}", msgtype.body())
+    match caption {
+        Some(caption) => format!("{label}: {caption}"),
+        None => label.to_owned(),
+    }
 }
 
 #[cfg(test)]

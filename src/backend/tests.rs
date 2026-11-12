@@ -377,6 +377,18 @@ async fn gui_fixture() {
     say(&bob_bridged, "Call me when you land").await;
     say(&bob_bridged, "And take a jacket, it is cold here").await;
 
+    // A bridged one-to-one chat as Beeper has them: no name, the other person and a bridge bot
+    // that the room lists as a service member. Also: letters outside the basic fonts, two lines.
+    let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+    req.invite = vec![bob.user_id().unwrap().to_owned(), carol.user_id().unwrap().to_owned()];
+    let direct = alice.create_room(req).await.unwrap();
+    let bot = serde_json::json!({ "service_members": [carol.user_id().unwrap()] });
+    direct.send_state_event_raw("io.element.functional_members", "", bot).await.unwrap();
+    let bridge = serde_json::json!({ "protocol": { "id": "signal", "displayname": "Signal" }, "com.beeper.room_type.v2": "dm" });
+    direct.send_state_event_raw("m.bridge", "fixture", bridge).await.unwrap();
+    let (bob_direct, _) = (join(&bob, direct.room_id()).await, join(&carol, direct.room_id()).await);
+    say(&bob_direct, "już ide XDD\nzaraz będę, 𝑺𝒉𝒖 🍮🐰 też").await;
+
     alice.sync_once(SyncSettings::default()).await.unwrap();
     alice.encryption().backups().wait_for_steady_state().await.unwrap();
 

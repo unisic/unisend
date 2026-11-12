@@ -51,5 +51,6 @@ there:
     GUI_FIXTURE_DIR=/tmp/fixture MATRIX_TEST_HS=... MATRIX_TEST_JWT_SECRET=... \
       cargo test --lib gui_fixture -- --ignored
 
-Debug desktop builds read `BEEPER_GPUI_HOMESERVER` to point at such a server;
-`BEEPER_GPUI_DATA_DIR` picks the data directory (with a pre-seeded `session.json`).
+Debug desktop builds read `BEEPER_GPUI_HOMESERVER` to point at such a server
+and `BEEPER_GPUI_DARK` to force the dark palette; `BEEPER_GPUI_DATA_DIR` picks
+the data directory (with a pre-seeded `session.json`).
