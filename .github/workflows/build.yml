@@ -1,0 +1,158 @@
+# Release artifacts on GitHub's runners. Written on Linux and never run: every step is unverified
+# until the first run; details that could not be checked offline are marked "unverified".
+name: build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  linux:
+    name: Linux x64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Libraries the Linux binary links (readelf -d on a local build): xcb, xkbcommon(-x11), fontconfig, freetype.
+      # Package names are Ubuntu's; unverified against 24.04's archive.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype-dev libwayland-dev pkg-config
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-${{ hashFiles('Cargo.lock') }}
+          restore-keys: linux-
+      - run: cargo build --release --locked --bin beeper-gpui
+      - run: tar -C target/release -czf beeper-gpui-linux-x64.tar.gz beeper-gpui
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: beeper-gpui-linux-x64
+          path: beeper-gpui-linux-x64.tar.gz
+
+  windows:
+    name: Windows x64
+    # Native, not cross: gpui-pre-windows compiles its release shaders with fxc.exe, found through the
+    # Windows SDK on the runner (assumed installed on windows-2025, unverified).
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-
+      # aws-lc-sys uses its prebuilt NASM objects (feature on in this tree), so no NASM install.
+      # Explicit target so .cargo/config.toml's static CRT applies to the app and not to build scripts.
+      - run: cargo build --release --locked --bin beeper-gpui --target x86_64-pc-windows-msvc
+      - shell: pwsh
+        run: Compress-Archive -Path target/x86_64-pc-windows-msvc/release/beeper-gpui.exe -DestinationPath beeper-gpui-windows-x64.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: beeper-gpui-windows-x64
+          path: beeper-gpui-windows-x64.zip
+
+  macos:
+    name: macOS universal
+    runs-on: macos-15
+    env:
+      # LSMinimumSystemVersion in packaging/macos/Info.plist; whether GPUI runs on 11.0 is unverified.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-${{ hashFiles('Cargo.lock') }}
+          restore-keys: macos-
+      # gpui-kit enables runtime_shaders, so no Metal toolchain is needed at build time.
+      - run: |
+          cargo build --release --locked --bin beeper-gpui --target aarch64-apple-darwin
+          cargo build --release --locked --bin beeper-gpui --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/beeper-gpui target/aarch64-apple-darwin/release/beeper-gpui target/x86_64-apple-darwin/release/beeper-gpui
+          lipo -info dist/beeper-gpui
+          packaging/macos/bundle.sh dist/beeper-gpui dist
+          ditto -c -k --keepParent dist/Beeper.app beeper-gpui-macos-universal.zip
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: beeper-gpui-macos-universal
+          path: beeper-gpui-macos-universal.zip
+
+  android:
+    name: Android debug APK
+    runs-on: ubuntu-24.04
+    env:
+      NDK_VERSION: 28.2.13676358
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        # Space-separated list passed to sdkmanager: format unverified (action.yml only says "Additional packages").
+        with:
+          packages: platform-tools platforms;android-35 ndk;28.2.13676358
+      - run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-linux-android
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-ndk
+            target
+          key: android-${{ hashFiles('Cargo.lock') }}
+          restore-keys: android-
+      # Same steps as the local build script: cargo-ndk for arm64, drop gpui-mobile's own .so, then Gradle.
+      - run: |
+          command -v cargo-ndk || cargo install cargo-ndk --version 4.1.2 --locked
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$NDK_VERSION"
+          cargo ndk -t arm64-v8a -P 26 -o android/app/src/main/jniLibs build --release --lib --locked
+          rm -f android/app/src/main/jniLibs/arm64-v8a/libgpui_mobile.so
+          cd android && ./gradlew --no-daemon assembleDebug
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: beeper-gpui-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  ios-check:
+    name: iOS compile check (expected to fail, no iOS port yet)
+    runs-on: macos-15
+    # The app has no iOS entry point and depends on gpui-mobile only for Android, so this
+    # reports how far the library gets; it never blocks the release jobs.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-apple-ios
+      - run: cargo check --locked --lib --target aarch64-apple-ios
