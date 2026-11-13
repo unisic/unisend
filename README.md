@@ -4,7 +4,10 @@ Beeper chat client in Rust: [GPUI](https://www.gpui.rs) via gpui-kit for the UI,
 gpui-mobile for Android, matrix-sdk against `matrix.beeper.com`.
 
 Login uses Beeper's email-code flow (`api.beeper.com/user/login`, same as
-`bbctl`), then Matrix JWT login. Encrypted history is unlocked with the Beeper
+`bbctl`), then Matrix JWT login. Any other Matrix homeserver that offers
+`m.login.password` works too ("Use another Matrix server"); single sign-on, OIDC
+and registration do not yet. On other servers the Networks page says that chat
+networks are a Beeper feature. Encrypted history is unlocked with the account's
 recovery code.
 
 What works and what Beeper has that this does not yet: [docs/parity.md](docs/parity.md).
@@ -45,6 +48,13 @@ against a local Synapse with JWT login enabled:
 
     MATRIX_TEST_HS=http://127.0.0.1:8008 MATRIX_TEST_JWT_SECRET=... \
       cargo test --lib login_sync -- --ignored
+
+`password_login_restore_sign_out` signs in with a password (wrong password,
+http refused, unknown server, restore after restart, sign out); it creates its
+user through Synapse's shared-secret registration:
+
+    MATRIX_TEST_HS=http://127.0.0.1:8008 MATRIX_TEST_REGISTRATION_SECRET=... \
+      cargo test --lib password_login -- --ignored
 
 `gui_fixture` seeds the same server for manual GUI runs: encrypted chats with a
 key backup, a room avatar, a bridged room. It reads `avatar.png` from

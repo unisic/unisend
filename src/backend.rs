@@ -39,6 +39,7 @@ use matrix_sdk::{
                 filter::{FilterDefinition, RoomFilter},
                 membership::joined_rooms,
                 profile::AvatarUrl,
+                session::get_login_types::v3::LoginType,
                 receipt::create_receipt,
             },
             error::ErrorKind,
@@ -96,6 +97,8 @@ const MAX_KEY_FETCHES: usize = 8;
 pub enum Cmd {
     SendCode(String),
     SubmitCode(String),
+    /// Sign in to any Matrix homeserver. `server` is a server name or URL, as typed.
+    PasswordLogin { server: String, user: String, password: String },
     Recover(String),
     Open(OwnedRoomId),
     /// The conversation left the screen.
@@ -141,8 +144,8 @@ pub enum Cmd {
 pub enum Ev {
     NeedLogin,
     CodeSent,
-    /// Signed in as this user.
-    Ready(OwnedUserId),
+    /// Signed in as this user; `beeper` says the account is Beeper's, with its bridges and account API.
+    Ready { user: OwnedUserId, beeper: bool },
     /// The connection to the server is lost (false) or back (true).
     Online(bool),
     /// True while this device lacks the secrets needed to decrypt history.
@@ -523,6 +526,8 @@ fn http_client() -> Result<reqwest::Client> {
 struct State {
     dir: PathBuf,
     homeserver: String,
+    /// Signed in through Beeper: only then may the access token reach Beeper's account API.
+    beeper: bool,
     http: reqwest::Client,
     ev: mpsc::Sender<Ev>,
     client: Option<Client>,
@@ -550,13 +555,8 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
             return;
         }
     };
-    // Debug builds can point at a local homeserver with a pre-seeded session.json.
-    let homeserver = std::env::var("BEEPER_GPUI_HOMESERVER")
-        .ok()
-        .filter(|_| cfg!(debug_assertions))
-        .unwrap_or_else(|| beeper::HOMESERVER_URL.to_owned());
     let _ = std::fs::remove_dir_all(media_dir(&dir));
-    let mut st = State { dir, homeserver, http, ev, client: None, login_request: None, open: None,
+    let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
         incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new() };
     match st.restore().await {
@@ -579,6 +579,74 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
 #[derive(Serialize, Deserialize)]
 struct SavedSession {
     session: MatrixSession,
+    /// The homeserver of an account signed in with a password; none for Beeper, which older files
+    /// always are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    homeserver: Option<String>,
+}
+
+fn beeper_homeserver() -> String {
+    // Debug builds can point at a local homeserver with a pre-seeded session.json.
+    std::env::var("BEEPER_GPUI_HOMESERVER")
+        .ok()
+        .filter(|_| cfg!(debug_assertions))
+        .unwrap_or_else(|| beeper::HOMESERVER_URL.to_owned())
+}
+
+/// The machine this app runs on, where plain http is allowed (a homeserver under test).
+fn is_local(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+}
+
+/// What the homeserver field (or a full user ID, `@name:server`) names, in the form the SDK's
+/// discovery takes: a server name or an https URL. Plain http only for this machine.
+pub(crate) fn server_from_input(input: &str) -> Result<String, &'static str> {
+    let input = input.trim();
+    let input = match input.strip_prefix('@') {
+        Some(user) => user.split_once(':').map(|(_, server)| server).ok_or("Enter a server, like matrix.org.")?,
+        None => input,
+    };
+    if input.is_empty() {
+        return Err("Enter a server, like matrix.org.");
+    }
+    if input.contains(char::is_whitespace) {
+        return Err("A server address has no spaces.");
+    }
+    let lower = input.to_ascii_lowercase();
+    let (scheme, rest) = match lower.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, lower.as_str()),
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().map_or("", |h| if h == "::1" { "[::1]" } else { h }),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    if host.is_empty() {
+        return Err("Enter a server, like matrix.org.");
+    }
+    match scheme {
+        Some("https") => Ok(input.to_owned()),
+        Some("http") if is_local(host) => Ok(input.to_owned()),
+        Some("http") => Err("This address is not encrypted. Use https."),
+        Some(_) => Err("Enter a server, like matrix.org, or an https address."),
+        None if is_local(host) => Ok(format!("http://{input}")),
+        None => Ok(input.to_owned()),
+    }
+}
+
+/// True when the error, or one it wraps, is a connection that never got an answer.
+fn unreachable(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(e) = next {
+        if let Some(e) = e.downcast_ref::<reqwest::Error>()
+            && (e.is_connect() || e.is_timeout())
+        {
+            return true;
+        }
+        next = e.source();
+    }
+    false
 }
 
 impl State {
@@ -591,27 +659,28 @@ impl State {
         self.dir.join("session.json")
     }
 
-    async fn build_client(&self) -> Result<Client> {
+    fn client_builder(&self) -> matrix_sdk::ClientBuilder {
         // Fetch a missing room key from the server-side backup when an event fails to decrypt,
         // instead of downloading the whole backup after recovery.
         let e2ee = EncryptionSettings {
             backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
             ..Default::default()
         };
-        Ok(Client::builder()
-            .homeserver_url(&self.homeserver)
-            .sqlite_store(self.dir.join("store"), None)
-            .http_client(self.http.clone())
-            .with_encryption_settings(e2ee)
-            .build()
-            .await?)
+        Client::builder().sqlite_store(self.dir.join("store"), None).http_client(self.http.clone()).with_encryption_settings(e2ee)
+    }
+
+    async fn build_client(&self) -> Result<Client> {
+        Ok(self.client_builder().homeserver_url(&self.homeserver).build().await?)
     }
 
     async fn restore(&mut self) -> Result<bool> {
         let Ok(raw) = std::fs::read(self.session_path()) else { return Ok(false) };
         let saved: SavedSession = serde_json::from_slice(&raw).context("session.json")?;
-        let client = self.build_client().await?;
+        let beeper = saved.homeserver.is_none();
+        let homeserver = saved.homeserver.unwrap_or_else(|| self.homeserver.clone());
+        let client = self.client_builder().homeserver_url(&homeserver).build().await?;
         client.matrix_auth().restore_session(saved.session, RoomLoadSettings::default()).await?;
+        (self.homeserver, self.beeper) = (homeserver, beeper);
         if let Some(rooms) = load_rooms(&self.dir) {
             let list = rooms.values().cloned().collect();
             *self.rooms.lock().unwrap() = rooms;
@@ -635,17 +704,23 @@ impl State {
         let user = client.user_id().map(ToOwned::to_owned);
         self.client = Some(client);
         if let Some(user) = user {
-            self.emit(Ev::Ready(user)).await;
+            self.emit(Ev::Ready { user, beeper: self.beeper }).await;
         }
     }
 
-    async fn login_jwt(&mut self, jwt: String) -> Result<()> {
-        // No session file means any store left behind belongs to a device that never finished logging in.
+    /// No session file means any store left behind belongs to a device that never finished logging in.
+    fn drop_orphaned_store(&self) -> Result<()> {
         let store = self.dir.join("store");
         if store.exists() {
             log::warn!("removing orphaned store at {}", store.display());
             std::fs::remove_dir_all(&store)?;
         }
+        Ok(())
+    }
+
+    async fn login_jwt(&mut self, jwt: String) -> Result<()> {
+        self.drop_orphaned_store()?;
+        self.beeper = true;
         let client = self.build_client().await?;
         let mut data = JsonObject::new();
         data.insert("token".into(), jwt.into());
@@ -655,7 +730,58 @@ impl State {
             .initial_device_display_name("Beeper GPUI")
             .await?;
         let session = client.matrix_auth().session().ok_or_else(|| anyhow!("Login returned no session"))?;
-        write_private(&self.session_path(), &serde_json::to_vec(&SavedSession { session })?)?;
+        write_private(&self.session_path(), &serde_json::to_vec(&SavedSession { session, homeserver: None })?)?;
+        self.go_live(client).await;
+        Ok(())
+    }
+
+    /// Password sign-in to the homeserver `server` names, found the way the SDK discovers it.
+    async fn login_password(&mut self, server: &str, user: &str, password: &str) -> Result<()> {
+        let server = server_from_input(server).map_err(|e| anyhow!(e))?;
+        let user = user.trim();
+        if user.is_empty() || password.is_empty() {
+            return Err(anyhow!("Enter your user name and password."));
+        }
+        self.drop_orphaned_store()?;
+        let not_reached = || anyhow!("Could not reach {server}. Check the address and your connection.");
+        // The SDK retries a silent host for minutes; someone waiting at the form should hear sooner.
+        let discovery = self.client_builder().server_name_or_homeserver_url(&server).build();
+        let client = tokio::time::timeout(Duration::from_secs(30), discovery).await.map_err(|_| not_reached())?.map_err(|e| {
+            log::warn!("homeserver discovery for {server}: {e}");
+            match unreachable(&e) {
+                true => not_reached(),
+                false => anyhow!("No Matrix server found at {server}."),
+            }
+        })?;
+        // A server's .well-known may point anywhere; the password only goes over https.
+        let homeserver = client.homeserver();
+        if homeserver.scheme() != "https" && !homeserver.host_str().is_some_and(is_local) {
+            return Err(anyhow!("{server} does not offer an encrypted (https) connection, so this app will not send it a password."));
+        }
+        let auth = client.matrix_auth();
+        let types = auth.get_login_types().await.map_err(|e| match unreachable(&e) {
+            true => anyhow!("Could not reach {server}. Check your connection."),
+            false => anyhow!("{server} did not answer like a Matrix server: {}", plain(&e)),
+        })?;
+        if !types.flows.iter().any(|flow| matches!(flow, LoginType::Password(_))) {
+            return Err(anyhow!(
+                "{server} signs people in another way (such as single sign-on) that this app does not support yet."
+            ));
+        }
+        auth.login_username(user, password).initial_device_display_name("Beeper GPUI").await.map_err(|e| {
+            match e.client_api_error_kind() {
+                Some(ErrorKind::Forbidden) => anyhow!("Wrong user name or password."),
+                Some(ErrorKind::UserDeactivated) => anyhow!("This account has been deactivated."),
+                Some(ErrorKind::LimitExceeded(_)) => anyhow!("Too many attempts. Wait a minute and try again."),
+                _ if unreachable(&e) => anyhow!("Could not reach {server}. Check your connection."),
+                _ => anyhow!("Could not sign in: {}", plain(&e)),
+            }
+        })?;
+        let session = auth.session().ok_or_else(|| anyhow!("Login returned no session"))?;
+        self.homeserver = homeserver.to_string();
+        self.beeper = false;
+        let saved = SavedSession { session, homeserver: Some(self.homeserver.clone()) };
+        write_private(&self.session_path(), &serde_json::to_vec(&saved)?)?;
         self.go_live(client).await;
         Ok(())
     }
@@ -676,6 +802,7 @@ impl State {
                 self.login_request = None;
                 self.login_jwt(jwt).await?;
             }
+            Cmd::PasswordLogin { server, user, password } => self.login_password(&server, &user, &password).await?,
             Cmd::Recover(key) => {
                 let recovery = self.client()?.encryption().recovery();
                 if let Err(e) = recovery.recover(key.trim()).await {
@@ -683,7 +810,7 @@ impl State {
                         RecoveryError::SecretStorage(SecretStorageError::SecretStorageKey(DecodeError::Mac(_))) => {
                             anyhow!(
                                 "This recovery code is valid but does not match your account's current key. \
-                                 It may be an older code; get the current one from a Beeper app where you are signed in."
+                                 It may be an older code; get the current one from another app where you are signed in."
                             )
                         }
                         RecoveryError::SecretStorage(SecretStorageError::SecretStorageKey(_)) => {
@@ -907,6 +1034,7 @@ impl State {
                 let _ = std::fs::remove_file(rooms_path(&self.dir));
                 let _ = std::fs::remove_dir_all(self.dir.join("store"));
                 let _ = std::fs::remove_dir_all(media_dir(&self.dir));
+                (self.homeserver, self.beeper) = (beeper_homeserver(), true);
                 self.emit(Ev::NeedLogin).await;
             }
             Cmd::Previews(ids) => {
@@ -983,6 +1111,10 @@ impl State {
 
     /// Access to Beeper's account API and the bridges behind the homeserver.
     fn api(&self) -> Result<bridges::Api> {
+        // Another homeserver's access token must never reach Beeper's servers.
+        if !self.beeper {
+            return Err(anyhow!("Networks are a Beeper feature"));
+        }
         let client = self.client()?;
         let debug = |var: &str| std::env::var(var).ok().filter(|_| cfg!(debug_assertions));
         Ok(bridges::Api {
