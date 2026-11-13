@@ -16,10 +16,12 @@ use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
 use tokio::sync::mpsc;
 
 mod cards;
+mod menu;
 mod panels;
 
 use std::path::PathBuf;
 
+use menu::{MenuKind, QUICK_REACTIONS};
 use panels::Panel;
 
 use crate::{Keyboard, Palette};
@@ -52,9 +54,6 @@ const BUBBLE_SHARE: f32 = 0.8;
 const SHEET_W: f32 = 480.;
 /// Sender's picture beside a run of messages in a group.
 const SENDER: f32 = 28.;
-/// The panel of a message's actions, and how far from the finger it opens.
-const MENU_W: f32 = 6. * TAP + 16.;
-const MENU_GAP: f32 = 28.;
 /// How far a message is swiped sideways to reply to it.
 const SWIPE_REPLY: f32 = 56.;
 /// How far a message's reactions reach up over its bubble.
@@ -62,7 +61,7 @@ const REACTION_LAP: f32 = 10.;
 /// Joins counted into one line; a longer burst says so of the last hundred.
 const MAX_JOINED: usize = 100;
 /// The reaction a double tap gives.
-const LIKE: &str = QUICK_REACTIONS[1];
+const LIKE: &str = QUICK_REACTIONS[0];
 /// A pause this long starts a new run of messages, with its own time.
 const RUN_PAUSE_MS: u64 = 10 * 60 * 1000;
 /// How often the others are told again that the user is still writing.
@@ -74,7 +73,6 @@ const BRIDGE_WAIT_MS: u64 = 2 * 60 * 1000;
 const MAX_THUMBS: usize = 60;
 /// Sender pictures kept for the open chat; people past that many keep their initials.
 const MAX_FACES: usize = 64;
-const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
 /// What the composer's next send does.
 #[derive(Clone, PartialEq)]
@@ -175,10 +173,10 @@ pub struct BeeperApp {
     /// Attachments being downloaded to open.
     fetching: HashSet<String>,
     uploads: usize,
-    /// Message whose actions are showing.
-    picked: Option<String>,
-    /// Where it was picked: its actions open at the finger.
-    picked_at: Point<Pixels>,
+    /// The message whose reactions and actions are showing.
+    menu: Option<menu::MessageMenu>,
+    /// A mouse button held on a message, on its way to being a long press.
+    press: Option<menu::Press>,
     /// A horizontal pan in progress over a message, with how far it has travelled.
     swipe: Option<(String, f32)>,
     /// The chat whose actions are showing.
@@ -305,8 +303,8 @@ impl BeeperApp {
             viewer: None,
             fetching: HashSet::new(),
             uploads: 0,
-            picked: None,
-            picked_at: Point::default(),
+            menu: None,
+            press: None,
             swipe: None,
             chat_sheet: None,
             faces: HashMap::new(),
@@ -571,7 +569,7 @@ impl BeeperApp {
             self.composer.update(cx, |c, cx| c.set_value(text, window, cx));
         }
         self.compose = compose;
-        self.picked = None;
+        self.close_menu(cx);
         self.composer.update(cx, |c, cx| c.focus(window, cx));
         cx.notify();
     }
@@ -582,7 +580,9 @@ impl BeeperApp {
         let narrow = window.viewport_size().width < px(NARROW);
         if self.viewer.is_some() {
             self.close_viewer(cx);
-        } else if self.picked.take().is_some() || self.chat_sheet.take().is_some() {
+        } else if self.menu_open() {
+            self.close_menu(cx);
+        } else if self.chat_sheet.take().is_some() {
             cx.notify();
         } else if self.compose != Compose::New {
             self.start_compose(Compose::New, window, cx);
@@ -669,7 +669,7 @@ impl BeeperApp {
     fn render_media(&self, m: &Msg, media: &Media, room: f32, cx: &mut Context<Self>) -> AnyElement {
         let (id, owned) = (m.id.clone(), media.clone());
         let open = cx.listener(move |this, _: &ClickEvent, _, cx| {
-            // The bubble's own tap selects the message.
+            // Not a tap on the bubble as well.
             cx.stop_propagation();
             this.open_media(id.clone(), owned.clone(), cx);
         });
@@ -777,8 +777,11 @@ impl BeeperApp {
     /// Adds the reaction, or removes it when it is already ours.
     fn toggle_reaction(&mut self, target: &str, key: &str, cx: &mut Context<Self>) {
         let Some(room) = self.open.clone() else { return };
-        self.picked = None;
-        self.send(Cmd::React { room, target: target.to_owned(), key: key.to_owned() }, cx);
+        self.close_menu(cx);
+        // The SDK takes a reaction back only by its exact key; the user's own may lack or carry U+FE0F.
+        let own = self.msgs.iter().find(|m| m.id == target).and_then(|m| m.reactions.iter().find(|r| r.own && menu::same_emoji(&r.key, key)));
+        let key = own.map_or(key, |r| r.key.as_str()).to_owned();
+        self.send(Cmd::React { room, target: target.to_owned(), key }, cx);
     }
 
     /// Opens the chat a tapped notification was for.
@@ -830,7 +833,7 @@ impl BeeperApp {
                 image.remove_asset(cx);
             }
         }
-        (self.picked, self.chat_sheet) = (None, None);
+        (self.menu, self.press, self.chat_sheet) = (None, None, None);
         self.compose = Compose::New;
         self.timeline.reset(0);
         self.more = false;
@@ -1170,7 +1173,8 @@ impl BeeperApp {
                 let first = prev.is_none_or(|p| !joined(p, m));
                 let last = next.is_none_or(|n| !joined(m, n));
                 let faded = m.deleted || m.body == UTD;
-                let picked = this.picked.as_deref() == Some(m.id.as_str());
+                // A pointer's menu marks its message; the touch overlay lifts it instead.
+                let picked = this.menu.as_ref().is_some_and(|menu| menu.id == m.id && menu.kind != MenuKind::Touch);
                 let quote = m.reply.as_ref().map(|quote| (quote.id.clone(), quote.sender.clone(), quote.text.clone()));
                 let state = if m.own { this.delivery_line(ix, dm) } else { None };
                 // Still only here, not yet with the server.
@@ -1235,11 +1239,11 @@ impl BeeperApp {
                     .rounded(px(RADIUS))
                     .bg(if m.own || picked { p.raised } else { p.surface })
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.pick(&id, event.position(), cx)))
-                    // A long press on a touch screen, the right button of a mouse.
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.bubble_click(&id, event, cx)))
+                    // The right button of a mouse; a touch's long press is claimed before it gets here.
                     .on_aux_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         if event.is_secondary() {
-                            this.pick(&held, event.position(), cx);
+                            this.open_menu(held.clone(), MenuKind::List, event.position(), None, false, cx);
                         }
                     }))
                     .children(quote.map(|(target, who, text)| {
@@ -1306,6 +1310,7 @@ impl BeeperApp {
                 let m = &this.msgs[ix];
                 let side = if faces { px(SENDER + 8.) } else { px(0.) };
                 v_flex()
+                    .group("message")
                     .w_full()
                     .relative()
                     .px(px(GUTTER))
@@ -1359,8 +1364,9 @@ impl BeeperApp {
                                     // Addressed to the user: the one place a message carries colour.
                                     .when(m.mentioned, |el| el.child(div().w(px(3.)).flex_none().rounded_full().bg(p.accent)))
                                     .when(leaving, |el| el.opacity(0.6))
-                                    .child(bubble),
-                            ),
+                                    .child(this.lifted(bubble, &m.id, cx)),
+                            )
+                            .when(!narrow && !m.deleted, |el| el.child(this.side_buttons(m, cx))),
                     )
                     .child(
                         v_flex()
@@ -1416,6 +1422,7 @@ impl BeeperApp {
                     .flex_1()
                     .min_h_0()
                     .child(timeline)
+                    .child(self.press_tracker(cx))
                     .when(self.loading && self.msgs.is_empty(), |el| {
                         el.child(
                             div()
@@ -1497,7 +1504,7 @@ impl BeeperApp {
             .bg(gpui_kit::black().opacity(0.6))
             .occlude()
             .on_click(cx.listener(|this, _, _, cx| {
-                (this.picked, this.chat_sheet) = (None, None);
+                this.chat_sheet = None;
                 cx.notify();
             }))
             .child(
@@ -1586,12 +1593,6 @@ impl BeeperApp {
         ))
     }
 
-    /// Picks a message: its reactions and actions open where it was touched.
-    fn pick(&mut self, id: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
-        (self.picked, self.picked_at) = (Some(id.to_owned()), at);
-        cx.notify();
-    }
-
     /// Scrolls to a message, when it is among the loaded ones.
     fn reveal(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(ix) = self.msgs.iter().position(|m| m.id == id) {
@@ -1610,124 +1611,6 @@ impl BeeperApp {
         } else if before != self.swipe.as_ref().map(|(_, far)| *far) {
             cx.notify();
         }
-    }
-
-    /// Reactions and actions for the picked message, in a panel at the finger. Whatever is tapped
-    /// outside it closes it; the second tap of a double tap likes the message.
-    fn render_message_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let p = Palette::of(cx);
-        let m = self.msgs.iter().find(|m| Some(&m.id) == self.picked.as_ref()).filter(|m| !m.deleted)?;
-        let (id, body, own) = (m.id.clone(), m.body.clone(), m.own);
-        // A message that has not reached the server can be sent again or dropped, nothing else.
-        let sent = id.starts_with('$');
-        let failed = matches!(m.delivery, Delivery::Failed(_));
-        let link = m.link.as_ref().map(|link| link.url.clone()).or_else(|| urls(&m.body).into_iter().next().map(|r| m.body[r].to_owned()));
-        let reactions = h_flex().children(QUICK_REACTIONS.iter().enumerate().map(|(n, key)| {
-            let id = id.clone();
-            let mine = m.reactions.iter().any(|r| r.own && r.key == *key);
-            div()
-                .id(("quick-reaction", n))
-                .size(px(TAP))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .when(mine, |el| el.bg(p.text.opacity(0.16)))
-                .hover(|el| el.bg(p.text.opacity(0.1)))
-                .text_size(px(24.))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, key, cx)))
-                .child(*key)
-        }));
-        let mut rows = Vec::new();
-        if sent {
-            rows.push(menu_row("reply", IconName::Reply, "Reply", p.text, cx).on_click(cx.listener({
-                let id = id.clone();
-                move |this, _, window, cx| this.start_compose(Compose::Reply(id.clone()), window, cx)
-            })));
-        } else if failed {
-            rows.push(menu_row("retry", IconName::RotateCw, "Try again", p.text, cx).on_click(cx.listener({
-                let id = id.clone();
-                move |this, _, _, cx| {
-                    if let Some(room) = this.open.clone() {
-                        this.send(Cmd::Retry { room, target: id.clone() }, cx);
-                    }
-                    this.picked = None;
-                    cx.notify();
-                }
-            })));
-        }
-        rows.push(menu_row("copy", IconName::Copy, "Copy text", p.text, cx).on_click(cx.listener(move |this, _, _, cx| {
-            crate::copy(cx, body.clone());
-            this.picked = None;
-            cx.notify();
-        })));
-        if own {
-            if sent {
-                rows.push(menu_row("edit", IconName::Pencil, "Edit", p.text, cx).on_click(cx.listener({
-                    let id = id.clone();
-                    move |this, _, window, cx| this.start_compose(Compose::Edit(id.clone()), window, cx)
-                })));
-            }
-            rows.push(menu_row("delete", IconName::Trash, "Delete", p.negative, cx).on_click(cx.listener({
-                let id = id.clone();
-                move |this, _, _, cx| {
-                    if let Some(room) = this.open.clone() {
-                        this.send(Cmd::Delete { room, target: id.clone() }, cx);
-                    }
-                    this.picked = None;
-                    cx.notify();
-                }
-            })));
-        }
-        if let Some(url) = link {
-            let open = menu_row("open-link", IconName::ExternalLink, "Open link", p.text, cx).on_click(cx.listener(move |this, _, _, cx| {
-                crate::open_link(cx, &url);
-                this.picked = None;
-                cx.notify();
-            }));
-            rows.insert(0, open);
-        }
-        // Under the finger when there is room, over it otherwise; never off the screen.
-        let (top, bottom) = crate::insets();
-        let view = window.viewport_size();
-        let height = 16. + TAP * (usize::from(sent) + rows.len()) as f32;
-        let floor = f32::from(view.height) - bottom - GUTTER;
-        let at = self.picked_at;
-        let left = (f32::from(at.x) - MENU_W / 2.).clamp(GUTTER, (f32::from(view.width) - MENU_W - GUTTER).max(GUTTER));
-        let under = f32::from(at.y) + MENU_GAP;
-        let y = if under + height <= floor { under } else { (f32::from(at.y) - MENU_GAP - height).max(top + GUTTER) };
-        Some(
-            div()
-                .id("message-menu")
-                .absolute()
-                .inset_0()
-                .bg(gpui_kit::black().opacity(0.35))
-                .occlude()
-                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                    if sent && event.click_count() >= 2 {
-                        this.toggle_reaction(&id, LIKE, cx);
-                    }
-                    this.picked = None;
-                    cx.notify();
-                }))
-                .child(
-                    v_flex()
-                        .id("message-menu-panel")
-                        .absolute()
-                        .left(px(left))
-                        .top(px(y))
-                        .w(px(MENU_W))
-                        .p(px(8.))
-                        .rounded(px(RADIUS))
-                        .bg(p.raised)
-                        // A tap between the rows is not a tap outside the panel.
-                        .on_click(|_, _, cx| cx.stop_propagation())
-                        .when(sent, |el| el.child(reactions))
-                        .children(rows),
-                )
-                .into_any_element(),
-        )
     }
 
     /// Actions for the open chat.
@@ -1959,23 +1842,6 @@ fn urls(text: &str) -> Vec<std::ops::Range<usize>> {
         from = at + len.max(4);
     }
     out
-}
-
-/// One action in a message's panel.
-fn menu_row(id: &'static str, icon: IconName, label: &'static str, ink: Hsla, cx: &App) -> Stateful<Div> {
-    let p = Palette::of(cx);
-    h_flex()
-        .id(id)
-        .h(px(TAP))
-        .px(px(GAP - 4.))
-        .gap(px(GAP))
-        .rounded(px(12.))
-        .text_size(px(16.))
-        .text_color(ink)
-        .cursor_pointer()
-        .hover(|el| el.bg(p.text.opacity(0.1)))
-        .child(Icon::new(icon).size_5())
-        .child(label)
 }
 
 /// Advances a sideways pan over a message by one event; gives the message to reply to when the
