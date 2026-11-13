@@ -184,6 +184,17 @@ async fn login_sync_decrypt_send_recover() {
     let bob_id = bob.user_id().unwrap().to_owned();
     until(&mut alice_rx, "bob's read receipt", |rows| rows.iter().skip_while(|m| m.id != hi_id).any(|m| m.seen.contains(&bob_id))).await;
 
+    // Bob starts writing: the open conversation says who.
+    bob_room.typing_notice(true).await.unwrap();
+    let typing = wait_for(&mut alice_rx, "bob typing", |e| match e {
+        Ev::Typing { room, names } if room == room_id && !names.is_empty() => Some(names),
+        _ => None,
+    })
+    .await;
+    assert_eq!(typing.len(), 1, "{typing:?}");
+    bob_room.typing_notice(false).await.unwrap();
+    wait_for(&mut alice_rx, "bob stopped typing", |e| matches!(e, Ev::Typing { names, .. } if names.is_empty()).then_some(())).await;
+
     // Recovery: a second Alice device unlocks history with the recovery key.
     // Beeper accounts already have cross-signing; a fresh test account needs it bootstrapped.
     alice_client.encryption().bootstrap_cross_signing_if_needed(None).await.unwrap();

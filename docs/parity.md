@@ -98,7 +98,8 @@ is not started.
 | PDF preview, storage manager | todo | local |
 | Feedback, help hub, subscription banners | todo | Beeper services |
 | Emoji rendering | part | bundled bitmap Noto Color Emoji (GPUI cannot draw COLRv1). On Linux, emoji that a system text font also holds (the heart U+2764 among them) draw as that font's outline: cosmic-text asks DejaVu Sans before the emoji font |
-| Windows, macOS builds | todo | GPUI targets, not built or tested |
+| Windows, macOS builds | part | a CI workflow builds them on GitHub's runners (`.github/workflows/build.yml`, never run: nothing is pushed); `packaging/macos` makes the `.app`. Not built locally: GPUI's Windows shaders need `fxc.exe` on a Windows host, Apple's SDK needs a Mac. Unsigned builds meet SmartScreen and Gatekeeper warnings |
+| iOS | todo | gpui-mobile has an iOS back end; this app has no iOS entry point, no Xcode project, and no counterpart of its Android helpers (in-app browser sign-in, notifications, background connection, which iOS allows only through push). Needs an Apple Developer account to reach anyone |
 
 ## Per network
 
