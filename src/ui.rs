@@ -91,8 +91,9 @@ pub struct BeeperApp {
     /// Ways to sign in to the chosen bridge, when it offers more than one.
     flows: Option<(String, Vec<Flow>)>,
     step: Option<Step>,
-    /// Inputs for the current step's fields, by field ID.
+    /// Inputs for the current step's fields, by field ID, with their keyboard subscriptions.
     fields: Vec<(String, Entity<InputState>)>,
+    field_subs: Vec<Subscription>,
     cookie_paste: Entity<InputState>,
     qr: Option<Arc<Image>>,
     /// A request for the settings pages is in flight.
@@ -165,6 +166,7 @@ impl BeeperApp {
             }));
         }
 
+        subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, _| keyboard_follows(ev, Keyboard::Key)));
         subs.push(cx.subscribe_in(&search, window, |this, _, ev: &InputEvent, _, cx| match ev {
             InputEvent::Change => this.refilter(cx),
             InputEvent::Focus => crate::show_keyboard(Keyboard::Text),
@@ -209,6 +211,7 @@ impl BeeperApp {
             flows: None,
             step: None,
             fields: Vec::new(),
+            field_subs: Vec::new(),
             cookie_paste,
             qr: None,
             working: false,
@@ -1478,6 +1481,16 @@ fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
         [b'G', b'I', b'F', b'8', ..] => Some(ImageFormat::Gif),
         [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some(ImageFormat::Webp),
         _ => None,
+    }
+}
+
+/// Raises the on-screen keyboard while an input has focus. Android shows none by itself for a
+/// GPUI input, so every input needs this.
+fn keyboard_follows(event: &InputEvent, kind: Keyboard) {
+    match event {
+        InputEvent::Focus => crate::show_keyboard(kind),
+        InputEvent::Blur => crate::hide_keyboard(),
+        _ => {}
     }
 }
 

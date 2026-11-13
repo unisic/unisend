@@ -672,12 +672,19 @@ impl State {
                         };
                         let mut chunk = resp.chunk;
                         chunk.reverse();
-                        let Some(text) = preview(&to_items(&room, &chunk).await, other_person(&room).await.is_some()) else {
+                        let items = to_items(&room, &chunk).await;
+                        let Some(text) = preview(&items, other_person(&room).await.is_some()) else {
                             return;
                         };
+                        let sent = items.iter().rev().find_map(|i| match i {
+                            Item::Msg(m) => Some(m.ts),
+                            _ => None,
+                        });
                         // rooms.json picks this up on the next sync that changes anything.
                         let summary = rooms.lock().unwrap().get_mut(&room_id).map(|r| {
                             r.preview = Some(text);
+                            // The room's time may have come from a state event; this is the message's.
+                            r.ts = sent.unwrap_or(r.ts);
                             r.clone()
                         });
                         if let Some(summary) = summary {
@@ -1100,7 +1107,14 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
             }
             let items = to_items(&room, &update.timeline.events).await;
             let prev = rooms.lock().unwrap().get(id).cloned();
-            let newest = update.timeline.events.iter().filter_map(|e| e.timestamp()).map(|t| u64::from(t.0)).max();
+            // A chat's time is its last message's. A room the bridge just created or backfilled has
+            // newer state events than messages; they count only until a message is seen.
+            let last_message = items.iter().filter_map(|i| match i {
+                Item::Msg(m) => Some(m.ts),
+                _ => None,
+            });
+            let last_event = || update.timeline.events.iter().filter_map(|e| e.timestamp()).map(|t| u64::from(t.0)).max();
+            let newest = last_message.max().max(prev.as_ref().map(|p| p.ts)).or_else(last_event);
             let peer = other_person(&room).await;
             let dm = peer.is_some();
             let order = items.iter().filter_map(|i| match i {
@@ -1111,7 +1125,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 id: id.clone(),
                 name: String::new(),
                 preview: preview(&items, dm).or_else(|| prev.as_ref().and_then(|p| p.preview.clone())),
-                ts: newest.max(prev.as_ref().map(|p| p.ts)).unwrap_or(0),
+                ts: newest.unwrap_or(0),
                 network: prev.as_ref().and_then(|p| p.network.clone()),
                 order: order.max().max(prev.as_ref().map(|p| p.order)).unwrap_or(0),
                 unread: 0,

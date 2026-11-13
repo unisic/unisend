@@ -43,6 +43,7 @@ impl BeeperApp {
     fn end_login(&mut self, cx: &mut Context<Self>) {
         (self.step, self.flows, self.working) = (None, None, false);
         self.fields.clear();
+        self.field_subs.clear();
         if let Some(qr) = self.qr.take() {
             qr.remove_asset(cx);
         }
@@ -292,13 +293,19 @@ impl BeeperApp {
         let body = match &step.kind {
             StepKind::Input(wanted) => {
                 if self.fields.is_empty() {
-                    self.fields = wanted
-                        .iter()
-                        .map(|f| {
-                            let state = cx.new(|cx| InputState::new(window, cx).placeholder(f.name.clone()).masked(f.kind == "password"));
-                            (f.id.clone(), state)
-                        })
-                        .collect();
+                    for field in wanted {
+                        let state = cx.new(|cx| InputState::new(window, cx).placeholder(field.name.clone()).masked(field.kind == "password"));
+                        // Codes, PINs and passwords must not be autocorrected.
+                        let keyboard = match field.kind.as_str() {
+                            "email" => Keyboard::Email,
+                            _ => Keyboard::Key,
+                        };
+                        self.field_subs.push(cx.subscribe_in(&state, window, move |this, _, event: &InputEvent, _, cx| match event {
+                            InputEvent::PressEnter { .. } => this.submit_fields(cx),
+                            other => keyboard_follows(other, keyboard),
+                        }));
+                        self.fields.push((field.id.clone(), state));
+                    }
                 }
                 v_flex()
                     .gap_3()
