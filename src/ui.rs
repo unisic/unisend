@@ -1181,7 +1181,7 @@ impl BeeperApp {
                 // Still only here, not yet with the server.
                 let leaving = m.delivery == Delivery::Sending && !m.id.starts_with('$');
                 let (id, held) = (m.id.clone(), m.id.clone());
-                let swiped = this.swipe.as_ref().filter(|(on, _)| *on == m.id).map_or(0., |(_, far)| far.clamp(-SWIPE_REPLY - 16., SWIPE_REPLY + 16.));
+                let swiped = this.swipe.as_ref().filter(|(on, _)| *on == m.id).map_or(0., |(_, far)| far.min(SWIPE_REPLY + 16.));
                 // What is drawn inside the bubble: an own one may carry a colour of the user's choosing.
                 let inside = if m.own { p.in_own_bubble() } else { p };
                 let ink = HighlightStyle { color: Some(inside.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
@@ -1344,10 +1344,10 @@ impl BeeperApp {
                                 .absolute()
                                 .top_0()
                                 .bottom_0()
-                                .map(|el| if swiped > 0. { el.left(px(GUTTER)) } else { el.right(px(GUTTER)) })
+                                .left(px(GUTTER))
                                 .flex()
                                 .items_center()
-                                .text_color(if swiped.abs() >= SWIPE_REPLY { p.text } else { p.faint })
+                                .text_color(if swiped >= SWIPE_REPLY { p.text } else { p.faint })
                                 .child(Icon::new(IconName::Reply).size_5()),
                         )
                     })
@@ -1608,7 +1608,8 @@ impl BeeperApp {
         }
     }
 
-    /// Follows a sideways pan over a message; one that travels far enough starts a reply.
+    /// Follows a pan to the right over a message, as in Signal and iMessage; one that travels far
+    /// enough starts a reply.
     fn swipe(&mut self, id: &str, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(px(20.));
         let before = self.swipe.as_ref().map(|(_, far)| *far);
@@ -1857,13 +1858,13 @@ fn urls(text: &str) -> Vec<std::ops::Range<usize>> {
 fn swipe_step(swipe: &mut Option<(String, f32)>, id: &str, dx: f32, dy: f32, phase: TouchPhase) -> Option<String> {
     let sideways = if dx.abs() > dy.abs() { dx } else { 0. };
     match phase {
-        TouchPhase::Started => *swipe = Some((id.to_owned(), sideways)),
+        TouchPhase::Started => *swipe = Some((id.to_owned(), sideways.max(0.))),
         TouchPhase::Moved => {
             if let Some((_, far)) = swipe {
-                *far += sideways;
+                *far = (*far + sideways).max(0.);
             }
         }
-        TouchPhase::Ended => return swipe.take().filter(|(_, far)| far.abs() >= SWIPE_REPLY).map(|(id, _)| id),
+        TouchPhase::Ended => return swipe.take().filter(|(_, far)| *far >= SWIPE_REPLY).map(|(id, _)| id),
         TouchPhase::Cancelled => *swipe = None,
     }
     None
@@ -2114,14 +2115,14 @@ mod tests {
     }
 
     #[test]
-    fn only_a_sideways_pan_that_began_on_a_message_replies() {
+    fn only_a_pan_to_the_right_that_began_on_a_message_replies() {
         let run = |events: &[(f32, f32, gpui_kit::TouchPhase)]| {
             let mut swipe = None;
             events.iter().find_map(|&(dx, dy, phase)| swipe_step(&mut swipe, "$m", dx, dy, phase))
         };
         let far = SWIPE_REPLY / 2. + 1.;
         assert_eq!(run(&[(0., 0., Started), (far, 1., Moved), (far, 0., Moved), (0., 0., Ended)]).as_deref(), Some("$m"));
-        assert_eq!(run(&[(0., 0., Started), (-far, 0., Moved), (-far, 2., Moved), (0., 0., Ended)]).as_deref(), Some("$m"), "either way");
+        assert_eq!(run(&[(0., 0., Started), (-far, 0., Moved), (-far, 2., Moved), (0., 0., Ended)]), None, "only to the right");
         assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (0., 0., Ended)]), None, "too short");
         assert_eq!(run(&[(0., 0., Started), (2., 300., Moved), (1., 300., Moved), (0., 0., Ended)]), None, "scrolling the chat");
         assert_eq!(run(&[(far, 0., Moved), (far, 0., Moved), (0., 0., Ended)]), None, "a wheel has no start");
