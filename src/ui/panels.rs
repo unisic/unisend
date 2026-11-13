@@ -241,7 +241,8 @@ impl BeeperApp {
                 card(cx)
                     .child(row("Theme", "", cx).child(themes))
                     .child(row("Chat colour", &format!("{}. Your own messages, on this device.", self.settings.chat_colour.label()), cx))
-                    .child(swatches),
+                    .child(swatches)
+                    .children(self.render_emoji(cx)),
             ))
             .when(cfg!(target_os = "android"), |el| {
                 el.child(section("Notifications", cx).child(card(cx).child(
@@ -514,6 +515,100 @@ fn qr_image(data: &str) -> Option<Arc<Image>> {
     let mut png = std::io::Cursor::new(Vec::new());
     picture.write_to(&mut png, image::ImageFormat::Png).ok()?;
     Some(Arc::new(Image::from_bytes(ImageFormat::Png, png.into_inner())))
+}
+
+/// The Emoji setting: a colour emoji font of the user's own, or the system's.
+#[derive(Default)]
+pub(super) struct EmojiChoice {
+    /// A font was chosen or dropped since start: fonts cannot be swapped live.
+    pending: bool,
+    open: bool,
+    copying: bool,
+    error: Option<String>,
+}
+
+impl BeeperApp {
+    fn render_emoji(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if !crate::emoji::SUPPORTED {
+            return None;
+        }
+        let p = Palette::of(cx);
+        let chosen = self.settings.emoji_font.as_deref();
+        let name = chosen.unwrap_or("System");
+        let detail = match () {
+            _ if self.emoji.copying => "Copying the font...".to_owned(),
+            _ if self.emoji.pending => format!("{name}. Applies after restart."),
+            _ => name.to_owned(),
+        };
+        let change = h_flex()
+            .id("emoji-change")
+            .h(px(TAP))
+            .px(px(GAP))
+            .rounded_full()
+            .bg(p.raised)
+            .when(!self.emoji.copying, |el| {
+                el.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                    this.emoji.open = !this.emoji.open;
+                    cx.notify();
+                }))
+            })
+            .child("Change");
+        let option = |id: &'static str, label: &'static str| h_flex().id(id).min_h(px(ROW_H)).text_size(px(16.)).cursor_pointer().child(label);
+        Some(
+            v_flex()
+                .child(row("Emoji", &detail, cx).child(change))
+                .when_some(self.emoji.error.clone(), |el, error| el.child(div().pb(px(8.)).text_size(px(13.)).text_color(p.negative).child(error)))
+                .when(self.emoji.open, |el| {
+                    el.child(option("emoji-file", "Choose font file...").on_click(cx.listener(|this, _, _, cx| this.choose_emoji_font(cx))))
+                        .when(chosen.is_some(), |el| {
+                            el.child(option("emoji-system", "Use system emoji").on_click(cx.listener(|this, _, _, cx| this.use_system_emoji(cx))))
+                        })
+                }),
+        )
+    }
+
+    fn choose_emoji_font(&mut self, cx: &mut Context<Self>) {
+        self.emoji.open = false;
+        let picked = crate::pick_file(cx);
+        let dir = self.dir.clone();
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else { return };
+            // One import at a time: they share the file being written.
+            let started = this.update(cx, |this, cx| {
+                let free = !std::mem::replace(&mut this.emoji.copying, true);
+                cx.notify();
+                free
+            });
+            if !matches!(started, Ok(true)) {
+                return;
+            }
+            let done = cx.background_spawn(async move { crate::emoji::import(&path, &dir) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.emoji.copying = false;
+                match done {
+                    Ok(family) => {
+                        this.settings.emoji_font = Some(family);
+                        this.settings.save(&this.dir);
+                        this.emoji.pending = true;
+                        this.emoji.error = None;
+                    }
+                    Err(e) => this.emoji.error = Some(e),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn use_system_emoji(&mut self, cx: &mut Context<Self>) {
+        crate::emoji::remove(&self.dir);
+        self.settings.emoji_font = None;
+        self.settings.save(&self.dir);
+        self.emoji.pending = true;
+        self.emoji.open = false;
+        self.emoji.error = None;
+        cx.notify();
+    }
 }
 
 #[cfg(test)]

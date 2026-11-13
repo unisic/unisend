@@ -11,6 +11,10 @@ and registration do not yet. On other servers the Networks page says that chat
 networks are a Beeper feature. Encrypted history is unlocked with the account's
 recovery code.
 
+Emoji: on Linux and Android, Settings > Emoji can use a colour emoji font file of your own (sbix,
+CBDT or COLRv0, up to 300 MB; applies after a restart); the app ships no such font, so use one you
+are licensed to use on that device. macOS draws with the system's emoji.
+
 What works and what Beeper has that this does not yet: [docs/parity.md](docs/parity.md).
 
 ## Desktop (Linux)
