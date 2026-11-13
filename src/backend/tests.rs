@@ -334,6 +334,27 @@ async fn login_sync_decrypt_send_recover() {
     assert!(saved.starts_with(root.join("alice2/media")) && saved.ends_with("holiday photo.png"), "{saved:?}");
     assert_eq!(std::fs::read(&saved).unwrap(), std::fs::read(&picture).unwrap());
 
+    // A chat with no messages, as a bridge creates them before it brings the history in: it has
+    // no time, so it sorts last, and it is marked as looked at. Its first message dates it.
+    let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+    req.name = Some("Just connected".into());
+    req.invite = vec![alice_client.user_id().unwrap().to_owned()];
+    let quiet = bob.create_room(req).await.unwrap();
+    let quiet_id = quiet.room_id().to_owned();
+    alice_client.sync_once(SyncSettings::default()).await.unwrap();
+    alice_client.join_room_by_id(&quiet_id).await.unwrap();
+    wait_for(&mut alice2_rx, "empty chat looked at", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == quiet_id && s.probed && s.ts == 0 && s.preview.is_none()).then_some(()),
+        _ => None,
+    })
+    .await;
+    quiet.send(RoomMessageEventContent::text_plain("first!")).await.unwrap();
+    wait_for(&mut alice2_rx, "first message dates the chat", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == quiet_id && s.ts > 0 && s.preview.as_deref().is_some_and(|p| p.ends_with("first!"))).then_some(()),
+        _ => None,
+    })
+    .await;
+
     // After a reload the deleted reply and reaction are gone, not "unable to decrypt".
     alice2.handle(Cmd::Open(room.clone())).await.unwrap();
     let items = wait_for(&mut alice2_rx, "history after deletions", |e| match e {
@@ -485,6 +506,7 @@ fn archive_rule_matches_beeper() {
         marked_unread: false,
         archived: false,
         order,
+        probed: true,
     };
     let done = |updated_ts, at_order| Done { updated_ts, at_order };
     let now = 10_000;

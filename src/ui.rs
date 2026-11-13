@@ -1460,7 +1460,8 @@ fn clock(ts_ms: u64) -> String {
 
 /// Room list time: clock today, "Yesterday", weekday this week, date otherwise.
 fn short_time(ts_ms: u64) -> String {
-    let Some(t) = local(ts_ms) else { return String::new() };
+    // No message yet: nothing to date.
+    let Some(t) = local(ts_ms).filter(|_| ts_ms != 0) else { return String::new() };
     let today = Local::now().date_naive();
     let days = (today - t.date_naive()).num_days();
     let format = match days {

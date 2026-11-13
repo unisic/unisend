@@ -80,8 +80,11 @@ const VIEW_PX: u32 = 2048;
 /// Larger files are not fetched to make a thumbnail, and not sent.
 const MAX_THUMB_SOURCE: u64 = 16 * 1024 * 1024;
 const MAX_UPLOAD: u64 = 100 * 1024 * 1024;
-/// History pages a preview refresh reads back looking for the last message.
+/// History pages read back looking for a chat's last message.
 const MAX_PREVIEW_PAGES: usize = 3;
+/// Chats whose last message is being looked up in the background at once, and how many may wait.
+const PROBES: usize = 2;
+const PROBE_QUEUE: usize = 4096;
 /// Backup key downloads per history page.
 const MAX_KEY_FETCHES: usize = 8;
 
@@ -192,6 +195,10 @@ pub struct RoomSummary {
     /// Beeper's server-side order of the newest message from someone else; 0 when unknown.
     #[serde(default)]
     pub order: i64,
+    /// The last message has been looked for. Until then `ts` 0 means "not known yet", after it
+    /// "this chat has no messages".
+    #[serde(default)]
+    pub probed: bool,
 }
 
 impl RoomSummary {
@@ -668,37 +675,7 @@ impl State {
                     let (ev, permits, rooms) = (self.ev.clone(), self.fetches.clone(), self.rooms.clone());
                     tokio::spawn(async move {
                         let Ok(_permit) = permits.acquire().await else { return };
-                        // A room the bridge has just set up ends in a run of state events, so the
-                        // newest page may hold no message at all.
-                        let (mut from, mut items) = (None, Vec::new());
-                        for _ in 0..MAX_PREVIEW_PAGES {
-                            let resp = match messages(&room, from.as_deref(), PAGE).await {
-                                Ok(r) => r,
-                                Err(e) => return log::debug!("preview {room_id}: {e:#}"),
-                            };
-                            let mut chunk = resp.chunk;
-                            chunk.reverse();
-                            items = to_items(&room, &chunk).await;
-                            from = resp.end;
-                            if from.is_none() || items.iter().any(|i| matches!(i, Item::Msg(_))) {
-                                break;
-                            }
-                        }
-                        let Some(text) = preview(&items, other_person(&room).await.is_some()) else {
-                            return;
-                        };
-                        let sent = items.iter().rev().find_map(|i| match i {
-                            Item::Msg(m) => Some(m.ts),
-                            _ => None,
-                        });
-                        // rooms.json picks this up on the next sync that changes anything.
-                        let summary = rooms.lock().unwrap().get_mut(&room_id).map(|r| {
-                            r.preview = Some(text);
-                            // The room's time may have come from a state event; this is the message's.
-                            r.ts = sent.unwrap_or(r.ts);
-                            r.clone()
-                        });
-                        if let Some(summary) = summary {
+                        if let Some(summary) = probe(&room, &rooms).await {
                             let _ = ev.send(Ev::Rooms(vec![summary])).await;
                         }
                     });
@@ -916,6 +893,15 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>) -> Result<()
     Ok(())
 }
 
+/// Ends a background task with the task that owns it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Delivers the answer to a settings-page request, or its error and the cue to stop waiting.
 async fn panel(ev: &mpsc::Sender<Ev>, result: Result<Ev>) {
     match result {
@@ -1016,6 +1002,70 @@ fn is_done(done: &Done, s: &RoomSummary, now: i64) -> bool {
     done.updated_ts.is_some_and(|upto| upto > 0 && upto >= s.ts as i64 && upto < now && !s.is_unread())
 }
 
+/// A probe changed a summary since rooms.json was last written.
+static UNSAVED_PROBES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The chat's last message as a preview and its time; `None` when the newest pages hold none.
+/// A room a bridge has just set up ends in a run of state events, hence more than one page.
+async fn last_message(room: &Room) -> Result<Option<(String, u64)>> {
+    let dm = other_person(room).await.is_some();
+    let mut from = None;
+    for _ in 0..MAX_PREVIEW_PAGES {
+        let resp = messages(room, from.as_deref(), PAGE).await?;
+        let mut chunk = resp.chunk;
+        chunk.reverse();
+        let items = to_items(room, &chunk).await;
+        let sent = items.iter().rev().find_map(|i| match i {
+            Item::Msg(m) => Some(m.ts),
+            _ => None,
+        });
+        if let (Some(text), Some(sent)) = (preview(&items, dm), sent) {
+            return Ok(Some((text, sent)));
+        }
+        from = resp.end;
+        if from.is_none() {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+/// Looks the chat's last message up and records it. Returns the summary when it changed.
+/// rooms.json picks the change up on the sync loop's next save.
+async fn probe(room: &Room, rooms: &Rooms) -> Option<RoomSummary> {
+    let found = match last_message(room).await {
+        Ok(found) => found,
+        // Left unprobed, so the next start tries again.
+        Err(e) => {
+            log::debug!("last message of {}: {e:#}", room.room_id());
+            return None;
+        }
+    };
+    let mut rooms = rooms.lock().unwrap();
+    let r = rooms.get_mut(room.room_id())?;
+    UNSAVED_PROBES.store(true, std::sync::atomic::Ordering::Relaxed);
+    r.probed = true;
+    if let Some((text, sent)) = found {
+        (r.preview, r.ts) = (Some(text), sent);
+    }
+    Some(r.clone())
+}
+
+/// Looks up the last message of chats where it is not known, a few at a time, as their IDs come in.
+async fn probe_queue(client: Client, rooms: Rooms, ev: mpsc::Sender<Ev>, queue: mpsc::Receiver<OwnedRoomId>) {
+    let ids = futures_util::stream::unfold(queue, |mut queue| async { queue.recv().await.map(|id| (id, queue)) });
+    ids.for_each_concurrent(PROBES, |id| {
+        let (client, rooms, ev) = (&client, &rooms, &ev);
+        async move {
+            let Some(room) = client.get_room(&id) else { return };
+            if let Some(summary) = probe(&room, rooms).await {
+                let _ = ev.send(Ev::Rooms(vec![summary])).await;
+            }
+        }
+    })
+    .await;
+}
+
 /// A cached preview in today's form. Caches written by earlier builds held bracketed media labels,
 /// which are dropped so the row reads the message again, and previews of several paragraphs.
 fn current(preview: Option<String>) -> Option<String> {
@@ -1072,7 +1122,12 @@ async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &R
         let fresh = summarize(&room, notif, other_person(&room).await, seen).await;
         if let Some(r) = rooms.lock().unwrap().get_mut(&fresh.id) {
             // A preview refresh may have updated the entry meanwhile.
-            *r = RoomSummary { preview: current(r.preview.take()), ..fresh };
+            *r = RoomSummary { preview: current(r.preview.take()), ts: r.ts, probed: r.probed, ..fresh };
+            // Caches from before `probed`: a preview means a message was seen; without one the
+            // time came from some state event and says nothing about when the chat was last used.
+            if !r.probed {
+                (r.probed, r.ts) = if r.preview.is_some() { (true, r.ts) } else { (false, 0) };
+            }
             out.push(r.clone());
         }
     }
@@ -1081,6 +1136,14 @@ async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &R
 
 async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, rooms: Rooms, ev: mpsc::Sender<Ev>) {
     let cached = refresh_cached(&client, &notif, &rooms).await;
+    // Chats whose last message is not known are looked up in the background. A full queue drops
+    // the rest; they stay unprobed and are queued again at the next start.
+    let (to_probe, queue) = mpsc::channel(PROBE_QUEUE);
+    let prober = tokio::spawn(probe_queue(client.clone(), rooms.clone(), ev.clone(), queue));
+    let _stop_prober = AbortOnDrop(prober);
+    for unknown in cached.iter().filter(|r| !r.probed) {
+        let _ = to_probe.try_send(unknown.id.clone());
+    }
     if !cached.is_empty() && ev.send(Ev::Rooms(cached)).await.is_err() {
         return;
     }
@@ -1118,14 +1181,19 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
             }
             let items = to_items(&room, &update.timeline.events).await;
             let prev = rooms.lock().unwrap().get(id).cloned();
-            // A chat's time is its last message's. A room the bridge just created or backfilled has
-            // newer state events than messages; they count only until a message is seen.
+            // A chat's time is its last message's. A room a bridge has just created has only state
+            // events, which say nothing about when the chat was last used: it stays at 0, sorts
+            // last, and is queued for a look at its history.
             let last_message = items.iter().filter_map(|i| match i {
                 Item::Msg(m) => Some(m.ts),
                 _ => None,
             });
-            let last_event = || update.timeline.events.iter().filter_map(|e| e.timestamp()).map(|t| u64::from(t.0)).max();
-            let newest = last_message.max().max(prev.as_ref().map(|p| p.ts)).or_else(last_event);
+            let last_message = last_message.max();
+            let probed = last_message.is_some() || prev.as_ref().is_some_and(|p| p.probed);
+            if !probed {
+                let _ = to_probe.try_send(id.clone());
+            }
+            let newest = last_message.max(prev.as_ref().map(|p| p.ts));
             let peer = other_person(&room).await;
             let dm = peer.is_some();
             let order = items.iter().filter_map(|i| match i {
@@ -1146,6 +1214,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 muted: false,
                 marked_unread: false,
                 archived: false,
+                probed,
             };
             let summary = summarize(&room, &notif, peer, seen).await;
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
@@ -1161,7 +1230,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 let _ = ev.send(Ev::RoomGone(id.clone())).await;
             }
         }
-        if !changed.is_empty() || gone {
+        // Probes change summaries between syncs; only this loop writes the file.
+        if !changed.is_empty() || gone || UNSAVED_PROBES.swap(false, std::sync::atomic::Ordering::Relaxed) {
             let saved = serde_json::to_vec(&*rooms.lock().unwrap()).map_err(anyhow::Error::from);
             if let Err(e) = saved.and_then(|b| write_private(&rooms_path(&dir), &b)) {
                 log::warn!("rooms.json: {e:#}");
