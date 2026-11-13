@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 mod cards;
 mod menu;
+pub(crate) mod motion;
 mod panels;
 mod rich;
 mod signin;
@@ -250,6 +251,8 @@ impl BeeperApp {
             let active = window.is_window_active();
             crate::FOREGROUND.store(active, std::sync::atomic::Ordering::Relaxed);
             if active {
+                // The animation setting may have changed while the app was away.
+                motion::follow_system(cx);
                 this.open_from_notification(cx);
             }
         }));
@@ -1158,7 +1161,7 @@ impl BeeperApp {
             }))
     }
 
-    fn render_chat(&mut self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_chat(&mut self, narrow: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         // The oldest row is on screen: the messages do not fill it, or the user has scrolled up to
         // them. A list too short to scroll reports no scrolling, so this is not left to its handler.
@@ -1911,6 +1914,12 @@ fn short_network(name: &str) -> &str {
 }
 
 /// Unread count; a bare dot for a chat marked unread by hand, grey when muted.
+/// Digits of one width, so times and counts do not shift as they change.
+#[expect(dead_code, reason = "for the motion and polish packages")]
+fn tabular() -> FontFeatures {
+    FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
+}
+
 fn count_pill(n: u64, muted: bool, cx: &App) -> Div {
     let p = Palette::of(cx);
     div()
@@ -2052,7 +2061,7 @@ impl Render for BeeperApp {
                     let screen = if let Some(panel) = panel {
                         panel
                     } else if self.open.is_some() {
-                        self.render_chat(true, cx).into_any_element()
+                        self.render_chat(true, window, cx).into_any_element()
                     } else {
                         self.render_rooms(cx).into_any_element()
                     };
@@ -2071,7 +2080,7 @@ impl Render for BeeperApp {
                             .h_full()
                             .child(div().w(px(LIST_W)).flex_none().h_full().child(self.render_rooms(cx)))
                             .child(div().flex_1().min_w_0().h_full().child(if self.open.is_some() {
-                                self.render_chat(false, cx).into_any_element()
+                                self.render_chat(false, window, cx).into_any_element()
                             } else {
                                 div()
                                     .size_full()

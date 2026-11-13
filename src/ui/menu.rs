@@ -255,13 +255,6 @@ fn ms(since: Instant, now: Instant) -> f32 {
     now.saturating_duration_since(since).as_secs_f32() * 1000.
 }
 
-#[cfg(target_os = "android")]
-fn haptic(feedback: gpui_mobile::packages::vibration::HapticFeedback) {
-    if let Err(e) = gpui_mobile::packages::vibration::haptic_feedback(feedback) {
-        log::debug!("haptic: {e}");
-    }
-}
-
 impl MessageMenu {
     /// The touch overlay's reveal: Signal's 200 ms reveal, the bar 100 ms after, each reaction 10
     /// ms after the one before; its hide undoes whatever was shown in 150 ms.
@@ -317,7 +310,7 @@ impl BeeperApp {
         let now = Instant::now();
         #[cfg(target_os = "android")]
         if kind == MenuKind::Touch {
-            haptic(gpui_mobile::packages::vibration::HapticFeedback::Heavy);
+            super::motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Heavy);
         }
         self.menu = Some(MessageMenu {
             id,
@@ -386,7 +379,7 @@ impl BeeperApp {
             (m.scrub_prev, m.scrub, m.scrub_at) = (m.scrub, slot, Instant::now());
             #[cfg(target_os = "android")]
             if slot.is_some() {
-                haptic(gpui_mobile::packages::vibration::HapticFeedback::Selection);
+                super::motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Selection);
             }
             cx.notify();
         }

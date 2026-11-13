@@ -23,6 +23,7 @@ gpui_kit::assets::icon_assets!(
         ArrowUp,
         AtSign,
         BellOff,
+        ChartBar,
         ChevronsDown,
         ClipboardPaste,
         ExternalLink,
@@ -41,7 +42,9 @@ gpui_kit::assets::icon_assets!(
         Reply,
         RotateCw,
         SendHorizontal,
+        Sticker,
         Trash,
+        Unlink,
         Video,
         Waypoints,
         X
@@ -67,6 +70,7 @@ impl AssetSource for Assets {
 
 fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::init(cx);
+    ui::motion::follow_system(cx);
     #[cfg(not(target_os = "android"))]
     bundled_emoji(cx);
     fonts(cx);
