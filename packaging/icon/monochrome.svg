@@ -1,4 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
-  <!-- Each disc minus the next one grown by a 3.4 gap, so the rings stay apart in one colour. -->
-  <path fill="#ffffff" fill-rule="evenodd" d="M25.5,52.5a30,30 0 1 0 60,0a30,30 0 1 0 -60,0ZM27.92,55.68a24.4,24.4 0 1 0 48.8,0a24.4,24.4 0 1 0 -48.8,0ZM31.32,55.68a21,21 0 1 0 42,0a21,21 0 1 0 -42,0ZM33.59,58.51a15.9,15.9 0 1 0 31.8,0a15.9,15.9 0 1 0 -31.8,0ZM36.99,58.51a12.5,12.5 0 1 0 25,0a12.5,12.5 0 1 0 -25,0Z"/>
-</svg>
