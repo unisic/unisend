@@ -50,7 +50,8 @@ PY
 for d in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
     n=${d%%:*}; s=${d##*:}; h=$((s / 2))
     png "$here/icon.svg" "$s" "$res/mipmap-$n/ic_launcher.png"
-    magick -density 1200 -background black "$here/foreground.svg" -flatten -resize "${s}x${s}" \
+    # The circle inscribed in the tile clears its rounded corners, so masking icon.svg is enough.
+    magick -density 1200 -background none "$here/icon.svg" -resize "${s}x${s}" \
         \( -size "${s}x${s}" xc:black -fill white -draw "circle $h,$h $h,0" \) \
         -alpha off -compose CopyOpacity -composite -strip "PNG32:$res/mipmap-$n/ic_launcher_round.png"
 done

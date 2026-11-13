@@ -1,14 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Themed-icon layer: the launcher mark as a single tintable shape. Master: packaging/icon/. -->
+<!-- Themed-icon layer: each disc minus the next one grown by a gap, as one tintable shape. Master: packaging/icon/. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <group>
-        <clip-path android:pathData="M35.68,62.7A23.5,23.5 0 1 1 46.5,73.52Q37.63,69.19 30.6,75.99Q37.19,65.81 35.68,62.7Z" />
-        <path
-            android:fillColor="#FFFFFFFF"
-            android:pathData="M27.3,20.9H86.3L86.3,37.6C63.88,44.74 45,33.86 27.3,41ZM27.3,45.2C45,38.06 63.88,48.94 86.3,41.8L86.3,48.6C63.88,55.74 45,44.86 27.3,52ZM27.3,56.2C45,49.06 63.88,59.94 86.3,52.8L86.3,59.6C63.88,66.74 45,55.86 27.3,63ZM27.3,67.2C45,60.06 63.88,70.94 86.3,63.8V95.65H27.3Z" />
-    </group>
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M25.5,52.5a30,30 0 1 0 60,0a30,30 0 1 0 -60,0ZM27.92,55.68a24.4,24.4 0 1 0 48.8,0a24.4,24.4 0 1 0 -48.8,0ZM31.32,55.68a21,21 0 1 0 42,0a21,21 0 1 0 -42,0ZM33.59,58.51a15.9,15.9 0 1 0 31.8,0a15.9,15.9 0 1 0 -31.8,0ZM36.99,58.51a12.5,12.5 0 1 0 25,0a12.5,12.5 0 1 0 -25,0Z" />
 </vector>
