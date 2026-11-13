@@ -1787,7 +1787,7 @@ impl BeeperApp {
         Some((
             match state {
                 Delivery::Sending if m.id.starts_with('$') && waited => "Sent",
-                Delivery::Sending => "Sending...",
+                Delivery::Sending => "Sending…",
                 Delivery::Delivered => "Delivered",
                 Delivery::Sent | Delivery::Failed(_) => "Sent",
             }
