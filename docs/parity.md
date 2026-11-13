@@ -34,7 +34,7 @@ is not started.
 | Search chats by name | part | names only; Beeper also searches messages, contacts, networks |
 | Unread filter | done | local |
 | DMs / Groups / Drafts / Unanswered filters | todo | local |
-| Avatars, network label, last message, time | done | `m.room.avatar`, `m.bridge` |
+| Avatars, network label, last message, time | done | `m.room.avatar`, `m.bridge`; in a group, each sender's picture from their member event |
 | Network icons (per-network glyph) | todo | text label for now |
 | Labels with schedules, snooze, reminders | todo | `com.beeper.label.*`, `com.beeper.chats.snoozed`, `com.beeper.chats.reminder` |
 | Message requests, invitations | todo | `com.beeper.message_request`, invites |
@@ -97,7 +97,7 @@ is not started.
 | Media viewer | part | pictures only; no zoom, no gallery |
 | PDF preview, storage manager | todo | local |
 | Feedback, help hub, subscription banners | todo | Beeper services |
-| Emoji rendering | done | bundled bitmap Noto Color Emoji (GPUI cannot draw COLRv1) |
+| Emoji rendering | part | bundled bitmap Noto Color Emoji (GPUI cannot draw COLRv1). On Linux, emoji that a system text font also holds (the heart U+2764 among them) draw as that font's outline: cosmic-text asks DejaVu Sans before the emoji font |
 | Windows, macOS builds | todo | GPUI targets, not built or tested |
 
 ## How Beeper stores chat state
