@@ -474,8 +474,6 @@ async fn gui_fixture() {
     say(&bob_dm, "Great, I'll bring the map").await;
     // The user's last word, which the other side has read.
     let last = say(&dm, "See you there").await;
-    bob.sync_once(SyncSettings::default()).await.unwrap();
-    bob_dm.send_single_receipt(create_receipt::v3::ReceiptType::Read, ReceiptThread::Unthreaded, last).await.unwrap();
     // Formatted messages, shaped like what bridges send: a markdown-ish `body` next to the HTML.
     let html = |body: &str, formatted: &str| RoomMessageEventContent::text_html(body, formatted);
     bob_dm.send(html("**Bold** and _italic_ and ~~gone~~, see [the map](https://example.com/map)", "<strong>Bold</strong> and <em>italic</em> and <del>gone</del>, see <a href=\"https://example.com/map\">the map</a>")).await.unwrap();
@@ -483,6 +481,11 @@ async fn gui_fixture() {
     bob_dm.send(html("```\nlet a = 1;\nlet b = a + 1;\n```", "<pre><code>let a = 1;\nlet b = a + 1;\n</code></pre>")).await.unwrap();
     bob_dm.send(html("> Quoted line\n\nAnd my answer", "<blockquote><p>Quoted line</p></blockquote><p>And my answer</p>")).await.unwrap();
     bob_dm.send(html("> Shared your story\n\n[https://www.instagram.com/stories/mapfriend/3000000000000000000/](https://www.instagram.com/stories/mapfriend/3000000000000000000/?reel_id=3000000000000000000)", "<blockquote>\n<p>Shared your story</p>\n</blockquote>\n<p><a href=\"https://www.instagram.com/stories/mapfriend/3000000000000000000/?reel_id=3000000000000000000\">https://www.instagram.com/stories/mapfriend/3000000000000000000/</a></p>")).await.unwrap();
+    // Bob syncs only after his last message here: messages he sends after a sync reached Alice's
+    // device with the room key at a later index, which left his first two locked (seen, not
+    // understood).
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    bob_dm.send_single_receipt(create_receipt::v3::ReceiptType::Read, ReceiptThread::Unthreaded, last).await.unwrap();
 
     let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     req.name = Some("Weekend trip".into());
