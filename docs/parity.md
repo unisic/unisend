@@ -68,7 +68,7 @@ is not started.
 | Disappearing messages | todo | `com.beeper.disappearing_timer` |
 | Search in chat, media gallery, bookmarks | todo | `com.beeper.bookmark`, `com.beeper.gallery` |
 | Chat info: members, admin actions, leave, block | todo | room state, `com.beeper.user_blocked` |
-| Chat theme, wallpaper | todo | account data |
+| Chat theme, wallpaper | part | own bubbles in Beeper's nine chat colours (blue a shade darker, for contrast), for every chat, kept on the device as Beeper Desktop keeps it (`chat_appearance` in its local prefs, not account data). No per-chat colour, no wallpaper, no app-wide theme colour |
 
 ## Composer
 
