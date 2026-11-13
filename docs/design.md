@@ -70,6 +70,14 @@ A link is underlined. When its sender attached a preview, the message carries a 
 picture in its own shape, the site, the title, two lines about it. Touching the card opens the
 link.
 
+A poll is its question, then one row per answer, 44 tall, with the share of votes drawn as a `lifted`
+bar behind the text, the count at the end, and a check before the answer you chose (no accent: a poll
+is not addressed to you). Under the rows, the number of votes, and "Poll ended" when it has. Touching
+an answer votes for it; touching your only choice takes it back.
+
+A location is a card in the bubble: a map pin, the description when it says more than the
+coordinates, and the coordinates to five decimals. Touching it opens the place in maps.
+
 A lost connection is a state, not an error: one quiet line at the top while it is retried, gone
 when it is back.
 

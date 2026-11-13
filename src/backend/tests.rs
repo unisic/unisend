@@ -481,6 +481,26 @@ async fn gui_fixture() {
     );
     bob_group.send(asks.add_mentions(Mentions::with_user_ids([me.to_owned()]))).await.unwrap();
     carol_group.send(RoomMessageEventContent::text_plain("@room we leave at 9 sharp").add_mentions(Mentions::with_room_mention())).await.unwrap();
+    // A poll with votes from two people, and a shared place.
+    let poll = serde_json::json!({
+        "m.poll": {
+            "question": { "m.text": [{ "body": "Which day do we leave?" }] },
+            "max_selections": 1,
+            "answers": [
+                { "m.id": "fri", "m.text": [{ "body": "Friday evening" }] },
+                { "m.id": "sat", "m.text": [{ "body": "Saturday morning" }] },
+                { "m.id": "sun", "m.text": [{ "body": "Sunday" }] },
+            ],
+        },
+        "m.text": [{ "body": "Which day do we leave?" }],
+    });
+    let poll_id = bob_group.send_raw("m.poll.start", poll).await.unwrap().response.event_id;
+    for (who, answer) in [(&carol_group, "sat"), (&group, "fri")] {
+        let vote = serde_json::json!({ "m.selections": [answer], "m.relates_to": { "rel_type": "m.reference", "event_id": poll_id } });
+        who.send_raw("m.poll.response", vote).await.unwrap();
+    }
+    let place = serde_json::json!({ "msgtype": "m.location", "body": "Lakeside cabin", "geo_uri": "geo:52.52008,13.40495" });
+    carol_group.send_raw("m.room.message", place).await.unwrap();
     // A link with the preview a bridge attaches to it.
     let preview = serde_json::json!({
         "msgtype": "m.text",
@@ -602,6 +622,8 @@ fn notifications_follow_the_push_rules() {
             deleted: false,
             edited: false,
             media: None,
+            poll: None,
+            place: None,
             notify,
             mentions: Vec::new(),
             mentioned: false,
@@ -655,6 +677,8 @@ fn unread_mentions_are_counted_among_the_unread() {
             deleted: false,
             edited: false,
             media: None,
+            poll: None,
+            place: None,
             notify: true,
             mentions: Vec::new(),
             mentioned,

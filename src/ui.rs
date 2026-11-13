@@ -15,6 +15,7 @@ use gpui_kit::*;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
 use tokio::sync::mpsc;
 
+mod cards;
 mod panels;
 
 use std::path::PathBuf;
@@ -1215,6 +1216,8 @@ impl BeeperApp {
                                 }),
                         )
                 });
+                let poll_card = m.poll.as_ref().filter(|_| !m.deleted).map(|poll| cards::poll(m, poll, this.user.as_ref(), room, p, cx));
+                let place_card = m.place.as_ref().filter(|_| !m.deleted).map(|place| cards::place(m, place, room, p, cx));
                 let bubble = v_flex()
                     .id(SharedString::from(m.id.clone()))
                     // Without this a flex child is as wide as its longest line and leaves the screen.
@@ -1260,6 +1263,8 @@ impl BeeperApp {
                         )
                     })
                     .children(link_card)
+                    .children(poll_card)
+                    .children(place_card)
                     .when(m.edited && !m.deleted, |el| el.child(div().text_size(px(12.)).text_color(p.faint).child("Edited")));
                 // One chip per emoji, in order of first use.
                 let mut chips: Vec<(&str, usize, bool)> = Vec::new();
@@ -2019,6 +2024,14 @@ fn apply(msgs: &mut [Msg], item: &Item) -> Option<usize> {
             }
             Some(ix)
         }
+        Item::Poll { target, from, ts, update } => {
+            let ix = find(msgs, target)?;
+            let by_creator = msgs[ix].from == *from;
+            if let Some(poll) = &mut msgs[ix].poll {
+                poll.update(from.as_str(), *ts, update, by_creator);
+            }
+            Some(ix)
+        }
         Item::Redact { target } => {
             if let Some(ix) = find(msgs, target) {
                 let m = &mut msgs[ix];
@@ -2026,6 +2039,7 @@ fn apply(msgs: &mut [Msg], item: &Item) -> Option<usize> {
                 // Ranges into the old body.
                 m.mentions.clear();
                 m.reactions.clear();
+                (m.poll, m.place) = (None, None);
                 return Some(ix);
             }
             let ix = msgs.iter().rposition(|m| m.reactions.iter().any(|r| &r.id == target))?;

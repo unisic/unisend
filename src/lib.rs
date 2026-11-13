@@ -28,6 +28,7 @@ gpui_kit::assets::icon_assets!(
         ExternalLink,
         Image,
         ListFilter,
+        MapPin,
         Mail,
         MailOpen,
         MessageCircle,
@@ -422,6 +423,16 @@ pub(crate) fn open_link(cx: &mut gpui_kit::App, url: &str) {
     }
 }
 
+/// Opens a place: on Android in the user's maps app, elsewhere in the browser. Built from parsed
+/// coordinates only.
+pub(crate) fn open_place(cx: &mut gpui_kit::App, place: &crate::backend::Place) {
+    #[cfg(target_os = "android")]
+    if android_files::browse(&place.geo_url()).map_err(|e| log::warn!("open place: {e}")).unwrap_or(false) {
+        return;
+    }
+    open_link(cx, &place.web_url());
+}
+
 /// Lets the user choose a file to send. `None` when cancelled or unreadable.
 pub(crate) fn pick_file(cx: &mut gpui_kit::App) -> gpui_kit::Task<Option<PathBuf>> {
     #[cfg(not(target_os = "android"))]
@@ -782,7 +793,7 @@ mod tests {
     /// An icon the UI names but the build does not embed draws as nothing, with only a log line.
     #[test]
     fn every_icon_the_ui_uses_is_embedded() {
-        for source in [include_str!("ui.rs"), include_str!("ui/panels.rs")] {
+        for source in [include_str!("ui.rs"), include_str!("ui/panels.rs"), include_str!("ui/cards.rs")] {
             for name in source.split("IconName::").skip(1) {
                 let name: String = name.chars().take_while(char::is_ascii_alphanumeric).collect();
                 let mut file = String::new();

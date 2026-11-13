@@ -63,7 +63,7 @@ is not started.
 | Formatted text, mentions, code blocks | part | mentions are drawn in the accent, a message that mentions the user is marked, and the chat list shows an `@` (from the HTML links and `m.mentions`; counted locally, a server cannot see into encrypted rooms). Bold, italics, links and code blocks: todo |
 | Send state (sending, sent, delivered, seen, failed) | todo | `com.beeper.message_send_status`, receipts |
 | Read receipts of others, typing | todo | `m.receipt`, `m.typing` |
-| Polls, locations, contacts | todo | `m.poll.*`, `m.location` |
+| Polls, locations, contacts | part | polls (stable and `org.matrix.msc3381` types) are shown with votes and can be voted on; locations show a card with coordinates that opens in maps. Votes are counted from the response events that are loaded (history is paged back from the newest event, so every response newer than a loaded poll is loaded too); a poll cannot be created or ended from here; a redacted vote is not taken back. Contacts: todo |
 | Threads | todo | `m.thread` |
 | Disappearing messages | todo | `com.beeper.disappearing_timer` |
 | Search in chat, media gallery, bookmarks | todo | `com.beeper.bookmark`, `com.beeper.gallery` |
@@ -107,17 +107,15 @@ Bridge features are from the mautrix roadmaps (whatsapp, signal, meta, which ser
 Messenger and Instagram); what the client does is from this file and the source. "Shown" means the
 conversation displays it.
 
-Verified in the source: a poll (`m.poll.start`) is skipped, so it does not appear at all; a
-location shows only "Location", without coordinates or a map link; typing, read receipts of others
-and membership changes are not read. Everything else below is a gap by the rows above.
+Verified in the source: typing, read receipts of others and membership changes are not read. Everything else below is a gap by the rows above.
 
 | Feature | WhatsApp | Signal | Messenger | Instagram | Client |
 |---|---|---|---|---|---|
 | Replies, reactions, deletes | yes | yes | yes | yes | done |
 | Edits, mentions | no | yes | yes | yes | done |
 | Images, video, files, voice notes | yes | yes | yes | yes | shown; no inline player |
-| Polls and votes | yes | yes | groups | no | not shown |
-| Locations | yes | to Signal only | from Messenger only | no | text only, no coordinates |
+| Polls and votes | yes | yes | groups | no | shown, vote; not created |
+| Locations | yes | to Signal only | from Messenger only | no | shown with coordinates, opens in maps; not sent |
 | Contact cards | from WhatsApp | from Signal | no | no | not checked |
 | Disappearing messages | no | yes | no | no | timer not shown |
 | Typing, read receipts of others | yes | yes | yes | yes | not shown |
@@ -140,7 +138,7 @@ are from Beeper's own feature list and not checked against these bridges.
    may not show up at all. M.
 3. Rich text: bold, italics, links, code (every network). M.
 4. Inline playback for voice notes, audio and video, and recording voice notes. M each.
-5. Polls (show, vote) and locations (coordinates, open in maps). M and S.
+5. Creating and ending polls, sending a location. S each.
 6. Mentions autocomplete; forward; paste and drag and drop attachments. S each.
 7. Disappearing-message timer shown. S.
 8. New chat from a contact, chat info and group admin. L.

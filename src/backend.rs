@@ -124,6 +124,8 @@ pub enum Cmd {
     /// `reply_to` and `edit` are event IDs; an edit replaces that message's text.
     Send { room: OwnedRoomId, body: String, reply_to: Option<String>, edit: Option<String> },
     React { room: OwnedRoomId, target: String, key: String },
+    /// Sets the user's vote on a poll to `answers`; empty withdraws it.
+    Vote { room: OwnedRoomId, target: String, unstable: bool, answers: Vec<String> },
     /// Redacts a message or a reaction.
     Delete { room: OwnedRoomId, target: String },
 }
@@ -236,6 +238,8 @@ pub struct Msg {
     pub edited: bool,
     /// Attachment; `body` is then its caption, possibly empty.
     pub media: Option<Media>,
+    pub poll: Option<Poll>,
+    pub place: Option<Place>,
     /// The account's push rules ask for a notification (false when they were not evaluated).
     pub notify: bool,
     /// Byte ranges of `body` that mention someone.
@@ -264,6 +268,12 @@ pub struct Link {
 impl Msg {
     /// One-line description for previews and quotes: Beeper's label for media, plus the caption.
     pub fn summary(&self) -> String {
+        if let Some(poll) = &self.poll {
+            return format!("📊 Poll: {}", poll.question);
+        }
+        if let Some(place) = &self.place {
+            return if place.description.is_empty() { "📍 Location".to_owned() } else { format!("📍 Location: {}", place.description) };
+        }
         let Some(media) = &self.media else { return self.body.clone() };
         let label = match media.kind {
             MediaKind::Image => "📷 Photo",
@@ -314,6 +324,8 @@ pub enum Item {
     Msg(Msg),
     Edit { target: String, body: String, mentions: Vec<std::ops::Range<usize>> },
     Reaction { target: String, reaction: Reaction },
+    /// A vote on a poll, or its end, by `from` at `ts`.
+    Poll { target: String, from: OwnedUserId, ts: u64, update: Update },
     /// A message or a reaction was deleted.
     Redact { target: String },
 }
@@ -779,6 +791,10 @@ impl State {
             Cmd::React { room, target, key } => {
                 let content = ReactionEventContent::new(Annotation::new(EventId::parse(target)?, key));
                 self.room(&room)?.send(content).await?;
+            }
+            Cmd::Vote { room, target, unstable, answers } => {
+                let (kind, content) = polls::response(unstable, &target, answers);
+                self.room(&room)?.send_raw(kind, content).await?;
             }
             Cmd::Delete { room, target } => {
                 self.room(&room)?.redact(&EventId::parse(target)?, None, None).await?;
@@ -1480,7 +1496,7 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
         let Some(sender) = event.sender() else { continue };
         let (mut reply_to, mut deleted, mut media) = (None, false, None);
         let (mut mentions, mut mentioned) = (Vec::new(), false);
-        let mut link = None;
+        let (mut link, mut poll, mut place) = (None, None, None);
         // A deleted event in an encrypted room is an empty `m.room.encrypted`: nothing says whether
         // it was a message or a reaction, so it gets no placeholder.
         let body = if event.kind.is_utd() {
@@ -1488,6 +1504,19 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
                 continue;
             }
             UTD.to_owned()
+        } else if let Some(found) = poll_event(event) {
+            match found {
+                polls::Event::Start(p) => {
+                    let question = p.question.clone();
+                    poll = Some(p);
+                    question
+                }
+                polls::Event::Update { target, update } => {
+                    let ts = event.timestamp().map_or(0, |t| u64::from(t.0));
+                    out.push(Item::Poll { target, from: sender.to_owned(), ts, update });
+                    continue;
+                }
+            }
         } else {
             match event.raw().deserialize() {
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
@@ -1505,8 +1534,13 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
                         }
                         let (found, text) = content(&m.content.msgtype);
                         media = found;
+                        if let MessageType::Location(l) = &m.content.msgtype {
+                            place = Place::parse(&l.geo_uri, &l.body);
+                        }
                         // Older clients and bridges prepend the quoted message to the body.
                         let text = if reply_to.is_some() { remove_plain_reply_fallback(&text).to_owned() } else { text };
+                        // The card shows the place's description.
+                        let text = if place.is_some() { String::new() } else { text };
                         (mentions, mentioned) = marks(&text, &m.content.msgtype, m.content.mentions.as_ref(), &own);
                         link = event.raw().get_field::<serde_json::Value>("content").ok().flatten().as_ref().and_then(link_preview);
                         text
@@ -1585,6 +1619,8 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
             deleted,
             edited: false,
             media,
+            poll,
+            place,
             notify: event.push_actions().is_some_and(|actions| actions.iter().any(|a| a.should_notify())),
             mentions,
             mentioned: mentioned && !own,
@@ -1593,6 +1629,13 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
         }));
     }
     out
+}
+
+/// A poll start, vote or end, whichever flavour of event type.
+fn poll_event(event: &TimelineEvent) -> Option<polls::Event> {
+    let kind = event.raw().get_field::<String>("type").ok().flatten().filter(|k| polls::is_poll(k))?;
+    let content = event.raw().get_field::<serde_json::Value>("content").ok().flatten()?;
+    polls::read(&kind, &content)
 }
 
 /// Longest title or description kept from a preview: it is someone else's text.
@@ -1900,7 +1943,6 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
             }
         }
-        MessageType::Location(_) => return (None, "📍 Location".to_owned()),
         other => return (None, other.body().to_owned()),
     };
     let caption = match msgtype {
@@ -1912,6 +1954,9 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
     };
     (Some(media), caption.unwrap_or_default().to_owned())
 }
+
+mod polls;
+pub use polls::{Place, Poll, Update};
 
 #[cfg(test)]
 mod tests;
