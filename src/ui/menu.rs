@@ -48,8 +48,10 @@ const PICK_RISE: f32 = 16.;
 const PICK_OFFSET: f32 = 4.;
 const POINTER_ROW_H: f32 = 40.;
 const POINTER_LIST_W: f32 = 200.;
-/// The buttons beside a message.
+/// The buttons beside a message, as tall as they lay out; each takes pointer input over
+/// `SIDE_HIT`, the dense-desktop minimum.
 const SIDE_BUTTON: f32 = 28.;
+const SIDE_HIT: f32 = 40.;
 
 /// Paint order over the dimmed screen: the lifted message, then the bar and the list over it.
 const LIFTED: usize = 1;
@@ -226,24 +228,9 @@ fn accelerate_decelerate(t: f32) -> f32 {
     ((t + 1.) * std::f32::consts::PI).cos() / 2. + 0.5
 }
 
-/// `cubic-bezier(x1, y1, x2, y2)` at `t`, as CSS draws it.
-fn bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
-    let curve = |a: f32, b: f32, s: f32| 3. * a * s * (1. - s) * (1. - s) + 3. * b * s * s * (1. - s) + s * s * s;
-    let (mut lo, mut hi) = (0., 1.);
-    for _ in 0..24 {
-        let mid = (lo + hi) / 2.;
-        if curve(x1, x2, mid) < t {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    curve(y1, y2, (lo + hi) / 2.)
-}
-
-/// Signal Desktop's `$ease-out-expo`.
+/// Signal Desktop's `$ease-out-expo`, `cubic-bezier(0.19, 1, 0.22, 1)`.
 fn ease_out_expo(t: f32) -> f32 {
-    bezier(0.19, 1., 0.22, 1., t)
+    gpui_kit::base::Easing::CubicBezier { x1: 0.19, y1: 1., x2: 0.22, y2: 1. }.sample(t)
 }
 
 /// How far along an animation of `ms` that starts `delay` ms in is, `elapsed` ms in.
@@ -307,6 +294,7 @@ impl BeeperApp {
             return;
         }
         self.press = None;
+        self.picker_hover = None;
         let now = Instant::now();
         #[cfg(target_os = "android")]
         if kind == MenuKind::Touch {
@@ -517,7 +505,8 @@ impl BeeperApp {
         let button = |name: &'static str, icon: IconName| {
             div()
                 .id(SharedString::from(format!("{}-{name}", m.id)))
-                .size(px(SIDE_BUTTON))
+                .size(px(SIDE_HIT))
+                .my(px((SIDE_BUTTON - SIDE_HIT) / 2.))
                 .flex()
                 .flex_none()
                 .items_center()
@@ -525,14 +514,13 @@ impl BeeperApp {
                 .rounded_full()
                 .text_color(p.faint)
                 .cursor_pointer()
-                .hover(|el| el.text_color(p.text))
+                .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.text_color(p.text)))
                 .child(Icon::new(icon).size_5())
         };
         let (react, reply, more) = (m.id.clone(), m.id.clone(), m.id.clone());
         h_flex()
             .self_center()
             .flex_none()
-            .gap(px(4.))
             .when(m.own, |el| el.flex_row_reverse())
             .opacity(if open { 1. } else { 0. })
             .group_hover("message", |el| el.opacity(1.))
@@ -589,7 +577,8 @@ impl BeeperApp {
                     .text_size(px(16.))
                     .text_color(ink)
                     .cursor_pointer()
-                    .hover(|el| el.bg(p.text.opacity(0.1)))
+                    .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.text.opacity(0.1))))
+                    .active(|el| el.bg(p.text.opacity(0.1)))
                     .child(Icon::new(icon).size_5())
                     .child(label)
                     .on_click(cx.listener(move |this, _, window, cx| this.act(&id, act.clone(), window, cx)))
@@ -734,14 +723,17 @@ impl BeeperApp {
         let above = at.1 - SIDE_BUTTON / 2. - PICK_OFFSET - h;
         let y = if above >= top + GUTTER { above } else { (at.1 + SIDE_BUTTON / 2. + PICK_OFFSET).min(f32::from(view.height) - bottom - h) };
         let t = ms(menu.opened, now);
-        let buttons = keys.iter().enumerate().map(|(n, key)| {
+        let hover = self.picker_hover;
+        let buttons: Vec<_> = keys.iter().enumerate().map(|(n, key)| {
             let mine = m.reactions.iter().any(|r| r.own && same_emoji(&r.key, key));
             let (id, label, key) = (id.clone(), key.clone(), key.clone());
             let shown = if still { 1. } else { ease_out_expo(phase(t, 10. * n as f32, 400.)) };
+            let grow = (!still && hover == Some(n)) as u8 as f32;
+            let grow = transition((("pick", n), "grow"), grow, Transition::new(Duration::from_millis(120)).easing(motion::EASE_OUT), window, cx);
             div()
                 .id(("picker-reaction", n))
                 .relative()
-                .top(px(24. * (1. - shown)))
+                .top(px(24. * (1. - shown) - PICK_RISE * grow))
                 .opacity(shown)
                 .size(px(PICK))
                 .flex()
@@ -750,12 +742,18 @@ impl BeeperApp {
                 .rounded_full()
                 .cursor_pointer()
                 .when(mine, |el| el.border_2().border_color(p.text))
-                .text_size(px(PICK_EMOJI))
+                .text_size(px(PICK_EMOJI + (PICK_GROWN - PICK_EMOJI) * grow))
                 .line_height(px(PICK_GROWN))
-                .when(!still, |el| el.hover(|el| el.text_size(px(PICK_GROWN)).top(px(-PICK_RISE))))
+                .on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                    let next = if *over { Some(n) } else { this.picker_hover.filter(|&h| h != n) };
+                    if next != this.picker_hover {
+                        this.picker_hover = next;
+                        cx.notify();
+                    }
+                }))
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, &key, cx)))
                 .child(label)
-        });
+        }).collect();
         let picker = div().absolute().left(px(x)).top(px(y)).child(
             h_flex()
                 .id("reaction-picker")
@@ -788,9 +786,14 @@ impl BeeperApp {
         let x = x.clamp(GUTTER, (vw - POINTER_LIST_W - GUTTER).max(GUTTER));
         let y = y.clamp(top + GUTTER, (vh - bottom - h - GUTTER).max(top + GUTTER));
         let rows = self.act_rows(&id, acts, POINTER_ROW_H, cx);
-        let list = div().absolute().left(px(x)).top(px(y)).child(
-            v_flex().id("message-menu").w(px(POINTER_LIST_W)).py(px(6.)).rounded(px(14.)).bg(p.lifted).occlude().children(rows),
-        );
+        let list = div()
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .child(v_flex().id("message-menu").w(px(POINTER_LIST_W)).py(px(6.)).rounded(px(14.)).bg(p.lifted).occlude().children(rows))
+            .with_animation(SharedString::from(format!("menu-list-{id}")), Animation::new(motion::ENTER).with_easing(motion::ease_out), move |el, t| {
+                el.top(px(y + 4. * (1. - t))).opacity(t)
+            });
         Some(self.barrier(list.into_any_element(), cx))
     }
 
@@ -810,7 +813,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAR_H, OVERLAY_GAP, Placement, TAP, bezier, place, same_emoji, slot_at};
+    use super::{BAR_H, OVERLAY_GAP, Placement, TAP, ease_out_expo, place, same_emoji, slot_at};
     use gpui_kit::{Bounds, point, size};
 
     #[test]
@@ -873,9 +876,9 @@ mod tests {
     }
 
     #[test]
-    fn css_curves_match_their_ends_and_middle() {
-        assert!(bezier(0.19, 1., 0.22, 1., 0.).abs() < 1e-3);
-        assert!((bezier(0.19, 1., 0.22, 1., 1.) - 1.).abs() < 1e-3);
-        assert!((bezier(0.25, 0.25, 0.75, 0.75, 0.3) - 0.3).abs() < 1e-3, "a straight curve is linear");
+    fn the_expo_curve_starts_fast_and_lands_on_its_ends() {
+        assert!(ease_out_expo(0.).abs() < 1e-3);
+        assert!((ease_out_expo(1.) - 1.).abs() < 1e-3);
+        assert!(ease_out_expo(0.2) > 0.7, "most of the way there in a fifth of the time");
     }
 }
