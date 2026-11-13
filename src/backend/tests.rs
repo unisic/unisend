@@ -481,6 +481,21 @@ async fn gui_fixture() {
     );
     bob_group.send(asks.add_mentions(Mentions::with_user_ids([me.to_owned()]))).await.unwrap();
     carol_group.send(RoomMessageEventContent::text_plain("@room we leave at 9 sharp").add_mentions(Mentions::with_room_mention())).await.unwrap();
+    // A link with the preview a bridge attaches to it.
+    let preview = serde_json::json!({
+        "msgtype": "m.text",
+        "body": "The cabin: https://example.org/cabins/lakeside, looks good?",
+        "com.beeper.linkpreviews": [{
+            "matched_url": "https://example.org/cabins/lakeside",
+            "og:title": "Lakeside cabin for six",
+            "og:description": "Two bedrooms, a wood stove and a jetty. Twenty minutes from the station by bus.",
+            "og:site_name": "Example Cabins",
+            "og:image": upload["content_uri"],
+            "og:image:width": 512,
+            "og:image:height": 512,
+        }],
+    });
+    bob_group.send_raw("m.room.message", preview).await.unwrap();
 
     let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     req.name = Some("Mum".into());
@@ -590,6 +605,7 @@ fn notifications_follow_the_push_rules() {
             notify,
             mentions: Vec::new(),
             mentioned: false,
+            link: None,
             reactions: Vec::new(),
         })
     };
@@ -656,6 +672,7 @@ fn unread_mentions_are_counted_among_the_unread() {
             notify: true,
             mentions: Vec::new(),
             mentioned,
+            link: None,
             reactions: Vec::new(),
         })
     };
@@ -683,4 +700,42 @@ fn avatars_become_upright_squares() {
     let small = encode(64, 64);
     assert_eq!(square(small.clone()), small, "already square: untouched");
     assert_eq!(square(b"not a picture".to_vec()), b"not a picture");
+}
+
+#[test]
+fn errors_lose_their_urls_and_retries_slow_down() {
+    let error = "Message not sent: error sending request for url (https://example.org/_matrix/client/v3/sync?filter=%7B%22a%22%7D&since=s1_2): connection reset";
+    assert_eq!(plain(&error), "Message not sent: error sending request: connection reset");
+    assert_eq!(plain(&"no address here"), "no address here");
+    assert_eq!(plain(&"cut off for url (https://example.org"), "cut off");
+    let waits: Vec<u64> = (1..=7).map(|failed| retry_wait(failed).as_secs()).collect();
+    assert_eq!(waits, [5, 10, 20, 40, 60, 60, 60]);
+}
+
+#[test]
+fn link_previews_are_read_from_the_message() {
+    let content = serde_json::json!({
+        "body": "look https://www.example.org/a?b=1",
+        "com.beeper.linkpreviews": [
+            { "matched_url": "javascript:alert(1)", "og:title": "Not a web address" },
+            {
+                "matched_url": "https://www.example.org/a?b=1",
+                "og:title": "  A title  ",
+                "og:description": "About it",
+                "og:image": "mxc://example.org/abc",
+                "og:image:width": "1200",
+                "og:image:height": 630,
+            },
+        ],
+    });
+    let link = link_preview(&content).expect("the second preview is usable");
+    assert_eq!((link.url.as_str(), link.title.as_str(), link.description.as_str()), ("https://www.example.org/a?b=1", "A title", "About it"));
+    assert_eq!(link.site, "example.org", "the host stands in for a missing site name");
+    assert_eq!(link.image.expect("a picture").dims, Some((1200, 630)));
+
+    assert!(link_preview(&serde_json::json!({ "body": "no previews" })).is_none());
+    let bare = serde_json::json!({ "com.beeper.linkpreviews": [{ "matched_url": "https://example.org" }] });
+    assert!(link_preview(&bare).is_none(), "nothing to show");
+    let long = serde_json::json!({ "com.beeper.linkpreviews": [{ "matched_url": "https://example.org", "og:title": "x".repeat(5000) }] });
+    assert_eq!(link_preview(&long).unwrap().title.len(), LINK_TEXT_MAX);
 }

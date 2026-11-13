@@ -25,6 +25,7 @@ gpui_kit::assets::icon_assets!(
         BellOff,
         ChevronsDown,
         ClipboardPaste,
+        ExternalLink,
         Image,
         ListFilter,
         Mail,
@@ -154,6 +155,8 @@ pub(crate) struct Palette {
     pub ground: Hsla,
     pub surface: Hsla,
     pub raised: Hsla,
+    /// One step above `raised`: a reaction badge on a message.
+    pub lifted: Hsla,
     pub rule: Hsla,
     pub text: Hsla,
     pub muted: Hsla,
@@ -184,6 +187,7 @@ fn apply_palette(cx: &mut App) {
             ground: c(0x000000),
             surface: c(0x111111),
             raised: c(0x2a2a2a),
+            lifted: c(0x3d3d3d),
             rule: c(0x1a1a1a),
             text: c(0xffffff),
             muted: c(0xb4b4b4),
@@ -200,6 +204,7 @@ fn apply_palette(cx: &mut App) {
             ground: c(0xffffff),
             surface: c(0xf2f2f2),
             raised: c(0xe2e2e2),
+            lifted: c(0xcfcfcf),
             rule: c(0xe8e8e8),
             text: c(0x000000),
             muted: c(0x4f4f4f),
@@ -397,6 +402,26 @@ pub(crate) fn open_file(cx: &mut gpui_kit::App, path: &std::path::Path, mime: Op
     }
 }
 
+/// Opens a web address in the browser. Addresses come out of other people's messages, so only
+/// http and https ones go any further.
+pub(crate) fn open_link(cx: &mut gpui_kit::App, url: &str) {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return log::warn!("not a web address, not opened");
+    }
+    #[cfg(not(target_os = "android"))]
+    cx.open_url(url);
+    // gpui-mobile's `open_url` only logs.
+    #[cfg(target_os = "android")]
+    {
+        let _ = cx;
+        match android_files::browse(url) {
+            Ok(true) => {}
+            Ok(false) => log::warn!("no app opens web addresses"),
+            Err(e) => log::warn!("open link: {e}"),
+        }
+    }
+}
+
 /// Lets the user choose a file to send. `None` when cancelled or unreadable.
 pub(crate) fn pick_file(cx: &mut gpui_kit::App) -> gpui_kit::Task<Option<PathBuf>> {
     #[cfg(not(target_os = "android"))]
@@ -494,6 +519,25 @@ mod android_files {
                 jni::jni_str!("view"),
                 jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)Z"),
                 &[JValue::Object(&activity), JValue::Object(&path), JValue::Object(&mime)],
+            )
+            .and_then(|v| v.z())
+            .map_err(|e| {
+                env.exception_clear();
+                e.to_string()
+            })
+        })
+    }
+
+    pub fn browse(url: &str) -> Result<bool, String> {
+        helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, CLASS)?;
+            let url = env.new_string(url).map_err(|e| e.to_string())?;
+            env.call_static_method(
+                &class,
+                jni::jni_str!("browse"),
+                jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;)Z"),
+                &[JValue::Object(&activity), JValue::Object(&url)],
             )
             .and_then(|v| v.z())
             .map_err(|e| {

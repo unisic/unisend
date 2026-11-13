@@ -47,7 +47,7 @@ use matrix_sdk::{
             reaction::ReactionEventContent,
             relation::Annotation,
             room::{
-                MediaSource,
+                EncryptedFile, MediaSource,
                 message::{
                     AddMentions, MessageType, Relation, RoomMessageEventContent,
                     sanitize::remove_plain_reply_fallback,
@@ -133,6 +133,8 @@ pub enum Ev {
     CodeSent,
     /// Signed in as this user.
     Ready(OwnedUserId),
+    /// The connection to the server is lost (false) or back (true).
+    Online(bool),
     /// True while this device lacks the secrets needed to decrypt history.
     NeedRecovery(bool),
     Rooms(Vec<RoomSummary>),
@@ -240,8 +242,23 @@ pub struct Msg {
     pub mentions: Vec<std::ops::Range<usize>>,
     /// Someone else mentions the user, by name or with the whole room.
     pub mentioned: bool,
+    /// Preview of a link in the message, when the sender's client or bridge attached one.
+    pub link: Option<Link>,
     /// Filled by the UI from `Item::Reaction`.
     pub reactions: Vec<Reaction>,
+}
+
+/// A link's preview as it came with the message (`com.beeper.linkpreviews`, MSC4095). Nothing is
+/// fetched from the linked site.
+#[derive(Clone)]
+pub struct Link {
+    /// Always `http://` or `https://`.
+    pub url: String,
+    pub title: String,
+    pub description: String,
+    /// The site's name, or its host.
+    pub site: String,
+    pub image: Option<Media>,
 }
 
 impl Msg {
@@ -1256,6 +1273,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
     let settings = SyncSettings::default().filter(def.into()).token(token);
 
     let mut stream = std::pin::pin!(client.sync_stream(settings).await);
+    // Requests failed in a row.
+    let mut failed = 0u32;
     while let Some(resp) = stream.next().await {
         let resp = match resp {
             Ok(r) => r,
@@ -1266,13 +1285,20 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 return;
             }
             Err(e) => {
-                if ev.send(Ev::Error(format!("Sync failed, retrying: {e}"))).await.is_err() {
+                failed += 1;
+                log::warn!("sync: {}", plain(&e));
+                // One failed request is a blip (a tunnel, a change of network); two in a row is
+                // being offline. Either way it is retried, so it is a state to show, not an error.
+                if failed == OFFLINE_AFTER && ev.send(Ev::Online(false)).await.is_err() {
                     return;
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(retry_wait(failed)).await;
                 continue;
             }
         };
+        if std::mem::take(&mut failed) >= OFFLINE_AFTER && ev.send(Ev::Online(true)).await.is_err() {
+            return;
+        }
         let mut changed = Vec::new();
         for (id, update) in &resp.rooms.joined {
             let Some(room) = client.get_room(id) else { continue };
@@ -1351,6 +1377,26 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
     }
 }
 
+/// Failed syncs in a row after which the UI is told the connection is lost.
+const OFFLINE_AFTER: u32 = 2;
+
+/// How long to wait before the sync after `failed` failures in a row: 5 s doubling to a minute,
+/// so a phone without a network does not wake its radio every few seconds.
+fn retry_wait(failed: u32) -> Duration {
+    Duration::from_secs((5u64 << failed.saturating_sub(1).min(4)).min(60))
+}
+
+/// An error as text for a person: without the address of the request, which an HTTP error
+/// carries in full and nobody on the other side of the screen can use.
+pub(crate) fn plain(error: &dyn std::fmt::Display) -> String {
+    let mut text = error.to_string();
+    while let Some(start) = text.find(" for url (") {
+        let end = text[start..].find(')').map_or(text.len(), |at| start + at + 1);
+        text.replace_range(start..end, "");
+    }
+    text
+}
+
 pub(crate) const UTD: &str = "Unable to decrypt this message yet";
 pub(crate) const DELETED: &str = "Message deleted";
 
@@ -1364,6 +1410,7 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
         let Some(sender) = event.sender() else { continue };
         let (mut reply_to, mut deleted, mut media) = (None, false, None);
         let (mut mentions, mut mentioned) = (Vec::new(), false);
+        let mut link = None;
         // A deleted event in an encrypted room is an empty `m.room.encrypted`: nothing says whether
         // it was a message or a reaction, so it gets no placeholder.
         let body = if event.kind.is_utd() {
@@ -1391,6 +1438,7 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
                         // Older clients and bridges prepend the quoted message to the body.
                         let text = if reply_to.is_some() { remove_plain_reply_fallback(&text).to_owned() } else { text };
                         (mentions, mentioned) = marks(&text, &m.content.msgtype, m.content.mentions.as_ref(), &own);
+                        link = event.raw().get_field::<serde_json::Value>("content").ok().flatten().as_ref().and_then(link_preview);
                         text
                     }
                 },
@@ -1470,10 +1518,59 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
             notify: event.push_actions().is_some_and(|actions| actions.iter().any(|a| a.should_notify())),
             mentions,
             mentioned: mentioned && !own,
+            link,
             reactions: Vec::new(),
         }));
     }
     out
+}
+
+/// Longest title or description kept from a preview: it is someone else's text.
+const LINK_TEXT_MAX: usize = 300;
+
+/// The first usable link preview in a message's content.
+fn link_preview(content: &serde_json::Value) -> Option<Link> {
+    use serde_json::Value;
+    let previews = content.get("com.beeper.linkpreviews")?.as_array()?;
+    previews.iter().find_map(|p| {
+        let text = |key: &str| {
+            let value = p.get(key).and_then(Value::as_str).unwrap_or_default().trim();
+            value.chars().take(LINK_TEXT_MAX).collect::<String>()
+        };
+        // Widths come as numbers or as strings.
+        let number = |key: &str| p.get(key).and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok())).and_then(|n| u32::try_from(n).ok());
+        let url = [text("matched_url"), text("og:url")].into_iter().find(|u| u.starts_with("https://") || u.starts_with("http://"))?;
+        let (title, description) = (text("og:title"), text("og:description"));
+        let mxc = p.get("og:image").and_then(Value::as_str).filter(|u| u.starts_with("mxc://"));
+        // In an encrypted room the picture is an encrypted file, whose address may be given once.
+        let encrypted = p.get("beeper:image:encryption").filter(|v| v.is_object()).and_then(|file| {
+            let mut file = file.clone();
+            if file.get("url").is_none() {
+                file["url"] = mxc?.into();
+            }
+            serde_json::from_value::<EncryptedFile>(file).ok()
+        });
+        let source = match encrypted {
+            Some(file) => Some(MediaSource::Encrypted(Box::new(file))),
+            None => mxc.map(|uri| MediaSource::Plain(uri.into())),
+        };
+        if title.is_empty() && description.is_empty() && source.is_none() {
+            return None;
+        }
+        let host = url.split("://").nth(1).and_then(|rest| rest.split(['/', '?', '#']).next()).unwrap_or_default();
+        let site = Some(text("og:site_name")).filter(|s| !s.is_empty()).unwrap_or_else(|| host.trim_start_matches("www.").to_owned());
+        let image = source.map(|source| Media {
+            kind: MediaKind::Image,
+            name: String::new(),
+            size: None,
+            mime: Some(text("og:image:type")).filter(|m| !m.is_empty()),
+            dims: number("og:image:width").zip(number("og:image:height")),
+            duration: None,
+            source,
+            thumb: None,
+        });
+        Some(Link { url, title, description, site, image })
+    })
 }
 
 /// Where `body` mentions someone, and whether it mentions `own`. Matrix writes a mention twice:

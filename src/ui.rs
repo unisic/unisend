@@ -43,6 +43,9 @@ const NAV_W: f32 = 210.;
 const LIST_W: f32 = 384.;
 /// Widest a message and a sheet grow on a wide window.
 const BUBBLE_W: f32 = 560.;
+/// Widest a link's preview grows inside a message, and the tallest its picture is shown.
+const LINK_W: f32 = 300.;
+const LINK_PICTURE_H: f32 = 240.;
 /// On a phone, the share of the row a message may take.
 const BUBBLE_SHARE: f32 = 0.8;
 const SHEET_W: f32 = 480.;
@@ -53,6 +56,8 @@ const MENU_W: f32 = 6. * TAP + 16.;
 const MENU_GAP: f32 = 28.;
 /// How far a message is swiped sideways to reply to it.
 const SWIPE_REPLY: f32 = 56.;
+/// How far a message's reactions reach up over its bubble.
+const REACTION_LAP: f32 = 10.;
 /// The reaction a double tap gives.
 const LIKE: &str = QUICK_REACTIONS[1];
 /// A pause this long starts a new run of messages, with its own time.
@@ -115,6 +120,8 @@ pub struct BeeperApp {
     recovery: Entity<InputState>,
     composer: Entity<InputState>,
     need_recovery: bool,
+    /// The connection is lost and being retried.
+    offline: bool,
     /// Holds keyboard focus when no input does, so Escape (Android's back) still reaches the app.
     focus: FocusHandle,
     dir: PathBuf,
@@ -246,6 +253,7 @@ impl BeeperApp {
             recovery,
             composer,
             need_recovery: false,
+            offline: false,
             focus: cx.focus_handle(),
             dir,
             settings,
@@ -437,8 +445,9 @@ impl BeeperApp {
                 }
                 self.relate(relations);
             }
+            Ev::Online(online) => self.offline = !online,
             Ev::Error(e) => {
-                self.error = Some(e.into());
+                self.error = Some(crate::backend::plain(&e).into());
                 self.busy = false;
                 self.loading = false;
             }
@@ -598,13 +607,17 @@ impl BeeperApp {
     /// the command channel to user actions.
     fn want_thumb(&mut self, ix: usize) {
         let m = &self.msgs[ix];
-        let Some(media) = &m.media else { return };
-        let pictured = matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video);
-        if !pictured || self.asked.contains(&m.id) || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
-            return;
-        }
-        if self.cmd.try_send(Cmd::Thumbs(vec![(m.id.clone(), media.clone())])).is_ok() {
-            self.asked.insert(m.id.clone());
+        let pictured = m.media.as_ref().filter(|media| matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
+        let linked = m.link.as_ref().and_then(|link| link.image.as_ref());
+        let wanted: Vec<(String, Media)> =
+            pictured.map(|media| (m.id.clone(), media.clone())).into_iter().chain(linked.map(|image| (link_key(&m.id), image.clone()))).collect();
+        for (key, media) in wanted {
+            if self.asked.contains(&key) || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
+                continue;
+            }
+            if self.cmd.try_send(Cmd::Thumbs(vec![(key.clone(), media)])).is_ok() {
+                self.asked.insert(key);
+            }
         }
     }
 
@@ -1134,6 +1147,51 @@ impl BeeperApp {
                 let (id, held) = (m.id.clone(), m.id.clone());
                 let swiped = this.swipe.as_ref().filter(|(on, _)| *on == m.id).map_or(0., |(_, far)| far.clamp(-SWIPE_REPLY - 16., SWIPE_REPLY + 16.));
                 let ink = HighlightStyle { color: Some(p.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
+                let underline = HighlightStyle { underline: Some(UnderlineStyle { thickness: px(1.), ..Default::default() }), ..Default::default() };
+                let mut marks: Vec<_> = m.mentions.iter().map(|r| (r.clone(), ink)).collect();
+                let apart = |u: &std::ops::Range<usize>| m.mentions.iter().all(|r| r.end <= u.start || u.end <= r.start);
+                marks.extend(urls(&m.body).into_iter().filter(apart).map(|r| (r, underline)));
+                marks.sort_by_key(|(r, _)| r.start);
+                // The preview its sender attached to a link; a touch opens the link.
+                let link_card = m.link.as_ref().filter(|_| !m.deleted).map(|link| {
+                    let url = link.url.clone();
+                    let width = room.min(LINK_W);
+                    let picture = link.image.as_ref().map(|image| {
+                        let (w, h) = image.dims.unwrap_or((1200, 630));
+                        // The picture's own shape; one taller than the limit is cut to it, since a
+                        // picture drawn to cover its box is not clipped by it.
+                        let height = (width * h.max(1) as f32 / w.max(1) as f32).clamp(60., LINK_PICTURE_H);
+                        div().w_full().h(px(height)).overflow_hidden().map(|el| match this.thumbs.get(&link_key(&m.id)) {
+                            Some(thumb) => el.child(img(thumb.clone()).size_full().rounded_t(px(12.)).object_fit(ObjectFit::Cover)),
+                            None => el,
+                        })
+                    });
+                    let line = |size: f32, height: f32| div().text_size(px(size)).line_height(px(height));
+                    v_flex()
+                        .id(SharedString::from(format!("{}-link", m.id)))
+                        .w(px(width))
+                        .rounded(px(12.))
+                        .bg(p.text.opacity(0.07))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            crate::open_link(cx, &url);
+                        }))
+                        .children(picture)
+                        .child(
+                            v_flex()
+                                .px(px(10.))
+                                .py(px(8.))
+                                .gap(px(2.))
+                                .child(line(12., 16.).text_color(p.faint).truncate().child(link.site.clone()))
+                                .when(!link.title.is_empty(), |el| {
+                                    el.child(line(14., 19.).font_weight(FontWeight::SEMIBOLD).line_clamp(2).text_ellipsis().child(link.title.clone()))
+                                })
+                                .when(!link.description.is_empty(), |el| {
+                                    el.child(line(13., 18.).text_color(p.muted).line_clamp(3).text_ellipsis().child(link.description.clone()))
+                                }),
+                        )
+                });
                 let bubble = v_flex()
                     .id(SharedString::from(m.id.clone()))
                     // Without this a flex child is as wide as its longest line and leaves the screen.
@@ -1175,9 +1233,10 @@ impl BeeperApp {
                                 .text_size(px(16.))
                                 .line_height(px(22.))
                                 .when(faded, |el| el.italic().text_color(p.faint))
-                                .child(StyledText::new(m.body.clone()).with_highlights(m.mentions.iter().map(|r| (r.clone(), ink)))),
+                                .child(StyledText::new(m.body.clone()).with_highlights(marks)),
                         )
                     })
+                    .children(link_card)
                     .when(m.edited && !m.deleted, |el| el.child(div().text_size(px(12.)).text_color(p.faint).child("Edited")));
                 // One chip per emoji, in order of first use.
                 let mut chips: Vec<(&str, usize, bool)> = Vec::new();
@@ -1187,18 +1246,24 @@ impl BeeperApp {
                         None => chips.push((&r.key, 1, r.own)),
                     }
                 }
+                // Badges pinned over the bubble's lower edge, ringed in the ground's colour: standing
+                // free under it they read as small messages of their own.
                 let reactions = (!chips.is_empty()).then(|| {
-                    h_flex().flex_wrap().gap(px(4.)).pt(px(4.)).children(chips.into_iter().enumerate().map(|(n, (key, count, mine))| {
+                    h_flex().flex_wrap().gap(px(2.)).mt(px(-REACTION_LAP)).px(px(8.)).children(chips.into_iter().enumerate().map(|(n, (key, count, mine))| {
                         let (id, key_owned) = (m.id.clone(), key.to_owned());
                         h_flex()
                             .id(SharedString::from(format!("{}-reaction-{n}", m.id)))
-                            .h(px(32.))
-                            .px(px(10.))
-                            .gap(px(5.))
+                            .h(px(28.))
+                            .px(px(7.))
+                            .gap(px(4.))
                             .rounded_full()
-                            .bg(if mine { p.raised } else { p.surface })
+                            .border_2()
+                            // The user's own reaction is the ringed one.
+                            .border_color(if mine { p.text } else { p.ground })
+                            .bg(p.lifted)
                             .text_size(px(13.))
-                            .text_color(if mine { p.text } else { p.muted })
+                            .line_height(px(18.))
+                            .font_weight(FontWeight::MEDIUM)
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, &key_owned, cx)))
                             .child(key.to_owned())
@@ -1435,6 +1500,7 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let m = self.msgs.iter().find(|m| Some(&m.id) == self.picked.as_ref()).filter(|m| !m.deleted)?;
         let (id, body, own) = (m.id.clone(), m.body.clone(), m.own);
+        let link = m.link.as_ref().map(|link| link.url.clone()).or_else(|| urls(&m.body).into_iter().next().map(|r| m.body[r].to_owned()));
         let reactions = h_flex().children(QUICK_REACTIONS.iter().enumerate().map(|(n, key)| {
             let id = id.clone();
             let mine = m.reactions.iter().any(|r| r.own && r.key == *key);
@@ -1478,6 +1544,14 @@ impl BeeperApp {
                     cx.notify();
                 }
             })));
+        }
+        if let Some(url) = link {
+            let open = menu_row("open-link", IconName::ExternalLink, "Open link", p.text, cx).on_click(cx.listener(move |this, _, _, cx| {
+                crate::open_link(cx, &url);
+                this.picked = None;
+                cx.notify();
+            }));
+            rows.insert(0, open);
         }
         // Under the finger when there is room, over it otherwise; never off the screen.
         let (top, bottom) = crate::insets();
@@ -1576,6 +1650,10 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let card = || v_flex().mx(px(GUTTER)).mt(px(8.)).p(px(GAP)).gap(px(10.)).rounded(px(RADIUS)).text_size(px(14.)).line_height(px(20.));
         v_flex()
+            // Being retried: a state, said quietly, that goes away by itself.
+            .when(self.offline, |el| {
+                el.child(div().h(px(28.)).flex().items_center().justify_center().text_size(px(12.)).text_color(p.faint).child("Connection lost. Reconnecting..."))
+            })
             .when(self.need_recovery, |el| {
                 el.child(
                     card()
@@ -1611,10 +1689,18 @@ impl BeeperApp {
             })
             .children(self.error.clone().map(|e| {
                 card().bg(p.surface).child(div().text_color(p.negative).child(e)).child(h_flex().justify_end().child(
-                    Button::new("dismiss-error").h(px(TAP)).px(px(GUTTER)).label("Dismiss").on_click(cx.listener(|this, _, _, cx| {
-                        this.error = None;
-                        cx.notify();
-                    })),
+                    h_flex()
+                        .id("dismiss-error")
+                        .h(px(TAP))
+                        .px(px(GUTTER + 4.))
+                        .rounded_full()
+                        .bg(p.raised)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.error = None;
+                            cx.notify();
+                        }))
+                        .child("Dismiss"),
                 ))
             }))
     }
@@ -1688,6 +1774,44 @@ fn chat_actions(room: &RoomSummary) -> [(&'static str, IconName, ChatAction); 5]
             ("Move to low priority", IconName::ChevronsDown, ChatAction::LowPriority(true))
         },
     ]
+}
+
+/// Where a link preview's picture is kept among the thumbnails.
+fn link_key(message: &str) -> String {
+    format!("{message}#link")
+}
+
+/// Byte ranges of the web addresses written in a text.
+fn urls(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find("http").map(|at| from + at) {
+        let rest = &text[at..];
+        let scheme = if rest.starts_with("https://") {
+            8
+        } else if rest.starts_with("http://") {
+            7
+        } else {
+            0
+        };
+        let len = rest.find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"')).unwrap_or(rest.len());
+        // Punctuation after an address ends the sentence, not the address.
+        let mut url = &rest[..len];
+        loop {
+            let cut = url.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'']);
+            let cut = if cut.ends_with(')') && !cut.contains('(') { &cut[..cut.len() - 1] } else { cut };
+            if cut.len() == url.len() {
+                break;
+            }
+            url = cut;
+        }
+        let inside_word = text[..at].ends_with(|c: char| c.is_alphanumeric());
+        if scheme > 0 && !inside_word && url.len() > scheme {
+            out.push(at..at + url.len());
+        }
+        from = at + len.max(4);
+    }
+    out
 }
 
 /// One action in a message's panel.
@@ -1995,8 +2119,17 @@ impl Render for BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{SWIPE_REPLY, swipe_step};
+    use super::{SWIPE_REPLY, swipe_step, urls};
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
+
+    #[test]
+    fn web_addresses_are_found_without_the_punctuation_around_them() {
+        let found = |text: &'static str| urls(text).into_iter().map(|r| &text[r]).collect::<Vec<_>>();
+        assert_eq!(found("see https://example.org/a?b=1, then (http://x.pl/ż)."), ["https://example.org/a?b=1", "http://x.pl/ż"]);
+        assert_eq!(found("https://en.wikipedia.org/wiki/Queen_(band)"), ["https://en.wikipedia.org/wiki/Queen_(band)"]);
+        assert_eq!(found("Zażółć https://a.pl! i xhttps://b.pl oraz https:// i http"), ["https://a.pl"]);
+        assert!(found("no address, just httpd").is_empty());
+    }
 
     #[test]
     fn only_a_sideways_pan_that_began_on_a_message_replies() {

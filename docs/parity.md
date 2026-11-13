@@ -59,7 +59,7 @@ is not started.
 | Images, stickers | done | inline thumbnail (800px at most), full-screen view (2048px); plain and encrypted |
 | Video, audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. No inline player |
 | Stickers, GIFs, custom emoji | todo | `m.sticker`, `fi.mau.gif`, `m.image_pack` |
-| Link previews | todo | `com.beeper.linkpreviews` |
+| Link previews | part | shows the preview that came with a message (`com.beeper.linkpreviews`); links are underlined and open in the browser. Does not make a preview for a link that has none, and attaches none to messages sent from here |
 | Formatted text, mentions, code blocks | part | mentions are drawn in the accent, a message that mentions the user is marked, and the chat list shows an `@` (from the HTML links and `m.mentions`; counted locally, a server cannot see into encrypted rooms). Bold, italics, links and code blocks: todo |
 | Send state (sending, sent, delivered, seen, failed) | todo | `com.beeper.message_send_status`, receipts |
 | Read receipts of others, typing | todo | `m.receipt`, `m.typing` |

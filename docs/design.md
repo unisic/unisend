@@ -62,6 +62,17 @@ message; the time is printed once under the run. A mention is accent text; a mes
 you carries an accent bar on its leading edge. Replies quote in a lighter inset; touching the
 quote goes to the message it quotes.
 
+Reactions are badges pinned over the lower edge of their message, on `lifted` (`#3d3d3d`, one
+step above `raised`) with a ring in the ground's colour; your own reaction has a white ring.
+Standing free under a message they read as small messages of their own.
+
+A link is underlined. When its sender attached a preview, the message carries a card: the
+picture in its own shape, the site, the title, two lines about it. Touching the card opens the
+link.
+
+A lost connection is a state, not an error: one quiet line at the top while it is retried, gone
+when it is back.
+
 ## Acting on things
 
 The common acts take one gesture, and each also has a slower way that can be found by looking.

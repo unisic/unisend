@@ -33,6 +33,16 @@ public final class Files {
         }
     }
 
+    /** Opens a web address in the browser. */
+    public static boolean browse(Activity activity, String url) {
+        try {
+            activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+            return true;
+        } catch (ActivityNotFoundException e) {
+            return false;
+        }
+    }
+
     /**
      * Copies a picked document into the cache under its own name and returns the path, or null
      * when it cannot be read. Each pick gets a directory; ones older than an hour are removed.
