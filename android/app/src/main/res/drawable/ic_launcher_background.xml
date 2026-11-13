@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Launcher icon ground: an evening sky around #8006da, deeper toward the bottom, with a warm glow
-     low on the horizon. Colours match SKY_STOPS and GLOW in packaging/icon/murmuration.py. -->
+<!-- Launcher icon ground: an evening sky from #8006da at the top to near black violet at the bottom,
+     with a faint warm glow low on the horizon. Colours match SKY_STOPS and GLOW in
+     packaging/icon/murmuration.py. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
@@ -10,18 +11,18 @@
     <path android:pathData="M0,0h108v108h-108Z">
         <aapt:attr name="android:fillColor">
             <gradient android:type="linear" android:startX="54" android:startY="0" android:endX="54" android:endY="108">
-                <item android:offset="0" android:color="#FF8A12E0" />
-                <item android:offset="0.5" android:color="#FF8006DA" />
-                <item android:offset="1" android:color="#FF3C0080" />
+                <item android:offset="0" android:color="#FF8006DA" />
+                <item android:offset="0.55" android:color="#FF4C0196" />
+                <item android:offset="1" android:color="#FF24004A" />
             </gradient>
         </aapt:attr>
     </path>
-    <!-- The glow is an ellipse 72 by 26 around (54, 104): a circle squashed by the group. -->
-    <group android:pivotX="54" android:pivotY="104" android:scaleY="0.3611">
-        <path android:pathData="M-18,32h144v144h-144Z">
+    <!-- The glow is an ellipse 64 by 16 around (54, 112): a circle squashed by the group. -->
+    <group android:pivotX="54" android:pivotY="112" android:scaleY="0.25">
+        <path android:pathData="M-10,48h128v128h-128Z">
             <aapt:attr name="android:fillColor">
-                <gradient android:type="radial" android:centerX="54" android:centerY="104" android:gradientRadius="72"
-                    android:startColor="#6BD65AA8" android:endColor="#00D65AA8" />
+                <gradient android:type="radial" android:centerX="54" android:centerY="112" android:gradientRadius="64"
+                    android:startColor="#52C2479E" android:endColor="#00C2479E" />
             </aapt:attr>
         </path>
     </group>
