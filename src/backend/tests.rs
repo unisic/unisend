@@ -12,6 +12,14 @@ use matrix_sdk::ruma::events::{reaction::ReactionEventContent, relation::Annotat
 
 use super::*;
 
+/// A suffix no other test in this run or an earlier one uses: tests running side by side start in
+/// the same millisecond, and two of them creating the same user fails with "User ID already taken".
+fn tag() -> String {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    format!("{ms}x{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
 fn jwt(secret: &str, sub: &str) -> String {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
     let payload = URL_SAFE_NO_PAD.encode(serde_json::json!({ "sub": sub }).to_string());
@@ -109,7 +117,7 @@ fn bodies(msgs: &[Msg]) -> Vec<String> {
 async fn login_sync_decrypt_send_recover() {
     let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
     let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
-    let tag = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let tag = tag();
     let root = std::env::temp_dir().join(format!("beeper-gpui-test-{tag}"));
     let (alice_name, bob_name) = (format!("alice{tag}"), format!("bob{tag}"));
 
@@ -419,7 +427,7 @@ async fn gui_fixture() {
     let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
     let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
     let out = PathBuf::from(std::env::var("GUI_FIXTURE_DIR").expect("GUI_FIXTURE_DIR"));
-    let tag = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let tag = tag();
     let store = std::env::temp_dir().join(format!("beeper-gpui-fixture-{tag}"));
     let http = reqwest::Client::new();
 
@@ -623,7 +631,7 @@ async fn register_with_password(hs: &str, secret: &str, name: &str, password: &s
 async fn password_login_restore_sign_out() {
     let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
     let secret = std::env::var("MATRIX_TEST_REGISTRATION_SECRET").expect("MATRIX_TEST_REGISTRATION_SECRET");
-    let tag = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let tag = tag();
     let root = std::env::temp_dir().join(format!("beeper-gpui-password-{tag}"));
     let (name, password) = (format!("carol{tag}"), format!("pw-{tag}-not-for-production"));
     register_with_password(&hs, &secret, &name, &password).await;
@@ -925,14 +933,14 @@ fn slow_hop(homeserver: &str, delay: Duration) -> String {
 async fn rows_arrive_while_quoted_messages_are_looked_up() {
     let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
     let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
-    let tag = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let tag = tag();
     let root = std::env::temp_dir().join(format!("beeper-gpui-slow-{tag}"));
     const REPLIES: usize = 30;
     let rtt = Duration::from_millis(200);
 
     let (mut alice, mut seat) = state(root.join("alice"), &slow_hop(&hs, rtt));
     alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
-    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready(_)).then_some(())).await;
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
     let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
     let mut data = JsonObject::new();
     data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
@@ -973,8 +981,9 @@ async fn rows_arrive_while_quoted_messages_are_looked_up() {
     let late = sent.elapsed();
     let replies = bodies(&seat.rows).iter().filter(|b| b.starts_with("reply")).count();
     eprintln!("new message on screen after {late:?}, with {replies} replies on screen");
-    // A sync answer is a round trip or two; one lookup per quoted message is many.
-    assert!(late < rtt * 4, "the new message took {late:?}");
+    // A sync answer is a round trip or two; one lookup per quoted message is thirty. The margin is
+    // for a homeserver busy with the other tests running alongside.
+    assert!(late < rtt * 8, "the new message took {late:?}");
 }
 
 /// The SDK empties its store of events when it upgrades it, and builds before the timeline kept
@@ -984,12 +993,12 @@ async fn rows_arrive_while_quoted_messages_are_looked_up() {
 async fn a_chat_opens_at_once_after_the_store_lost_its_events() {
     let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
     let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
-    let tag = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let tag = tag();
     let root = std::env::temp_dir().join(format!("beeper-gpui-emptied-{tag}"));
 
     let (mut alice, mut seat) = state(root.join("alice"), &hs);
     alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
-    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready(_)).then_some(())).await;
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
     let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
     let mut data = JsonObject::new();
     data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
@@ -1020,7 +1029,7 @@ async fn a_chat_opens_at_once_after_the_store_lost_its_events() {
     }
     let (mut alice, mut seat) = state(root.join("alice"), &hs);
     assert!(alice.restore().await.unwrap());
-    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready(_)).then_some(())).await;
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
 
     let opened = tokio::time::Instant::now();
     alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
