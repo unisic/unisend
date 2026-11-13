@@ -226,6 +226,8 @@ pub struct Msg {
     pub edited: bool,
     /// Attachment; `body` is then its caption, possibly empty.
     pub media: Option<Media>,
+    /// The account's push rules ask for a notification (false when they were not evaluated).
+    pub notify: bool,
     /// Filled by the UI from `Item::Reaction`.
     pub reactions: Vec<Reaction>,
 }
@@ -494,6 +496,7 @@ impl State {
             }
             Cmd::Open(room_id) => {
                 self.open = Some((room_id.clone(), None));
+                crate::clear_notification(room_id.as_str());
                 let newest = self.page(room_id.clone(), true).await?;
                 if let Err(e) = mark_read(&self.room(&room_id)?, newest, self.incognito).await {
                     log::warn!("mark {room_id} read: {e:#}");
@@ -895,6 +898,31 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>) -> Result<()
     Ok(())
 }
 
+/// Text of the notification these new items call for: the newest message from someone else that
+/// the account's push rules ask to be notified of (they cover mutes and mentions-only chats).
+fn notification(summary: &RoomSummary, items: &[Item]) -> Option<String> {
+    let m = items.iter().rev().find_map(|i| match i {
+        Item::Msg(m) if m.notify && !m.own => Some(m),
+        _ => None,
+    })?;
+    Some(if summary.dm { m.summary() } else { format!("{}: {}", m.sender, m.summary()) })
+}
+
+/// Notifies while the window is not in front; clears the chat's notification once it has been
+/// read somewhere.
+fn announce(summary: &RoomSummary, prev: Option<&RoomSummary>, items: &[Item]) {
+    let chat = summary.id.as_str();
+    if summary.unread == 0 && prev.is_some_and(|p| p.unread > 0) {
+        crate::clear_notification(chat);
+    }
+    if crate::FOREGROUND.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(text) = notification(summary, items) {
+        crate::notify(chat, &summary.name, &text);
+    }
+}
+
 /// Ends a background task with the task that owns it.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
@@ -1241,6 +1269,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 dated,
             };
             let summary = summarize(&room, &notif, peer, seen).await;
+            announce(&summary, prev.as_ref(), &items);
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
             changed.push(summary);
             if !items.is_empty() && ev.send(Ev::Live { room: id.clone(), items }).await.is_err() {
@@ -1384,6 +1413,7 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
             deleted,
             edited: false,
             media,
+            notify: event.push_actions().is_some_and(|actions| actions.iter().any(|a| a.should_notify())),
             reactions: Vec::new(),
         }));
     }

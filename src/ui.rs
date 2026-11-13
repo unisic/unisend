@@ -175,6 +175,9 @@ impl BeeperApp {
         }));
 
         subs.push(cx.observe_window_appearance(window, |_, window, cx| crate::sync_theme(Some(window), cx)));
+        subs.push(cx.observe_window_activation(window, |_, window, _| {
+            crate::FOREGROUND.store(window.is_window_active(), std::sync::atomic::Ordering::Relaxed);
+        }));
 
         let timeline = ListState::new(0, ListAlignment::Bottom, px(800.));
         let weak = cx.entity().downgrade();
@@ -269,6 +272,7 @@ impl BeeperApp {
             }
             ev @ (Ev::Networks(_) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
             Ev::Ready(user) => {
+                crate::background(true);
                 self.user = Some(user);
                 self.send(Cmd::Incognito(self.settings.incognito), cx);
                 self.screen = Screen::Main;

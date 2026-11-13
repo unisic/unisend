@@ -88,8 +88,8 @@ is not started.
 
 | Feature | Status | Protocol |
 |---|---|---|
-| Notifications, badge, sounds | todo | push (FCM on Android), local on desktop |
-| Background sync on Android | todo | foreground service |
+| Notifications | part | Android: one per chat for messages the push rules ask about, while the app is not in front; cleared when the chat is read. No sounds per chat, no reply from the notification, tapping opens the app but not the chat. Desktop: none |
+| Background connection on Android | part | a foreground service keeps the process connected while the app is in the background; it ends when the app is swiped away, and Android's Doze can delay it. No push (FCM) |
 | Settings | part | theme (dark by default), incognito, chat networks, sign out; kept locally, not in `com.beeper.desktop.prefs`. Beeper's chat list, notification, shortcut and AI settings: todo |
 | Incognito mode | done | on: `m.read.private`; off: `m.read`. On by default |
 | Command bar, hotkeys | todo | local |

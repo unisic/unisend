@@ -200,6 +200,7 @@ impl BeeperApp {
             .child(section("Account", cx).child(
                 row("Beeper", &self.user.as_ref().map(ToString::to_string).unwrap_or_default(), cx).child(
                     Button::new("sign-out").danger().label("Sign out").on_click(cx.listener(|this, _, _, cx| {
+                        crate::background(false);
                         this.panel = None;
                         this.send(Cmd::SignOut, cx);
                     })),

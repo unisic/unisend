@@ -328,6 +328,41 @@ pub(crate) fn pick_file(cx: &mut gpui_kit::App) -> gpui_kit::Task<Option<PathBuf
     })
 }
 
+/// Whether the window is in front. Notifications are for when it is not.
+pub(crate) static FOREGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Starts or stops staying connected in the background (Android: a foreground service, which
+/// also asks for the notification permission). Desktop stays connected while it runs.
+pub(crate) fn background(on: bool) {
+    #[cfg(target_os = "android")]
+    if let Err(e) = android_files::notify(if on { "start" } else { "stop" }, &[]) {
+        log::warn!("background connection: {e}");
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+/// Shows a message notification for a chat; a newer one for the same chat replaces it.
+/// shortcut: Android only, desktop has none yet; add them through the platform's notification
+/// service when the desktop app is used day to day.
+pub(crate) fn notify(chat: &str, title: &str, text: &str) {
+    #[cfg(target_os = "android")]
+    if let Err(e) = android_files::notify("message", &[chat, title, text]) {
+        log::warn!("notification: {e}");
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (chat, title, text);
+}
+
+pub(crate) fn clear_notification(chat: &str) {
+    #[cfg(target_os = "android")]
+    if let Err(e) = android_files::notify("clear", &[chat]) {
+        log::warn!("notification: {e}");
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = chat;
+}
+
 /// Signs in to a chat network in a browser and returns its cookies as `name=value; ...`.
 /// Desktop has no embedded browser: it opens the page in the system's, and the user pastes the
 /// cookies; so it returns nothing.
@@ -409,6 +444,36 @@ mod android_files {
                     e.to_string()
                 })?;
             Ok((!cookies.is_null()).then(|| helpers::get_string(env, &cookies)))
+        })
+    }
+
+    /// Calls a `void` static method of `dev.gpui.beeper.Notify` taking the activity and up to
+    /// three strings.
+    pub fn notify(method: &str, args: &[&str]) -> Result<(), String> {
+        helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, "dev.gpui.beeper.Notify")?;
+            let mut strings = Vec::with_capacity(args.len());
+            for arg in args {
+                strings.push(env.new_string(arg).map_err(|e| e.to_string())?);
+            }
+            let mut values = vec![JValue::Object(&activity)];
+            values.extend(strings.iter().map(|s| JValue::Object(s)));
+            let name = jni::strings::JNIString::new(method);
+            let called = match args.len() {
+                0 => env.call_static_method(&class, &name, jni::jni_sig!("(Landroid/app/Activity;)V"), &values),
+                1 => env.call_static_method(&class, &name, jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;)V"), &values),
+                _ => env.call_static_method(
+                    &class,
+                    &name,
+                    jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"),
+                    &values,
+                ),
+            };
+            called.map(|_| ()).map_err(|e| {
+                env.exception_clear();
+                e.to_string()
+            })
         })
     }
 

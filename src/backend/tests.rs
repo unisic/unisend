@@ -134,7 +134,7 @@ async fn login_sync_decrypt_send_recover() {
         _ => None,
     })
     .await;
-    assert!(matches!(live.iter().find(|i| matches!(i, Item::Msg(_))), Some(Item::Msg(m)) if !m.own && !m.sender.is_empty()));
+    assert!(matches!(live.iter().find(|i| matches!(i, Item::Msg(_))), Some(Item::Msg(m)) if !m.own && !m.sender.is_empty() && m.notify));
 
     // History path: Open returns the message (decrypted) and the edit targeting it.
     alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
@@ -557,4 +557,48 @@ fn file_names_stay_in_their_directory() {
     assert_eq!(safe_name("holiday photo.png"), "holiday photo.png");
     assert_eq!(safe_name(".."), "file");
     assert_eq!(safe_name("$abc:beeper.com"), "_abc_beeper.com");
+}
+
+#[test]
+fn notifications_follow_the_push_rules() {
+    let msg = |sender: &str, own, notify| {
+        Item::Msg(Msg {
+            id: "$e".into(),
+            sender: sender.into(),
+            from: matrix_sdk::ruma::user_id!("@a:example.org").to_owned(),
+            body: "hello".into(),
+            own,
+            ts: 1,
+            order: 0,
+            reply_to: None,
+            deleted: false,
+            edited: false,
+            media: None,
+            notify,
+            reactions: Vec::new(),
+        })
+    };
+    let chat = |dm| RoomSummary {
+        id: matrix_sdk::ruma::room_id!("!r:example.org").to_owned(),
+        name: "Trip".into(),
+        preview: None,
+        ts: 1,
+        network: None,
+        unread: 1,
+        dm,
+        pinned: false,
+        low_priority: false,
+        muted: false,
+        marked_unread: false,
+        archived: false,
+        order: 0,
+        dated: true,
+    };
+    assert_eq!(notification(&chat(false), &[msg("Ann", false, true)]).as_deref(), Some("Ann: hello"));
+    assert_eq!(notification(&chat(true), &[msg("Ann", false, true)]).as_deref(), Some("hello"));
+    // Muted or mentions-only chats, and one's own messages from another device.
+    assert_eq!(notification(&chat(false), &[msg("Ann", false, false)]), None);
+    assert_eq!(notification(&chat(false), &[msg("Me", true, true)]), None);
+    // The newest that qualifies, past ones that do not.
+    assert_eq!(notification(&chat(false), &[msg("Ann", false, true), msg("Me", true, true)]).as_deref(), Some("Ann: hello"));
 }
