@@ -336,9 +336,11 @@ pub(crate) fn web_login(cx: &mut gpui_kit::App, wanted: &bridges::Cookies) -> gp
         domains.sort_unstable();
         domains.dedup();
         let domains = domains.join(",");
+        let required: Vec<String> = wanted.fields.iter().filter(|f| f.required).flat_map(|f| &f.cookies).map(|c| format!("{}@{}", c.0, c.1)).collect();
+        let required = required.join(",");
         // Blocks until the browser closes, so off the UI thread.
         cx.background_spawn(async move {
-            android_files::web_login(&url, &agent, &pattern, &domains).map_err(|e| log::warn!("web login: {e}")).ok()?
+            android_files::web_login(&url, &agent, &pattern, &domains, &required).map_err(|e| log::warn!("web login: {e}")).ok()?
         })
     }
 }
@@ -371,18 +373,18 @@ mod android_files {
         })
     }
 
-    pub fn web_login(url: &str, agent: &str, pattern: &str, domains: &str) -> Result<Option<String>, String> {
+    pub fn web_login(url: &str, agent: &str, pattern: &str, domains: &str, required: &str) -> Result<Option<String>, String> {
         helpers::with_env(|env| {
             let activity = helpers::activity(env)?;
             let class = helpers::find_app_class(env, "dev.gpui.beeper.WebLogin")?;
             let mut text = |s: &str| env.new_string(s).map_err(|e| e.to_string());
-            let (url, agent, pattern, domains) = (text(url)?, text(agent)?, text(pattern)?, text(domains)?);
+            let (url, agent, pattern, domains, required) = (text(url)?, text(agent)?, text(pattern)?, text(domains)?, text(required)?);
             let cookies = env
                 .call_static_method(
                     &class,
                     jni::jni_str!("run"),
                     jni::jni_sig!(
-                        "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+                        "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
                     ),
                     &[
                         JValue::Object(&activity),
@@ -390,6 +392,7 @@ mod android_files {
                         JValue::Object(&agent),
                         JValue::Object(&pattern),
                         JValue::Object(&domains),
+                        JValue::Object(&required),
                     ],
                 )
                 .and_then(|v| v.l())

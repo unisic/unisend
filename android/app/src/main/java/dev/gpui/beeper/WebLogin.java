@@ -15,9 +15,11 @@ import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 /**
- * A browser for signing in to a chat network. It closes when the address matches the pattern the
- * bridge gave, and hands back that site's cookies, which is what the bridge logs in with.
- * {@link #run} is called from Rust over JNI and blocks until the page is done or closed.
+ * A browser for signing in to a chat network. It closes once the address matches the pattern the
+ * bridge gave and the cookies the bridge needs exist, and hands back the site's cookies, which is
+ * what the bridge logs in with. The pattern alone is not enough: Messenger's also matches its own
+ * sign-in and captcha pages. {@link #run} is called from Rust over JNI and blocks until then, or
+ * until the user closes the page.
  */
 public final class WebLogin extends Activity {
     private static CountDownLatch latch;
@@ -26,17 +28,21 @@ public final class WebLogin extends Activity {
     private static String userAgent;
     private static Pattern done;
     private static String[] domains;
+    /** "name@domain" for each cookie the bridge cannot do without. */
+    private static String[] required;
 
     private WebView web;
 
     /** Returns "name=value; ..." for the given domains, or null when there are no cookies. */
-    public static String run(Activity activity, String url, String agent, String pattern, String domainList) {
+    public static String run(
+            Activity activity, String url, String agent, String pattern, String domainList, String requiredList) {
         CountDownLatch wait = new CountDownLatch(1);
         latch = wait;
         result = null;
         startUrl = url;
         userAgent = agent;
         domains = domainList.isEmpty() ? new String[0] : domainList.split(",");
+        required = requiredList.isEmpty() ? new String[0] : requiredList.split(",");
         try {
             done = pattern.isEmpty() ? null : Pattern.compile(pattern);
         } catch (PatternSyntaxException e) {
@@ -116,9 +122,38 @@ public final class WebLogin extends Activity {
     }
 
     private void check(String url) {
-        if (done != null && url != null && !url.equals(startUrl) && done.matcher(url).find()) {
+        boolean arrived = done == null || (url != null && done.matcher(url).find());
+        if (arrived && required.length > 0 && hasRequiredCookies()) {
             finish();
         }
+    }
+
+    private static boolean hasRequiredCookies() {
+        for (String cookie : required) {
+            int at = cookie.indexOf('@');
+            String name = at < 0 ? cookie : cookie.substring(0, at);
+            String jar = at < 0 ? "" : cookies(cookie.substring(at + 1));
+            if (!("; " + jar).contains("; " + name + "=")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The domain's cookies as "name=value; ...", whether set for the bare domain or for www. */
+    private static String cookies(String domain) {
+        CookieManager manager = CookieManager.getInstance();
+        StringBuilder all = new StringBuilder();
+        for (String host : new String[] {domain, "www." + domain}) {
+            String jar = manager.getCookie("https://" + host);
+            if (jar != null && !jar.isEmpty()) {
+                if (all.length() > 0) {
+                    all.append("; ");
+                }
+                all.append(jar);
+            }
+        }
+        return all.toString();
     }
 
     @Override
@@ -132,12 +167,11 @@ public final class WebLogin extends Activity {
 
     @Override
     protected void onDestroy() {
-        CookieManager cookies = CookieManager.getInstance();
-        cookies.flush();
+        CookieManager.getInstance().flush();
         StringBuilder all = new StringBuilder();
         for (String domain : domains) {
-            String jar = cookies.getCookie("https://" + domain);
-            if (jar != null && !jar.isEmpty()) {
+            String jar = cookies(domain);
+            if (!jar.isEmpty()) {
                 if (all.length() > 0) {
                     all.append("; ");
                 }
