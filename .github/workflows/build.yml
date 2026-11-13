@@ -97,7 +97,7 @@ jobs:
           lipo -create -output dist/beeper-gpui target/aarch64-apple-darwin/release/beeper-gpui target/x86_64-apple-darwin/release/beeper-gpui
           lipo -info dist/beeper-gpui
           packaging/macos/bundle.sh dist/beeper-gpui dist
-          ditto -c -k --keepParent dist/Beeper.app beeper-gpui-macos-universal.zip
+          ditto -c -k --keepParent dist/Murmur.app beeper-gpui-macos-universal.zip
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: beeper-gpui-macos-universal

@@ -1,7 +1,8 @@
-# beeper-gpui
+# Murmur
 
-Beeper chat client in Rust: [GPUI](https://www.gpui.rs) via gpui-kit for the UI,
-gpui-mobile for Android, matrix-sdk against `matrix.beeper.com`.
+Murmur (crate and binary `beeper-gpui`) is a chat client for Beeper accounts, in
+Rust: [GPUI](https://www.gpui.rs) via gpui-kit for the UI, gpui-mobile for
+Android, matrix-sdk against `matrix.beeper.com`.
 
 Login uses Beeper's email-code flow (`api.beeper.com/user/login`, same as
 `bbctl`), then Matrix JWT login. Encrypted history is unlocked with the Beeper

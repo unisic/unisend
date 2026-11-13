@@ -1,18 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Splash screen icon: a simple GPUI logo placeholder.
-     Used as windowSplashScreenAnimatedIcon on API 31+ and as
-     a centered drawable in the splash layer-list on API < 31. -->
+<!-- Splash icon: the launcher mark; at the splash size it sits inside the 192 dp circle. Master: packaging/icon/. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Rounded rectangle background -->
-    <path
-        android:fillColor="#6366F1"
-        android:pathData="M20,20h68a8,8 0,0 1,8 8v52a8,8 0,0 1,-8 8h-68a8,8 0,0 1,-8,-8v-52a8,8 0,0 1,8,-8z" />
-    <!-- "G" letter -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M54,42h-8v12h4v-4h4a8,8 0,1 0,0,-8zM54,46h-4v-2h4a1,1 0,0 1,0 2z" />
+    <group>
+        <clip-path android:pathData="M35.68,62.7A23.5,23.5 0 1 1 46.5,73.52Q37.63,69.19 30.6,75.99Q37.19,65.81 35.68,62.7Z" />
+        <path
+            android:fillColor="#FFC6F24E"
+            android:pathData="M27.3,20.9H86.3L86.3,37.6C63.88,44.74 45,33.86 27.3,41ZM27.3,45.2C45,38.06 63.88,48.94 86.3,41.8L86.3,48.6C63.88,55.74 45,44.86 27.3,52ZM27.3,56.2C45,49.06 63.88,59.94 86.3,52.8L86.3,59.6C63.88,66.74 45,55.86 27.3,63ZM27.3,67.2C45,60.06 63.88,70.94 86.3,63.8V95.65H27.3Z" />
+    </group>
 </vector>

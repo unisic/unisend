@@ -17,7 +17,7 @@ public final class SyncService extends Service {
         Notify.channels(this);
         Notification notification = new Notification.Builder(this, Notify.CONNECTION)
                 .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
-                .setContentTitle("Beeper")
+                .setContentTitle("Murmur")
                 .setContentText("Connected for new messages")
                 .setOngoing(true)
                 .build();

@@ -77,7 +77,9 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     let (cmd, events) = backend::start(dir.clone());
     let options = WindowOptions {
         window_bounds,
-        titlebar: Some(TitlebarOptions { title: Some("Beeper".into()), ..Default::default() }),
+        titlebar: Some(TitlebarOptions { title: Some("Murmur".into()), ..Default::default() }),
+        // Wayland app id; matches packaging/linux/dev.gpui.beeper.desktop so the shell finds the icon.
+        app_id: Some("dev.gpui.beeper".into()),
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, dir, settings, window, cx)))

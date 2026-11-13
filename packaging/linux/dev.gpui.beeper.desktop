@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Murmur
+Comment=Chat client for Beeper accounts
+Exec=beeper-gpui
+Icon=dev.gpui.beeper
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+StartupWMClass=dev.gpui.beeper

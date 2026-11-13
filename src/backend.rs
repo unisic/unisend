@@ -652,7 +652,7 @@ impl State {
         client
             .matrix_auth()
             .login_custom("org.matrix.login.jwt", data)?
-            .initial_device_display_name("Beeper GPUI")
+            .initial_device_display_name("Murmur")
             .await?;
         let session = client.matrix_auth().session().ok_or_else(|| anyhow!("Login returned no session"))?;
         write_private(&self.session_path(), &serde_json::to_vec(&SavedSession { session })?)?;

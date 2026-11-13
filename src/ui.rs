@@ -865,7 +865,7 @@ impl BeeperApp {
                     .w_full()
                     .max_w(px(360.))
                     .gap(px(GAP))
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(p.faint).child("Beeper"))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(p.faint).child("Murmur"))
                     .child(screen_title(title))
                     .child(div().pb(px(8.)).text_size(px(14.)).line_height(px(20.)).text_color(p.muted).child(hint))
                     .child(Input::new(input).large())
@@ -973,7 +973,7 @@ impl BeeperApp {
                 .h_full()
                 .px(px(8.))
                 .gap(px(2.))
-                .child(h_flex().h(px(BAR_H)).px(px(GAP)).text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Beeper"))
+                .child(h_flex().h(px(BAR_H)).px(px(GAP)).text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Murmur"))
                 .children(items)
         }
     }

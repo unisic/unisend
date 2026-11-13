@@ -1,0 +1,56 @@
+#!/bin/sh
+# Regenerates every raster icon from the SVG masters in this directory.
+# Needs ImageMagick 7 built with librsvg, and python3 (for the .icns container).
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+root="$here/../.."
+res="$root/android/app/src/main/res"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# Renders an SVG at high density, then downsamples, so small sizes stay sharp.
+png() { magick -density 1200 -background none "$1" -resize "$2x$2" -strip "PNG32:$3"; }
+
+for s in 48 128 256 512; do
+    mkdir -p "$root/packaging/linux/icons/hicolor/${s}x${s}/apps"
+    png "$here/icon.svg" "$s" "$root/packaging/linux/icons/hicolor/${s}x${s}/apps/dev.gpui.beeper.png"
+done
+mkdir -p "$root/packaging/linux/icons/hicolor/scalable/apps"
+cp "$here/icon.svg" "$root/packaging/linux/icons/hicolor/scalable/apps/dev.gpui.beeper.svg"
+
+for s in 16 24 32 48 64 128 256; do png "$here/icon.svg" "$s" "$tmp/ico-$s.png"; done
+# PNG-compressed entries (Windows Vista and later); ImageMagick would store them as raw bitmaps.
+python3 - "$tmp" "$root/packaging/windows/icon.ico" <<'PY'
+import struct, sys
+tmp, out = sys.argv[1], sys.argv[2]
+sizes = [16, 24, 32, 48, 64, 128, 256]
+data = [open(f"{tmp}/ico-{s}.png", "rb").read() for s in sizes]
+head = struct.pack("<HHH", 0, 1, len(sizes))
+offset = len(head) + 16 * len(sizes)
+for s, d in zip(sizes, data):
+    head += struct.pack("<BBBBHHII", s % 256, s % 256, 0, 0, 1, 32, len(d), offset)
+    offset += len(d)
+open(out, "wb").write(head + b"".join(data))
+PY
+
+# ImageMagick cannot write ICNS; the container is a header plus PNG chunks keyed by OSType.
+for s in 16 32 64 128 256 512 1024; do png "$here/icon.svg" "$s" "$tmp/icns-$s.png"; done
+python3 - "$tmp" "$root/packaging/macos/Murmur.icns" <<'PY'
+import struct, sys
+tmp, out = sys.argv[1], sys.argv[2]
+types = [("icp4", 16), ("icp5", 32), ("icp6", 64), ("ic07", 128), ("ic08", 256), ("ic09", 512),
+         ("ic10", 1024), ("ic11", 32), ("ic12", 64), ("ic13", 256), ("ic14", 512)]
+body = b""
+for ostype, size in types:
+    data = open(f"{tmp}/icns-{size}.png", "rb").read()
+    body += ostype.encode() + struct.pack(">I", 8 + len(data)) + data
+open(out, "wb").write(b"icns" + struct.pack(">I", 8 + len(body)) + body)
+PY
+
+for d in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+    n=${d%%:*}; s=${d##*:}; h=$((s / 2))
+    png "$here/icon.svg" "$s" "$res/mipmap-$n/ic_launcher.png"
+    magick -density 1200 -background black "$here/foreground.svg" -flatten -resize "${s}x${s}" \
+        \( -size "${s}x${s}" xc:black -fill white -draw "circle $h,$h $h,0" \) \
+        -alpha off -compose CopyOpacity -composite -strip "PNG32:$res/mipmap-$n/ic_launcher_round.png"
+done

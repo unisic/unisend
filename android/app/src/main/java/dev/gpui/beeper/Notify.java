@@ -175,8 +175,8 @@ public final class Notify {
         long now = System.currentTimeMillis();
         NotificationCompat.MessagingStyle.Message line = sent
                 ? new NotificationCompat.MessagingStyle.Message(text, now, old.getUser())
-                : new NotificationCompat.MessagingStyle.Message("Not sent. Open Beeper and try again.", now,
-                        new Person.Builder().setName("Beeper").setKey("beeper").build());
+                : new NotificationCompat.MessagingStyle.Message("Not sent. Open Murmur and try again.", now,
+                        new Person.Builder().setName("Murmur").setKey("beeper").build());
         NotificationCompat.MessagingStyle style = extend(old, old.getConversationTitle() == null ? null
                 : old.getConversationTitle().toString(), old.isGroupConversation(), line);
         Bundle extras = shown.getNotification().extras;
@@ -276,7 +276,7 @@ public final class Notify {
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         manager.notify(SUMMARY, 0, new NotificationCompat.Builder(context, MESSAGES)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
-                .setContentTitle("Beeper")
+                .setContentTitle("Murmur")
                 .setContentText(chats == 1 ? "1 chat has new messages" : chats + " chats have new messages")
                 .setGroup(GROUP)
                 .setGroupSummary(true)
