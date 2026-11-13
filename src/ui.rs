@@ -898,9 +898,11 @@ impl BeeperApp {
                 .bg(if on { chip } else { bar })
                 .shadow_lg()
                 .cursor_pointer()
+                // Floats over the list: without this a tap also opens the chat underneath.
+                .occlude()
                 .child(Icon::new(icon).size_5())
         };
-        let sections = h_flex().h(px(BAR_H)).p(px(4.)).gap(px(4.)).rounded_full().bg(bar).shadow_lg().children(
+        let sections = h_flex().h(px(BAR_H)).p(px(4.)).gap(px(4.)).rounded_full().bg(bar).shadow_lg().occlude().children(
             VIEWS.iter().enumerate().map(|(ix, &(view, label, _, icon))| {
                 div()
                     .id(label)
@@ -1498,6 +1500,7 @@ impl Render for BeeperApp {
                         .justify_center()
                         .bg(gpui_kit::black().opacity(0.94))
                         .text_color(gpui_kit::white())
+                        .occlude()
                         .on_click(cx.listener(|this, _, _, cx| this.close_viewer(cx)))
                         .map(|el| match shown {
                             Some(image) => el.child(img(image).size_full().object_fit(ObjectFit::Contain)),
