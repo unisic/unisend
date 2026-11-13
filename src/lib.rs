@@ -454,16 +454,48 @@ pub(crate) fn background(on: bool) {
     let _ = on;
 }
 
-/// Shows a message notification for a chat; a newer one for the same chat replaces it.
+/// A message for a chat's notification.
+#[cfg_attr(not(target_os = "android"), expect(dead_code, reason = "only Android shows notifications"))]
+pub(crate) struct Notice<'a> {
+    pub chat: &'a str,
+    pub name: &'a str,
+    pub group: bool,
+    /// Path of the chat's picture, or empty.
+    pub icon: &'a str,
+    pub note: &'a backend::Note,
+    /// False for all but the last of messages that arrive together: one sound for them.
+    pub alert: bool,
+}
+
+/// Adds a message to the chat's notification, which shows the last few messages of the chat.
 /// shortcut: Android only, desktop has none yet; add them through the platform's notification
 /// service when the desktop app is used day to day.
-pub(crate) fn notify(chat: &str, title: &str, text: &str) {
+pub(crate) fn notify(notice: &Notice) {
     #[cfg(target_os = "android")]
-    if let Err(e) = android_files::notify("message", &[chat, title, text]) {
+    if let Err(e) = android_files::message(notice) {
         log::warn!("notification: {e}");
     }
     #[cfg(not(target_os = "android"))]
-    let _ = (chat, title, text);
+    let _ = notice;
+}
+
+/// The chat a tapped notification asked to open, once.
+pub(crate) fn pending_chat() -> Option<String> {
+    #[cfg(target_os = "android")]
+    return android_files::pending_chat().unwrap_or_else(|e| {
+        log::warn!("notification chat: {e}");
+        None
+    });
+    #[cfg(not(target_os = "android"))]
+    None
+}
+
+/// Opens the system's page for the app's notification sounds and importance, where there is one.
+pub(crate) fn notification_settings() {
+    #[cfg(target_os = "android")]
+    if let Err(e) = android_files::notify("settings", &[]) {
+        log::warn!("notification settings: {e}");
+    }
 }
 
 pub(crate) fn clear_notification(chat: &str) {
@@ -580,6 +612,62 @@ mod android_files {
 
     /// Calls a `void` static method of `dev.gpui.beeper.Notify` taking the activity and up to
     /// three strings.
+    /// Adds a message to a chat's conversation notification.
+    pub fn message(notice: &crate::Notice) -> Result<(), String> {
+        helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, "dev.gpui.beeper.Notify")?;
+            let mut text = |s: &str| env.new_string(s).map_err(|e| e.to_string());
+            let (chat, name, sender, body, icon) =
+                (text(notice.chat)?, text(notice.name)?, text(&notice.note.sender)?, text(&notice.note.text)?, text(notice.icon)?);
+            env.call_static_method(
+                &class,
+                jni::jni_str!("message"),
+                jni::jni_sig!(
+                    "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;Ljava/lang/String;JZLjava/lang/String;Z)V"
+                ),
+                &[
+                    JValue::Object(&activity),
+                    JValue::Object(&chat),
+                    JValue::Object(&name),
+                    JValue::Bool(notice.group),
+                    JValue::Object(&sender),
+                    JValue::Object(&body),
+                    JValue::Long(i64::try_from(notice.note.ts).unwrap_or(i64::MAX)),
+                    JValue::Bool(notice.note.mention),
+                    JValue::Object(&icon),
+                    JValue::Bool(notice.alert),
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| {
+                env.exception_clear();
+                e.to_string()
+            })
+        })
+    }
+
+    /// The chat the notification that opened the app asked for, taken from the activity's intent.
+    pub fn pending_chat() -> Result<Option<String>, String> {
+        helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, "dev.gpui.beeper.Notify")?;
+            let chat = env
+                .call_static_method(
+                    &class,
+                    jni::jni_str!("takeChat"),
+                    jni::jni_sig!("(Landroid/app/Activity;)Ljava/lang/String;"),
+                    &[JValue::Object(&activity)],
+                )
+                .and_then(|v| v.l())
+                .map_err(|e| {
+                    env.exception_clear();
+                    e.to_string()
+                })?;
+            Ok((!chat.is_null()).then(|| helpers::get_string(env, &chat)))
+        })
+    }
+
     pub fn notify(method: &str, args: &[&str]) -> Result<(), String> {
         helpers::with_env(|env| {
             let activity = helpers::activity(env)?;
@@ -648,6 +736,42 @@ pub(crate) fn insets() -> (f32, f32) {
     }
     #[allow(unreachable_code)]
     (0., 0.)
+}
+
+/// Entry points the Java side of notifications calls: the reply box and the mark-as-read button.
+#[cfg(target_os = "android")]
+mod from_java {
+    use std::ffi::c_void;
+
+    use gpui_mobile::android::jni::{get_string, with_env};
+    use jni::objects::JObject;
+
+    fn text(env: &mut jni::Env<'_>, raw: *mut c_void) -> String {
+        let obj = unsafe { JObject::from_raw(env, raw as jni::sys::jobject) };
+        get_string(env, &obj)
+    }
+
+    /// # Safety
+    /// Called by the JVM with valid string references.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_beeper_Notify_nativeReply(
+        _env: *mut c_void,
+        _class: *mut c_void,
+        chat: *mut c_void,
+        body: *mut c_void,
+    ) -> u8 {
+        let Ok((chat, body)) = with_env(|env| Ok((text(env, chat), text(env, body)))) else { return 0 };
+        u8::from(crate::backend::reply(&chat, &body))
+    }
+
+    /// # Safety
+    /// Called by the JVM with a valid string reference.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_beeper_Notify_nativeRead(_env: *mut c_void, _class: *mut c_void, chat: *mut c_void) {
+        if let Ok(chat) = with_env(|env| Ok(text(env, chat))) {
+            crate::backend::read_from_notification(&chat);
+        }
+    }
 }
 
 #[cfg(test)]

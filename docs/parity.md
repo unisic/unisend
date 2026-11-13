@@ -19,7 +19,7 @@ is not started.
 | Chat networks: list, sign in, sign out | part | cloud bridges only: `api.beeper.com/whoami`, `POST /bridge/{name}/start`, then the bridge's mautrix provisioning API (`/v3/whoami`, `login/flows`, `login/start`, `login/step`, `logout`) proxied at `matrix.beeper.com/_matrix/client/unstable/com.beeper.bridge/{name}/`. Steps: form fields, QR or code, browser cookies (in-app browser on Android, paste on desktop). Not yet: cookie sources other than cookies, re-login of a broken account, Beeper's browser-session import |
 | On-device bridges | todo | Beeper runs local mautrix bridges inside the client |
 | Multiple accounts, account filter, spaces bar | todo | `m.space`, `com.beeper.chat_list_rules` |
-| Connection state (offline, syncing, reconnect) | part | sync errors are shown; no dedicated indicator |
+| Connection state (offline, syncing, reconnect) | part | one quiet line while the connection is lost and retried (5 s doubling to 60 s); no syncing indicator |
 
 ## Chat list
 
@@ -88,7 +88,7 @@ is not started.
 
 | Feature | Status | Protocol |
 |---|---|---|
-| Notifications | part | Android: one per chat for messages the push rules ask about, while the app is not in front; cleared when the chat is read. No sounds per chat, no reply from the notification, tapping opens the app but not the chat. Desktop: none |
+| Notifications | part | Android: one conversation notification per chat (last 8 messages, who wrote each, the chat's picture), reply box and Mark as read on the notification, a tap opens that chat, several chats fold under one line. Direct messages, group chats and mentions are separate channels (sounds set in the system's page, linked from Settings). Only for messages the push rules ask about, only while the app is not in front, cleared when the chat is read anywhere. Reply and Mark as read need the app's process: after the app is swiped away they do nothing. Desktop: none |
 | Background connection on Android | part | a foreground service keeps the process connected while the app is in the background; it ends when the app is swiped away, and Android's Doze can delay it. No push (FCM) |
 | Settings | part | theme (dark by default), incognito, chat networks, sign out; kept locally, not in `com.beeper.desktop.prefs`. Beeper's chat list, notification, shortcut and AI settings: todo |
 | Incognito mode | done | on: `m.read.private`; off: `m.read`. On by default |
@@ -99,6 +99,52 @@ is not started.
 | Feedback, help hub, subscription banners | todo | Beeper services |
 | Emoji rendering | part | bundled bitmap Noto Color Emoji (GPUI cannot draw COLRv1). On Linux, emoji that a system text font also holds (the heart U+2764 among them) draw as that font's outline: cosmic-text asks DejaVu Sans before the emoji font |
 | Windows, macOS builds | todo | GPUI targets, not built or tested |
+
+## Per network
+
+What the bridges for the networks in daily use send or accept, against what this client does.
+Bridge features are from the mautrix roadmaps (whatsapp, signal, meta, which serves both
+Messenger and Instagram); what the client does is from this file and the source. "Shown" means the
+conversation displays it.
+
+Verified in the source: a poll (`m.poll.start`) is skipped, so it does not appear at all; a
+location shows only "Location", without coordinates or a map link; typing, read receipts of others
+and membership changes are not read. Everything else below is a gap by the rows above.
+
+| Feature | WhatsApp | Signal | Messenger | Instagram | Client |
+|---|---|---|---|---|---|
+| Replies, reactions, deletes | yes | yes | yes | yes | done |
+| Edits, mentions | no | yes | yes | yes | done |
+| Images, video, files, voice notes | yes | yes | yes | yes | shown; no inline player |
+| Polls and votes | yes | yes | groups | no | not shown |
+| Locations | yes | to Signal only | from Messenger only | no | text only, no coordinates |
+| Contact cards | from WhatsApp | from Signal | no | no | not checked |
+| Disappearing messages | no | yes | no | no | timer not shown |
+| Typing, read receipts of others | yes | yes | yes | yes | not shown |
+| GIFs, stickers received | not listed | yes | yes | yes | stickers shown; no picker |
+| Story, reel and profile shares | no | no | yes | stories | not checked how they arrive |
+| Group changes (title, avatar, members) | yes | yes | yes | yes | not shown |
+| Group admin from Matrix | invite, leave, kick | all but join | invite, kick, rename | rename | none |
+| History of an old chat | yes | no | unencrypted only | yes | only what the bridge sent |
+
+The last row matters for Messenger: the meta bridge's roadmap lists reading the chat backup of
+encrypted Messenger chats as not done, which is why their history does not come over.
+Message state (sent, delivered, failed) and message requests are not in the bridge roadmaps; they
+are from Beeper's own feature list and not checked against these bridges.
+
+## Next, by what a daily user of these networks would notice
+
+1. Typing and read receipts of others, and message state (sent, delivered, failed): the live feel
+   of a chat, and whether a message left. M.
+2. Message requests and invitations: a first message from someone new on Messenger or Instagram
+   may not show up at all. M.
+3. Rich text: bold, italics, links, code (every network). M.
+4. Inline playback for voice notes, audio and video, and recording voice notes. M each.
+5. Polls (show, vote) and locations (coordinates, open in maps). M and S.
+6. Mentions autocomplete; forward; paste and drag and drop attachments. S each.
+7. Disappearing-message timer shown. S.
+8. New chat from a contact, chat info and group admin. L.
+9. Notifications on the desktop, and without the app running (needs Google's push, FCM). L.
 
 ## How Beeper stores chat state
 

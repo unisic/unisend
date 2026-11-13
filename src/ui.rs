@@ -223,8 +223,12 @@ impl BeeperApp {
         }));
 
         subs.push(cx.observe_window_appearance(window, |_, window, cx| crate::sync_theme(Some(window), cx)));
-        subs.push(cx.observe_window_activation(window, |_, window, _| {
-            crate::FOREGROUND.store(window.is_window_active(), std::sync::atomic::Ordering::Relaxed);
+        subs.push(cx.observe_window_activation(window, |this, window, cx| {
+            let active = window.is_window_active();
+            crate::FOREGROUND.store(active, std::sync::atomic::Ordering::Relaxed);
+            if active {
+                this.open_from_notification(cx);
+            }
         }));
 
         let timeline = ListState::new(0, ListAlignment::Bottom, px(800.));
@@ -326,6 +330,8 @@ impl BeeperApp {
             ev @ (Ev::Networks(_) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
             Ev::Ready(user) => {
                 crate::background(true);
+                // The app may have been started by a tap on a notification.
+                self.open_from_notification(cx);
                 self.user = Some(user);
                 self.send(Cmd::Incognito(self.settings.incognito), cx);
                 self.screen = Screen::Main;
@@ -781,6 +787,23 @@ impl BeeperApp {
         };
         self.picked = None;
         self.send(cmd, cx);
+    }
+
+    /// Opens the chat a tapped notification was for.
+    fn open_from_notification(&mut self, cx: &mut Context<Self>) {
+        if self.screen != Screen::Main {
+            return;
+        }
+        let Some(chat) = crate::pending_chat() else { return };
+        match OwnedRoomId::try_from(chat) {
+            Ok(id) => {
+                self.panel = None;
+                self.chat_sheet = None;
+                self.open_room(id, cx);
+                cx.notify();
+            }
+            Err(e) => log::warn!("notification chat: {e}"),
+        }
     }
 
     fn open_room(&mut self, id: OwnedRoomId, cx: &mut Context<Self>) {

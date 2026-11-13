@@ -46,6 +46,11 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Reply box and mark-as-read button of a message notification. -->
+        <receiver
+            android:name="dev.gpui.beeper.NotifyReceiver"
+            android:exported="false" />
+
         <!-- Browser for signing in to a chat network; see WebLogin. -->
         <activity
             android:name="dev.gpui.beeper.WebLogin"

@@ -208,6 +208,21 @@ impl BeeperApp {
         v_flex()
             .gap(px(GAP * 2.))
             .child(section("Appearance", cx).child(card(cx).child(row("Theme", "", cx).child(themes))))
+            .when(cfg!(target_os = "android"), |el| {
+                el.child(section("Notifications", cx).child(card(cx).child(
+                    row("Sounds and importance", "Direct messages, group chats and mentions each have their own.", cx).child(
+                        h_flex()
+                            .id("notification-settings")
+                            .h(px(TAP))
+                            .px(px(GAP))
+                            .rounded_full()
+                            .bg(Palette::of(cx).raised)
+                            .cursor_pointer()
+                            .on_click(|_, _, _| crate::notification_settings())
+                            .child("Change"),
+                    ),
+                )))
+            })
             .child(section("Privacy", cx).child(card(cx).child(
                 row("Incognito", "Others do not see that you have read their messages.", cx).child(incognito),
             )))

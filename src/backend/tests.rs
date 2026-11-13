@@ -609,33 +609,19 @@ fn notifications_follow_the_push_rules() {
             reactions: Vec::new(),
         })
     };
-    let chat = |dm| RoomSummary {
-        id: matrix_sdk::ruma::room_id!("!r:example.org").to_owned(),
-        name: "Trip".into(),
-        preview: None,
-        ts: 1,
-        network: None,
-        unread: 1,
-        mentions: 0,
-        dm,
-        pinned: false,
-        low_priority: false,
-        muted: false,
-        marked_unread: false,
-        archived: false,
-        order: 0,
-        dated: true,
-    };
     let now = 60_000;
-    assert_eq!(notification(&chat(false), &[msg("Ann", false, true)], now).as_deref(), Some("Ann: hello"));
-    assert_eq!(notification(&chat(true), &[msg("Ann", false, true)], now).as_deref(), Some("hello"));
+    let said = |items: &[Item]| notes(items, now).into_iter().map(|n| format!("{}: {}", n.sender, n.text)).collect::<Vec<_>>();
+    assert_eq!(said(&[msg("Ann", false, true)]), ["Ann: hello"]);
     // Muted or mentions-only chats, and one's own messages from another device.
-    assert_eq!(notification(&chat(false), &[msg("Ann", false, false)], now), None);
-    assert_eq!(notification(&chat(false), &[msg("Me", true, true)], now), None);
-    // The newest that qualifies, past ones that do not.
-    assert_eq!(notification(&chat(false), &[msg("Ann", false, true), msg("Me", true, true)], now).as_deref(), Some("Ann: hello"));
+    assert!(said(&[msg("Ann", false, false)]).is_empty());
+    assert!(said(&[msg("Me", true, true)]).is_empty());
+    // Those that qualify, oldest first, past the ones that do not.
+    assert_eq!(said(&[msg("Ann", false, true), msg("Me", true, true), msg("Bob", false, true)]), ["Ann: hello", "Bob: hello"]);
+    // A burst keeps its last few.
+    let burst: Vec<Item> = (0..10).map(|_| msg("Ann", false, true)).collect();
+    assert_eq!(said(&burst).len(), MAX_NOTES);
     // History a bridge brings in later is not news.
-    assert_eq!(notification(&chat(false), &[msg("Ann", false, true)], now + 3_600_000), None);
+    assert!(notes(&[msg("Ann", false, true)], now + 3_600_000).is_empty());
 }
 
 #[test]

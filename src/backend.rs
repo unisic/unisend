@@ -318,8 +318,31 @@ pub enum Item {
     Redact { target: String },
 }
 
+/// The command channel, for what happens outside the UI: a reply typed into a notification.
+#[cfg(target_os = "android")]
+static COMMANDS: std::sync::OnceLock<mpsc::Sender<Cmd>> = std::sync::OnceLock::new();
+
+/// Sends a message from a notification's reply box. False when the app is not signed in.
+#[cfg(target_os = "android")]
+pub(crate) fn reply(chat: &str, body: &str) -> bool {
+    log::info!("notification: reply to {chat}");
+    let (body, Ok(room)) = (body.trim(), OwnedRoomId::try_from(chat)) else { return false };
+    !body.is_empty() && COMMANDS.get().is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None }).is_ok())
+}
+
+/// Marks a chat read from its notification.
+#[cfg(target_os = "android")]
+pub(crate) fn read_from_notification(chat: &str) {
+    log::info!("notification: mark {chat} read");
+    if let (Some(tx), Ok(room)) = (COMMANDS.get(), OwnedRoomId::try_from(chat)) {
+        let _ = tx.try_send(Cmd::Chat(room, ChatAction::Unread(false)));
+    }
+}
+
 pub fn start(dir: PathBuf) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Ev>) {
     let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_CAP);
+    #[cfg(target_os = "android")]
+    let _ = COMMANDS.set(cmd_tx.clone());
     let (ev_tx, ev_rx) = mpsc::channel(CHANNEL_CAP);
     std::thread::Builder::new()
         .name("matrix".into())
@@ -941,21 +964,46 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>) -> Result<()
     Ok(())
 }
 
-/// Text of the notification these new items call for: the newest message from someone else that
-/// the account's push rules ask to be notified of (they cover mutes and mentions-only chats).
+/// One message to put in a chat's notification.
+#[cfg_attr(not(target_os = "android"), expect(dead_code, reason = "only Android shows notifications"))]
+pub(crate) struct Note {
+    pub sender: String,
+    pub text: String,
+    pub ts: u64,
+    pub mention: bool,
+}
+
+/// Most messages of one sync a notification is given; it shows the last few of a chat anyway.
+const MAX_NOTES: usize = 6;
+/// How long to wait for a chat's picture before notifying without it.
+const ICON_WAIT: Duration = Duration::from_secs(3);
+
+/// The messages these new items call for a notification of, oldest first: those from someone else
+/// that the account's push rules ask to be notified of (they cover mutes and mentions-only chats).
 /// Old messages do not count: a bridge bringing in history sends them through sync too.
-fn notification(summary: &RoomSummary, items: &[Item], now_ms: i64) -> Option<String> {
+fn notes(items: &[Item], now_ms: i64) -> Vec<Note> {
     let recent = |m: &Msg| now_ms - (m.ts as i64) < NOTIFY_WINDOW.as_millis() as i64;
-    let m = items.iter().rev().find_map(|i| match i {
-        Item::Msg(m) if m.notify && !m.own && recent(m) => Some(m),
-        _ => None,
-    })?;
-    Some(if summary.dm { m.summary() } else { format!("{}: {}", m.sender, m.summary()) })
+    let mut found: Vec<Note> = items
+        .iter()
+        .rev()
+        .filter_map(|i| match i {
+            Item::Msg(m) if m.notify && !m.own && recent(m) => {
+                Some(Note { sender: m.sender.clone(), text: m.summary(), ts: m.ts, mention: m.mentioned })
+            }
+            _ => None,
+        })
+        .take(MAX_NOTES)
+        .collect();
+    found.reverse();
+    found
 }
 
 /// Notifies while the window is not in front; clears the chat's notification once it has been
-/// read somewhere.
-fn announce(summary: &RoomSummary, prev: Option<&RoomSummary>, items: &[Item]) {
+/// read somewhere. Only Android has notifications.
+fn announce(client: &Client, dir: &Path, summary: &RoomSummary, prev: Option<&RoomSummary>, items: &[Item]) {
+    if !cfg!(target_os = "android") {
+        return;
+    }
     let chat = summary.id.as_str();
     if summary.unread == 0 && prev.is_some_and(|p| p.unread > 0) {
         crate::clear_notification(chat);
@@ -963,9 +1011,31 @@ fn announce(summary: &RoomSummary, prev: Option<&RoomSummary>, items: &[Item]) {
     if crate::FOREGROUND.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    if let Some(text) = notification(summary, items, now_ms()) {
-        crate::notify(chat, &summary.name, &text);
+    let notes = notes(items, now_ms());
+    if notes.is_empty() {
+        return;
     }
+    let (client, dir, summary) = (client.clone(), dir.to_owned(), summary.clone());
+    // Off the sync loop: the picture may have to be fetched.
+    tokio::spawn(async move {
+        let icon = tokio::time::timeout(ICON_WAIT, notification_icon(&client, &dir, &summary.id)).await.ok().flatten();
+        let icon = icon.as_deref().and_then(Path::to_str).unwrap_or_default();
+        for (n, note) in notes.iter().enumerate() {
+            let alert = n + 1 == notes.len();
+            crate::notify(&crate::Notice { chat: summary.id.as_str(), name: &summary.name, group: !summary.dm, icon, note, alert });
+        }
+    });
+}
+
+/// The chat's picture as a file Android can read, one small file per chat that has notified.
+async fn notification_icon(client: &Client, dir: &Path, room: &RoomId) -> Option<PathBuf> {
+    let bytes = avatar(client, room).await.ok()??;
+    let folder = dir.join("notify");
+    std::fs::create_dir_all(&folder).ok()?;
+    let name: String = room.as_str().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let path = folder.join(name);
+    write_private(&path, &bytes).ok()?;
+    Some(path)
 }
 
 /// Unread messages that mention the user, counted here because a server cannot see into
@@ -1345,7 +1415,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
             };
             let mut summary = summarize(&room, &notif, peer, seen).await;
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &items);
-            announce(&summary, prev.as_ref(), &items);
+            announce(&client, &dir, &summary, prev.as_ref(), &items);
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
             changed.push(summary);
             if !items.is_empty() && ev.send(Ev::Live { room: id.clone(), items }).await.is_err() {
