@@ -33,6 +33,8 @@ fn state(dir: PathBuf, hs: &str) -> (State, mpsc::Receiver<Ev>) {
         rooms: Rooms::default(),
         fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)),
         notif: None,
+        incognito: true,
+        tasks: Vec::new(),
     };
     (st, rx)
 }
@@ -95,7 +97,7 @@ async fn login_sync_decrypt_send_recover() {
     // Alice goes through the production login path.
     let (mut alice, mut alice_rx) = state(root.join("alice"), &hs);
     alice.login_jwt(jwt(&secret, &alice_name)).await.unwrap();
-    wait_for(&mut alice_rx, "Ready", |e| matches!(e, Ev::Ready).then_some(())).await;
+    wait_for(&mut alice_rx, "Ready", |e| matches!(e, Ev::Ready(_)).then_some(())).await;
     assert!(root.join("alice/session.json").exists());
 
     // Bob is a plain matrix-sdk client.

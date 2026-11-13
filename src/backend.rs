@@ -64,6 +64,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::beeper;
+use crate::bridges::{self, Flow, Network, Step};
 
 const CHANNEL_CAP: usize = 64;
 const PAGE: u32 = 40;
@@ -97,6 +98,17 @@ pub enum Cmd {
     /// Download to the media cache so the system can open it.
     Fetch(String, Media),
     Attach { room: OwnedRoomId, path: PathBuf, reply_to: Option<String> },
+    /// Chat networks on the account.
+    Networks,
+    /// Ways to log in to a bridge; starts the bridge when the account does not run it yet.
+    Flows(String),
+    LoginStart { bridge: String, flow: String },
+    /// Answers a login step; the values are empty for a step that only waits.
+    LoginSubmit(Step, HashMap<String, String>),
+    Logout { bridge: String, login: String },
+    /// Read receipts stay private while on.
+    Incognito(bool),
+    SignOut,
     /// Re-read the latest message of rooms whose preview is missing or undecryptable.
     Previews(Vec<OwnedRoomId>),
     /// `reply_to` and `edit` are event IDs; an edit replaces that message's text.
@@ -109,7 +121,8 @@ pub enum Cmd {
 pub enum Ev {
     NeedLogin,
     CodeSent,
-    Ready,
+    /// Signed in as this user.
+    Ready(OwnedUserId),
     /// True while this device lacks the secrets needed to decrypt history.
     NeedRecovery(bool),
     Rooms(Vec<RoomSummary>),
@@ -127,6 +140,11 @@ pub enum Ev {
     Fetched(String, Option<PathBuf>),
     /// An attachment finished uploading, or failed.
     Attached,
+    Networks(Vec<Network>),
+    Flows(String, Vec<Flow>),
+    LoginStep(Step),
+    /// A request made for the settings pages failed; `Error` carries the reason.
+    PanelFailed,
     Error(String),
 }
 
@@ -248,6 +266,8 @@ pub struct Reaction {
     pub own: bool,
 }
 
+// Nearly every item is a message, so boxing it would add an allocation to the common case.
+#[allow(clippy::large_enum_variant)]
 pub enum Item {
     Msg(Msg),
     Edit { target: String, body: String },
@@ -300,6 +320,9 @@ struct State {
     fetches: Arc<tokio::sync::Semaphore>,
     /// Push rules, kept current by the SDK. One instance: each registers an event handler.
     notif: Option<NotificationSettings>,
+    incognito: bool,
+    /// Sync and recovery watchers, stopped on sign-out.
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 /// Room summaries, shared by the sync loop and preview refreshes. Never held across an await.
@@ -320,7 +343,8 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         .unwrap_or_else(|| beeper::HOMESERVER_URL.to_owned());
     let _ = std::fs::remove_dir_all(media_dir(&dir));
     let mut st = State { dir, homeserver, http, ev, client: None, login_request: None, open: None,
-        rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None };
+        rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
+        incognito: true, tasks: Vec::new() };
     match st.restore().await {
         Ok(true) => {}
         Ok(false) => st.emit(Ev::NeedLogin).await,
@@ -384,12 +408,17 @@ impl State {
     }
 
     async fn go_live(&mut self, client: Client) {
-        tokio::spawn(watch_recovery(client.clone(), self.ev.clone()));
         let notif = client.notification_settings().await;
-        tokio::spawn(sync_loop(client.clone(), notif.clone(), self.dir.clone(), self.rooms.clone(), self.ev.clone()));
+        self.tasks = vec![
+            tokio::spawn(watch_recovery(client.clone(), self.ev.clone())),
+            tokio::spawn(sync_loop(client.clone(), notif.clone(), self.dir.clone(), self.rooms.clone(), self.ev.clone())),
+        ];
         self.notif = Some(notif);
+        let user = client.user_id().map(ToOwned::to_owned);
         self.client = Some(client);
-        self.emit(Ev::Ready).await;
+        if let Some(user) = user {
+            self.emit(Ev::Ready(user)).await;
+        }
     }
 
     async fn login_jwt(&mut self, jwt: String) -> Result<()> {
@@ -455,7 +484,7 @@ impl State {
             Cmd::Open(room_id) => {
                 self.open = Some((room_id.clone(), None));
                 let newest = self.page(room_id.clone(), true).await?;
-                if let Err(e) = mark_read(&self.room(&room_id)?, newest).await {
+                if let Err(e) = mark_read(&self.room(&room_id)?, newest, self.incognito).await {
                     log::warn!("mark {room_id} read: {e:#}");
                 }
             }
@@ -472,7 +501,7 @@ impl State {
                     ChatAction::Unread(true) => room.set_unread_flag(true).await?,
                     ChatAction::Unread(false) => {
                         let resp = room.messages(MessagesOptions::backward()).await?;
-                        mark_read(&room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned)).await?;
+                        mark_read(&room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito).await?;
                     }
                     ChatAction::Mute(on) => {
                         let notif = self.notif.as_ref().context("Not signed in")?;
@@ -497,7 +526,7 @@ impl State {
                         room.set_account_data_raw(DONE.into(), Raw::new(&done)?.cast_unchecked()).await?;
                         // Without a server order the rule compares timestamps, which never archive an unread chat.
                         if order.is_none() || mark_read_on_archive(self.client()?).await {
-                            mark_read(&room, newest.and_then(|e| e.event_id()).map(ToOwned::to_owned)).await?;
+                            mark_read(&room, newest.and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito).await?;
                         }
                     }
                 }
@@ -583,6 +612,54 @@ impl State {
                     let _ = ev.send(Ev::Attached).await;
                 });
             }
+            Cmd::Incognito(on) => self.incognito = on,
+            Cmd::Networks => {
+                let (api, ev) = (self.api()?, self.ev.clone());
+                tokio::spawn(async move { panel(&ev, api.networks().await.map(Ev::Networks)).await });
+            }
+            Cmd::Flows(bridge) => {
+                let (api, ev) = (self.api()?, self.ev.clone());
+                tokio::spawn(async move {
+                    panel(&ev, api.flows(&bridge).await.map(|flows| Ev::Flows(bridge, flows))).await;
+                });
+            }
+            Cmd::LoginStart { bridge, flow } => {
+                let (api, ev) = (self.api()?, self.ev.clone());
+                tokio::spawn(async move { panel(&ev, api.start(&bridge, &flow).await.map(Ev::LoginStep)).await });
+            }
+            Cmd::LoginSubmit(step, values) => {
+                let (api, ev) = (self.api()?, self.ev.clone());
+                tokio::spawn(async move { panel(&ev, api.submit(&step, &values).await.map(Ev::LoginStep)).await });
+            }
+            Cmd::Logout { bridge, login } => {
+                let (api, ev) = (self.api()?, self.ev.clone());
+                tokio::spawn(async move {
+                    let done = async {
+                        api.logout(&bridge, &login).await?;
+                        api.networks().await
+                    };
+                    panel(&ev, done.await.map(Ev::Networks)).await;
+                });
+            }
+            Cmd::SignOut => {
+                for task in self.tasks.drain(..) {
+                    task.abort();
+                }
+                if let Some(client) = self.client.take() {
+                    // The device is gone locally either way; the server forgets it when it can.
+                    if let Err(e) = client.matrix_auth().logout().await {
+                        log::warn!("logout: {e}");
+                    }
+                }
+                self.notif = None;
+                self.open = None;
+                self.rooms.lock().unwrap().clear();
+                let _ = std::fs::remove_file(self.session_path());
+                let _ = std::fs::remove_file(rooms_path(&self.dir));
+                let _ = std::fs::remove_dir_all(self.dir.join("store"));
+                let _ = std::fs::remove_dir_all(media_dir(&self.dir));
+                self.emit(Ev::NeedLogin).await;
+            }
             Cmd::Previews(ids) => {
                 for room_id in ids {
                     let room = self.room(&room_id)?;
@@ -642,6 +719,19 @@ impl State {
             }
         }
         Ok(())
+    }
+
+    /// Access to Beeper's account API and the bridges behind the homeserver.
+    fn api(&self) -> Result<bridges::Api> {
+        let client = self.client()?;
+        let debug = |var: &str| std::env::var(var).ok().filter(|_| cfg!(debug_assertions));
+        Ok(bridges::Api {
+            http: self.http.clone(),
+            api: debug("BEEPER_GPUI_API").unwrap_or_else(|| beeper::API_URL.to_owned()),
+            homeserver: debug("BEEPER_GPUI_BRIDGES").unwrap_or_else(|| self.homeserver.clone()),
+            token: client.access_token().context("Not signed in")?,
+            user_id: client.user_id().context("Not signed in")?.to_string(),
+        })
     }
 
     fn room(&self, id: &OwnedRoomId) -> Result<Room> {
@@ -808,6 +898,19 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>) -> Result<()
     Ok(())
 }
 
+/// Delivers the answer to a settings-page request, or its error and the cue to stop waiting.
+async fn panel(ev: &mpsc::Sender<Ev>, result: Result<Ev>) {
+    match result {
+        Ok(answer) => {
+            let _ = ev.send(answer).await;
+        }
+        Err(e) => {
+            let _ = ev.send(Ev::Error(format!("{e:#}"))).await;
+            let _ = ev.send(Ev::PanelFailed).await;
+        }
+    }
+}
+
 fn rooms_path(dir: &Path) -> PathBuf {
     dir.join("rooms.json")
 }
@@ -839,11 +942,13 @@ struct Done {
     at_order: Option<i64>,
 }
 
-/// Clears the unread state. The receipt is private: the other side, or the bridged network, is not told.
-async fn mark_read(room: &Room, newest: Option<OwnedEventId>) -> Result<()> {
+/// Clears the unread state. A private receipt does that without telling the other side, or the
+/// bridged network, that the message was read.
+async fn mark_read(room: &Room, newest: Option<OwnedEventId>, private: bool) -> Result<()> {
     room.set_unread_flag(false).await?;
     if let Some(id) = newest {
-        room.send_single_receipt(create_receipt::v3::ReceiptType::ReadPrivate, ReceiptThread::Unthreaded, id).await?;
+        let kind = if private { create_receipt::v3::ReceiptType::ReadPrivate } else { create_receipt::v3::ReceiptType::Read };
+        room.send_single_receipt(kind, ReceiptThread::Unthreaded, id).await?;
     }
     Ok(())
 }

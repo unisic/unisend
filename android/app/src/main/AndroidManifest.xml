@@ -37,6 +37,13 @@
             android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <!-- Browser for signing in to a chat network; see WebLogin. -->
+        <activity
+            android:name="dev.gpui.beeper.WebLogin"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|uiMode"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
         <!-- Lets other apps open a downloaded attachment, one grant per file. -->
         <provider
             android:name="androidx.core.content.FileProvider"

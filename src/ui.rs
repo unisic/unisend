@@ -14,10 +14,17 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use matrix_sdk::ruma::OwnedRoomId;
+use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
 use tokio::sync::mpsc;
 
+mod panels;
+
+use std::path::PathBuf;
+
+use panels::Panel;
+
 use crate::Keyboard;
+use crate::bridges::{Flow, Network, Step};
 use crate::backend::{ChatAction, Cmd, DELETED, Ev, Item, Media, MediaKind, Msg, RoomSummary, UTD};
 
 const NARROW: f32 = 720.;
@@ -72,6 +79,22 @@ pub struct BeeperApp {
     recovery: Entity<InputState>,
     composer: Entity<InputState>,
     need_recovery: bool,
+    dir: PathBuf,
+    settings: crate::Settings,
+    user: Option<OwnedUserId>,
+    /// Settings page shown in place of the chat.
+    panel: Option<Panel>,
+    /// `None` until loaded.
+    networks: Option<Vec<Network>>,
+    /// Ways to sign in to the chosen bridge, when it offers more than one.
+    flows: Option<(String, Vec<Flow>)>,
+    step: Option<Step>,
+    /// Inputs for the current step's fields, by field ID.
+    fields: Vec<(String, Entity<InputState>)>,
+    cookie_paste: Entity<InputState>,
+    qr: Option<Arc<Image>>,
+    /// A request for the settings pages is in flight.
+    working: bool,
     search: Entity<InputState>,
     /// The search field takes the place of the list title.
     searching: bool,
@@ -113,9 +136,12 @@ impl BeeperApp {
     pub fn new(
         cmd: mpsc::Sender<Cmd>,
         mut events: mpsc::Receiver<Ev>,
+        dir: PathBuf,
+        settings: crate::Settings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let cookie_paste = cx.new(|cx| InputState::new(window, cx).placeholder("Paste cookies or a cURL command"));
         let email = cx.new(|cx| InputState::new(window, cx).placeholder("you@example.com"));
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("123456"));
         let recovery = cx.new(|cx| InputState::new(window, cx).placeholder("Recovery code"));
@@ -172,6 +198,17 @@ impl BeeperApp {
             recovery,
             composer,
             need_recovery: false,
+            dir,
+            settings,
+            user: None,
+            panel: None,
+            networks: None,
+            flows: None,
+            step: None,
+            fields: Vec::new(),
+            cookie_paste,
+            qr: None,
+            working: false,
             search,
             searching: false,
             view: View::Inbox,
@@ -212,6 +249,10 @@ impl BeeperApp {
     fn on_event(&mut self, ev: Ev, cx: &mut Context<Self>) {
         match ev {
             Ev::NeedLogin => {
+                (self.panel, self.networks, self.user) = (None, None, None);
+                self.rooms.clear();
+                self.refilter(cx);
+                self.close_room(cx);
                 self.screen = Screen::Email;
                 self.busy = false;
             }
@@ -220,7 +261,10 @@ impl BeeperApp {
                 self.busy = false;
                 self.error = None;
             }
-            Ev::Ready => {
+            ev @ (Ev::Networks(_) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
+            Ev::Ready(user) => {
+                self.user = Some(user);
+                self.send(Cmd::Incognito(self.settings.incognito), cx);
                 self.screen = Screen::Main;
                 self.busy = false;
                 self.error = None;
@@ -257,10 +301,10 @@ impl BeeperApp {
                 }
             }
             Ev::Viewed(id, bytes) => {
-                if let (Some((open, slot)), Some(format)) = (&mut self.viewer, image_format(&bytes)) {
-                    if *open == id {
-                        *slot = Some(Arc::new(Image::from_bytes(format, bytes)));
-                    }
+                if let (Some((open, slot)), Some(format)) = (&mut self.viewer, image_format(&bytes))
+                    && *open == id
+                {
+                    *slot = Some(Arc::new(Image::from_bytes(format, bytes)));
                 }
             }
             Ev::Fetched(id, path) => {
@@ -676,6 +720,7 @@ impl BeeperApp {
             return;
         }
         self.close_room(cx);
+        self.panel = None;
         self.open = Some(id.clone());
         self.loading = self.send(Cmd::Open(id), cx);
     }
@@ -875,12 +920,16 @@ impl BeeperApp {
                 .child(div().text_size(px(20.)).font_weight(FontWeight::MEDIUM).child(VIEWS[view_ix].1))
                 .dropdown_caret(true)
                 .dropdown_menu(move |menu, _, _| {
-                    VIEWS.iter().fold(menu, |menu, &(view, label, _, icon)| {
+                    let sections = VIEWS.iter().fold(menu, |menu, &(view, label, _, icon)| {
                         let weak = weak.clone();
                         menu.item(PopupMenuItem::new(label).icon(icon).on_click(move |_, _, cx| {
                             let _ = weak.update(cx, |this, cx| this.set_view(view, cx));
                         }))
-                    })
+                    });
+                    let weak = weak.clone();
+                    sections.separator().item(PopupMenuItem::new("Settings").icon(IconName::Settings).on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |this, cx| this.open_panel(Panel::Settings, cx));
+                    }))
                 })
                 .into_any_element()
         };
@@ -1455,8 +1504,11 @@ impl Render for BeeperApp {
             Screen::Email | Screen::Code => root.child(self.render_login(cx)).into_any_element(),
             Screen::Main => {
                 let narrow = window.viewport_size().width < px(NARROW);
+                let panel = self.panel.map(|panel| self.render_panel(panel, window, cx));
                 let body = if narrow {
-                    if self.open.is_some() {
+                    if let Some(panel) = panel {
+                        panel
+                    } else if self.open.is_some() {
                         self.render_chat(true, cx).into_any_element()
                     } else {
                         self.render_rooms(cx).into_any_element()
@@ -1473,7 +1525,9 @@ impl Render for BeeperApp {
                                 .border_color(cx.theme().border)
                                 .child(self.render_rooms(cx)),
                         )
-                        .child(div().flex_1().min_w_0().h_full().child(if self.open.is_some() {
+                        .child(div().flex_1().min_w_0().h_full().child(if let Some(panel) = panel {
+                            panel
+                        } else if self.open.is_some() {
                             self.render_chat(false, cx).into_any_element()
                         } else {
                             v_flex()

@@ -16,7 +16,7 @@ is not started.
 | Email-code login | done | `api.beeper.com/user/login*`, then `org.matrix.login.jwt` |
 | Encrypted history via recovery code | done | secret storage, key backup v1 |
 | Device verification by another device (QR, emoji) | todo | `m.key.verification.*` |
-| Add / remove chat networks | todo | bridge login flows, `fi.mau.*.login.*`, `com.beeper.bridge_state` |
+| Chat networks: list, sign in, sign out | part | cloud bridges only: `api.beeper.com/whoami`, `POST /bridge/{name}/start`, then the bridge's mautrix provisioning API (`/v3/whoami`, `login/flows`, `login/start`, `login/step`, `logout`) proxied at `matrix.beeper.com/_matrix/client/unstable/com.beeper.bridge/{name}/`. Steps: form fields, QR or code, browser cookies (in-app browser on Android, paste on desktop). Not yet: cookie sources other than cookies, re-login of a broken account, Beeper's browser-session import |
 | On-device bridges | todo | Beeper runs local mautrix bridges inside the client |
 | Multiple accounts, account filter, spaces bar | todo | `m.space`, `com.beeper.chat_list_rules` |
 | Connection state (offline, syncing, reconnect) | part | sync errors are shown; no dedicated indicator |
@@ -90,8 +90,8 @@ is not started.
 |---|---|---|
 | Notifications, badge, sounds | todo | push (FCM on Android), local on desktop |
 | Background sync on Android | todo | foreground service |
-| Settings (appearance, chat list, notifications, shortcuts) | todo | `com.beeper.desktop.prefs` |
-| Incognito mode (no read receipts, no typing) | part | read receipts are always private for now |
+| Settings | part | theme (dark by default), incognito, chat networks, sign out; kept locally, not in `com.beeper.desktop.prefs`. Beeper's chat list, notification, shortcut and AI settings: todo |
+| Incognito mode | done | on: `m.read.private`; off: `m.read`. On by default |
 | Command bar, hotkeys | todo | local |
 | Tray icon, launch at login, deep links | todo | local |
 | Media viewer | part | pictures only; no zoom, no gallery |

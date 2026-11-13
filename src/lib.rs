@@ -6,6 +6,7 @@
 
 mod backend;
 mod beeper;
+mod bridges;
 mod ui;
 
 use std::path::PathBuf;
@@ -60,14 +61,16 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     bundled_emoji(cx);
     #[cfg(target_os = "android")]
     extra_fonts(cx);
+    let settings = Settings::load(&dir);
+    cx.set_global(settings.theme);
     sync_theme(None, cx);
-    let (cmd, events) = backend::start(dir);
+    let (cmd, events) = backend::start(dir.clone());
     let options = WindowOptions {
         window_bounds,
         titlebar: Some(TitlebarOptions { title: Some("Beeper".into()), ..Default::default() }),
         ..Default::default()
     };
-    gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, window, cx)))
+    gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, dir, settings, window, cx)))
         .expect("open main window");
     cx.activate(true);
 }
@@ -87,12 +90,56 @@ fn bundled_emoji(cx: &mut App) {
 
 /// Follows the system's light or dark mode and puts Beeper's colors over the library's.
 pub(crate) fn sync_theme(window: Option<&mut Window>, cx: &mut App) {
-    if cfg!(debug_assertions) && std::env::var_os("BEEPER_GPUI_DARK").is_some() {
-        Theme::change(gpui_kit::component::ThemeMode::Dark, window, cx);
-    } else {
-        Theme::sync_system_appearance(window, cx);
+    use gpui_kit::component::ThemeMode;
+    match cx.try_global::<ThemeChoice>().copied().unwrap_or_default() {
+        ThemeChoice::Dark => Theme::change(ThemeMode::Dark, window, cx),
+        ThemeChoice::Light => Theme::change(ThemeMode::Light, window, cx),
+        ThemeChoice::System => Theme::sync_system_appearance(window, cx),
     }
     apply_palette(cx);
+}
+
+/// Dark unless the user chooses otherwise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum ThemeChoice {
+    #[default]
+    Dark,
+    Light,
+    System,
+}
+
+impl Global for ThemeChoice {}
+
+/// What the settings page changes, kept in `settings.json` in the data directory.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Settings {
+    #[serde(default)]
+    pub theme: ThemeChoice,
+    /// Read receipts stay private: others do not see what has been read.
+    #[serde(default = "Settings::private_by_default")]
+    pub incognito: bool,
+}
+
+impl Settings {
+    fn private_by_default() -> bool {
+        true
+    }
+
+    fn path(dir: &std::path::Path) -> PathBuf {
+        dir.join("settings.json")
+    }
+
+    fn load(dir: &std::path::Path) -> Self {
+        let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| serde_json::from_slice(&raw).ok());
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true })
+    }
+
+    pub fn save(&self, dir: &std::path::Path) {
+        let written = serde_json::to_vec_pretty(self).map_err(std::io::Error::other).and_then(|raw| std::fs::write(Self::path(dir), raw));
+        if let Err(e) = written {
+            log::warn!("settings.json: {e}");
+        }
+    }
 }
 
 /// Beeper's colors. The dark set is sampled from Beeper Android 4.64; the light set mirrors it in
@@ -263,6 +310,29 @@ pub(crate) fn pick_file(cx: &mut gpui_kit::App) -> gpui_kit::Task<Option<PathBuf
     })
 }
 
+/// Signs in to a chat network in a browser and returns its cookies as `name=value; ...`.
+/// Desktop has no embedded browser: it opens the page in the system's, and the user pastes the
+/// cookies; so it returns nothing.
+pub(crate) fn web_login(cx: &mut gpui_kit::App, wanted: &bridges::Cookies) -> gpui_kit::Task<Option<String>> {
+    #[cfg(not(target_os = "android"))]
+    {
+        cx.open_url(&wanted.url);
+        gpui_kit::Task::ready(None)
+    }
+    #[cfg(target_os = "android")]
+    {
+        let (url, agent, pattern) = (wanted.url.clone(), wanted.user_agent.clone(), wanted.wait_for.clone());
+        let mut domains: Vec<&str> = wanted.fields.iter().flat_map(|f| &f.cookies).map(|c| c.1.as_str()).filter(|d| !d.is_empty()).collect();
+        domains.sort_unstable();
+        domains.dedup();
+        let domains = domains.join(",");
+        // Blocks until the browser closes, so off the UI thread.
+        cx.background_spawn(async move {
+            android_files::web_login(&url, &agent, &pattern, &domains).map_err(|e| log::warn!("web login: {e}")).ok()?
+        })
+    }
+}
+
 /// Calls into `dev.gpui.beeper.Files`, this app's Java helper.
 #[cfg(target_os = "android")]
 mod android_files {
@@ -288,6 +358,36 @@ mod android_files {
                 env.exception_clear();
                 e.to_string()
             })
+        })
+    }
+
+    pub fn web_login(url: &str, agent: &str, pattern: &str, domains: &str) -> Result<Option<String>, String> {
+        helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, "dev.gpui.beeper.WebLogin")?;
+            let mut text = |s: &str| env.new_string(s).map_err(|e| e.to_string());
+            let (url, agent, pattern, domains) = (text(url)?, text(agent)?, text(pattern)?, text(domains)?);
+            let cookies = env
+                .call_static_method(
+                    &class,
+                    jni::jni_str!("run"),
+                    jni::jni_sig!(
+                        "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+                    ),
+                    &[
+                        JValue::Object(&activity),
+                        JValue::Object(&url),
+                        JValue::Object(&agent),
+                        JValue::Object(&pattern),
+                        JValue::Object(&domains),
+                    ],
+                )
+                .and_then(|v| v.l())
+                .map_err(|e| {
+                    env.exception_clear();
+                    e.to_string()
+                })?;
+            Ok((!cookies.is_null()).then(|| helpers::get_string(env, &cookies)))
         })
     }
 
