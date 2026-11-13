@@ -46,6 +46,9 @@ const MAX_SEEN: usize = 32;
 const MAX_QUOTES_FETCHED: usize = 256;
 /// Sessions whose key was asked of the backup while a conversation is open.
 const MAX_SESSIONS_FETCHED: usize = 256;
+/// Batches of lookups waiting for the ones before them, and quoted messages fetched at once.
+const LOOKUP_QUEUE: usize = 16;
+const QUOTES_AT_ONCE: usize = 4;
 /// Longest chat name or failure reason put on a row.
 const LINE_MAX: usize = 120;
 
@@ -53,7 +56,7 @@ const LINE_MAX: usize = 120;
 pub(super) struct Open {
     pub room: OwnedRoomId,
     pub timeline: Arc<Timeline>,
-    _tasks: [AbortOnDrop; 2],
+    _tasks: [AbortOnDrop; 3],
 }
 
 /// Who is looking at the conversation: what a row needs to know besides its own item.
@@ -90,6 +93,28 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
     // What is there already goes the same way as every change after it.
     let diffs = futures_util::stream::once(std::future::ready(vec![VectorDiff::Reset { values: items }])).chain(diffs);
 
+    // On a phone every lookup is a round trip: made beside the rows, a chat full of replies or of
+    // locked messages does not hold back the rows after them.
+    let (lookups, mut wanted) = mpsc::channel::<(Vec<String>, Vec<OwnedEventId>)>(LOOKUP_QUEUE);
+    let lookup = tokio::spawn({
+        let timeline = timeline.clone();
+        async move {
+            while let Some((sessions, quotes)) = wanted.recv().await {
+                fetch_keys(timeline.room(), sessions).await;
+                // The answers come back as changes to those rows.
+                futures_util::stream::iter(quotes)
+                    .for_each_concurrent(QUOTES_AT_ONCE, |quoting| {
+                        let timeline = &timeline;
+                        async move {
+                            if let Err(e) = timeline.fetch_details_for_event(&quoting).await {
+                                log::debug!("quoted message: {e}");
+                            }
+                        }
+                    })
+                    .await;
+            }
+        }
+    });
     let rows = tokio::spawn({
         let (timeline, ev, id, viewer) = (timeline.clone(), ev.clone(), id.clone(), viewer.clone());
         async move {
@@ -105,15 +130,14 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
                     break;
                 }
                 // Asked once per session, and only once the backup can answer: recovery asks again.
-                if !sessions.is_empty() && keyed.len() < MAX_SESSIONS_FETCHED && timeline.room().client().encryption().backups().are_enabled().await {
+                let sessions = if !sessions.is_empty() && keyed.len() < MAX_SESSIONS_FETCHED && timeline.room().client().encryption().backups().are_enabled().await {
                     keyed.extend(sessions.iter().cloned());
-                    fetch_keys(timeline.room(), sessions).await;
-                }
-                for quoting in quotes {
-                    // The answer comes back as a change to that row.
-                    if let Err(e) = timeline.fetch_details_for_event(&quoting).await {
-                        log::debug!("quoted message: {e}");
-                    }
+                    sessions
+                } else {
+                    Vec::new()
+                };
+                if !sessions.is_empty() || !quotes.is_empty() {
+                    let _ = lookups.send((sessions, quotes)).await;
                 }
                 if arrived && crate::FOREGROUND.load(Ordering::Relaxed) {
                     let newest = timeline.latest_event_id().await;
@@ -145,7 +169,7 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
             }
         }
     });
-    Ok(Open { room: id, timeline, _tasks: [AbortOnDrop(rows), AbortOnDrop(typing)] })
+    Ok(Open { room: id, timeline, _tasks: [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing)] })
 }
 
 /// The items a change brings: new ones, and ones that took the place of an old one.

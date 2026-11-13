@@ -1471,6 +1471,15 @@ async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &R
     out
 }
 
+/// Whether the SDK holds no events of the newest chat: an upgrade of its store emptied it, or the
+/// chat has not changed since the store was made.
+async fn forgotten(client: &Client, rooms: &Rooms) -> bool {
+    let newest = rooms.lock().unwrap().values().max_by_key(|r| r.ts).map(|r| r.id.clone());
+    let Some(room) = newest.and_then(|id| client.get_room(&id)) else { return false };
+    let Ok((cache, _)) = room.event_cache().await else { return false };
+    cache.events().await.is_ok_and(|events| events.is_empty())
+}
+
 async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, rooms: Rooms, ev: mpsc::Sender<Ev>) {
     drop_left(&client, &rooms, &ev).await;
     let cached = refresh_cached(&client, &notif, &rooms).await;
@@ -1492,8 +1501,12 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
     filter.timeline.limit = Some(UInt::from(SYNC_TIMELINE_LIMIT));
     let mut def = FilterDefinition::default();
     def.room = filter;
-    // Without a summary cache the stored sync token would skip rooms with no new events.
-    let token = if rooms.lock().unwrap().is_empty() { SyncToken::NoToken } else { SyncToken::ReusePrevious };
+    // Without a summary cache the stored sync token would skip rooms with no new events. So it
+    // would when the SDK has lost their events, and a chat it holds none of waits 3 s for a sync
+    // that mentions it before asking the server for its history.
+    // shortcut: the SDK drops a full answer at the token it already holds, so the resync lands at
+    // the first change on the account; clear the stored token if a quiet account ever needs it.
+    let token = if rooms.lock().unwrap().is_empty() || forgotten(&client, &rooms).await { SyncToken::NoToken } else { SyncToken::ReusePrevious };
     let settings = SyncSettings::default().filter(def.into()).token(token);
 
     let mut stream = std::pin::pin!(client.sync_stream(settings).await);

@@ -778,3 +778,148 @@ fn timeline_changes_keep_the_rows_and_tell_the_list() {
     assert_eq!(apply(&mut rows, Diff::Clear), None);
     assert!(rows.is_empty() && apply(&mut rows, Diff::PopBack).is_none());
 }
+
+/// A hop to a local homeserver that holds every chunk a client sends for `delay`, so that each
+/// request costs about one round trip of a phone's connection.
+fn slow_hop(homeserver: &str, delay: Duration) -> String {
+    use std::io::{Read as _, Write as _};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream = homeserver.trim_start_matches("http://").to_owned();
+    std::thread::spawn(move || {
+        for inbound in listener.incoming().flatten() {
+            let Ok(outbound) = TcpStream::connect(&upstream) else { continue };
+            let (mut from_client, mut to_server) = (inbound.try_clone().unwrap(), outbound.try_clone().unwrap());
+            std::thread::spawn(move || {
+                let mut buf = vec![0; 64 * 1024];
+                while let Ok(n @ 1..) = from_client.read(&mut buf) {
+                    std::thread::sleep(delay);
+                    if to_server.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+                let _ = to_server.shutdown(Shutdown::Write);
+            });
+            let (mut from_server, mut to_client) = (outbound, inbound);
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut from_server, &mut to_client);
+                let _ = to_client.shutdown(Shutdown::Write);
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// On a phone's connection every request takes a while: what the open conversation looks up for
+/// the rows it has (the messages that replies quote, room keys) must not hold back the next rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn rows_arrive_while_quoted_messages_are_looked_up() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-slow-{tag}"));
+    const REPLIES: usize = 30;
+    let rtt = Duration::from_millis(200);
+
+    let (mut alice, mut seat) = state(root.join("alice"), &slow_hop(&hs, rtt));
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready(_)).then_some(())).await;
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+
+    // Old messages, then replies to each of them: a chat opened at its end quotes messages it has
+    // not loaded.
+    let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+    req.invite = vec![alice.client().unwrap().user_id().unwrap().to_owned()];
+    let room = bob.create_room(req).await.unwrap();
+    let room_id = room.room_id().to_owned();
+    let mut old = Vec::new();
+    for i in 0..REPLIES {
+        old.push(room.send(RoomMessageEventContent::text_plain(format!("old {i}"))).await.unwrap().response.event_id);
+    }
+    for i in 0..40 {
+        room.send(RoomMessageEventContent::text_plain(format!("between {i}"))).await.unwrap();
+    }
+    for (i, quoted) in old.into_iter().enumerate() {
+        let mut reply = RoomMessageEventContent::text_plain(format!("reply {i}"));
+        reply.relates_to = Some(matrix_sdk::ruma::events::room::message::Relation::Reply(matrix_sdk::ruma::events::relation::Reply::new(
+            matrix_sdk::ruma::events::relation::InReplyTo::new(quoted),
+        )));
+        room.send(reply).await.unwrap();
+    }
+    alice.client().unwrap().join_room_by_id(&room_id).await.unwrap();
+    wait_for(&mut seat, "the chat in the list", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id).then_some(()),
+        _ => None,
+    })
+    .await;
+
+    alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
+    until(&mut seat, "the first rows", |rows| bodies(rows).iter().any(|b| b.starts_with("reply"))).await;
+    let sent = tokio::time::Instant::now();
+    room.send(RoomMessageEventContent::text_plain("fresh")).await.unwrap();
+    until(&mut seat, "the new message", |rows| bodies(rows).iter().any(|b| b == "fresh")).await;
+    let late = sent.elapsed();
+    let replies = bodies(&seat.rows).iter().filter(|b| b.starts_with("reply")).count();
+    eprintln!("new message on screen after {late:?}, with {replies} replies on screen");
+    // A sync answer is a round trip or two; one lookup per quoted message is many.
+    assert!(late < rtt * 4, "the new message took {late:?}");
+}
+
+/// The SDK empties its store of events when it upgrades it, and builds before the timeline kept
+/// none: a chat with nothing new since then must not wait for a sync that never mentions it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn a_chat_opens_at_once_after_the_store_lost_its_events() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-emptied-{tag}"));
+
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready(_)).then_some(())).await;
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+    req.invite = vec![alice.client().unwrap().user_id().unwrap().to_owned()];
+    let room = bob.create_room(req).await.unwrap();
+    let room_id = room.room_id().to_owned();
+    for i in 0..5 {
+        room.send(RoomMessageEventContent::text_plain(format!("hello {i}"))).await.unwrap();
+    }
+    alice.client().unwrap().join_room_by_id(&room_id).await.unwrap();
+    wait_for(&mut seat, "the chat in the list", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id && s.preview.is_some()).then_some(()),
+        _ => None,
+    })
+    .await;
+
+    // The app stops, and comes back to a store without events.
+    for task in alice.tasks.drain(..) {
+        task.abort();
+    }
+    drop((alice, seat));
+    for file in std::fs::read_dir(root.join("alice/store")).unwrap().flatten() {
+        if file.file_name().to_string_lossy().starts_with("matrix-sdk-event-cache") {
+            std::fs::remove_file(file.path()).unwrap();
+        }
+    }
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    assert!(alice.restore().await.unwrap());
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready(_)).then_some(())).await;
+
+    let opened = tokio::time::Instant::now();
+    alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
+    until(&mut seat, "the messages", |rows| bodies(rows).iter().any(|b| b == "hello 4")).await;
+    let took = opened.elapsed();
+    eprintln!("messages on screen after {took:?}");
+    // The SDK waits up to 3 s for a sync to tell it where the chat's history starts.
+    assert!(took < Duration::from_secs(2), "the messages took {took:?}");
+}
