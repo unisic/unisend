@@ -10,6 +10,7 @@ use gpui_kit::component::{
     input::{Input, InputEvent, InputState},
     v_flex,
 };
+use gpui_kit::base::{Presence, Transition, transition};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
@@ -55,6 +56,9 @@ const LINK_PICTURE_H: f32 = 240.;
 /// On a phone, the share of the row a message may take.
 const BUBBLE_SHARE: f32 = 0.8;
 const SHEET_W: f32 = 480.;
+const SHEET_ROW_H: f32 = 52.;
+/// How long a finger rests on a chat row before the row shows the press: Android's tap timeout.
+const ROW_PRESS_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 /// Sender's picture beside a run of messages in a group.
 const SENDER: f32 = 28.;
 /// How far a message is swiped sideways to reply to it.
@@ -189,6 +193,16 @@ pub struct BeeperApp {
     swipe: Option<(String, f32)>,
     /// The chat whose actions are showing.
     chat_sheet: Option<OwnedRoomId>,
+    /// The chat whose sheet is still falling after it closed.
+    sheet_last: Option<OwnedRoomId>,
+    /// The phone's last move between the chat list and a chat: when, and whether it went in.
+    nav: Option<(std::time::Instant, bool)>,
+    /// The picture still fading out after the viewer closed.
+    viewer_last: Option<(String, Option<Arc<Image>>)>,
+    /// The reaction under the pointer in the picker.
+    picker_hover: Option<usize>,
+    /// A finger resting on a chat row, and since when; the row shows it after a tap's time.
+    row_press: Option<(OwnedRoomId, std::time::Instant)>,
     compose: Compose,
     more: bool,
     loading: bool,
@@ -320,6 +334,11 @@ impl BeeperApp {
             press: None,
             swipe: None,
             chat_sheet: None,
+            sheet_last: None,
+            nav: None,
+            viewer_last: None,
+            picker_hover: None,
+            row_press: None,
             faces: HashMap::new(),
             compose: Compose::New,
             more: false,
@@ -605,6 +624,7 @@ impl BeeperApp {
         } else if self.searching {
             self.set_searching(false, window, cx);
         } else if narrow && self.open.is_some() {
+            self.nav = Some((std::time::Instant::now(), false));
             self.close_room(cx);
             cx.notify();
         } else {
@@ -613,8 +633,11 @@ impl BeeperApp {
         true
     }
 
+    /// The picture stays in `viewer_last` while it fades out; `render` frees it after.
     fn close_viewer(&mut self, cx: &mut Context<Self>) {
-        if let Some((_, Some(image))) = self.viewer.take() {
+        if let Some(closed) = self.viewer.take()
+            && let Some((_, Some(image))) = self.viewer_last.replace(closed)
+        {
             image.remove_asset(cx);
         }
         cx.notify();
@@ -808,6 +831,9 @@ impl BeeperApp {
             Ok(id) => {
                 self.panel = None;
                 self.chat_sheet = None;
+                if self.open.as_ref() != Some(&id) {
+                    self.nav = Some((std::time::Instant::now(), true));
+                }
                 self.open_room(id, cx);
                 cx.notify();
             }
@@ -975,12 +1001,17 @@ impl BeeperApp {
                 .items_center()
                 .text_color(ink)
                 .cursor_pointer()
+                .active(|el| el.bg(p.surface))
                 .on_click(cx.listener(move |this, _, window, cx| this.set_tab(tab, window, cx)))
                 .map(|el| {
                     if narrow {
                         el.flex_1().h_full().flex_col().justify_center().gap(px(4.)).text_size(px(12.))
                     } else {
-                        el.h(px(TAP)).px(px(GAP)).gap(px(GAP)).rounded(px(RADIUS)).hover(|el| el.bg(p.surface))
+                        el.h(px(TAP))
+                            .px(px(GAP))
+                            .gap(px(GAP))
+                            .rounded(px(RADIUS))
+                            .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.surface)))
                     }
                 })
                 .child(Icon::new(icon).size_5())
@@ -1011,6 +1042,7 @@ impl BeeperApp {
                     .map(|ix| {
                         let room = &this.rooms[this.shown[ix]];
                         let selected = this.open.as_ref() == Some(&room.id);
+                        let held = this.row_press.as_ref().is_some_and(|(id, at)| id == &room.id && at.elapsed() >= ROW_PRESS_DELAY);
                         let id = room.id.clone();
                         let unread = room.is_unread();
                         let mark = |icon: IconName| Icon::new(icon).size_3p5().flex_none().text_color(p.faint);
@@ -1027,10 +1059,18 @@ impl BeeperApp {
                             .h(px(ROOM_ROW_H))
                             .px(px(GUTTER))
                             .gap(px(GAP))
-                            .hover(|el| el.bg(if selected { p.raised } else { p.surface }))
-                            .when(selected, |el| el.bg(p.raised))
+                            .relative()
+                            .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(if selected { p.raised } else { p.surface })))
+                            .when(selected || held, |el| el.bg(p.raised))
+                            .active(|el| el.bg(p.raised))
                             .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| this.open_room(id.clone(), cx)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.open.as_ref() != Some(&id) {
+                                    this.nav = Some((std::time::Instant::now(), true));
+                                }
+                                this.open_room(id.clone(), cx)
+                            }))
+                            .child(this.row_touch(room.id.clone(), cx))
                             .child(avatar(&room.name, this.avatars.get(&room.id), AVATAR, cx))
                             .child(
                                 v_flex()
@@ -1050,7 +1090,7 @@ impl BeeperApp {
                                                     .when(unread, |el| el.font_weight(FontWeight::SEMIBOLD))
                                                     .child(room.name.clone()),
                                             )
-                                            .child(div().flex_none().text_size(px(12.)).text_color(p.faint).child(meta)),
+                                            .child(div().flex_none().text_size(px(12.)).font_features(tabular()).text_color(p.faint).child(meta)),
                                     )
                                     .child(
                                         h_flex()
@@ -1093,7 +1133,7 @@ impl BeeperApp {
         let archive = self.view == View::Archive;
         let has_query = !self.search.read(cx).value().trim().is_empty();
         let empty = if self.rooms.is_empty() {
-            "Syncing chats..."
+            "Syncing chats…"
         } else if has_query {
             "No chat matches"
         } else if self.only_unread {
@@ -1135,8 +1175,10 @@ impl BeeperApp {
         .map(|(label, view, only_unread, count)| {
             let on = self.view == view && self.only_unread == only_unread;
             // The pill is slimmer than what a finger needs; the target around it is not.
-            h_flex().id(label).h(px(TAP)).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.set_filter(view, only_unread, cx))).child(
+            h_flex().id(label).group(label).h(px(TAP)).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.set_filter(view, only_unread, cx))).child(
                 h_flex()
+                    .id("pill")
+                    .when(!on, |el| el.group_active(label, |el| el.bg(p.surface)))
                     .h(px(36.))
                     .px(px(GAP))
                     .gap(px(6.))
@@ -1145,7 +1187,7 @@ impl BeeperApp {
                     .text_color(if on { p.text } else { p.muted })
                     .when(on, |el| el.bg(p.raised))
                     .child(label)
-                    .when(count > 0, |el| el.child(div().text_color(p.faint).child(count.to_string()))),
+                    .when(count > 0, |el| el.child(div().text_color(p.faint).font_features(tabular()).child(count.to_string()))),
             )
         });
         v_flex()
@@ -1154,11 +1196,87 @@ impl BeeperApp {
             .when(!archive && !self.searching, |el| {
                 el.child(h_flex().flex_none().px(px(GUTTER)).pb(px(4.)).gap(px(4.)).children(filters))
             })
+            .child(self.row_release(cx))
             .child(div().flex_1().min_h_0().child(if self.shown.is_empty() {
                 div().px(px(GUTTER)).py(px(GAP)).text_size(px(14.)).text_color(p.faint).child(empty).into_any_element()
             } else {
                 list.into_any_element()
             }))
+    }
+
+    /// Where a finger lands on a chat row. A touch reaches the app as a click only when it lifts,
+    /// so the row learns of the press from the touch itself; it shows it after `ROW_PRESS_DELAY`,
+    /// so a finger that starts scrolling the list never lights a row up.
+    fn row_touch(&self, room: OwnedRoomId, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let weak = cx.entity().downgrade();
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let visible = window.content_mask().bounds;
+                window.on_mouse_event(move |e: &TouchDragEvent, phase, _, cx| {
+                    let at = e.start_position;
+                    if phase.bubble() && e.phase == TouchPhase::Started && bounds.contains(&at) && visible.contains(&at) {
+                        let _ = weak.update(cx, |this, cx| this.row_pressed(room.clone(), cx));
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+    }
+
+    fn row_pressed(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
+        if self.chat_sheet.is_some() || self.menu_open() || self.viewer.is_some() {
+            return;
+        }
+        let at = std::time::Instant::now();
+        self.row_press = Some((room, at));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ROW_PRESS_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.row_press.as_ref().is_some_and(|(_, since)| *since == at) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Ends a chat row's press: the finger lifted (a tap), started scrolling, or let go of a long
+    /// press.
+    fn row_release(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let weak = cx.entity().downgrade();
+        let release = move |cx: &mut App| {
+            let _ = weak.update(cx, |this, cx| {
+                if this.row_press.take().is_some() {
+                    cx.notify();
+                }
+            });
+        };
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let scroll = release.clone();
+                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        scroll(cx);
+                    }
+                });
+                let up = release.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        up(cx);
+                    }
+                });
+                window.on_mouse_event(move |e: &LongPressEvent, phase, _, cx| {
+                    if phase.bubble() && matches!(e.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        release(cx);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
     }
 
     fn render_chat(&mut self, narrow: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1424,6 +1542,7 @@ impl BeeperApp {
                 header()
                     .when(narrow, |el| {
                         el.child(round_button("back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| {
+                            this.nav = Some((std::time::Instant::now(), false));
                             this.close_room(cx);
                             cx.notify();
                         })))
@@ -1518,10 +1637,13 @@ impl BeeperApp {
 
     /// Rows that rise from the bottom over a dimmed screen: the app's menus. Touch has no
     /// right-click, and a popup's rows are too small for a finger.
-    /// `title` says what the rows act on.
-    fn sheet(&self, title: String, rows: Vec<Stateful<Div>>, cx: &mut Context<Self>) -> AnyElement {
+    /// `title` says what the rows act on; `shown` is how far it has risen, 0 to 1. While it falls
+    /// (`live` false) it takes no input, so taps reach the screen under it.
+    fn sheet(&self, title: String, rows: Vec<Stateful<Div>>, shown: f32, live: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         let (_, bottom) = crate::insets();
+        // Its own height, from the parts below: top padding, title, rows, bottom padding.
+        let height = 8. + 36. + SHEET_ROW_H * rows.len() as f32 + bottom + 8.;
         div()
             .id("sheet")
             .absolute()
@@ -1530,15 +1652,18 @@ impl BeeperApp {
             .flex_col()
             .justify_end()
             .items_center()
-            .bg(gpui_kit::black().opacity(0.6))
-            .occlude()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.chat_sheet = None;
-                cx.notify();
-            }))
+            .bg(gpui_kit::black().opacity(0.6 * shown))
+            .when(live, |el| {
+                el.occlude().on_click(cx.listener(|this, _, _, cx| {
+                    this.chat_sheet = None;
+                    cx.notify();
+                }))
+            })
             .child(
                 v_flex()
                     .id("sheet-rows")
+                    .relative()
+                    .top(px(height * (1. - shown)))
                     .w_full()
                     .max_w(px(SHEET_W))
                     .pt(px(8.))
@@ -1546,7 +1671,7 @@ impl BeeperApp {
                     .rounded_t(px(RADIUS))
                     .bg(p.surface)
                     // A tap between the rows is not a tap outside the sheet.
-                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
                     .child(div().h(px(36.)).px(px(GUTTER + 4.)).flex().items_center().truncate().text_size(px(14.)).text_color(p.faint).child(title))
                     .children(rows),
             )
@@ -1643,23 +1768,44 @@ impl BeeperApp {
         }
     }
 
-    /// Actions for the open chat.
-    fn render_chat_sheet(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Actions for the open chat. Rises with Vaul's sheet curve and falls quicker; the scrim
+    /// follows the same progress, so the two never drift apart when reversed halfway.
+    fn render_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let live = self.chat_sheet.is_some();
+        if live {
+            self.sheet_last = self.chat_sheet.clone();
+        } else if self.sheet_last.is_none() {
+            return None;
+        }
+        let motion = if live {
+            Transition::new(motion::SHEET_IN).easing(motion::EASE_SHEET)
+        } else {
+            Transition::new(motion::SHEET_OUT).easing(motion::EASE_OUT)
+        };
+        let shown = Presence::new("chat-sheet", live).transition(motion).sample(window, cx);
+        if !shown.should_render() {
+            self.sheet_last = None;
+            return None;
+        }
         let p = Palette::of(cx);
-        let room = self.chat_sheet.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id))?;
+        let room = self.sheet_last.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id))?;
         let (id, title) = (room.id.clone(), room.name.clone());
         let rows = chat_actions(room)
             .into_iter()
             .map(|(label, icon, action)| {
                 let id = id.clone();
-                sheet_row(label, icon, label, p.text).on_click(cx.listener(move |this, _, _, cx| {
+                let row = sheet_row(label, icon, label, p.text, cx);
+                if !live {
+                    return row;
+                }
+                row.on_click(cx.listener(move |this, _, _, cx| {
                     this.send(Cmd::Chat(id.clone(), action), cx);
                     this.chat_sheet = None;
                     cx.notify();
                 }))
             })
             .collect();
-        Some(self.sheet(title, rows, cx))
+        Some(self.sheet(title, rows, shown.progress, live, cx))
     }
 
     /// What the composer is replying to or editing, with a way out.
@@ -1694,13 +1840,27 @@ impl BeeperApp {
         )
     }
 
-    fn render_banners(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_banners(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
+        // Fades and opens in, closes and fades out; it sits above everything, so opening its
+        // height moves the screen down instead of covering it.
+        let offline = Presence::new("offline", self.offline).transition(if self.offline { motion::enter() } else { motion::exit() }).sample(window, cx);
         let card = || v_flex().mx(px(GUTTER)).mt(px(8.)).p(px(GAP)).gap(px(10.)).rounded(px(RADIUS)).text_size(px(14.)).line_height(px(20.));
         v_flex()
             // Being retried: a state, said quietly, that goes away by itself.
-            .when(self.offline, |el| {
-                el.child(div().h(px(28.)).flex().items_center().justify_center().text_size(px(12.)).text_color(p.faint).child("Connection lost. Reconnecting..."))
+            .when(offline.should_render(), |el| {
+                el.child(
+                    div()
+                        .h(px(28. * offline.progress))
+                        .overflow_hidden()
+                        .opacity(offline.progress)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.))
+                        .text_color(p.faint)
+                        .child("Connection lost. Reconnecting…"),
+                )
             })
             .when(self.need_recovery, |el| {
                 el.child(
@@ -1775,7 +1935,8 @@ fn round_button(id: &'static str, icon: IconName, cx: &App) -> Stateful<Div> {
         .justify_center()
         .rounded_full()
         .cursor_pointer()
-        .hover(|el| el.bg(p.surface))
+        .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.surface)))
+        .active(|el| el.bg(p.raised))
         .child(Icon::new(icon).size_5())
 }
 
@@ -1893,10 +2054,12 @@ fn swipe_step(swipe: &mut Option<(String, f32)>, id: &str, dx: f32, dy: f32, pha
 }
 
 /// One action in a sheet.
-fn sheet_row(id: &'static str, icon: IconName, label: &'static str, ink: Hsla) -> Stateful<Div> {
+fn sheet_row(id: &'static str, icon: IconName, label: &'static str, ink: Hsla, cx: &App) -> Stateful<Div> {
+    let p = Palette::of(cx);
     h_flex()
         .id(id)
-        .h(px(52.))
+        .h(px(SHEET_ROW_H))
+        .active(|el| el.bg(p.raised))
         .px(px(GUTTER + 4.))
         .gap(px(GAP))
         .text_size(px(16.))
@@ -1913,13 +2076,12 @@ fn short_network(name: &str) -> &str {
     inner.unwrap_or_else(|| name.strip_prefix("Facebook ").unwrap_or(name))
 }
 
-/// Unread count; a bare dot for a chat marked unread by hand, grey when muted.
 /// Digits of one width, so times and counts do not shift as they change.
-#[expect(dead_code, reason = "for the motion and polish packages")]
 fn tabular() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
 }
 
+/// Unread count; a bare dot for a chat marked unread by hand, grey when muted.
 fn count_pill(n: u64, muted: bool, cx: &App) -> Div {
     let p = Palette::of(cx);
     div()
@@ -1935,6 +2097,7 @@ fn count_pill(n: u64, muted: bool, cx: &App) -> Div {
         .text_color(if muted { p.text } else { p.on_accent })
         .text_size(px(12.))
         .font_weight(FontWeight::SEMIBOLD)
+        .font_features(tabular())
         .children((n > 0).then(|| if n > 99 { "99+".to_string() } else { n.to_string() }))
 }
 
@@ -2024,6 +2187,52 @@ fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperA
     }
 }
 
+impl BeeperApp {
+    /// A picture full-screen: fades in, and fades out quicker without taking taps while it does.
+    /// No zoom from the thumbnail: GPUI cannot scale an element.
+    fn render_viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let live = self.viewer.is_some();
+        if live {
+            if let Some((_, Some(image))) = self.viewer_last.take() {
+                image.remove_asset(cx);
+            }
+        } else if self.viewer_last.is_none() {
+            return None;
+        }
+        let shown = Presence::new("viewer", live).transition(if live { motion::enter() } else { motion::exit() }).sample(window, cx);
+        if !shown.should_render() {
+            if let Some((_, Some(image))) = self.viewer_last.take() {
+                image.remove_asset(cx);
+            }
+            return None;
+        }
+        let (top, _) = crate::insets();
+        let (id, full) = self.viewer.as_ref().or(self.viewer_last.as_ref())?;
+        // The thumbnail stands in until the full picture arrives.
+        let picture = full.clone().or_else(|| self.thumbs.get(id).cloned());
+        Some(
+            div()
+                .id("viewer")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui_kit::black())
+                .text_color(gpui_kit::white())
+                .opacity(shown.progress)
+                .when(live, |el| el.occlude().on_click(cx.listener(|this, _, _, cx| this.close_viewer(cx))))
+                .map(|el| match picture {
+                    Some(image) => el.child(img(image).size_full().object_fit(ObjectFit::Contain)),
+                    None if live => el.child("Loading…"),
+                    None => el,
+                })
+                .child(div().absolute().top(px(top + 12.)).right(px(GUTTER)).child(Icon::new(IconName::X).size_6()))
+                .into_any_element(),
+        )
+    }
+}
+
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
@@ -2048,7 +2257,7 @@ impl Render for BeeperApp {
             Screen::Starting => root
                 .items_center()
                 .justify_center()
-                .child(div().text_size(px(14.)).text_color(p.faint).child("Connecting..."))
+                .child(div().text_size(px(14.)).text_color(p.faint).child("Connecting…"))
                 .into_any_element(),
             Screen::Email | Screen::Code => root.child(self.render_login(cx)).into_any_element(),
             Screen::Matrix => root.child(self.render_matrix_login(cx)).into_any_element(),
@@ -2058,6 +2267,15 @@ impl Render for BeeperApp {
                 let body = if narrow {
                     // One thing at a time; the destinations stay in reach wherever they lead.
                     let deep = self.open.is_some() || self.searching || matches!(self.panel, Some(Panel::Add | Panel::Login));
+                    // Android's shared-axis move: a chat comes in from the right, the list returns
+                    // from the left, each 32 px with a fade. The screen it replaces is already gone.
+                    let shift = self.nav.filter(|&(_, push)| panel.is_none() && push == self.open.is_some()).and_then(|(at, push)| {
+                        let t = at.elapsed().as_secs_f32() / motion::PUSH.as_secs_f32();
+                        (t < 1. && !cx.reduce_motion()).then(|| (motion::ease_out(t), if push { 32. } else { -32. }))
+                    });
+                    if shift.is_some() {
+                        window.request_animation_frame();
+                    }
                     let screen = if let Some(panel) = panel {
                         panel
                     } else if self.open.is_some() {
@@ -2067,7 +2285,7 @@ impl Render for BeeperApp {
                     };
                     v_flex()
                         .size_full()
-                        .child(div().flex_1().min_h_0().child(screen))
+                        .child(div().flex_1().min_h_0().when_some(shift, |el, (v, far)| el.relative().left(px(far * (1. - v))).opacity(v)).child(screen))
                         .when(!deep, |el| el.child(self.render_nav(true, cx)))
                         .into_any_element()
                 } else {
@@ -2096,29 +2314,12 @@ impl Render for BeeperApp {
                     };
                     h_flex().size_full().child(self.render_nav(false, cx)).child(main).into_any_element()
                 };
-                let viewer = self.viewer.as_ref().map(|(id, full)| {
-                    // The thumbnail stands in until the full picture arrives.
-                    let shown = full.clone().or_else(|| self.thumbs.get(id).cloned());
-                    div()
-                        .id("viewer")
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(gpui_kit::black())
-                        .text_color(gpui_kit::white())
-                        .occlude()
-                        .on_click(cx.listener(|this, _, _, cx| this.close_viewer(cx)))
-                        .map(|el| match shown {
-                            Some(image) => el.child(img(image).size_full().object_fit(ObjectFit::Contain)),
-                            None => el.child("Loading..."),
-                        })
-                        .child(div().absolute().top(px(top + 12.)).right(px(GUTTER)).child(Icon::new(IconName::X).size_6()))
-                });
-                let sheet = self.render_message_menu(window, cx).or_else(|| self.render_chat_sheet(cx));
+                let viewer = self.render_viewer(window, cx);
+                // Sampled every frame, so a falling sheet finishes even when a message menu opens.
+                let chat_sheet = self.render_chat_sheet(window, cx);
+                let sheet = self.render_message_menu(window, cx).or(chat_sheet);
                 root.relative()
-                    .child(self.render_banners(cx))
+                    .child(self.render_banners(window, cx))
                     .child(div().flex_1().min_h_0().child(body))
                     .children(sheet)
                     .children(viewer)

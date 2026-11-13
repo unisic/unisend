@@ -294,7 +294,7 @@ impl BeeperApp {
         }
         let note = |text: &'static str| div().text_size(px(14.)).text_color(p.faint).child(text);
         let list = match &self.networks {
-            None => note(if self.working { "Loading..." } else { "Could not load the networks." }).into_any_element(),
+            None => note(if self.working { "Loading…" } else { "Could not load the networks." }).into_any_element(),
             Some(networks) if networks.is_empty() => note("No chat network is connected yet.").into_any_element(),
             Some(networks) => v_flex()
                 .gap(px(GAP * 2.))
@@ -368,7 +368,7 @@ impl BeeperApp {
                             .p_3()
                             .rounded(px(12.))
                             .bg(cx.theme().secondary)
-                            .hover(|el| el.bg(cx.theme().secondary_hover))
+                            .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(cx.theme().secondary_hover)))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| this.start_flow(bridge.clone(), id.clone(), cx)))
                             .child(div().text_size(px(16.)).child(flow.name.clone()))
