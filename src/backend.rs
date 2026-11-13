@@ -81,6 +81,8 @@ const VIEW_PX: u32 = 2048;
 /// Larger files are not fetched to make a thumbnail, and not sent.
 const MAX_THUMB_SOURCE: u64 = 16 * 1024 * 1024;
 const MAX_UPLOAD: u64 = 100 * 1024 * 1024;
+/// A message older than this when it arrives is history, not news.
+const NOTIFY_WINDOW: Duration = Duration::from_secs(300);
 /// History pages read back looking for a chat's last message.
 const MAX_PREVIEW_PAGES: usize = 3;
 /// Chats whose last message is being looked up in the background at once, and how many may wait.
@@ -900,9 +902,11 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>) -> Result<()
 
 /// Text of the notification these new items call for: the newest message from someone else that
 /// the account's push rules ask to be notified of (they cover mutes and mentions-only chats).
-fn notification(summary: &RoomSummary, items: &[Item]) -> Option<String> {
+/// Old messages do not count: a bridge bringing in history sends them through sync too.
+fn notification(summary: &RoomSummary, items: &[Item], now_ms: i64) -> Option<String> {
+    let recent = |m: &Msg| now_ms - (m.ts as i64) < NOTIFY_WINDOW.as_millis() as i64;
     let m = items.iter().rev().find_map(|i| match i {
-        Item::Msg(m) if m.notify && !m.own => Some(m),
+        Item::Msg(m) if m.notify && !m.own && recent(m) => Some(m),
         _ => None,
     })?;
     Some(if summary.dm { m.summary() } else { format!("{}: {}", m.sender, m.summary()) })
@@ -918,7 +922,7 @@ fn announce(summary: &RoomSummary, prev: Option<&RoomSummary>, items: &[Item]) {
     if crate::FOREGROUND.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    if let Some(text) = notification(summary, items) {
+    if let Some(text) = notification(summary, items, now_ms()) {
         crate::notify(chat, &summary.name, &text);
     }
 }

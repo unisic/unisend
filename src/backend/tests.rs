@@ -594,11 +594,14 @@ fn notifications_follow_the_push_rules() {
         order: 0,
         dated: true,
     };
-    assert_eq!(notification(&chat(false), &[msg("Ann", false, true)]).as_deref(), Some("Ann: hello"));
-    assert_eq!(notification(&chat(true), &[msg("Ann", false, true)]).as_deref(), Some("hello"));
+    let now = 60_000;
+    assert_eq!(notification(&chat(false), &[msg("Ann", false, true)], now).as_deref(), Some("Ann: hello"));
+    assert_eq!(notification(&chat(true), &[msg("Ann", false, true)], now).as_deref(), Some("hello"));
     // Muted or mentions-only chats, and one's own messages from another device.
-    assert_eq!(notification(&chat(false), &[msg("Ann", false, false)]), None);
-    assert_eq!(notification(&chat(false), &[msg("Me", true, true)]), None);
+    assert_eq!(notification(&chat(false), &[msg("Ann", false, false)], now), None);
+    assert_eq!(notification(&chat(false), &[msg("Me", true, true)], now), None);
     // The newest that qualifies, past ones that do not.
-    assert_eq!(notification(&chat(false), &[msg("Ann", false, true), msg("Me", true, true)]).as_deref(), Some("Ann: hello"));
+    assert_eq!(notification(&chat(false), &[msg("Ann", false, true), msg("Me", true, true)], now).as_deref(), Some("Ann: hello"));
+    // History a bridge brings in later is not news.
+    assert_eq!(notification(&chat(false), &[msg("Ann", false, true)], now + 3_600_000), None);
 }
