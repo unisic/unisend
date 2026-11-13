@@ -27,7 +27,7 @@ impl BeeperApp {
     }
 
     /// One level up: the login and the network list lead back to where they were opened from.
-    fn back(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn back(&mut self, cx: &mut Context<Self>) {
         self.panel = match self.panel {
             Some(Panel::Login) => {
                 self.end_login(cx);

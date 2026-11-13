@@ -79,6 +79,8 @@ pub struct BeeperApp {
     recovery: Entity<InputState>,
     composer: Entity<InputState>,
     need_recovery: bool,
+    /// Holds keyboard focus when no input does, so Escape (Android's back) still reaches the app.
+    focus: FocusHandle,
     dir: PathBuf,
     settings: crate::Settings,
     user: Option<OwnedUserId>,
@@ -198,6 +200,7 @@ impl BeeperApp {
             recovery,
             composer,
             need_recovery: false,
+            focus: cx.focus_handle(),
             dir,
             settings,
             user: None,
@@ -544,6 +547,29 @@ impl BeeperApp {
         self.picked = None;
         self.composer.update(cx, |c, cx| c.focus(window, cx));
         cx.notify();
+    }
+
+    /// Escape, which is also Android's back gesture: undoes the innermost thing on screen.
+    /// Returns whether there was anything to undo.
+    fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let narrow = window.viewport_size().width < px(NARROW);
+        if self.viewer.is_some() {
+            self.close_viewer(cx);
+        } else if self.picked.take().is_some() {
+            cx.notify();
+        } else if self.compose != Compose::New {
+            self.start_compose(Compose::New, window, cx);
+        } else if self.panel.is_some() {
+            self.back(cx);
+        } else if self.searching {
+            self.set_searching(false, window, cx);
+        } else if narrow && self.open.is_some() {
+            self.close_room(cx);
+            cx.notify();
+        } else {
+            return false;
+        }
+        true
     }
 
     fn close_viewer(&mut self, cx: &mut Context<Self>) {
@@ -1490,7 +1516,16 @@ fn apply(msgs: &mut [Msg], item: &Item) -> Option<usize> {
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (top, bottom) = crate::insets();
+        if window.focused(cx).is_none() {
+            window.focus(&self.focus, cx);
+        }
         let root = v_flex()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.go_back(window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .size_full()
             .pt(px(top))
             .pb(px(bottom))

@@ -229,6 +229,10 @@ fn android_main(app: android_activity::AndroidApp) {
     };
     // Blocks on the Android event loop; the closure runs once the native window exists.
     Application::with_platform(platform.into_rc()).with_assets(Assets).run(move |cx| open(cx, dir, None));
+    // The loop ends when the activity is destroyed, but Android keeps the process, and a GPUI app
+    // cannot be built a second time in one process: reopening would panic and leave the app
+    // unable to start. Ending the process makes the next launch a clean one.
+    std::process::exit(0);
 }
 
 #[derive(Clone, Copy)]
