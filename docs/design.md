@@ -62,6 +62,12 @@ message; the time is printed once under the run. A mention is accent text; a mes
 you carries an accent bar on its leading edge. Replies quote in a lighter inset; touching the
 quote goes to the message it quotes.
 
+Own messages can take a chat colour from Settings: Default (`raised`) or one of Beeper's nine
+(blue, indigo, purple, pink, red, orange, green, teal, slate), the same in dark and light, kept on this
+device. Everything inside such a bubble (text, quote inset, link, mention, poll, place) is drawn in
+the bubble's ink, white or near-black (orange), chosen for 4.5:1. Blue is Beeper's #3478F6 darkened
+to #2E6EF0 to reach that. The lime accent keeps its meaning.
+
 Reactions are badges pinned over the lower edge of their message, on `lifted` (`#3d3d3d`, one
 step above `raised`) with a ring in the ground's colour; your own reaction has a white ring.
 Standing free under a message they read as small messages of their own.

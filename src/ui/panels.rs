@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use gpui_kit::component::switch::Switch;
 
 use super::*;
-use crate::ThemeChoice;
+use crate::{ChatColour, ThemeChoice};
 
 /// A settings row, and the widest a settings page grows.
 const ROW_H: f32 = 52.;
@@ -56,6 +56,14 @@ impl BeeperApp {
         self.settings.theme = theme;
         self.settings.save(&self.dir);
         cx.set_global(theme);
+        crate::sync_theme(Some(window), cx);
+        cx.notify();
+    }
+
+    fn set_chat_colour(&mut self, colour: ChatColour, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.chat_colour = colour;
+        self.settings.save(&self.dir);
+        cx.set_global(colour);
         crate::sync_theme(Some(window), cx);
         cx.notify();
     }
@@ -200,6 +208,28 @@ impl BeeperApp {
             .child(choice("Dark", ThemeChoice::Dark, cx))
             .child(choice("Light", ThemeChoice::Light, cx))
             .child(choice("System", ThemeChoice::System, cx));
+        let swatches = h_flex().flex_wrap().gap_x(px(4.)).pb(px(8.)).children(ChatColour::ALL.map(|colour| {
+            let on = self.settings.chat_colour == colour;
+            let name = format!("Chat colour: {}", colour.label());
+            let fill = colour.fill().map_or(p.raised, |hex| rgb(hex).into());
+            div()
+                .id(SharedString::from(name.clone()))
+                .size(px(TAP))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| this.set_chat_colour(colour, window, cx)))
+                .child(
+                    div()
+                        .size(px(32.))
+                        .p(px(2.))
+                        .rounded_full()
+                        .border_2()
+                        .border_color(if on { p.text } else { p.surface })
+                        .child(div().size_full().rounded_full().bg(fill)),
+                )
+        }));
         let weak = cx.entity().downgrade();
         let incognito = Switch::new("incognito").checked(self.settings.incognito).on_click(move |on, _, cx| {
             let _ = weak.update(cx, |this, cx| this.set_incognito(*on, cx));
@@ -207,7 +237,12 @@ impl BeeperApp {
         let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
         v_flex()
             .gap(px(GAP * 2.))
-            .child(section("Appearance", cx).child(card(cx).child(row("Theme", "", cx).child(themes))))
+            .child(section("Appearance", cx).child(
+                card(cx)
+                    .child(row("Theme", "", cx).child(themes))
+                    .child(row("Chat colour", &format!("{}. Your own messages, on this device.", self.settings.chat_colour.label()), cx))
+                    .child(swatches),
+            ))
             .when(cfg!(target_os = "android"), |el| {
                 el.child(section("Notifications", cx).child(card(cx).child(
                     row("Sounds and importance", "Direct messages, group chats and mentions each have their own.", cx).child(

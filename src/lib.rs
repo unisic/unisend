@@ -72,6 +72,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     fonts(cx);
     let settings = Settings::load(&dir);
     cx.set_global(settings.theme);
+    cx.set_global(settings.chat_colour);
     sync_theme(None, cx);
     let (cmd, events) = backend::start(dir.clone());
     let options = WindowOptions {
@@ -119,6 +120,93 @@ pub(crate) enum ThemeChoice {
 
 impl Global for ThemeChoice {}
 
+/// The colour of the user's own bubbles: Beeper's nine, or the Night design's `raised` grey.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum ChatColour {
+    #[default]
+    Default,
+    Blue,
+    Indigo,
+    Purple,
+    Pink,
+    Red,
+    Orange,
+    Green,
+    Teal,
+    Slate,
+}
+
+impl Global for ChatColour {}
+
+impl ChatColour {
+    pub const ALL: [Self; 10] = [
+        Self::Default,
+        Self::Blue,
+        Self::Indigo,
+        Self::Purple,
+        Self::Pink,
+        Self::Red,
+        Self::Orange,
+        Self::Green,
+        Self::Teal,
+        Self::Slate,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Blue => "Blue",
+            Self::Indigo => "Indigo",
+            Self::Purple => "Purple",
+            Self::Pink => "Pink",
+            Self::Red => "Red",
+            Self::Orange => "Orange",
+            Self::Green => "Green",
+            Self::Teal => "Teal",
+            Self::Slate => "Slate",
+        }
+    }
+
+    /// Beeper's swatch, the same in both modes; `None` for the design's own grey. Blue is Beeper's
+    /// #3478F6 darkened a little: neither white nor dark text reaches 4.5:1 on the original.
+    pub fn fill(self) -> Option<u32> {
+        Some(match self {
+            Self::Default => return None,
+            Self::Blue => 0x2e6ef0,
+            Self::Indigo => 0x4f5bd5,
+            Self::Purple => 0x734ef3,
+            Self::Pink => 0xc2185b,
+            Self::Red => 0xd32f2f,
+            Self::Orange => 0xe8710a,
+            Self::Green => 0x2e7d32,
+            Self::Teal => 0x00838f,
+            Self::Slate => 0x37474f,
+        })
+    }
+}
+
+/// WCAG relative luminance of an sRGB colour.
+fn luminance(hex: u32) -> f32 {
+    let lin = |shift: u32| {
+        let c = ((hex >> shift) & 0xff) as f32 / 255.;
+        if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * lin(16) + 0.7152 * lin(8) + 0.0722 * lin(0)
+}
+
+/// WCAG contrast ratio of two sRGB colours.
+fn contrast(a: u32, b: u32) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// The text on a bubble of this fill: white, or Beeper's near-black where that reads better.
+fn ink_on(fill: u32) -> u32 {
+    const WHITE: u32 = 0xffffff;
+    const DARK: u32 = 0x1a1a1a;
+    if contrast(fill, WHITE) >= contrast(fill, DARK) { WHITE } else { DARK }
+}
+
 /// What the settings page changes, kept in `settings.json` in the data directory.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Settings {
@@ -127,6 +215,9 @@ pub(crate) struct Settings {
     /// Read receipts stay private: others do not see what has been read.
     #[serde(default = "Settings::private_by_default")]
     pub incognito: bool,
+    /// Own bubbles' colour, kept on this device like the rest.
+    #[serde(default)]
+    pub chat_colour: ChatColour,
 }
 
 impl Settings {
@@ -139,8 +230,12 @@ impl Settings {
     }
 
     fn load(dir: &std::path::Path) -> Self {
-        let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| serde_json::from_slice(&raw).ok());
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true })
+        let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true, chat_colour: ChatColour::default() })
+    }
+
+    fn parse(raw: &[u8]) -> Option<Self> {
+        serde_json::from_slice(raw).ok()
     }
 
     pub fn save(&self, dir: &std::path::Path) {
@@ -171,6 +266,11 @@ pub(crate) struct Palette {
     pub negative: Hsla,
     pub warning: Hsla,
     pub warning_bg: Hsla,
+    /// An own bubble's fill and the text on it.
+    pub own: Hsla,
+    pub on_own: Hsla,
+    /// Whether the user chose a colour, so what is drawn inside the bubble must follow it.
+    pub own_coloured: bool,
 }
 
 impl Global for Palette {}
@@ -179,12 +279,22 @@ impl Palette {
     pub fn of(cx: &App) -> Self {
         *cx.global()
     }
+
+    /// The palette for what is drawn inside an own bubble: on a chosen colour every text role is
+    /// the bubble's ink (a lighter grey would miss 4.5:1 on blue and teal) and insets are tints of it.
+    pub fn in_own_bubble(self) -> Self {
+        if !self.own_coloured {
+            return self;
+        }
+        Self { text: self.on_own, muted: self.on_own, faint: self.on_own, accent_ink: self.on_own, lifted: self.on_own.opacity(0.28), ..self }
+    }
 }
 
 /// Sets `Palette` for the current mode and lays it over the component library's theme.
 fn apply_palette(cx: &mut App) {
     let c = |hex: u32| -> Hsla { rgb(hex).into() };
-    let p = if Theme::global(cx).is_dark() {
+    let chosen = cx.try_global::<ChatColour>().copied().unwrap_or_default().fill();
+    let mut p = if Theme::global(cx).is_dark() {
         Palette {
             ground: c(0x000000),
             surface: c(0x111111),
@@ -200,6 +310,9 @@ fn apply_palette(cx: &mut App) {
             negative: c(0xe5484d),
             warning: c(0xe5a93b),
             warning_bg: c(0x2b2414),
+            own: c(0x2a2a2a),
+            on_own: c(0xffffff),
+            own_coloured: false,
         }
     } else {
         Palette {
@@ -217,8 +330,14 @@ fn apply_palette(cx: &mut App) {
             negative: c(0xc62f35),
             warning: c(0x7a5200),
             warning_bg: c(0xfbefd2),
+            own: c(0xe2e2e2),
+            on_own: c(0x000000),
+            own_coloured: false,
         }
     };
+    if let Some(fill) = chosen {
+        (p.own, p.on_own, p.own_coloured) = (c(fill), c(ink_on(fill)), true);
+    }
     cx.set_global(p);
     // The system bars share the ground, with their icons in the ink that shows on it.
     #[cfg(target_os = "android")]
@@ -809,5 +928,24 @@ mod tests {
                 assert!(matches!(Assets.load(&path), Ok(Some(_))), "{path} is used but not embedded");
             }
         }
+    }
+
+    #[test]
+    fn text_on_every_chat_colour_reaches_4_5() {
+        for colour in super::ChatColour::ALL {
+            let Some(fill) = colour.fill() else { continue };
+            let ratio = super::contrast(fill, super::ink_on(fill));
+            assert!(ratio >= 4.5, "{}: {ratio}", colour.label());
+        }
+        assert_eq!(super::ink_on(super::ChatColour::Orange.fill().unwrap()), 0x1a1a1a);
+        assert_eq!(super::ink_on(super::ChatColour::Indigo.fill().unwrap()), 0xffffff);
+    }
+
+    #[test]
+    fn old_settings_file_loads_with_the_default_colour() {
+        let old = super::Settings::parse(br#"{"theme":"Light","incognito":false}"#).unwrap();
+        assert_eq!((old.theme, old.incognito, old.chat_colour), (super::ThemeChoice::Light, false, super::ChatColour::Default));
+        let new = super::Settings::parse(br#"{"chat_colour":"Teal"}"#).unwrap();
+        assert_eq!(new.chat_colour, super::ChatColour::Teal);
     }
 }

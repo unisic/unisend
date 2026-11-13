@@ -1177,7 +1177,9 @@ impl BeeperApp {
                 let leaving = m.delivery == Delivery::Sending && !m.id.starts_with('$');
                 let (id, held) = (m.id.clone(), m.id.clone());
                 let swiped = this.swipe.as_ref().filter(|(on, _)| *on == m.id).map_or(0., |(_, far)| far.clamp(-SWIPE_REPLY - 16., SWIPE_REPLY + 16.));
-                let ink = HighlightStyle { color: Some(p.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
+                // What is drawn inside the bubble: an own one may carry a colour of the user's choosing.
+                let inside = if m.own { p.in_own_bubble() } else { p };
+                let ink = HighlightStyle { color: Some(inside.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
                 let underline = HighlightStyle { underline: Some(UnderlineStyle { thickness: px(1.), ..Default::default() }), ..Default::default() };
                 let mut marks: Vec<_> = m.mentions.iter().map(|r| (r.clone(), ink)).collect();
                 let apart = |u: &std::ops::Range<usize>| m.mentions.iter().all(|r| r.end <= u.start || u.end <= r.start);
@@ -1202,7 +1204,7 @@ impl BeeperApp {
                         .id(SharedString::from(format!("{}-link", m.id)))
                         .w(px(width))
                         .rounded(px(12.))
-                        .bg(p.text.opacity(0.07))
+                        .bg(inside.text.opacity(0.07))
                         .cursor_pointer()
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.stop_propagation();
@@ -1214,17 +1216,17 @@ impl BeeperApp {
                                 .px(px(10.))
                                 .py(px(8.))
                                 .gap(px(2.))
-                                .child(line(12., 16.).text_color(p.faint).truncate().child(link.site.clone()))
+                                .child(line(12., 16.).text_color(inside.faint).truncate().child(link.site.clone()))
                                 .when(!link.title.is_empty(), |el| {
                                     el.child(line(14., 19.).font_weight(FontWeight::SEMIBOLD).line_clamp(2).text_ellipsis().child(link.title.clone()))
                                 })
                                 .when(!link.description.is_empty(), |el| {
-                                    el.child(line(13., 18.).text_color(p.muted).line_clamp(3).text_ellipsis().child(link.description.clone()))
+                                    el.child(line(13., 18.).text_color(inside.muted).line_clamp(3).text_ellipsis().child(link.description.clone()))
                                 }),
                         )
                 });
-                let poll_card = m.poll.as_ref().filter(|_| !m.deleted).map(|poll| cards::poll(m, poll, this.user.as_ref(), room, p, cx));
-                let place_card = m.place.as_ref().filter(|_| !m.deleted).map(|place| cards::place(m, place, room, p, cx));
+                let poll_card = m.poll.as_ref().filter(|_| !m.deleted).map(|poll| cards::poll(m, poll, this.user.as_ref(), room, inside, cx));
+                let place_card = m.place.as_ref().filter(|_| !m.deleted).map(|place| cards::place(m, place, room, inside, cx));
                 let bubble = v_flex()
                     .id(SharedString::from(m.id.clone()))
                     // Without this a flex child is as wide as its longest line and leaves the screen.
@@ -1233,7 +1235,8 @@ impl BeeperApp {
                     .py(px(9.))
                     .gap(px(4.))
                     .rounded(px(RADIUS))
-                    .bg(if m.own || picked { p.raised } else { p.surface })
+                    .bg(if m.own { p.own } else if picked { p.raised } else { p.surface })
+                    .text_color(inside.text)
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.pick(&id, event.position(), cx)))
                     // A long press on a touch screen, the right button of a mouse.
@@ -1253,11 +1256,11 @@ impl BeeperApp {
                             .px(px(10.))
                             .py(px(6.))
                             .rounded(px(12.))
-                            .bg(p.text.opacity(0.07))
+                            .bg(inside.text.opacity(0.07))
                             .text_size(px(13.))
                             .line_height(px(18.))
                             .when(!who.is_empty(), |el| el.child(div().font_weight(FontWeight::SEMIBOLD).child(who)))
-                            .child(div().line_clamp(2).text_ellipsis().text_color(p.muted).child(text))
+                            .child(div().line_clamp(2).text_ellipsis().text_color(inside.muted).child(text))
                     }))
                     .children(attachment)
                     .when(!m.body.is_empty(), |el| {
@@ -1265,14 +1268,14 @@ impl BeeperApp {
                             div()
                                 .text_size(px(16.))
                                 .line_height(px(22.))
-                                .when(faded, |el| el.italic().text_color(p.faint))
+                                .when(faded, |el| el.italic().text_color(inside.faint))
                                 .child(StyledText::new(m.body.clone()).with_highlights(marks)),
                         )
                     })
                     .children(link_card)
                     .children(poll_card)
                     .children(place_card)
-                    .when(m.edited && !m.deleted, |el| el.child(div().text_size(px(12.)).text_color(p.faint).child("Edited")));
+                    .when(m.edited && !m.deleted, |el| el.child(div().text_size(px(12.)).text_color(inside.faint).child("Edited")));
                 // Badges pinned over the bubble's lower edge, ringed in the ground's colour: standing
                 // free under it they read as small messages of their own.
                 let reactions = (!m.reactions.is_empty()).then(|| {
