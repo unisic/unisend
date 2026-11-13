@@ -57,7 +57,19 @@ when you were mentioned. Unread rows have a white bold name and a white preview.
 ## Conversation
 
 Incoming messages sit left on `surface`, own messages right on `raised`. In a group, each run of
-messages from one person starts with their name and ends with their avatar beside the last
+messages from one person starts with their name and ends with their picture beside the last
 message; the time is printed once under the run. A mention is accent text; a message that mentions
-you carries an accent bar on its leading edge. Replies quote in a lighter inset. Menus are sheets
-that rise from the bottom with rows 52 tall.
+you carries an accent bar on its leading edge. Replies quote in a lighter inset; touching the
+quote goes to the message it quotes.
+
+## Acting on things
+
+The common acts take one gesture, and each also has a slower way that can be found by looking.
+
+- A tap on a message opens its panel right at the finger: six reactions in a row, then Reply,
+  Copy, and for your own messages Edit and Delete. A long press or the right mouse button opens
+  the same panel. A tap anywhere else closes it.
+- A double tap likes the message (the heart), and a second double tap takes it back.
+- A sideways swipe on a message replies to it.
+- A long press or the right mouse button on a chat in the list, or the dots in a chat's header,
+  opens that chat's sheet: rows 52 tall rising from the bottom, named after the chat.

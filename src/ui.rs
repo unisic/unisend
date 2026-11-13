@@ -8,7 +8,6 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
-    menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -49,6 +48,13 @@ const BUBBLE_SHARE: f32 = 0.8;
 const SHEET_W: f32 = 480.;
 /// Sender's picture beside a run of messages in a group.
 const SENDER: f32 = 28.;
+/// The panel of a message's actions, and how far from the finger it opens.
+const MENU_W: f32 = 6. * TAP + 16.;
+const MENU_GAP: f32 = 28.;
+/// How far a message is swiped sideways to reply to it.
+const SWIPE_REPLY: f32 = 56.;
+/// The reaction a double tap gives.
+const LIKE: &str = QUICK_REACTIONS[1];
 /// A pause this long starts a new run of messages, with its own time.
 const RUN_PAUSE_MS: u64 = 10 * 60 * 1000;
 /// Edits, reactions and deletions kept until the message they target is paged in.
@@ -152,8 +158,12 @@ pub struct BeeperApp {
     uploads: usize,
     /// Message whose actions are showing.
     picked: Option<String>,
-    /// The open chat's actions are showing.
-    chat_sheet: bool,
+    /// Where it was picked: its actions open at the finger.
+    picked_at: Point<Pixels>,
+    /// A horizontal pan in progress over a message, with how far it has travelled.
+    swipe: Option<(String, f32)>,
+    /// The chat whose actions are showing.
+    chat_sheet: Option<OwnedRoomId>,
     compose: Compose,
     more: bool,
     loading: bool,
@@ -265,7 +275,9 @@ impl BeeperApp {
             fetching: HashSet::new(),
             uploads: 0,
             picked: None,
-            chat_sheet: false,
+            picked_at: Point::default(),
+            swipe: None,
+            chat_sheet: None,
             faces: HashMap::new(),
             compose: Compose::New,
             more: false,
@@ -488,23 +500,6 @@ impl BeeperApp {
     }
 
     /// Menu of what can be done to a chat; shared by the row's context menu and the chat header.
-    /// The chat's actions as a popup, for a right-click on its row.
-    fn chat_menu(
-        room: &RoomSummary,
-        this: WeakEntity<Self>,
-    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-        let entries = chat_actions(room);
-        let id = room.id.clone();
-        move |menu, _, _| {
-            entries.iter().fold(menu, |menu, &(label, icon, action)| {
-                let (this, id) = (this.clone(), id.clone());
-                menu.item(PopupMenuItem::new(label).icon(icon).on_click(move |_, _, cx| {
-                    let _ = this.update(cx, |this, cx| this.send(Cmd::Chat(id.clone(), action), cx));
-                }))
-            })
-        }
-    }
-
     /// Asks the backend for avatars and previews of rows that just became visible.
     /// Uses at most half the command channel so user actions always fit.
     fn fetch_rows(&mut self, range: std::ops::Range<usize>) {
@@ -575,7 +570,7 @@ impl BeeperApp {
         let narrow = window.viewport_size().width < px(NARROW);
         if self.viewer.is_some() {
             self.close_viewer(cx);
-        } else if self.picked.take().is_some() || std::mem::take(&mut self.chat_sheet) {
+        } else if self.picked.take().is_some() || self.chat_sheet.take().is_some() {
             cx.notify();
         } else if self.compose != Compose::New {
             self.start_compose(Compose::New, window, cx);
@@ -796,12 +791,13 @@ impl BeeperApp {
         }
         self.close_viewer(cx);
         self.fetching.clear();
+        self.swipe = None;
         for (_, image) in self.faces.drain() {
             if let Some(image) = image {
                 image.remove_asset(cx);
             }
         }
-        (self.picked, self.chat_sheet) = (None, false);
+        (self.picked, self.chat_sheet) = (None, None);
         self.compose = Compose::New;
         self.timeline.reset(0);
         self.more = false;
@@ -947,7 +943,6 @@ impl BeeperApp {
 
     fn render_rooms(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
-        let weak = cx.entity().downgrade();
         let list = uniform_list(
             "rooms",
             self.shown.len(),
@@ -1019,7 +1014,16 @@ impl BeeperApp {
                                             .when(unread, |el| el.child(count_pill(room.unread, room.muted, cx))),
                                     ),
                             )
-                            .context_menu(Self::chat_menu(room, weak.clone()))
+                            // A long press on a touch screen, the right button of a mouse.
+                            .on_aux_click(cx.listener({
+                                let id = room.id.clone();
+                                move |this, event: &ClickEvent, _, cx| {
+                                    if event.is_secondary() {
+                                        this.chat_sheet = Some(id.clone());
+                                        cx.notify();
+                                    }
+                                }
+                            }))
                     })
                     .collect()
             }),
@@ -1124,10 +1128,11 @@ impl BeeperApp {
                 let faded = m.deleted || m.body == UTD;
                 let picked = this.picked.as_deref() == Some(m.id.as_str());
                 let quote = m.reply_to.as_ref().map(|id| match this.msgs.iter().rfind(|x| &x.id == id) {
-                    Some(q) => (q.sender.clone(), q.summary()),
-                    None => (String::new(), "Message unavailable".to_owned()),
+                    Some(q) => (id.clone(), q.sender.clone(), q.summary()),
+                    None => (id.clone(), String::new(), "Message unavailable".to_owned()),
                 });
-                let id = m.id.clone();
+                let (id, held) = (m.id.clone(), m.id.clone());
+                let swiped = this.swipe.as_ref().filter(|(on, _)| *on == m.id).map_or(0., |(_, far)| far.clamp(-SWIPE_REPLY - 16., SWIPE_REPLY + 16.));
                 let ink = HighlightStyle { color: Some(p.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
                 let bubble = v_flex()
                     .id(SharedString::from(m.id.clone()))
@@ -1139,12 +1144,20 @@ impl BeeperApp {
                     .rounded(px(RADIUS))
                     .bg(if m.own || picked { p.raised } else { p.surface })
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.picked = (this.picked.as_ref() != Some(&id)).then(|| id.clone());
-                        cx.notify();
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.pick(&id, event.position(), cx)))
+                    // A long press on a touch screen, the right button of a mouse.
+                    .on_aux_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        if event.is_secondary() {
+                            this.pick(&held, event.position(), cx);
+                        }
                     }))
-                    .children(quote.map(|(who, text)| {
+                    .children(quote.map(|(target, who, text)| {
                         v_flex()
+                            .id(SharedString::from(format!("{}-quote", m.id)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.reveal(&target, cx);
+                            }))
                             .min_w_0()
                             .px(px(10.))
                             .py(px(6.))
@@ -1201,6 +1214,7 @@ impl BeeperApp {
                 let side = if faces { px(SENDER + 8.) } else { px(0.) };
                 v_flex()
                     .w_full()
+                    .relative()
                     .px(px(GUTTER))
                     .pt(if first { px(GAP) } else { px(3.) })
                     .when(new_day, |el| {
@@ -1219,9 +1233,29 @@ impl BeeperApp {
                                 .child(m.sender.clone()),
                         )
                     })
+                    .on_scroll_wheel(cx.listener({
+                        let id = m.id.clone();
+                        move |this, event: &ScrollWheelEvent, window, cx| this.swipe(&id, event, window, cx)
+                    }))
+                    .when(swiped != 0., |el| {
+                        // What letting go will do, shown where the message came from.
+                        el.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .bottom_0()
+                                .map(|el| if swiped > 0. { el.left(px(GUTTER)) } else { el.right(px(GUTTER)) })
+                                .flex()
+                                .items_center()
+                                .text_color(if swiped.abs() >= SWIPE_REPLY { p.text } else { p.faint })
+                                .child(Icon::new(IconName::Reply).size_5()),
+                        )
+                    })
                     .child(
                         h_flex()
                             .w_full()
+                            .relative()
+                            .left(px(swiped))
                             .items_end()
                             .gap(px(8.))
                             .when(m.own, |el| el.flex_row_reverse())
@@ -1274,7 +1308,7 @@ impl BeeperApp {
                     )
                     .when(room.is_some(), |el| {
                         el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, _, _, cx| {
-                            this.chat_sheet = true;
+                            this.chat_sheet = this.open.clone();
                             cx.notify();
                         })))
                     }),
@@ -1334,7 +1368,8 @@ impl BeeperApp {
 
     /// Rows that rise from the bottom over a dimmed screen: the app's menus. Touch has no
     /// right-click, and a popup's rows are too small for a finger.
-    fn sheet(&self, top: Option<AnyElement>, rows: Vec<Stateful<Div>>, cx: &mut Context<Self>) -> AnyElement {
+    /// `title` says what the rows act on.
+    fn sheet(&self, title: String, rows: Vec<Stateful<Div>>, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         let (_, bottom) = crate::insets();
         div()
@@ -1348,7 +1383,7 @@ impl BeeperApp {
             .bg(gpui_kit::black().opacity(0.6))
             .occlude()
             .on_click(cx.listener(|this, _, _, cx| {
-                (this.picked, this.chat_sheet) = (None, false);
+                (this.picked, this.chat_sheet) = (None, None);
                 cx.notify();
             }))
             .child(
@@ -1362,19 +1397,47 @@ impl BeeperApp {
                     .bg(p.surface)
                     // A tap between the rows is not a tap outside the sheet.
                     .on_click(|_, _, cx| cx.stop_propagation())
-                    .children(top)
+                    .child(div().h(px(36.)).px(px(GUTTER + 4.)).flex().items_center().truncate().text_size(px(14.)).text_color(p.faint).child(title))
                     .children(rows),
             )
             .into_any_element()
     }
 
-    /// Actions for the picked message.
-    fn render_message_sheet(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Picks a message: its reactions and actions open where it was touched.
+    fn pick(&mut self, id: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
+        (self.picked, self.picked_at) = (Some(id.to_owned()), at);
+        cx.notify();
+    }
+
+    /// Scrolls to a message, when it is among the loaded ones.
+    fn reveal(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(ix) = self.msgs.iter().position(|m| m.id == id) {
+            self.timeline.scroll_to_reveal_item(ix);
+            cx.notify();
+        }
+    }
+
+    /// Follows a sideways pan over a message; one that travels far enough starts a reply.
+    fn swipe(&mut self, id: &str, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let delta = event.delta.pixel_delta(px(20.));
+        let before = self.swipe.as_ref().map(|(_, far)| *far);
+        let reply = swipe_step(&mut self.swipe, id, f32::from(delta.x), f32::from(delta.y), event.touch_phase);
+        if let Some(target) = reply {
+            self.start_compose(Compose::Reply(target), window, cx);
+        } else if before != self.swipe.as_ref().map(|(_, far)| *far) {
+            cx.notify();
+        }
+    }
+
+    /// Reactions and actions for the picked message, in a panel at the finger. Whatever is tapped
+    /// outside it closes it; the second tap of a double tap likes the message.
+    fn render_message_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = Palette::of(cx);
         let m = self.msgs.iter().find(|m| Some(&m.id) == self.picked.as_ref()).filter(|m| !m.deleted)?;
         let (id, body, own) = (m.id.clone(), m.body.clone(), m.own);
-        let reactions = h_flex().px(px(GUTTER)).pb(px(8.)).justify_between().children(QUICK_REACTIONS.iter().enumerate().map(|(n, key)| {
+        let reactions = h_flex().children(QUICK_REACTIONS.iter().enumerate().map(|(n, key)| {
             let id = id.clone();
+            let mine = m.reactions.iter().any(|r| r.own && r.key == *key);
             div()
                 .id(("quick-reaction", n))
                 .size(px(TAP))
@@ -1382,56 +1445,99 @@ impl BeeperApp {
                 .items_center()
                 .justify_center()
                 .rounded_full()
-                .bg(p.raised)
-                .text_size(px(20.))
+                .when(mine, |el| el.bg(p.text.opacity(0.16)))
+                .hover(|el| el.bg(p.text.opacity(0.1)))
+                .text_size(px(24.))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, key, cx)))
                 .child(*key)
         }));
         let mut rows = vec![
-            sheet_row("reply", IconName::Reply, "Reply", p.text).on_click(cx.listener({
+            menu_row("reply", IconName::Reply, "Reply", p.text, cx).on_click(cx.listener({
                 let id = id.clone();
                 move |this, _, window, cx| this.start_compose(Compose::Reply(id.clone()), window, cx)
             })),
-            sheet_row("copy", IconName::Copy, "Copy text", p.text).on_click(cx.listener(move |this, _, _, cx| {
+            menu_row("copy", IconName::Copy, "Copy text", p.text, cx).on_click(cx.listener(move |this, _, _, cx| {
                 crate::copy(cx, body.clone());
                 this.picked = None;
                 cx.notify();
             })),
         ];
         if own {
-            rows.push(sheet_row("edit", IconName::Pencil, "Edit", p.text).on_click(cx.listener({
+            rows.push(menu_row("edit", IconName::Pencil, "Edit", p.text, cx).on_click(cx.listener({
                 let id = id.clone();
                 move |this, _, window, cx| this.start_compose(Compose::Edit(id.clone()), window, cx)
             })));
-            rows.push(sheet_row("delete", IconName::Trash, "Delete", p.negative).on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(room) = this.open.clone() {
-                    this.send(Cmd::Delete { room, target: id.clone() }, cx);
+            rows.push(menu_row("delete", IconName::Trash, "Delete", p.negative, cx).on_click(cx.listener({
+                let id = id.clone();
+                move |this, _, _, cx| {
+                    if let Some(room) = this.open.clone() {
+                        this.send(Cmd::Delete { room, target: id.clone() }, cx);
+                    }
+                    this.picked = None;
+                    cx.notify();
                 }
-                this.picked = None;
-                cx.notify();
             })));
         }
-        Some(self.sheet(Some(reactions.into_any_element()), rows, cx))
+        // Under the finger when there is room, over it otherwise; never off the screen.
+        let (top, bottom) = crate::insets();
+        let view = window.viewport_size();
+        let height = 16. + TAP * (1 + rows.len()) as f32;
+        let floor = f32::from(view.height) - bottom - GUTTER;
+        let at = self.picked_at;
+        let left = (f32::from(at.x) - MENU_W / 2.).clamp(GUTTER, (f32::from(view.width) - MENU_W - GUTTER).max(GUTTER));
+        let under = f32::from(at.y) + MENU_GAP;
+        let y = if under + height <= floor { under } else { (f32::from(at.y) - MENU_GAP - height).max(top + GUTTER) };
+        Some(
+            div()
+                .id("message-menu")
+                .absolute()
+                .inset_0()
+                .bg(gpui_kit::black().opacity(0.35))
+                .occlude()
+                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                    if event.click_count() >= 2 {
+                        this.toggle_reaction(&id, LIKE, cx);
+                    }
+                    this.picked = None;
+                    cx.notify();
+                }))
+                .child(
+                    v_flex()
+                        .id("message-menu-panel")
+                        .absolute()
+                        .left(px(left))
+                        .top(px(y))
+                        .w(px(MENU_W))
+                        .p(px(8.))
+                        .rounded(px(RADIUS))
+                        .bg(p.raised)
+                        // A tap between the rows is not a tap outside the panel.
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(reactions)
+                        .children(rows),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Actions for the open chat.
     fn render_chat_sheet(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = Palette::of(cx);
-        let room = self.open.as_ref().filter(|_| self.chat_sheet).and_then(|id| self.rooms.iter().find(|r| &r.id == id))?;
-        let id = room.id.clone();
+        let room = self.chat_sheet.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id))?;
+        let (id, title) = (room.id.clone(), room.name.clone());
         let rows = chat_actions(room)
             .into_iter()
             .map(|(label, icon, action)| {
                 let id = id.clone();
                 sheet_row(label, icon, label, p.text).on_click(cx.listener(move |this, _, _, cx| {
                     this.send(Cmd::Chat(id.clone(), action), cx);
-                    this.chat_sheet = false;
+                    this.chat_sheet = None;
                     cx.notify();
                 }))
             })
             .collect();
-        Some(self.sheet(None, rows, cx))
+        Some(self.sheet(title, rows, cx))
     }
 
     /// What the composer is replying to or editing, with a way out.
@@ -1582,6 +1688,41 @@ fn chat_actions(room: &RoomSummary) -> [(&'static str, IconName, ChatAction); 5]
             ("Move to low priority", IconName::ChevronsDown, ChatAction::LowPriority(true))
         },
     ]
+}
+
+/// One action in a message's panel.
+fn menu_row(id: &'static str, icon: IconName, label: &'static str, ink: Hsla, cx: &App) -> Stateful<Div> {
+    let p = Palette::of(cx);
+    h_flex()
+        .id(id)
+        .h(px(TAP))
+        .px(px(GAP - 4.))
+        .gap(px(GAP))
+        .rounded(px(12.))
+        .text_size(px(16.))
+        .text_color(ink)
+        .cursor_pointer()
+        .hover(|el| el.bg(p.text.opacity(0.1)))
+        .child(Icon::new(icon).size_5())
+        .child(label)
+}
+
+/// Advances a sideways pan over a message by one event; gives the message to reply to when the
+/// pan has just ended far enough. Only a pan that begins on a message counts, so a mouse wheel and
+/// the glide after a fling (neither has a start) never reply.
+fn swipe_step(swipe: &mut Option<(String, f32)>, id: &str, dx: f32, dy: f32, phase: TouchPhase) -> Option<String> {
+    let sideways = if dx.abs() > dy.abs() { dx } else { 0. };
+    match phase {
+        TouchPhase::Started => *swipe = Some((id.to_owned(), sideways)),
+        TouchPhase::Moved => {
+            if let Some((_, far)) = swipe {
+                *far += sideways;
+            }
+        }
+        TouchPhase::Ended => return swipe.take().filter(|(_, far)| far.abs() >= SWIPE_REPLY).map(|(id, _)| id),
+        TouchPhase::Cancelled => *swipe = None,
+    }
+    None
 }
 
 /// One action in a sheet.
@@ -1839,7 +1980,7 @@ impl Render for BeeperApp {
                         })
                         .child(div().absolute().top(px(top + 12.)).right(px(GUTTER)).child(Icon::new(IconName::X).size_6()))
                 });
-                let sheet = self.render_message_sheet(cx).or_else(|| self.render_chat_sheet(cx));
+                let sheet = self.render_message_menu(window, cx).or_else(|| self.render_chat_sheet(cx));
                 root.relative()
                     .child(self.render_banners(cx))
                     .child(div().flex_1().min_h_0().child(body))
@@ -1848,5 +1989,27 @@ impl Render for BeeperApp {
                     .into_any_element()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
+    use super::{SWIPE_REPLY, swipe_step};
+    use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
+
+    #[test]
+    fn only_a_sideways_pan_that_began_on_a_message_replies() {
+        let run = |events: &[(f32, f32, gpui_kit::TouchPhase)]| {
+            let mut swipe = None;
+            events.iter().find_map(|&(dx, dy, phase)| swipe_step(&mut swipe, "$m", dx, dy, phase))
+        };
+        let far = SWIPE_REPLY / 2. + 1.;
+        assert_eq!(run(&[(0., 0., Started), (far, 1., Moved), (far, 0., Moved), (0., 0., Ended)]).as_deref(), Some("$m"));
+        assert_eq!(run(&[(0., 0., Started), (-far, 0., Moved), (-far, 2., Moved), (0., 0., Ended)]).as_deref(), Some("$m"), "either way");
+        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (0., 0., Ended)]), None, "too short");
+        assert_eq!(run(&[(0., 0., Started), (2., 300., Moved), (1., 300., Moved), (0., 0., Ended)]), None, "scrolling the chat");
+        assert_eq!(run(&[(far, 0., Moved), (far, 0., Moved), (0., 0., Ended)]), None, "a wheel has no start");
+        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (far, 0., Moved), (0., 0., Cancelled), (0., 0., Ended)]), None);
     }
 }

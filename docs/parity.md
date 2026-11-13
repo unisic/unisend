@@ -54,7 +54,7 @@ is not started.
 | Day separators | done | local |
 | Unread divider | todo | `m.fully_read` |
 | Replies (quote shown) | part | `m.in_reply_to`; no jump to the quoted message |
-| Reactions (show, add, remove) | part | `m.reaction`; six quick emoji, no picker, no custom emoji |
+| Reactions (show, add, remove) | part | `m.reaction`; six quick emoji in the message's panel, a double tap for the heart; no picker, no custom emoji |
 | Deleted messages | part | `m.room.redaction`; in encrypted rooms a deleted message disappears after reload (it cannot be told from a deleted reaction) |
 | Images, stickers | done | inline thumbnail (800px at most), full-screen view (2048px); plain and encrypted |
 | Video, audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. No inline player |
