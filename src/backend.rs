@@ -196,10 +196,11 @@ pub struct RoomSummary {
     /// Beeper's server-side order of the newest message from someone else; 0 when unknown.
     #[serde(default)]
     pub order: i64,
-    /// The last message has been looked for. Until then `ts` 0 means "not known yet", after it
-    /// "this chat has no messages".
+    /// `ts` is known to be the last message's time, or 0 because there is no message: either a
+    /// message was seen, or the history was looked at. Without it `ts` may be a guess (caches from
+    /// builds that took any event's time), and the chat is queued for a look.
     #[serde(default)]
-    pub probed: bool,
+    pub dated: bool,
 }
 
 impl RoomSummary {
@@ -1036,7 +1037,7 @@ async fn last_message(room: &Room) -> Result<Option<(String, u64)>> {
 async fn probe(room: &Room, rooms: &Rooms) -> Option<RoomSummary> {
     let found = match last_message(room).await {
         Ok(found) => found,
-        // Left unprobed, so the next start tries again.
+        // Left undated, so the next start tries again.
         Err(e) => {
             log::debug!("last message of {}: {e:#}", room.room_id());
             return None;
@@ -1045,7 +1046,7 @@ async fn probe(room: &Room, rooms: &Rooms) -> Option<RoomSummary> {
     let mut rooms = rooms.lock().unwrap();
     let r = rooms.get_mut(room.room_id())?;
     UNSAVED_PROBES.store(true, std::sync::atomic::Ordering::Relaxed);
-    r.probed = true;
+    r.dated = true;
     match found {
         Some((text, sent)) => (r.preview, r.ts) = (Some(text), sent),
         // No message and no preview: whatever time it had came from a state event.
@@ -1141,11 +1142,11 @@ async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &R
         let fresh = summarize(&room, notif, other_person(&room).await, seen).await;
         if let Some(r) = rooms.lock().unwrap().get_mut(&fresh.id) {
             // A preview refresh may have updated the entry meanwhile.
-            *r = RoomSummary { preview: current(r.preview.take()), ts: r.ts, probed: r.probed, ..fresh };
-            // Caches from before `probed`: a preview means a message was seen; without one the
-            // time came from some state event and says nothing about when the chat was last used.
-            if !r.probed {
-                (r.probed, r.ts) = if r.preview.is_some() { (true, r.ts) } else { (false, 0) };
+            *r = RoomSummary { preview: current(r.preview.take()), ts: r.ts, dated: r.dated, ..fresh };
+            // An unverified time on a chat with no preview came from a state event: it has no
+            // business near the top while it waits for its look.
+            if !r.dated && r.preview.is_none() {
+                r.ts = 0;
             }
             out.push(r.clone());
         }
@@ -1157,11 +1158,14 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
     drop_left(&client, &rooms, &ev).await;
     let cached = refresh_cached(&client, &notif, &rooms).await;
     // Chats whose last message is not known are looked up in the background. A full queue drops
-    // the rest; they stay unprobed and are queued again at the next start.
+    // the rest; they stay undated and are queued again at the next start.
     let (to_probe, queue) = mpsc::channel(PROBE_QUEUE);
     let prober = tokio::spawn(probe_queue(client.clone(), rooms.clone(), ev.clone(), queue));
     let _stop_prober = AbortOnDrop(prober);
-    for unknown in cached.iter().filter(|r| !r.probed) {
+    // Top of the list first: those are the rows in view.
+    let mut undated: Vec<&RoomSummary> = cached.iter().filter(|r| !r.dated).collect();
+    undated.sort_unstable_by_key(|r| std::cmp::Reverse(r.ts));
+    for unknown in undated {
         let _ = to_probe.try_send(unknown.id.clone());
     }
     if !cached.is_empty() && ev.send(Ev::Rooms(cached)).await.is_err() {
@@ -1209,8 +1213,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 _ => None,
             });
             let last_message = last_message.max();
-            let probed = last_message.is_some() || prev.as_ref().is_some_and(|p| p.probed);
-            if !probed {
+            let dated = last_message.is_some() || prev.as_ref().is_some_and(|p| p.dated);
+            if !dated {
                 let _ = to_probe.try_send(id.clone());
             }
             let newest = last_message.max(prev.as_ref().map(|p| p.ts));
@@ -1234,7 +1238,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 muted: false,
                 marked_unread: false,
                 archived: false,
-                probed,
+                dated,
             };
             let summary = summarize(&room, &notif, peer, seen).await;
             rooms.lock().unwrap().insert(id.clone(), summary.clone());

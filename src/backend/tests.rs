@@ -344,16 +344,24 @@ async fn login_sync_decrypt_send_recover() {
     alice_client.sync_once(SyncSettings::default()).await.unwrap();
     alice_client.join_room_by_id(&quiet_id).await.unwrap();
     wait_for(&mut alice2_rx, "empty chat looked at", |e| match e {
-        Ev::Rooms(r) => r.iter().any(|s| s.id == quiet_id && s.probed && s.ts == 0 && s.preview.is_none()).then_some(()),
+        Ev::Rooms(r) => r.iter().any(|s| s.id == quiet_id && s.dated && s.ts == 0 && s.preview.is_none()).then_some(()),
         _ => None,
     })
     .await;
     // A cache from an older build gave such a chat the time of a state event; whichever of the
     // startup pass and a row's own refresh gets to it first, it must lose that time.
-    alice2.rooms.lock().unwrap().get_mut(&quiet_id).map(|r| (r.ts, r.probed) = (777, false)).unwrap();
+    alice2.rooms.lock().unwrap().get_mut(&quiet_id).map(|r| (r.ts, r.dated) = (777, false)).unwrap();
     alice2.handle(Cmd::Previews(vec![quiet_id.clone()])).await.unwrap();
     wait_for(&mut alice2_rx, "stale time dropped", |e| match e {
-        Ev::Rooms(r) => r.iter().any(|s| s.id == quiet_id && s.probed && s.ts == 0).then_some(()),
+        Ev::Rooms(r) => r.iter().any(|s| s.id == quiet_id && s.dated && s.ts == 0).then_some(()),
+        _ => None,
+    })
+    .await;
+    // A chat with messages whose cached time is a guess gets its last message's time.
+    alice2.rooms.lock().unwrap().get_mut(&room_id).map(|r| (r.ts, r.dated) = (1, false)).unwrap();
+    alice2.handle(Cmd::Previews(vec![room_id.clone()])).await.unwrap();
+    wait_for(&mut alice2_rx, "guessed time replaced", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id && s.dated && s.ts > 1_600_000_000_000).then_some(()),
         _ => None,
     })
     .await;
@@ -524,7 +532,7 @@ fn archive_rule_matches_beeper() {
         marked_unread: false,
         archived: false,
         order,
-        probed: true,
+        dated: true,
     };
     let done = |updated_ts, at_order| Done { updated_ts, at_order };
     let now = 10_000;
