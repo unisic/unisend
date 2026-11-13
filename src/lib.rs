@@ -217,6 +217,14 @@ pub fn run_desktop() {
 #[unsafe(no_mangle)]
 fn android_main(app: android_activity::AndroidApp) {
     use gpui_mobile::android::jni;
+    // Android can create a second instance of the activity in a process that already runs the
+    // app: relaunching the task (from recents, say) starts the new one before destroying the old.
+    // GPUI cannot be built twice in one process, so end it; Android then starts a fresh process
+    // for the instance it just asked for.
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        std::process::exit(0);
+    }
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("beeper-gpui"),
     );
