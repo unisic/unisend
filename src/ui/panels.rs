@@ -536,7 +536,7 @@ impl BeeperApp {
         let chosen = self.settings.emoji_font.as_deref();
         let name = chosen.unwrap_or("System");
         let detail = match () {
-            _ if self.emoji.copying => "Copying the font...".to_owned(),
+            _ if self.emoji.copying => "Copying the font…".to_owned(),
             _ if self.emoji.pending => format!("{name}. Applies after restart."),
             _ => name.to_owned(),
         };
@@ -559,7 +559,7 @@ impl BeeperApp {
                 .child(row("Emoji", &detail, cx).child(change))
                 .when_some(self.emoji.error.clone(), |el, error| el.child(div().pb(px(8.)).text_size(px(13.)).text_color(p.negative).child(error)))
                 .when(self.emoji.open, |el| {
-                    el.child(option("emoji-file", "Choose font file...").on_click(cx.listener(|this, _, _, cx| this.choose_emoji_font(cx))))
+                    el.child(option("emoji-file", "Choose font file…").on_click(cx.listener(|this, _, _, cx| this.choose_emoji_font(cx))))
                         .when(chosen.is_some(), |el| {
                             el.child(option("emoji-system", "Use system emoji").on_click(cx.listener(|this, _, _, cx| this.use_system_emoji(cx))))
                         })
