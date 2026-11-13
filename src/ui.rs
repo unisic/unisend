@@ -1137,6 +1137,11 @@ impl BeeperApp {
 
     fn render_chat(&mut self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
+        // The oldest row is on screen: the messages do not fill it, or the user has scrolled up to
+        // them. A list too short to scroll reports no scrolling, so this is not left to its handler.
+        if self.timeline.bounds_for_item(0).is_some() {
+            self.load_older(cx);
+        }
         let room = self.open.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id));
         let name = room.map(|r| r.name.clone()).unwrap_or_default();
         let network = room.and_then(|r| r.network.clone());
@@ -1407,11 +1412,22 @@ impl BeeperApp {
             )
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .child(timeline)
                     .when(self.loading && self.msgs.is_empty(), |el| {
-                        el.child(div().p(px(GUTTER)).text_size(px(14.)).text_color(p.faint).child("Loading messages..."))
+                        el.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(14.))
+                                .text_color(p.faint)
+                                .child("Loading messages..."),
+                        )
                     }),
             )
             .when(!self.typing.is_empty(), |el| {

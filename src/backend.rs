@@ -56,6 +56,7 @@ use matrix_sdk::{
             sticker::StickerEventContent,
         },
         media::Method,
+        room_version_rules::RoomVersionRules,
         serde::{JsonObject, Raw},
         uint,
     },
@@ -193,6 +194,9 @@ pub struct RoomSummary {
     pub id: OwnedRoomId,
     pub name: String,
     pub preview: Option<String>,
+    /// The event the preview was made from, so that its edit or deletion can change the preview.
+    #[serde(default)]
+    pub preview_id: Option<String>,
     pub ts: u64,
     /// Bridge network, e.g. "WhatsApp"; none for native Matrix rooms.
     #[serde(default)]
@@ -962,7 +966,7 @@ impl State {
                         break;
                     }
                 }
-                if !more || timeline.items().await.iter().filter(|item| item.as_event().is_some()).count() >= MIN_ITEMS {
+                if !more || timeline.items().await.iter().filter(|item| timeline::drawn(item)).count() >= MIN_ITEMS {
                     break;
                 }
             }
@@ -1023,14 +1027,13 @@ async fn messages(room: &Room, from: Option<&str>, limit: u16) -> Result<Message
 }
 
 /// List preview: the newest message on one line, prefixed with its sender outside one-to-one chats.
-fn preview(msgs: &[Msg], dm: bool) -> Option<String> {
-    let m = msgs.last()?;
+fn preview(m: &Msg, dm: bool) -> String {
     let text = match m {
         m if m.own => format!("You: {}", m.summary()),
         m if dm => m.summary(),
         m => format!("{}: {}", m.sender, m.summary()),
     };
-    Some(text.replace('\n', " "))
+    text.replace('\n', " ")
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1317,16 +1320,16 @@ static UNSAVED_PROBES: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 
 /// The chat's last message as a preview and its time; `None` when the newest pages hold none.
 /// A room a bridge has just set up ends in a run of state events, hence more than one page.
-async fn last_message(room: &Room) -> Result<Option<(String, u64)>> {
+async fn last_message(room: &Room) -> Result<Option<(String, u64, String)>> {
     let dm = other_person(room).await.is_some();
     let mut from = None;
     for _ in 0..MAX_PREVIEW_PAGES {
         let resp = messages(room, from.as_deref(), PAGE).await?;
         let mut chunk = resp.chunk;
         chunk.reverse();
-        let msgs = to_msgs(room, &chunk).await;
-        if let (Some(text), Some(sent)) = (preview(&msgs, dm), msgs.last().map(|m| m.ts)) {
-            return Ok(Some((text, sent)));
+        let (msgs, _) = to_msgs(room, &chunk).await;
+        if let Some(m) = msgs.last() {
+            return Ok(Some((preview(m, dm), m.ts, m.id.clone())));
         }
         from = resp.end;
         if from.is_none() {
@@ -1352,7 +1355,7 @@ async fn probe(room: &Room, rooms: &Rooms) -> Option<RoomSummary> {
     UNSAVED_PROBES.store(true, std::sync::atomic::Ordering::Relaxed);
     r.dated = true;
     match found {
-        Some((text, sent)) => (r.preview, r.ts) = (Some(text), sent),
+        Some((text, sent, id)) => (r.preview, r.ts, r.preview_id) = (Some(text), sent, Some(id)),
         // No message and no preview: whatever time it had came from a state event.
         None if r.preview.is_none() => r.ts = 0,
         None => {}
@@ -1411,6 +1414,7 @@ async fn summarize(
         network,
         dm: peer.is_some(),
         preview: current(seen.preview),
+        preview_id: seen.preview_id,
         unread: counts.notification_count,
         // Once the chat is read nothing in it is an unread mention.
         mentions: seen.mentions.max(counts.highlight_count).min(counts.notification_count),
@@ -1523,7 +1527,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
             if room.is_space() {
                 continue;
             }
-            let msgs = to_msgs(&room, &update.timeline.events).await;
+            let (msgs, amends) = to_msgs(&room, &update.timeline.events).await;
             let prev = rooms.lock().unwrap().get(id).cloned();
             // A chat's time is its last message's. A room a bridge has just created has only state
             // events, which say nothing about when the chat was last used: it stays at 0, sorts
@@ -1537,10 +1541,14 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
             let peer = other_person(&room).await;
             let dm = peer.is_some();
             let order = msgs.iter().filter(|m| !m.own).map(|m| m.order);
+            let preview_id = msgs.last().map(|m| m.id.clone()).or_else(|| prev.as_ref().and_then(|p| p.preview_id.clone()));
+            // An edit or deletion of the message the row shows changes the row.
+            let amended = amends.iter().rev().find(|m| Some(&m.id) == preview_id.as_ref());
             let seen = RoomSummary {
                 id: id.clone(),
                 name: String::new(),
-                preview: preview(&msgs, dm).or_else(|| prev.as_ref().and_then(|p| p.preview.clone())),
+                preview: amended.or(msgs.last()).map(|m| preview(m, dm)).or_else(|| prev.as_ref().and_then(|p| p.preview.clone())),
+                preview_id,
                 ts: newest.unwrap_or(0),
                 network: prev.as_ref().and_then(|p| p.network.clone()),
                 order: order.max().max(prev.as_ref().map(|p| p.order)).unwrap_or(0),
@@ -1611,14 +1619,18 @@ pub(crate) const DELETED: &str = "Message deleted";
 /// The messages among timeline events, oldest first, as the chat list and notifications need
 /// them: what each says, by whom and when. Edits, reactions and deletions belong to the open
 /// conversation, which the SDK's timeline keeps.
-async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> Vec<Msg> {
+/// Messages of a batch of events, and the changes the batch makes to messages it may not hold:
+/// each edited or deleted message as it now reads, under its own id.
+async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> (Vec<Msg>, Vec<Msg>) {
     let own = room.own_user_id().to_owned();
+    let rules = room.version().and_then(|v| v.rules()).unwrap_or(RoomVersionRules::V11);
     let mut names: HashMap<OwnedUserId, String> = HashMap::new();
-    let mut out = Vec::new();
+    let (mut out, mut amends) = (Vec::new(), Vec::new());
     for event in events {
         let Some(id) = event.event_id().map(|e| e.to_string()) else { continue };
         let Some(sender) = event.sender() else { continue };
         let mut m = Msg::bare(id, Kind::Message, sender.clone());
+        let mut amends_id = None;
         // A deleted event in an encrypted room is an empty `m.room.encrypted`: nothing says whether
         // it was a message or a reaction, so it gets no placeholder.
         if event.kind.is_utd() {
@@ -1631,21 +1643,28 @@ async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> Vec<Msg> {
         } else {
             match event.raw().deserialize() {
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Original(e)))) => {
-                    let reply = match e.content.relates_to {
-                        Some(Relation::Replacement(_)) => continue,
-                        Some(Relation::Reply(_)) => true,
-                        _ => false,
+                    let (msgtype, mentions, reply) = match &e.content.relates_to {
+                        Some(Relation::Replacement(r)) => {
+                            (amends_id, m.edited) = (Some(r.event_id.to_string()), true);
+                            (&r.new_content.msgtype, r.new_content.mentions.as_ref(), false)
+                        }
+                        relation => (&e.content.msgtype, e.content.mentions.as_ref(), matches!(relation, Some(Relation::Reply(_)))),
                     };
-                    let (media, text) = content(&e.content.msgtype);
+                    let (media, text) = content(msgtype);
                     m.media = media;
-                    if let MessageType::Location(l) = &e.content.msgtype {
+                    if let MessageType::Location(l) = msgtype {
                         m.place = Place::parse(&l.geo_uri, &l.body);
                     }
                     // Older clients and bridges prepend the quoted message to the body.
                     let text = if reply { remove_plain_reply_fallback(&text).to_owned() } else { text };
                     // The place's description is told with the place.
                     m.body = if m.place.is_some() { String::new() } else { text };
-                    (m.mentions, m.mentioned) = marks(&m.body, &e.content.msgtype, e.content.mentions.as_ref(), &own);
+                    (m.mentions, m.mentioned) = marks(&m.body, msgtype, mentions, &own);
+                }
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(r))) => {
+                    let Some(target) = r.redacts(&rules.redaction) else { continue };
+                    amends_id = Some(target.to_string());
+                    (m.body, m.deleted) = (DELETED.to_owned(), true);
                 }
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Redacted(_)))) => {
                     (m.body, m.deleted) = (DELETED.to_owned(), true);
@@ -1672,9 +1691,12 @@ async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> Vec<Msg> {
         m.own = sender == own;
         m.mentioned &= !m.own;
         m.notify = event.push_actions().is_some_and(|actions| actions.iter().any(|a| a.should_notify()));
-        out.push(m);
+        match amends_id {
+            Some(target) => amends.push(Msg { id: target, notify: false, mentioned: false, ..m }),
+            None => out.push(m),
+        }
     }
-    out
+    (out, amends)
 }
 
 fn sticker(content: &StickerEventContent) -> Media {

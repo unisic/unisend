@@ -144,9 +144,10 @@ async fn login_sync_decrypt_send_recover() {
         .make_replacement(ReplacementMetadata::new(sent.response.event_id.clone(), None));
     bob_room.send(edit).await.unwrap();
 
-    // List path: the decrypted message arrives through the sync loop and becomes the preview.
+    // List path: the decrypted message arrives through the sync loop and becomes the preview, which
+    // reads the edit.
     wait_for(&mut alice_rx, "preview of the new message", |e| match e {
-        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id && s.preview.as_deref() == Some("hello from bob") && s.unread > 0).then_some(()),
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id && s.preview.as_deref() == Some("hello from bob (edited)") && s.unread > 0).then_some(()),
         _ => None,
     })
     .await;
@@ -170,7 +171,7 @@ async fn login_sync_decrypt_send_recover() {
     for _ in 0..20 {
         let resp = bob.sync_once(SyncSettings::default().timeout(Duration::from_secs(2))).await.unwrap();
         if let Some(update) = resp.rooms.joined.get(&room_id) {
-            got |= bodies(&to_msgs(&bob_room, &update.timeline.events).await).contains(&"hi bob".to_owned());
+            got |= bodies(&to_msgs(&bob_room, &update.timeline.events).await.0).contains(&"hi bob".to_owned());
         }
         if got {
             break;
@@ -295,11 +296,27 @@ async fn login_sync_decrypt_send_recover() {
     let reply_id = alice2_rx.rows.iter().find(replied).unwrap().id.clone();
     alice2.handle(Cmd::Send { room: room.clone(), body: "yes!".into(), reply_to: None, edit: Some(reply_id.clone()) }).await.unwrap();
     until(&mut alice2_rx, "the edit", |rows| rows.iter().any(|m| m.id == reply_id && m.body == "yes!" && m.edited)).await;
+    // The chat list's preview follows an edit and a deletion of the message it shows.
+    let rooms = alice2.rooms.clone();
+    let preview_is = |want: String| {
+        let (rooms, room) = (rooms.clone(), room.clone());
+        async move {
+            for _ in 0..100 {
+                if rooms.lock().unwrap().get(&room).and_then(|r| r.preview.clone()) == Some(want.clone()) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            panic!("preview never read {want:?}: {:?}", rooms.lock().unwrap().get(&room).map(|r| r.preview.clone()));
+        }
+    };
+    preview_is("You: yes!".into()).await;
     // The same reaction again takes it back.
     alice2.handle(Cmd::React { room: room.clone(), target: ping.to_string(), key: "👍".into() }).await.unwrap();
     until(&mut alice2_rx, "the reaction gone", |rows| !reacted(rows)).await;
     alice2.handle(Cmd::Delete { room: room.clone(), target: reply_id.clone() }).await.unwrap();
     until(&mut alice2_rx, "the deletion", |rows| rows.iter().any(|m| m.id == reply_id && m.deleted)).await;
+    preview_is(format!("You: {DELETED}")).await;
     // Media: a picture sent to an encrypted room comes back with its shape, a thumbnail and a
     // viewing copy no larger than their limits, and downloads byte for byte.
     let picture = root.join("holiday photo.png");
@@ -581,6 +598,7 @@ fn archive_rule_matches_beeper() {
         id: matrix_sdk::ruma::room_id!("!r:example.org").to_owned(),
         name: String::new(),
         preview: None,
+        preview_id: None,
         ts,
         network: None,
         unread,

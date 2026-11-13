@@ -253,6 +253,11 @@ fn shown(event: &AnySyncTimelineEvent, rules: &RoomVersionRules, dm: bool, big: 
     }
 }
 
+/// An event that shows as a row of its own: not a state of delivery, which only marks its message.
+pub fn drawn(item: &TimelineItem) -> bool {
+    item.as_event().is_some_and(|e| !matches!(e.content(), TimelineItemContent::MsgLike(like) if matches!(like.kind, MsgLikeKind::Other(_))))
+}
+
 /// A timeline item as a row.
 fn row(item: &TimelineItem, viewer: &Viewer) -> Msg {
     match item.kind() {
