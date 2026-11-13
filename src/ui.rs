@@ -44,6 +44,8 @@ const NAV_W: f32 = 210.;
 const LIST_W: f32 = 384.;
 /// Widest a message and a sheet grow on a wide window.
 const BUBBLE_W: f32 = 560.;
+/// On a phone, the share of the row a message may take.
+const BUBBLE_SHARE: f32 = 0.8;
 const SHEET_W: f32 = 480.;
 /// Sender's picture beside a run of messages in a group.
 const SENDER: f32 = 28.;
@@ -628,7 +630,8 @@ impl BeeperApp {
         .detach();
     }
 
-    fn render_media(&self, m: &Msg, media: &Media, cx: &mut Context<Self>) -> AnyElement {
+    /// `room` is the width a bubble has for its content.
+    fn render_media(&self, m: &Msg, media: &Media, room: f32, cx: &mut Context<Self>) -> AnyElement {
         let (id, owned) = (m.id.clone(), media.clone());
         let open = cx.listener(move |this, _: &ClickEvent, _, cx| {
             // The bubble's own tap selects the message.
@@ -640,19 +643,16 @@ impl BeeperApp {
         let pictured = matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video);
         if pictured && (media.kind != MediaKind::Video || media.dims.is_some()) {
             // The picture's own shape, within what a bubble may take.
-            let (max_w, max_h) = if media.kind == MediaKind::Sticker { (140., 140.) } else { (260., 320.) };
+            let (max_w, max_h) = if media.kind == MediaKind::Sticker { (140., 140.) } else { (room.min(260.), 320.) };
             let (w, h) = media.dims.map_or((max_w, max_w * 0.75), |(w, h)| (w.max(1) as f32, h.max(1) as f32));
             let scale = (max_w / w).min(max_h / h).min(1.);
             let thumb = self.thumbs.get(&m.id).cloned();
             let video = media.kind == MediaKind::Video;
-            let (w, h) = ((w * scale).max(80.), (h * scale).max(60.));
             return div()
                 .id(SharedString::from(format!("{}-media", m.id)))
                 .relative()
-                // Narrower when the bubble is: a phone's bubble has less room than the picture asks for.
-                .w(px(w))
-                .max_w_full()
-                .aspect_ratio(w / h)
+                .w(px((w * scale).max(80.)))
+                .h(px((h * scale).max(60.)))
                 .rounded(px(14.))
                 .overflow_hidden()
                 .bg(raised)
@@ -1078,10 +1078,13 @@ impl BeeperApp {
         let dm = room.is_some_and(|r| r.dm);
         let timeline = list(
             self.timeline.clone(),
-            cx.processor(move |this, ix: usize, _, cx| {
+            cx.processor(move |this, ix: usize, window, cx| {
                 this.want_thumb(ix);
                 let m = &this.msgs[ix];
-                let attachment = m.media.as_ref().filter(|_| !m.deleted).map(|media| this.render_media(m, media, cx));
+                // What a bubble has inside: its share of the row, less its padding and a mention's bar.
+                let row = f32::from(window.viewport_size().width) - 2. * GUTTER;
+                let room = if narrow { row * BUBBLE_SHARE } else { BUBBLE_W } - 2. * GAP - 9.;
+                let attachment = m.media.as_ref().filter(|_| !m.deleted).map(|media| this.render_media(m, media, room, cx));
                 let prev = ix.checked_sub(1).map(|p| &this.msgs[p]);
                 let next = this.msgs.get(ix + 1);
                 let new_day = prev.is_none_or(|p| day(p.ts) != day(m.ts));
@@ -1194,7 +1197,7 @@ impl BeeperApp {
                             })
                             .child(
                                 h_flex()
-                                    .max_w(if narrow { relative(0.8) } else { px(BUBBLE_W).into() })
+                                    .max_w(if narrow { relative(BUBBLE_SHARE) } else { px(BUBBLE_W).into() })
                                     .min_w_0()
                                     .items_stretch()
                                     .gap(px(6.))
