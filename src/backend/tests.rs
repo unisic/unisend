@@ -217,7 +217,7 @@ async fn login_sync_decrypt_send_recover() {
     let stale = alice2.rooms.lock().unwrap().get_mut(&room_id).map(|r| (r.dm, r.unread) = (false, 99));
     assert!(stale.is_some());
     let notif = alice2.notif.clone().unwrap();
-    let fixed = refresh_cached(alice2.client().unwrap(), &notif, &alice2.rooms).await;
+    let fixed = refresh_cached(alice2.client().unwrap(), &notif, &alice2.rooms, &alice2.ev).await;
     let fixed = fixed.iter().find(|s| s.id == room_id).unwrap();
     assert!(fixed.dm && fixed.unread == 0, "dm {} unread {}", fixed.dm, fixed.unread);
 
@@ -348,6 +348,23 @@ async fn login_sync_decrypt_send_recover() {
         _ => None,
     })
     .await;
+    // A cache from an older build gave such a chat the time of a state event; whichever of the
+    // startup pass and a row's own refresh gets to it first, it must lose that time.
+    alice2.rooms.lock().unwrap().get_mut(&quiet_id).map(|r| (r.ts, r.probed) = (777, false)).unwrap();
+    alice2.handle(Cmd::Previews(vec![quiet_id.clone()])).await.unwrap();
+    wait_for(&mut alice2_rx, "stale time dropped", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == quiet_id && s.probed && s.ts == 0).then_some(()),
+        _ => None,
+    })
+    .await;
+    // A chat left while the app was closed disappears from the cache at the next start.
+    let gone = matrix_sdk::ruma::room_id!("!left-long-ago:localhost").to_owned();
+    let ghost = RoomSummary { id: gone.clone(), ..alice2.rooms.lock().unwrap()[&quiet_id].clone() };
+    alice2.rooms.lock().unwrap().insert(gone.clone(), ghost);
+    refresh_cached(alice2.client().unwrap(), &notif, &alice2.rooms, &alice2.ev).await;
+    assert!(!alice2.rooms.lock().unwrap().contains_key(&gone));
+    wait_for(&mut alice2_rx, "RoomGone for the left chat", |e| matches!(e, Ev::RoomGone(id) if id == gone).then_some(())).await;
+
     quiet.send(RoomMessageEventContent::text_plain("first!")).await.unwrap();
     wait_for(&mut alice2_rx, "first message dates the chat", |e| match e {
         Ev::Rooms(r) => r.iter().any(|s| s.id == quiet_id && s.ts > 0 && s.preview.as_deref().is_some_and(|p| p.ends_with("first!"))).then_some(()),

@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow};
 use futures_util::StreamExt as _;
 use matrix_sdk::{
-    Client, Room, RoomMemberships,
+    Client, Room, RoomMemberships, RoomState,
     authentication::matrix::MatrixSession,
     config::{SyncSettings, SyncToken},
     deserialized_responses::{RawAnySyncOrStrippedState, TimelineEvent, TimelineEventKind},
@@ -1045,8 +1045,11 @@ async fn probe(room: &Room, rooms: &Rooms) -> Option<RoomSummary> {
     let r = rooms.get_mut(room.room_id())?;
     UNSAVED_PROBES.store(true, std::sync::atomic::Ordering::Relaxed);
     r.probed = true;
-    if let Some((text, sent)) = found {
-        (r.preview, r.ts) = (Some(text), sent);
+    match found {
+        Some((text, sent)) => (r.preview, r.ts) = (Some(text), sent),
+        // No message and no preview: whatever time it had came from a state event.
+        None if r.preview.is_none() => r.ts = 0,
+        None => {}
     }
     Some(r.clone())
 }
@@ -1114,11 +1117,17 @@ async fn summarize(
 
 /// Rooms without new events never pass through the sync loop, so their cached summaries miss
 /// fields added since and changes made on other devices. Store reads only.
-async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &Rooms) -> Vec<RoomSummary> {
+async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &Rooms, ev: &mpsc::Sender<Ev>) -> Vec<RoomSummary> {
     let cached: Vec<RoomSummary> = rooms.lock().unwrap().values().cloned().collect();
     let mut out = Vec::with_capacity(cached.len());
     for seen in cached {
-        let Some(room) = client.get_room(&seen.id) else { continue };
+        // A room left while the app was not running: sync only reports leaves since its token.
+        let room = client.get_room(&seen.id).filter(|room| room.state() == RoomState::Joined);
+        let Some(room) = room else {
+            rooms.lock().unwrap().remove(&seen.id);
+            let _ = ev.send(Ev::RoomGone(seen.id)).await;
+            continue;
+        };
         let fresh = summarize(&room, notif, other_person(&room).await, seen).await;
         if let Some(r) = rooms.lock().unwrap().get_mut(&fresh.id) {
             // A preview refresh may have updated the entry meanwhile.
@@ -1135,7 +1144,7 @@ async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &R
 }
 
 async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, rooms: Rooms, ev: mpsc::Sender<Ev>) {
-    let cached = refresh_cached(&client, &notif, &rooms).await;
+    let cached = refresh_cached(&client, &notif, &rooms, &ev).await;
     // Chats whose last message is not known are looked up in the background. A full queue drops
     // the rest; they stay unprobed and are queued again at the next start.
     let (to_probe, queue) = mpsc::channel(PROBE_QUEUE);
@@ -1240,7 +1249,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
         // Mutes are push rules: one global event changes any number of rooms.
         let rules_changed = resp.account_data.iter().any(|e| e.get_field::<String>("type").ok().flatten().as_deref() == Some("m.push_rules"));
         if rules_changed {
-            changed = refresh_cached(&client, &notif, &rooms).await;
+            changed = refresh_cached(&client, &notif, &rooms, &ev).await;
         }
         if !changed.is_empty() && ev.send(Ev::Rooms(changed)).await.is_err() {
             return;
