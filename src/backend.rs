@@ -99,6 +99,8 @@ pub enum Cmd {
     LoadOlder,
     Chat(OwnedRoomId, ChatAction),
     Avatars(Vec<OwnedRoomId>),
+    /// The picture of a person in a chat, as that chat shows them.
+    Face(OwnedRoomId, OwnedUserId),
     /// Inline thumbnails for these messages (event ID, media).
     Thumbs(Vec<(String, Media)>),
     /// The image at viewing size.
@@ -140,6 +142,7 @@ pub enum Ev {
     Live { room: OwnedRoomId, items: Vec<Item> },
     /// Thumbnail bytes as served (PNG, JPEG, ...).
     Avatar(OwnedRoomId, Vec<u8>),
+    Face(OwnedUserId, Vec<u8>),
     /// JPEG or PNG, at most `THUMB_PX` on its longest side.
     Thumb(String, Vec<u8>),
     /// JPEG or PNG, at most `VIEW_PX`.
@@ -553,6 +556,20 @@ impl State {
                         }
                     }
                 }
+            }
+            Cmd::Face(room_id, user) => {
+                let client = self.client()?.clone();
+                let (ev, permits) = (self.ev.clone(), self.fetches.clone());
+                tokio::spawn(async move {
+                    let Ok(_permit) = permits.acquire().await else { return };
+                    match face(&client, &room_id, &user).await {
+                        Ok(Some(bytes)) => {
+                            let _ = ev.send(Ev::Face(user, bytes)).await;
+                        }
+                        Ok(None) => {}
+                        Err(e) => log::debug!("face {user}: {e:#}"),
+                    }
+                });
             }
             Cmd::Avatars(ids) => {
                 for room_id in ids {
@@ -1600,9 +1617,22 @@ async fn avatar(client: &Client, room_id: &RoomId) -> Result<Option<Vec<u8>>> {
             url
         }
     };
+    Ok(Some(picture(client, url).await?))
+}
+
+/// A member's picture in a chat; bridges set it per chat, so the member event is asked, not the
+/// profile.
+async fn face(client: &Client, room_id: &RoomId, user: &UserId) -> Result<Option<Vec<u8>>> {
+    let Some(room) = client.get_room(room_id) else { return Ok(None) };
+    let Some(url) = room.get_member_no_sync(user).await?.and_then(|m| m.avatar_url().map(ToOwned::to_owned)) else { return Ok(None) };
+    Ok(Some(picture(client, url).await?))
+}
+
+/// A small square thumbnail of an avatar, from the media cache when it is there.
+async fn picture(client: &Client, url: matrix_sdk::ruma::OwnedMxcUri) -> Result<Vec<u8>> {
     let format = MediaFormat::Thumbnail(MediaThumbnailSettings::with_method(Method::Crop, uint!(96), uint!(96)));
     let request = MediaRequestParameters { source: MediaSource::Plain(url), format };
-    Ok(Some(square(client.media().get_media_content(&request, true).await?)))
+    Ok(square(client.media().get_media_content(&request, true).await?))
 }
 
 /// Side of a stored avatar, in pixels.

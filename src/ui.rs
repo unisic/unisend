@@ -55,6 +55,8 @@ const RUN_PAUSE_MS: u64 = 10 * 60 * 1000;
 const MAX_PENDING: usize = 512;
 /// Inline thumbnails kept decoded; each is at most 2.6 MB of pixels.
 const MAX_THUMBS: usize = 60;
+/// Sender pictures kept for the open chat; people past that many keep their initials.
+const MAX_FACES: usize = 64;
 const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
 /// What the composer's next send does.
@@ -159,6 +161,9 @@ pub struct BeeperApp {
     rooms_scroll: UniformListScrollHandle,
     /// Room avatars; `None` while loading or when the room has none. One entry per room at most.
     avatars: HashMap<OwnedRoomId, Option<Arc<Image>>>,
+    /// Pictures of the people writing in the open chat; `None` while loading or when they have
+    /// none. At most `MAX_FACES`, 37 kB of pixels each.
+    faces: HashMap<OwnedUserId, Option<Arc<Image>>>,
     /// Rooms whose missing or undecryptable preview was already re-read this session.
     peeked: HashSet<OwnedRoomId>,
     _subs: Vec<Subscription>,
@@ -261,6 +266,7 @@ impl BeeperApp {
             uploads: 0,
             picked: None,
             chat_sheet: false,
+            faces: HashMap::new(),
             compose: Compose::New,
             more: false,
             loading: false,
@@ -320,6 +326,12 @@ impl BeeperApp {
             Ev::Avatar(id, bytes) => {
                 if let Some(format) = image_format(&bytes) {
                     self.avatars.insert(id, Some(Arc::new(Image::from_bytes(format, bytes))));
+                }
+            }
+            Ev::Face(user, bytes) => {
+                // Asked for by the chat that is open now, not by one closed meanwhile.
+                if let (Some(slot), Some(format)) = (self.faces.get_mut(&user), image_format(&bytes)) {
+                    *slot = Some(Arc::new(Image::from_bytes(format, bytes)));
                 }
             }
             Ev::Thumb(id, bytes) => {
@@ -601,6 +613,18 @@ impl BeeperApp {
         }
     }
 
+    /// Asks once for the picture of whoever wrote this message.
+    fn want_face(&mut self, ix: usize) {
+        let from = &self.msgs[ix].from;
+        if self.faces.contains_key(from) || self.faces.len() >= MAX_FACES || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
+            return;
+        }
+        let Some(room) = self.open.clone() else { return };
+        if self.cmd.try_send(Cmd::Face(room, from.clone())).is_ok() {
+            self.faces.insert(from.clone(), None);
+        }
+    }
+
     /// A tap on an attachment: pictures open full-screen, everything else in the system's app.
     fn open_media(&mut self, id: String, media: Media, cx: &mut Context<Self>) {
         if matches!(media.kind, MediaKind::Image | MediaKind::Sticker) {
@@ -772,6 +796,11 @@ impl BeeperApp {
         }
         self.close_viewer(cx);
         self.fetching.clear();
+        for (_, image) in self.faces.drain() {
+            if let Some(image) = image {
+                image.remove_asset(cx);
+            }
+        }
         (self.picked, self.chat_sheet) = (None, false);
         self.compose = Compose::New;
         self.timeline.reset(0);
@@ -1165,6 +1194,10 @@ impl BeeperApp {
                 });
                 // In a group, the sender's picture stands beside the last message of the run.
                 let faces = !dm && !m.own;
+                if faces && last {
+                    this.want_face(ix);
+                }
+                let m = &this.msgs[ix];
                 let side = if faces { px(SENDER + 8.) } else { px(0.) };
                 v_flex()
                     .w_full()
@@ -1193,7 +1226,7 @@ impl BeeperApp {
                             .gap(px(8.))
                             .when(m.own, |el| el.flex_row_reverse())
                             .when(faces, |el| {
-                                el.child(if last { avatar(&m.sender, None, SENDER, cx) } else { div().w(px(SENDER)).flex_none() })
+                                el.child(if last { avatar(&m.sender, this.faces.get(&m.from), SENDER, cx) } else { div().w(px(SENDER)).flex_none() })
                             })
                             .child(
                                 h_flex()

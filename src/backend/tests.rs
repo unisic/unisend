@@ -438,6 +438,10 @@ async fn gui_fixture() {
         .map(|b| serde_json::from_slice(&b).unwrap())
         .unwrap();
 
+    // One person with a picture, for the faces beside a group's messages.
+    let picture = matrix_sdk::ruma::OwnedMxcUri::from(upload["content_uri"].as_str().unwrap());
+    carol.account().set_avatar_url(Some(&picture)).await.unwrap();
+
     async fn join(who: &Client, room: &RoomId) -> Room {
         who.sync_once(SyncSettings::default()).await.unwrap();
         who.join_room_by_id(room).await.unwrap();
