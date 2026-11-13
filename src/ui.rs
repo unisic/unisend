@@ -1031,6 +1031,81 @@ impl BeeperApp {
         }
     }
 
+    /// Where a finger lands on a chat row. A touch reaches the app as a click only when it lifts,
+    /// so the row learns of the press from the touch itself; it shows it after `ROW_PRESS_DELAY`,
+    /// so a finger that starts scrolling the list never lights a row up.
+    fn row_touch(&self, room: OwnedRoomId, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let weak = cx.entity().downgrade();
+        canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let visible = window.content_mask().bounds;
+                window.on_mouse_event(move |e: &TouchDragEvent, phase, _, cx| {
+                    let at = e.start_position;
+                    if phase.bubble() && e.phase == TouchPhase::Started && bounds.contains(&at) && visible.contains(&at) {
+                        let _ = weak.update(cx, |this, cx| this.row_pressed(room.clone(), cx));
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+    }
+
+    fn row_pressed(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
+        if self.chat_sheet.is_some() || self.menu_open() || self.viewer.is_some() {
+            return;
+        }
+        let at = std::time::Instant::now();
+        self.row_press = Some((room, at));
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ROW_PRESS_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.row_press.as_ref().is_some_and(|(_, since)| *since == at) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Ends a chat row's press: the finger lifted (a tap), started scrolling, or let go of a long
+    /// press.
+    fn row_release(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let weak = cx.entity().downgrade();
+        let release = move |cx: &mut App| {
+            let _ = weak.update(cx, |this, cx| {
+                if this.row_press.take().is_some() {
+                    cx.notify();
+                }
+            });
+        };
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let scroll = release.clone();
+                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        scroll(cx);
+                    }
+                });
+                let up = release.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        up(cx);
+                    }
+                });
+                window.on_mouse_event(move |e: &LongPressEvent, phase, _, cx| {
+                    if phase.bubble() && matches!(e.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        release(cx);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
     fn render_rooms(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         let list = uniform_list(
@@ -1202,81 +1277,6 @@ impl BeeperApp {
             } else {
                 list.into_any_element()
             }))
-    }
-
-    /// Where a finger lands on a chat row. A touch reaches the app as a click only when it lifts,
-    /// so the row learns of the press from the touch itself; it shows it after `ROW_PRESS_DELAY`,
-    /// so a finger that starts scrolling the list never lights a row up.
-    fn row_touch(&self, room: OwnedRoomId, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let weak = cx.entity().downgrade();
-        canvas(
-            |_, _, _| {},
-            move |bounds, _, window, _| {
-                let visible = window.content_mask().bounds;
-                window.on_mouse_event(move |e: &TouchDragEvent, phase, _, cx| {
-                    let at = e.start_position;
-                    if phase.bubble() && e.phase == TouchPhase::Started && bounds.contains(&at) && visible.contains(&at) {
-                        let _ = weak.update(cx, |this, cx| this.row_pressed(room.clone(), cx));
-                    }
-                });
-            },
-        )
-        .absolute()
-        .inset_0()
-    }
-
-    fn row_pressed(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
-        if self.chat_sheet.is_some() || self.menu_open() || self.viewer.is_some() {
-            return;
-        }
-        let at = std::time::Instant::now();
-        self.row_press = Some((room, at));
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(ROW_PRESS_DELAY).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.row_press.as_ref().is_some_and(|(_, since)| *since == at) {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Ends a chat row's press: the finger lifted (a tap), started scrolling, or let go of a long
-    /// press.
-    fn row_release(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let weak = cx.entity().downgrade();
-        let release = move |cx: &mut App| {
-            let _ = weak.update(cx, |this, cx| {
-                if this.row_press.take().is_some() {
-                    cx.notify();
-                }
-            });
-        };
-        canvas(
-            |_, _, _| {},
-            move |_, _, window, _| {
-                let scroll = release.clone();
-                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
-                    if phase.bubble() {
-                        scroll(cx);
-                    }
-                });
-                let up = release.clone();
-                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                    if phase.bubble() {
-                        up(cx);
-                    }
-                });
-                window.on_mouse_event(move |e: &LongPressEvent, phase, _, cx| {
-                    if phase.bubble() && matches!(e.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                        release(cx);
-                    }
-                });
-            },
-        )
-        .absolute()
-        .size_0()
     }
 
     fn render_chat(&mut self, narrow: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
