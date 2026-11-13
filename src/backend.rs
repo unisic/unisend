@@ -307,13 +307,37 @@ pub enum Delivery {
     Failed(String),
 }
 
+/// Whether the message a reply answers is known.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum QuoteState {
+    Ready,
+    /// Being fetched from the server.
+    Loading,
+    /// Not found, or not fetched.
+    Missing,
+}
+
 /// The message a reply answers, as far as it is known.
 #[derive(Clone)]
 pub struct Quote {
     pub id: String,
-    /// Empty when the message could not be loaded.
+    pub state: QuoteState,
+    /// Empty unless `state` is `Ready`.
     pub sender: String,
+    pub own: bool,
+    /// The text or caption; a poll's question; a place's description.
     pub text: String,
+    pub deleted: bool,
+    pub media: Option<Media>,
+    pub poll: bool,
+    pub place: bool,
+}
+
+impl Quote {
+    /// A message that is not, or not yet, known.
+    pub fn unknown(id: String, state: QuoteState) -> Self {
+        Self { id, state, sender: String::new(), own: false, text: String::new(), deleted: false, media: None, poll: false, place: false }
+    }
 }
 
 impl Msg {
@@ -360,7 +384,27 @@ pub struct Link {
 }
 
 impl Msg {
-    /// One-line description for previews and quotes: Beeper's label for media, plus the caption.
+    /// This message as a reply quotes it.
+    pub fn quote(&self) -> Quote {
+        let text = match (&self.poll, &self.place) {
+            (Some(poll), _) => poll.question.clone(),
+            (_, Some(place)) => place.description.clone(),
+            _ => self.body.clone(),
+        };
+        Quote {
+            id: self.id.clone(),
+            state: QuoteState::Ready,
+            sender: self.sender.clone(),
+            own: self.own,
+            text,
+            deleted: self.deleted,
+            media: self.media.clone().filter(|_| !self.deleted),
+            poll: self.poll.is_some(),
+            place: self.place.is_some(),
+        }
+    }
+
+    /// One-line description for previews: Beeper's label for media, plus the caption.
     pub fn summary(&self) -> String {
         if let Some(poll) = &self.poll {
             return format!("📊 Poll: {}", poll.question);

@@ -19,13 +19,15 @@ impl BeeperApp {
 }
 
 /// `width` is what a bubble has for its content.
-pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p: Palette, cx: &mut Context<BeeperApp>) -> AnyElement {
+pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p: Palette, window: &mut Window, cx: &mut Context<BeeperApp>) -> AnyElement {
     let (counts, voters) = poll.tally();
     let mine = me.map_or(&[][..], |me| poll.choice(me.as_str()));
     let open = poll.ended.is_none();
     let rows = poll.answers.iter().zip(counts).enumerate().map(|(n, (answer, count))| {
         let chosen = mine.contains(&answer.id);
         let (target, id) = (m.id.clone(), answer.id.clone());
+        // A vote moves the bars to their new shares, so the change the touch made can be seen.
+        let share = transition((SharedString::from(format!("{}-share-{n}", m.id)), "share"), count as f32 / voters.max(1) as f32, motion::enter(), window, cx);
         div()
             .id(SharedString::from(format!("{}-answer-{n}", m.id)))
             .relative()
@@ -39,7 +41,7 @@ pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p
                     this.vote(&target, &id, cx);
                 }))
             })
-            .child(div().absolute().top_0().left_0().h_full().w(relative(count as f32 / voters.max(1) as f32)).bg(if chosen { p.text.opacity(0.3) } else { p.lifted }))
+            .child(div().absolute().top_0().left_0().h_full().w(relative(share)).bg(if chosen { p.text.opacity(0.3) } else { p.lifted }))
             .child(
                 h_flex()
                     .relative()
@@ -50,9 +52,10 @@ pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p
                     .text_size(px(14.))
                     .when(chosen, |el| el.child(Icon::new(IconName::Check).size_4()))
                     .child(div().flex_1().min_w_0().line_clamp(2).text_ellipsis().child(answer.text.clone()))
-                    .child(div().text_color(p.muted).child(count.to_string())),
+                    .child(div().text_color(p.muted).font_features(tabular()).child(count.to_string())),
             )
     });
+    let rows: Vec<_> = rows.collect();
     let total = match voters {
         0 => "No votes".to_owned(),
         1 => "1 vote".to_owned(),

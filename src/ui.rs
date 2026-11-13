@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::{Datelike as _, Local, TimeZone as _};
 use gpui_kit::assets::IconName;
@@ -12,6 +13,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use gpui_kit::base::{Presence, PresencePhase, Transition, spring, transition};
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
 use tokio::sync::mpsc;
 
@@ -29,7 +31,7 @@ use panels::Panel;
 
 use crate::{Keyboard, Palette};
 use crate::bridges::{Flow, Network, Step};
-use crate::backend::{ChatAction, Cmd, Delivery, Ev, Kind, Media, MediaKind, Msg, RoomSummary, UTD};
+use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, Quote, QuoteState, RoomSummary, UTD};
 
 const NARROW: f32 = 720.;
 // Metrics; `docs/design.md` gives the reasons.
@@ -44,6 +46,8 @@ const NAV_H: f32 = 64.;
 /// Smallest thing a finger is asked to hit.
 const TAP: f32 = 44.;
 const RADIUS: f32 = 20.;
+/// The corners where two bubbles of one run meet.
+const JOINED: f32 = 6.;
 /// Width of the navigation and of the chat list beside an open chat on a wide window.
 const NAV_W: f32 = 210.;
 const LIST_W: f32 = 384.;
@@ -54,11 +58,15 @@ const LINK_W: f32 = 300.;
 const LINK_PICTURE_H: f32 = 240.;
 /// On a phone, the share of the row a message may take.
 const BUBBLE_SHARE: f32 = 0.8;
+/// What the hover buttons beside a wide bubble take: three of `menu.rs`'s 28px buttons, their gaps and the row's.
+const SIDE_ROOM: f32 = 3. * 28. + 2. * 4. + 8.;
 const SHEET_W: f32 = 480.;
 /// Sender's picture beside a run of messages in a group.
 const SENDER: f32 = 28.;
 /// How far a message is swiped sideways to reply to it.
 const SWIPE_REPLY: f32 = 56.;
+/// Above the compose strip's tallest: its margin, padding and a quote with a picture.
+const STRIP_H: f32 = 80.;
 /// How far a message's reactions reach up over its bubble.
 const REACTION_LAP: f32 = 10.;
 /// Joins counted into one line; a longer burst says so of the last hundred.
@@ -76,6 +84,10 @@ const BRIDGE_WAIT_MS: u64 = 2 * 60 * 1000;
 const MAX_THUMBS: usize = 60;
 /// Sender pictures kept for the open chat; people past that many keep their initials.
 const MAX_FACES: usize = 64;
+/// Messages that can be arriving at once; more in one go is a page of history, not news.
+const MAX_ARRIVALS: usize = 3;
+/// Pages of older messages loaded to find a quoted one before giving up.
+const SEEK_PAGES: u8 = 5;
 
 /// What the composer's next send does.
 #[derive(Clone, PartialEq)]
@@ -187,6 +199,22 @@ pub struct BeeperApp {
     press: Option<menu::Press>,
     /// A horizontal pan in progress over a message, with how far it has travelled.
     swipe: Option<(String, f32)>,
+    /// The message a finger let go of, springing back into place since then.
+    swipe_back: Option<(String, Instant)>,
+    /// Messages that just arrived at the end of the open chat, at most `MAX_ARRIVALS`.
+    arrivals: VecDeque<(String, Instant)>,
+    /// When the open chat was opened: what arrives in its first moments is history, not news.
+    opened_at: Option<Instant>,
+    /// The message a quote led to, tinted for a moment; the tint's clock starts when it is drawn.
+    flash: Option<(String, Option<Instant>)>,
+    /// A quoted message being looked for among older ones, with the pages loaded for it.
+    seek: Option<(String, u8)>,
+    /// The user's reaction just given: message, emoji, and when its badge was first drawn.
+    fresh_reaction: Option<(String, String, Option<Instant>)>,
+    /// What the compose strip showed last, drawn while it leaves.
+    strip_last: Option<(Option<IconName>, SharedString, Quote)>,
+    /// Bumped when the strip must go at once (Escape), so it does not play its exit.
+    strip_epoch: usize,
     /// The chat whose actions are showing.
     chat_sheet: Option<OwnedRoomId>,
     compose: Compose,
@@ -319,6 +347,14 @@ impl BeeperApp {
             menu: None,
             press: None,
             swipe: None,
+            swipe_back: None,
+            arrivals: VecDeque::new(),
+            opened_at: None,
+            flash: None,
+            seek: None,
+            fresh_reaction: None,
+            strip_last: None,
+            strip_epoch: 0,
             chat_sheet: None,
             faces: HashMap::new(),
             compose: Compose::New,
@@ -439,11 +475,40 @@ impl BeeperApp {
                 if self.open.as_ref() != Some(&room) {
                     return;
                 }
+                // Rows added at the end, with what stood there before and the messages among them.
+                let mut ends = Vec::new();
                 for diff in diffs {
+                    if let Diff::Set { index, value } = &diff
+                        && let Some(old) = self.msgs.get(*index)
+                        && let Some(arrival) = self.arrivals.iter_mut().find(|(id, _)| *id == old.id)
+                    {
+                        // The user's message reached the server: its transaction ID became the event's.
+                        arrival.0 = value.id.clone();
+                    }
+                    let len_before = self.msgs.len();
                     match crate::backend::apply(&mut self.msgs, diff) {
-                        Some((old, new)) => self.timeline.splice(old, new),
+                        Some((old, new)) => {
+                            if old.start == len_before && old.is_empty() {
+                                let added = &self.msgs[old.start..old.start + new];
+                                let ids: Vec<String> = added.iter().filter(|m| m.kind == Kind::Message).map(|m| m.id.clone()).collect();
+                                ends.push((len_before, new, ids));
+                            }
+                            self.timeline.splice(old, new);
+                        }
                         None => self.timeline.reset(self.msgs.len()),
                     }
+                }
+                let appended = ends.iter().map(|(_, new, _)| new).sum();
+                let open_for = self.opened_at.map_or(Duration::ZERO, |at| at.elapsed());
+                let now = Instant::now();
+                for (len_before, _, ids) in ends {
+                    if arrived(len_before, appended, open_for) {
+                        self.arrivals.extend(ids.into_iter().map(|id| (id, now)));
+                    }
+                }
+                self.arrivals.retain(|(_, at)| now.duration_since(*at) < Duration::from_secs(1));
+                while self.arrivals.len() > 2 * MAX_ARRIVALS {
+                    self.arrivals.pop_front();
                 }
             }
             Ev::Paged { room, more } => {
@@ -451,6 +516,14 @@ impl BeeperApp {
                     return;
                 }
                 (self.loading, self.more) = (false, more);
+                if let Some((id, pages)) = self.seek.take() {
+                    if self.msgs.iter().any(|m| m.id == id) {
+                        self.reveal(&id, cx);
+                    } else if more && pages + 1 < SEEK_PAGES {
+                        self.seek = Some((id, pages + 1));
+                        self.load_older(cx);
+                    }
+                }
             }
             Ev::Typing { room, names } => {
                 if self.open.as_ref() != Some(&room) {
@@ -599,6 +672,7 @@ impl BeeperApp {
         } else if self.chat_sheet.take().is_some() {
             cx.notify();
         } else if self.compose != Compose::New {
+            self.strip_epoch += 1;
             self.start_compose(Compose::New, window, cx);
         } else if self.panel.is_some() {
             self.back(cx);
@@ -626,8 +700,13 @@ impl BeeperApp {
         let m = &self.msgs[ix];
         let pictured = m.media.as_ref().filter(|media| matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
         let linked = m.link.as_ref().and_then(|link| link.image.as_ref());
-        let wanted: Vec<(String, Media)> =
-            pictured.map(|media| (m.id.clone(), media.clone())).into_iter().chain(linked.map(|image| (link_key(&m.id), image.clone()))).collect();
+        let quoted = m.reply.as_ref().and_then(|q| q.media.as_ref()).filter(|media| matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
+        let wanted: Vec<(String, Media)> = pictured
+            .map(|media| (m.id.clone(), media.clone()))
+            .into_iter()
+            .chain(linked.map(|image| (link_key(&m.id), image.clone())))
+            .chain(quoted.map(|media| (quote_key(&m.id), media.clone())))
+            .collect();
         for (key, media) in wanted {
             if self.asked.contains(&key) || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
                 continue;
@@ -680,7 +759,8 @@ impl BeeperApp {
     }
 
     /// `room` is the width a bubble has for its content.
-    fn render_media(&self, m: &Msg, media: &Media, room: f32, cx: &mut Context<Self>) -> AnyElement {
+    /// `radius` is a picture's corner, concentric with the bubble around it.
+    fn render_media(&self, m: &Msg, media: &Media, room: f32, radius: f32, cx: &mut Context<Self>) -> AnyElement {
         let (id, owned) = (m.id.clone(), media.clone());
         let open = cx.listener(move |this, _: &ClickEvent, _, cx| {
             // Not a tap on the bubble as well.
@@ -689,26 +769,28 @@ impl BeeperApp {
         });
         // Lighter than either kind of bubble it may sit in.
         let raised = cx.theme().foreground.opacity(0.1);
-        let pictured = matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video);
-        if pictured && (media.kind != MediaKind::Video || media.dims.is_some()) {
+        if drawn_as_picture(media) {
             // The picture's own shape, within what a bubble may take.
-            let (max_w, max_h) = if media.kind == MediaKind::Sticker { (140., 140.) } else { (room.min(260.), 320.) };
-            let (w, h) = media.dims.map_or((max_w, max_w * 0.75), |(w, h)| (w.max(1) as f32, h.max(1) as f32));
-            let scale = (max_w / w).min(max_h / h).min(1.);
+            let (w, h) = picture_size(media, room);
             let thumb = self.thumbs.get(&m.id).cloned();
             let video = media.kind == MediaKind::Video;
             return div()
                 .id(SharedString::from(format!("{}-media", m.id)))
                 .relative()
-                .w(px((w * scale).max(80.)))
-                .h(px((h * scale).max(60.)))
-                .rounded(px(14.))
+                .w(px(w))
+                .h(px(h))
+                .rounded(px(radius))
                 .overflow_hidden()
-                .bg(raised)
+                // A sticker stands free once it is there.
+                .when(media.kind != MediaKind::Sticker || thumb.is_none(), |el| el.bg(raised))
                 .cursor_pointer()
                 .on_click(open)
                 .map(|el| match thumb {
-                    Some(image) => el.child(img(image).size_full().rounded(px(14.)).object_fit(ObjectFit::Cover)),
+                    Some(image) if media.kind == MediaKind::Sticker => el.child(img(image).size_full().object_fit(ObjectFit::Contain)),
+                    // The ring keeps a dark picture's edge from melting into the ground.
+                    Some(image) => el.child(img(image).size_full().rounded(px(radius)).object_fit(ObjectFit::Cover)).child(
+                        div().absolute().inset_0().rounded(px(radius)).border_1().border_color(Palette::of(cx).text.opacity(0.1)),
+                    ),
                     None => el.child(
                         div().size_full().flex().items_center().justify_center().opacity(0.5).child(
                             Icon::new(if video { IconName::Video } else { IconName::Image }).size_6(),
@@ -779,11 +861,12 @@ impl BeeperApp {
             .child(
                 v_flex()
                     .min_w_0()
-                    .child(div().truncate().text_size(px(15.)).child(match media.kind {
-                        MediaKind::Voice => "Voice Note".to_owned(),
+                    // Two lines, so a long file name keeps its extension in sight more often.
+                    .child(div().line_clamp(2).text_ellipsis().text_size(px(15.)).line_height(px(20.)).child(match media.kind {
+                        MediaKind::Voice => "Voice message".to_owned(),
                         _ => media.name.clone(),
                     }))
-                    .when(!detail.is_empty(), |el| el.child(div().text_size(px(12.)).opacity(0.7).child(detail))),
+                    .when(!detail.is_empty(), |el| el.child(div().text_size(px(12.)).font_features(tabular()).opacity(0.7).child(detail))),
             )
             .into_any_element()
     }
@@ -794,7 +877,11 @@ impl BeeperApp {
         self.close_menu(cx);
         // The SDK takes a reaction back only by its exact key; the user's own may lack or carry U+FE0F.
         let own = self.msgs.iter().find(|m| m.id == target).and_then(|m| m.reactions.iter().find(|r| r.own && menu::same_emoji(&r.key, key)));
+        let adding = own.is_none();
         let key = own.map_or(key, |r| r.key.as_str()).to_owned();
+        if adding {
+            self.fresh_reaction = Some((target.to_owned(), key.clone(), None));
+        }
         self.send(Cmd::React { room, target: target.to_owned(), key }, cx);
     }
 
@@ -822,6 +909,7 @@ impl BeeperApp {
         self.close_room(cx);
         self.panel = None;
         self.open = Some(id.clone());
+        self.opened_at = Some(Instant::now());
         self.loading = self.send(Cmd::Open(id), cx);
     }
 
@@ -841,7 +929,8 @@ impl BeeperApp {
         }
         self.close_viewer(cx);
         self.fetching.clear();
-        self.swipe = None;
+        (self.swipe, self.swipe_back, self.flash, self.seek, self.fresh_reaction, self.strip_last) = (None, None, None, None, None, None);
+        self.arrivals.clear();
         for (_, image) in self.faces.drain() {
             if let Some(image) = image {
                 image.remove_asset(cx);
@@ -1161,7 +1250,7 @@ impl BeeperApp {
             }))
     }
 
-    fn render_chat(&mut self, narrow: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_chat(&mut self, narrow: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         // The oldest row is on screen: the messages do not fill it, or the user has scrolled up to
         // them. A list too short to scroll reports no scrolling, so this is not left to its handler.
@@ -1179,14 +1268,36 @@ impl BeeperApp {
             self.timeline.clone(),
             cx.processor(move |this, ix: usize, window, cx| {
                 this.want_thumb(ix);
+                let flash = this.flash_level(ix, window, cx);
+                let reaction_since = this.reaction_since(ix);
                 let m = &this.msgs[ix];
                 if m.kind != Kind::Message {
                     return this.render_line(ix, cx);
                 }
                 // What a bubble has inside: its share of the row, less its padding and a mention's bar.
                 let row = f32::from(window.viewport_size().width) - 2. * GUTTER;
-                let room = if narrow { row * BUBBLE_SHARE } else { BUBBLE_W } - 2. * GAP - 9.;
-                let attachment = m.media.as_ref().filter(|_| !m.deleted).map(|media| this.render_media(m, media, room, cx));
+                // Wide, the pane beside the lists also holds a face and the hover buttons.
+                let room = if narrow { row * BUBBLE_SHARE } else { BUBBLE_W.min(row - NAV_W - LIST_W - SENDER - 8. - SIDE_ROOM).max(TAP * 4.) } - 2. * GAP - 9.;
+                // A picture sits in its bubble with a thin margin, concentric with it; alone, it is the bubble.
+                let pictured = !m.deleted && m.media.as_ref().is_some_and(drawn_as_picture);
+                // A few emoji on their own are drawn large and free, as the phones do.
+                let jumbo = m.media.is_none() && m.reply.is_none() && m.link.is_none() && m.poll.is_none() && m.place.is_none() && !m.edited && emoji_only(&m.body);
+                let bare = jumbo || (pictured && m.body.is_empty() && m.reply.is_none() && !m.edited && m.link.is_none());
+                // A place alone fills its bubble, its card concentric with it.
+                let place_only = !m.deleted && m.place.is_some() && m.body.is_empty() && m.reply.is_none() && !m.edited;
+                let (pad_x, pad_y) = if bare {
+                    (0., 0.)
+                } else if pictured {
+                    (4., 4.)
+                } else if place_only {
+                    (8., 8.)
+                } else {
+                    (GAP, 9.)
+                };
+                let text_x = if pictured { GAP - pad_x } else { 0. };
+                // A caption keeps to its picture's width.
+                let framed_w = m.media.as_ref().filter(|_| pictured && !bare).map(|media| picture_size(media, room).0 + 2. * pad_x);
+                let attachment = m.media.as_ref().filter(|_| !m.deleted).map(|media| this.render_media(m, media, room, RADIUS - pad_x, cx));
                 // Rows that draw nothing do not come between two messages.
                 let drawn = |row: &&Msg| !matches!(row.kind, Kind::Hidden | Kind::Status { .. });
                 let prev = this.msgs[..ix].iter().rev().find(drawn);
@@ -1196,16 +1307,49 @@ impl BeeperApp {
                 let first = prev.is_none_or(|p| !joined(p, m));
                 let last = next.is_none_or(|n| !joined(m, n));
                 let faded = m.deleted || m.body == UTD;
+                // Where a run's bubbles meet, their corners on the sender's side are tighter; a picture
+                // keeps its round corners.
+                let joins = !pictured;
+                let top_r = if first || !joins { RADIUS } else { JOINED };
+                let bottom_r = if last || !joins { RADIUS } else { JOINED };
                 // A pointer's menu marks its message; the touch overlay lifts it instead.
                 let picked = this.menu.as_ref().is_some_and(|menu| menu.id == m.id && menu.kind != MenuKind::Touch);
-                let quote = m.reply.as_ref().map(|quote| (quote.id.clone(), quote.sender.clone(), quote.text.clone()));
+                let quote = m.reply.as_ref().map(|quote| {
+                    let thumb = this.thumbs.get(&quote_key(&m.id)).cloned();
+                    let target = quote.id.clone();
+                    let inset = quote_inset(quote, None, inside_of(m, p), thumb).id(SharedString::from(format!("{}-quote", m.id))).mx(px(8. - pad_x)).mt(px(8. - pad_y));
+                    match quote.state {
+                        QuoteState::Missing => inset,
+                        _ => inset.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.reveal(&target, cx);
+                        })),
+                    }
+                });
                 let state = if m.own { this.delivery_line(ix, dm) } else { None };
                 // Still only here, not yet with the server.
                 let leaving = m.delivery == Delivery::Sending && !m.id.starts_with('$');
                 let (id, held) = (m.id.clone(), m.id.clone());
-                let swiped = this.swipe.as_ref().filter(|(on, _)| *on == m.id).map_or(0., |(_, far)| far.min(SWIPE_REPLY + 16.));
+                // The finger's pan, followed 1:1 with resistance past the reply point; once it has let
+                // go, a spring brings the message back.
+                let dragged = this.swipe.as_ref().filter(|(on, _)| *on == m.id).map(|(_, far)| rubber(*far));
+                let springing = this.swipe_back.as_ref().is_some_and(|(on, at)| *on == m.id && at.elapsed() < Duration::from_millis(600));
+                let swiped = if dragged.is_some() || springing {
+                    let release = motion::RELEASE.with_travel(dragged.is_none());
+                    spring((SharedString::from(m.id.clone()), "swipe"), dragged.unwrap_or(0.), release, window, cx)
+                } else {
+                    0.
+                };
+                let armed = dragged.is_some_and(|far| far >= SWIPE_REPLY);
+                let arrow_scale = if swiped > 0.5 {
+                    let grow = Transition::new(Duration::from_millis(120)).easing(motion::EASE_OUT);
+                    transition((SharedString::from(m.id.clone()), "armed"), if armed { 1.15 } else { 1. }, grow, window, cx)
+                } else {
+                    1.
+                };
+                let arriving = this.arrivals.iter().find(|(id, _)| *id == m.id).and_then(|&(_, at)| fresh(at, motion::ENTER, window, cx));
                 // What is drawn inside the bubble: an own one may carry a colour of the user's choosing.
-                let inside = if m.own { p.in_own_bubble() } else { p };
+                let inside = inside_of(m, p);
                 let ink = HighlightStyle { color: Some(inside.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
                 let underline = HighlightStyle { underline: Some(UnderlineStyle { thickness: px(1.), ..Default::default() }), ..Default::default() };
                 let mut marks: Vec<_> = m.mentions.iter().map(|r| (r.clone(), ink)).collect();
@@ -1252,17 +1396,19 @@ impl BeeperApp {
                                 }),
                         )
                 });
-                let poll_card = m.poll.as_ref().filter(|_| !m.deleted).map(|poll| cards::poll(m, poll, this.user.as_ref(), room, inside, cx));
+                let poll_card = m.poll.as_ref().filter(|_| !m.deleted).map(|poll| cards::poll(m, poll, this.user.as_ref(), room, inside, window, cx));
                 let place_card = m.place.as_ref().filter(|_| !m.deleted).map(|place| cards::place(m, place, room, inside, cx));
                 let bubble = v_flex()
                     .id(SharedString::from(m.id.clone()))
                     // Without this a flex child is as wide as its longest line and leaves the screen.
                     .min_w_0()
-                    .px(px(GAP))
-                    .py(px(9.))
+                    .px(px(pad_x))
+                    .pt(px(pad_y))
+                    .pb(px(if pictured && !(m.body.is_empty() && !m.edited) { 9. } else { pad_y }))
                     .gap(px(4.))
-                    .rounded(px(RADIUS))
-                    .bg(if m.own { p.own } else if picked { p.raised } else { p.surface })
+                    .when_some(framed_w, |el, w| el.w(px(w)))
+                    .map(|el| corners(el, m.own, top_r, bottom_r))
+                    .when(!bare, |el| el.bg(if m.own { p.own } else if picked { p.raised } else { p.surface }))
                     .text_color(inside.text)
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.bubble_click(&id, event, cx)))
@@ -1272,29 +1418,17 @@ impl BeeperApp {
                             this.open_menu(held.clone(), MenuKind::List, event.position(), None, false, cx);
                         }
                     }))
-                    .children(quote.map(|(target, who, text)| {
-                        v_flex()
-                            .id(SharedString::from(format!("{}-quote", m.id)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.reveal(&target, cx);
-                            }))
-                            .min_w_0()
-                            .px(px(10.))
-                            .py(px(6.))
-                            .rounded(px(12.))
-                            .bg(inside.text.opacity(0.07))
-                            .text_size(px(13.))
-                            .line_height(px(18.))
-                            .when(!who.is_empty(), |el| el.child(div().font_weight(FontWeight::SEMIBOLD).child(who)))
-                            .child(div().line_clamp(2).text_ellipsis().text_color(inside.muted).child(text))
-                    }))
+                    // Where a quote led: the tint sits under the content and fades.
+                    .when_some(flash, |el, level| {
+                        el.relative().child(corners(div().absolute().inset_0(), m.own, top_r, bottom_r).bg(inside.text.opacity(0.16 * level)))
+                    })
+                    .children(quote)
                     .children(attachment)
                     .when(!m.body.is_empty(), |el| {
                         el.child(
                             div()
-                                .text_size(px(16.))
-                                .line_height(px(22.))
+                                .px(px(text_x))
+                                .map(|el| if jumbo { el.text_size(px(40.)).line_height(px(48.)) } else { el.text_size(px(16.)).line_height(px(22.)) })
                                 .when(faded, |el| el.italic().text_color(inside.faint))
                                 .child(match m.rich.as_ref().filter(|_| !faded) {
                                     Some(rich) => rich::body(m, rich, inside, ink),
@@ -1305,16 +1439,20 @@ impl BeeperApp {
                     .children(link_card)
                     .children(poll_card)
                     .children(place_card)
-                    .when(m.edited && !m.deleted, |el| el.child(div().text_size(px(12.)).text_color(inside.faint).child("Edited")));
+                    .when(m.edited && !m.deleted, |el| el.child(div().px(px(text_x)).text_size(px(12.)).text_color(inside.faint).child("Edited")));
                 // Badges pinned over the bubble's lower edge, ringed in the ground's colour: standing
                 // free under it they read as small messages of their own.
                 let reactions = (!m.reactions.is_empty()).then(|| {
-                    h_flex().flex_wrap().gap(px(2.)).mt(px(-REACTION_LAP)).px(px(8.)).children(m.reactions.iter().enumerate().map(|(n, reaction)| {
+                    // Before the next message of the run, the badges keep a little room under them.
+                    h_flex().flex_wrap().gap(px(2.)).mt(px(-REACTION_LAP)).px(px(8.)).when(!last, |el| el.pb(px(4.))).children(m.reactions.iter().enumerate().map(|(n, reaction)| {
                         let (key, count, mine) = (reaction.key.as_str(), reaction.count, reaction.own);
                         let (id, key_owned) = (m.id.clone(), key.to_owned());
+                        // The one the user just gave rises into place; others appear as they are.
+                        let rising = reaction_since.as_ref().filter(|(given, _)| mine && menu::same_emoji(given, key)).and_then(|(_, at)| fresh(*at, motion::ENTER, window, cx));
                         h_flex()
                             .id(SharedString::from(format!("{}-reaction-{n}", m.id)))
-                            .h(px(28.))
+                            .when_some(rising, |el, v| el.relative().top(px(6. * (1. - v))).opacity(v))
+                            .h(px(32.))
                             .px(px(7.))
                             .gap(px(4.))
                             .rounded_full()
@@ -1328,7 +1466,7 @@ impl BeeperApp {
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, &key_owned, cx)))
                             .child(key.to_owned())
-                            .when(count > 1, |el| el.child(count.to_string()))
+                            .when(count > 1, |el| el.child(div().font_features(tabular()).child(count.to_string())))
                     }))
                 });
                 // In a group, the sender's picture stands beside the last message of the run.
@@ -1338,10 +1476,13 @@ impl BeeperApp {
                 }
                 let m = &this.msgs[ix];
                 let side = if faces { px(SENDER + 8.) } else { px(0.) };
+                // Arriving: the user's own message rises from the composer, another's settles in.
+                let rise = if m.own { 12. } else { 8. };
                 v_flex()
                     .group("message")
                     .w_full()
                     .relative()
+                    .when_some(arriving, |el, v| el.top(px(rise * (1. - v))).opacity(v))
                     .px(px(GUTTER))
                     .pt(if first { px(GAP) } else { px(3.) })
                     .when(faces && first, |el| {
@@ -1352,6 +1493,7 @@ impl BeeperApp {
                                 .text_size(px(12.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(p.muted)
+                                .truncate()
                                 .child(m.sender.clone()),
                         )
                     })
@@ -1359,7 +1501,7 @@ impl BeeperApp {
                         let id = m.id.clone();
                         move |this, event: &ScrollWheelEvent, window, cx| this.swipe(&id, event, window, cx)
                     }))
-                    .when(swiped != 0., |el| {
+                    .when(swiped > 0.5, |el| {
                         // What letting go will do, shown where the message came from.
                         el.child(
                             div()
@@ -1369,8 +1511,9 @@ impl BeeperApp {
                                 .left(px(GUTTER))
                                 .flex()
                                 .items_center()
-                                .text_color(if swiped >= SWIPE_REPLY { p.text } else { p.faint })
-                                .child(Icon::new(IconName::Reply).size_5()),
+                                .opacity((swiped / SWIPE_REPLY).min(1.))
+                                .text_color(if armed { p.text } else { p.faint })
+                                .child(Icon::new(IconName::Reply).size_5().transform(Transformation::scale(size(arrow_scale, arrow_scale)))),
                         )
                     })
                     .child(
@@ -1410,7 +1553,7 @@ impl BeeperApp {
                                     (Some((state, _)), false) => state,
                                     (None, _) => clock(m.ts),
                                 };
-                                el.child(div().px(px(GAP)).pt(px(4.)).text_size(px(12.)).text_color(if failed { p.negative } else { p.faint }).child(text))
+                                el.child(div().px(px(GAP)).pt(px(4.)).text_size(px(12.)).font_features(tabular()).text_color(if failed { p.negative } else { p.faint }).child(text))
                             }),
                     )
                     .into_any_element()
@@ -1462,19 +1605,49 @@ impl BeeperApp {
                                 .justify_center()
                                 .text_size(px(14.))
                                 .text_color(p.faint)
-                                .child("Loading messages..."),
+                                .child("Loading messages…")
+                                // Said only when the wait is long enough to notice.
+                                .with_animations(
+                                    "loading",
+                                    vec![Animation::new(Duration::from_millis(300)), Animation::new(motion::ENTER).with_easing(motion::ease_out)],
+                                    |el, ix, t| el.opacity(if ix == 0 { 0. } else { t }),
+                                ),
                         )
                     }),
             )
             .when(!self.typing.is_empty(), |el| {
                 let names: Vec<&str> = self.typing.iter().map(String::as_str).collect();
                 let (who, many) = people(&names);
-                let line = format!("{who} {} typing...", if many { "are" } else { "is" });
-                el.child(div().px(px(GUTTER + GAP)).pt(px(6.)).text_size(px(12.)).text_color(p.faint).child(line))
+                let line = format!("{who} {} typing…", if many { "are" } else { "is" });
+                let faint = p.faint;
+                // An activity indicator may loop; at 24 frames a second it costs little while it lasts.
+                let pulse = Animation::new(Duration::from_millis(1200)).repeat().with_max_fps(24.);
+                let dots = h_flex().gap(px(3.)).with_animation("typing-dots", pulse, move |el, t| {
+                    el.children((0..3).map(|n| {
+                        let phase = (t - n as f32 * 0.2).rem_euclid(1.);
+                        let level = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
+                        div().size(px(4.)).rounded_full().bg(faint).opacity(0.3 + 0.7 * level)
+                    }))
+                });
+                el.child(
+                    h_flex()
+                        .px(px(GUTTER + GAP))
+                        .pt(px(6.))
+                        .gap(px(6.))
+                        .text_size(px(12.))
+                        .text_color(faint)
+                        .child(dots)
+                        .child(line)
+                        .with_animation(
+                            SharedString::from(format!("typing-{}", names.join(","))),
+                            Animation::new(Duration::from_millis(150)).with_easing(motion::ease_out),
+                            |el, t| el.opacity(t),
+                        ),
+                )
             })
-            .children(self.render_compose_strip(cx))
+            .children(self.render_compose_strip(window, cx))
             .when(self.uploads > 0, |el| {
-                el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(px(12.)).text_color(p.faint).child("Sending attachment..."))
+                el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(px(12.)).text_color(p.faint).child("Sending attachment…"))
             })
             .child(
                 h_flex()
@@ -1509,7 +1682,8 @@ impl BeeperApp {
                             .bg(p.text)
                             .text_color(p.ground)
                             .cursor_pointer()
-                            .hover(|el| el.bg(p.muted))
+                            .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
+                            .active(|el| el.bg(p.muted))
                             .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
                             .child(Icon::new(IconName::ArrowUp).size_5()),
                     ),
@@ -1622,12 +1796,58 @@ impl BeeperApp {
         ))
     }
 
-    /// Scrolls to a message, when it is among the loaded ones.
+    /// Scrolls to a message and tints it for a moment; one not loaded yet is looked for among
+    /// older pages.
     fn reveal(&mut self, id: &str, cx: &mut Context<Self>) {
         if let Some(ix) = self.msgs.iter().position(|m| m.id == id) {
+            self.seek = None;
             self.timeline.scroll_to_reveal_item(ix);
+            self.flash = Some((id.to_owned(), None));
             cx.notify();
+        } else if self.more {
+            self.seek = Some((id.to_owned(), 0));
+            self.load_older(cx);
         }
+    }
+
+    /// The emoji the user just gave this message and when its badge was first drawn, once it is.
+    fn reaction_since(&mut self, ix: usize) -> Option<(String, Instant)> {
+        let (id, key, since) = self.fresh_reaction.as_mut()?;
+        let m = &self.msgs[ix];
+        if *id != m.id || !m.reactions.iter().any(|r| r.own && menu::same_emoji(&r.key, key)) {
+            return None;
+        }
+        Some((key.clone(), *since.get_or_insert_with(Instant::now)))
+    }
+
+    /// How strongly a message a quote led to is tinted, 1 to 0; `None` when it is not.
+    fn flash_level(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> Option<f32> {
+        let (hold, fade) = (motion::FLASH_HOLD, motion::FLASH_FADE);
+        let Some((id, since)) = &mut self.flash else { return None };
+        if *id != self.msgs[ix].id {
+            return None;
+        }
+        let since = *since.get_or_insert_with(|| {
+            if cx.reduce_motion() {
+                // Nothing else asks for a frame when the tint should go.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(hold + fade).await;
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                })
+                .detach();
+            }
+            Instant::now()
+        });
+        let elapsed = since.elapsed();
+        if elapsed >= hold + fade {
+            self.flash = None;
+            return None;
+        }
+        if cx.reduce_motion() {
+            return Some(1.);
+        }
+        window.request_animation_frame();
+        Some(if elapsed < hold { 1. } else { 1. - motion::ease_out((elapsed - hold).as_secs_f32() / fade.as_secs_f32()) })
     }
 
     /// Follows a pan to the right over a message, as in Signal and iMessage; one that travels far
@@ -1635,7 +1855,15 @@ impl BeeperApp {
     fn swipe(&mut self, id: &str, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(px(20.));
         let before = self.swipe.as_ref().map(|(_, far)| *far);
+        let held = self.swipe.as_ref().map(|(on, _)| on.clone());
         let reply = swipe_step(&mut self.swipe, id, f32::from(delta.x), f32::from(delta.y), event.touch_phase);
+        if let (Some(held), None) = (held, &self.swipe) {
+            self.swipe_back = Some((held, Instant::now()));
+        }
+        #[cfg(target_os = "android")]
+        if before.is_some_and(|far| far < SWIPE_REPLY) && self.swipe.as_ref().is_some_and(|(_, far)| *far >= SWIPE_REPLY) {
+            motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Light);
+        }
         if let Some(target) = reply {
             self.start_compose(Compose::Reply(target), window, cx);
         } else if before != self.swipe.as_ref().map(|(_, far)| *far) {
@@ -1662,35 +1890,57 @@ impl BeeperApp {
         Some(self.sheet(title, rows, cx))
     }
 
-    /// What the composer is replying to or editing, with a way out.
-    fn render_compose_strip(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    /// What the composer is replying to or editing, with a way out. It opens and closes over the
+    /// composer rather than pushing the chat at once; Escape takes it away at once.
+    fn render_compose_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let p = Palette::of(cx);
-        let (title, id) = match &self.compose {
-            Compose::New => return None,
-            Compose::Reply(id) => ("Replying to", id),
-            Compose::Edit(id) => ("Editing", id),
+        let target = match &self.compose {
+            Compose::New => None,
+            Compose::Reply(id) | Compose::Edit(id) => Some(id),
         };
-        let quoted = self.msgs.iter().find(|m| &m.id == id).map(|m| format!("{}: {}", m.sender, m.summary())).unwrap_or_default();
+        let current = target.map(|id| {
+            let found = self.msgs.iter().find(|m| &m.id == id);
+            let quote = found.map_or_else(|| Quote::unknown(id.clone(), QuoteState::Missing), Msg::quote);
+            let (icon, title) = match (&self.compose, found) {
+                (Compose::Edit(_), _) => (Some(IconName::Pencil), "Editing".into()),
+                (_, Some(m)) if m.own => (None, "Replying to yourself".into()),
+                (_, Some(m)) => (None, format!("Replying to {}", m.sender).into()),
+                _ => (None, "Replying".into()),
+            };
+            (icon, title, quote)
+        });
+        let present = current.is_some();
+        if current.is_some() {
+            self.strip_last = current;
+        }
+        let room = self.open.as_ref().map(ToString::to_string).unwrap_or_default();
+        let shown = Presence::new((("compose-strip", self.strip_epoch), room), present)
+            .transition(if present { motion::enter() } else { motion::exit() })
+            .sample(window, cx);
+        if !shown.should_render() {
+            self.strip_last = None;
+            return None;
+        }
+        let (icon, title, quote) = self.strip_last.clone()?;
+        let thumb = self.thumbs.get(&quote.id).cloned();
+        let leaving = shown.phase == PresencePhase::Exiting;
+        let v = shown.progress;
         Some(
-            h_flex()
-                .mx(px(GUTTER))
-                .mt(px(8.))
-                .pl(px(GAP))
-                .rounded(px(RADIUS))
-                .bg(p.surface)
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .py(px(8.))
-                        .text_size(px(13.))
-                        .line_height(px(18.))
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-                        .child(div().truncate().text_color(p.muted).child(quoted)),
-                )
-                .child(round_button("cancel-compose", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| {
-                    this.start_compose(Compose::New, window, cx);
-                }))),
+            div().flex_none().overflow_hidden().max_h(px(STRIP_H * v)).opacity(v).child(
+                h_flex()
+                    .mx(px(GUTTER))
+                    .mt(px(8.))
+                    .p(px(8.))
+                    .gap(px(8.))
+                    .rounded(px(RADIUS))
+                    .bg(p.surface)
+                    .child(quote_inset(&quote, Some((icon, title)), p, thumb).flex_1())
+                    .child(round_button("cancel-compose", IconName::X, cx).when(!leaving, |el| {
+                        el.on_click(cx.listener(|this, _, window, cx| {
+                            this.start_compose(Compose::New, window, cx);
+                        }))
+                    })),
+            ),
         )
     }
 
@@ -1841,6 +2091,198 @@ fn link_key(message: &str) -> String {
     format!("{message}#link")
 }
 
+/// A picture's size in a bubble: its own shape, within what a bubble may take. `room` is the
+/// bubble's width for content.
+fn picture_size(media: &Media, room: f32) -> (f32, f32) {
+    let (max_w, max_h) = if media.kind == MediaKind::Sticker { (140., 140.) } else { (room.min(260.), 320.) };
+    let (w, h) = media.dims.map_or((max_w, max_w * 0.75), |(w, h)| (w.max(1) as f32, h.max(1) as f32));
+    let scale = (max_w / w).min(max_h / h).min(1.);
+    ((w * scale).max(80.), (h * scale).max(60.))
+}
+
+/// Rounds a bubble: `top` and `bottom` are its corners on the sender's side.
+fn corners<E: Styled>(el: E, own: bool, top: f32, bottom: f32) -> E {
+    if own {
+        el.rounded_l(px(RADIUS)).rounded_tr(px(top)).rounded_br(px(bottom))
+    } else {
+        el.rounded_r(px(RADIUS)).rounded_tl(px(top)).rounded_bl(px(bottom))
+    }
+}
+
+/// Whether a message is one to three emoji and nothing else. Flags (two regional indicators),
+/// skin tones and sequences joined by U+200D count as one.
+fn emoji_only(text: &str) -> bool {
+    let (mut count, mut joined, mut half_flag) = (0, false, false);
+    for c in text.chars() {
+        match u32::from(c) {
+            0x200D => {
+                joined = true;
+                continue;
+            }
+            0xFE0F | 0x20E3 | 0x1F3FB..=0x1F3FF | 0xE0020..=0xE007F => continue,
+            0x1F1E6..=0x1F1FF => {
+                if !half_flag {
+                    count += 1;
+                }
+                half_flag = !half_flag;
+            }
+            0x1F000..=0x1FAFF | 0x2190..=0x21FF | 0x2300..=0x23FF | 0x2600..=0x27BF | 0x2B00..=0x2BFF | 0x3030 | 0x303D | 0x3297 | 0x3299 | 0xA9 | 0xAE | 0x2122 => {
+                if !joined {
+                    count += 1;
+                }
+            }
+            _ if c.is_whitespace() => {}
+            _ => return false,
+        }
+        joined = false;
+    }
+    (1..=3).contains(&count)
+}
+
+/// An attachment drawn as its picture rather than as a file's row; a video without its size is a row.
+fn drawn_as_picture(media: &Media) -> bool {
+    matches!(media.kind, MediaKind::Image | MediaKind::Sticker) || (media.kind == MediaKind::Video && media.dims.is_some())
+}
+
+/// Key of the thumbnail of the message a reply quotes, in the thumbnail cache.
+fn quote_key(message: &str) -> String {
+    format!("{message}#quote")
+}
+
+/// The palette of what is drawn inside a message's bubble: an own one may carry a colour of the
+/// user's choosing.
+fn inside_of(m: &Msg, p: Palette) -> Palette {
+    if m.own { p.in_own_bubble() } else { p }
+}
+
+/// A quoted message: who wrote it and what it says, behind a bar that tells it from a link's card.
+/// `heading` takes the place of the sender (the compose strip's "Replying to"), with one line of
+/// text under it. `inside` is the palette of what it sits in.
+fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, inside: Palette, thumb: Option<Arc<Image>>) -> Stateful<Div> {
+    let line = |size: f32, height: f32| div().text_size(px(size)).line_height(px(height));
+    let lines = if heading.is_some() { 1 } else { 2 };
+    let top = match heading {
+        Some((icon, title)) => Some((icon, title)),
+        None => (q.state == QuoteState::Ready).then(|| (None, if q.own { "You".into() } else { SharedString::from(q.sender.clone()) })),
+    };
+    let top = top.map(|(icon, title)| {
+        h_flex()
+            .gap(px(4.))
+            .min_w_0()
+            .text_color(inside.text)
+            .children(icon.map(|icon| Icon::new(icon).size_3p5().flex_none()))
+            .child(line(13., 18.).min_w_0().font_weight(FontWeight::SEMIBOLD).truncate().child(title))
+    });
+    let quiet = |text: &'static str| line(14., 19.).italic().text_color(inside.faint).child(text);
+    let body = match q.state {
+        QuoteState::Loading => line(14., 19.).text_color(inside.faint).child("Loading…").into_any_element(),
+        QuoteState::Missing => h_flex()
+            .gap(px(4.))
+            .text_color(inside.faint)
+            .child(Icon::new(IconName::Unlink).size_3p5().flex_none())
+            .child(quiet("Message unavailable"))
+            .into_any_element(),
+        QuoteState::Ready if q.deleted => quiet("Message deleted").into_any_element(),
+        QuoteState::Ready => {
+            let (icon, text) = quote_label(q);
+            h_flex()
+                .items_start()
+                .gap(px(4.))
+                .min_w_0()
+                .text_color(inside.muted)
+                // Centred on the first line of text.
+                .children(icon.map(|icon| Icon::new(icon).size_3p5().flex_none().mt(px(2.5))))
+                .child(line(14., 19.).flex_1().min_w_0().line_clamp(lines).text_ellipsis().child(text))
+                .into_any_element()
+        }
+    };
+    let pictured = q.media.as_ref().filter(|media| matches!(media.kind, MediaKind::Image | MediaKind::Video | MediaKind::Sticker));
+    let picture = pictured.map(|media| {
+        let sticker = media.kind == MediaKind::Sticker;
+        div()
+            .relative()
+            .flex_none()
+            .size(px(40.))
+            .m(px(7.))
+            .ml(px(0.))
+            .overflow_hidden()
+            .when(!sticker, |el| el.rounded(px(6.)))
+            .map(|el| match thumb {
+                Some(image) => el.child(img(image).size_full().when(!sticker, |el| el.rounded(px(6.))).object_fit(if sticker { ObjectFit::Contain } else { ObjectFit::Cover })),
+                None => el.flex().items_center().justify_center().bg(inside.text.opacity(0.07)).text_color(inside.faint).child(
+                    Icon::new(match media.kind {
+                        MediaKind::Video => IconName::Video,
+                        MediaKind::Sticker => IconName::Sticker,
+                        _ => IconName::Image,
+                    })
+                    .size_4(),
+                ),
+            })
+            .when(media.kind == MediaKind::Video, |el| {
+                el.child(
+                    div().absolute().inset_0().flex().items_center().justify_center().child(
+                        div().size(px(20.)).flex().items_center().justify_center().rounded_full().bg(gpui_kit::black().opacity(0.5)).text_color(gpui_kit::white()).child(Icon::new(IconName::Play).size_3()),
+                    ),
+                )
+            })
+    });
+    h_flex()
+        .id(SharedString::from(format!("{}#inset", q.id)))
+        .min_w_0()
+        .items_stretch()
+        .rounded(px(12.))
+        .bg(inside.text.opacity(0.07))
+        // A neutral bar inside, where a mention's accent bar stands outside the bubble.
+        .child(div().flex_none().w(px(3.)).ml(px(7.)).my(px(7.)).rounded_full().bg(inside.text.opacity(0.4)))
+        .child(v_flex().flex_1().min_w_0().pl(px(8.)).pr(px(10.)).py(px(7.)).children(top).child(body))
+        .children(picture)
+}
+
+/// What a quote says about a message's content: an icon for what is not text, and its caption or
+/// a label.
+fn quote_label(q: &Quote) -> (Option<IconName>, String) {
+    let or = |label: &str| if q.text.is_empty() { label.to_owned() } else { q.text.clone() };
+    if q.poll {
+        return (Some(IconName::ChartBar), format!("Poll: {}", q.text));
+    }
+    if q.place {
+        return (Some(IconName::MapPin), or("Location"));
+    }
+    let Some(media) = &q.media else { return (None, q.text.clone()) };
+    match media.kind {
+        MediaKind::Image => (Some(IconName::Image), or("Photo")),
+        MediaKind::Video => (Some(IconName::Video), or("Video")),
+        MediaKind::Sticker => (Some(IconName::Sticker), or("Sticker")),
+        MediaKind::Voice => (Some(IconName::Mic), media.duration.map_or_else(|| "Voice message".to_owned(), |d| format!("Voice message \u{b7} {}", length(d)))),
+        MediaKind::Audio => (Some(IconName::Music), or(&format!("Audio \u{b7} {}", media.name))),
+        MediaKind::File => (Some(IconName::File), or(&media.name)),
+    }
+}
+
+/// How far a message follows a sideways pan: all the way to the reply point, then a third of
+/// the rest, so the pan meets resistance instead of a wall.
+fn rubber(far: f32) -> f32 {
+    if far <= SWIPE_REPLY { far } else { SWIPE_REPLY + (far - SWIPE_REPLY) * 0.3 }
+}
+
+/// Whether messages added at the end of the open chat are news to show arriving: not the first
+/// load (`len_before` 0), not a page of history (more than `MAX_ARRIVALS` in one go), and not
+/// what the chat catches up on just after it opened.
+fn arrived(len_before: usize, appended_in_batch: usize, open_for: Duration) -> bool {
+    len_before > 0 && appended_in_batch <= MAX_ARRIVALS && open_for >= Duration::from_millis(500)
+}
+
+/// Eased progress of a motion that began at `since`, asking for the next frame while it lasts;
+/// `None` once it is over, or at once when the system asks for less motion. A clock kept by the
+/// app rather than by the element, so a row scrolled away and back does not replay it.
+fn fresh(since: Instant, length: Duration, window: &mut Window, cx: &App) -> Option<f32> {
+    let t = since.elapsed().as_secs_f32() / length.as_secs_f32();
+    (t < 1. && !cx.reduce_motion()).then(|| {
+        window.request_animation_frame();
+        motion::ease_out(t)
+    })
+}
+
 /// Byte ranges of the web addresses written in a text.
 fn urls(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
@@ -1915,7 +2357,6 @@ fn short_network(name: &str) -> &str {
 
 /// Unread count; a bare dot for a chat marked unread by hand, grey when muted.
 /// Digits of one width, so times and counts do not shift as they change.
-#[expect(dead_code, reason = "for the motion and polish packages")]
 fn tabular() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
 }
@@ -2131,7 +2572,7 @@ impl Render for BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{SWIPE_REPLY, swipe_step, urls};
+    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, rubber, swipe_step, urls};
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
 
     #[test]
@@ -2141,6 +2582,33 @@ mod tests {
         assert_eq!(found("https://en.wikipedia.org/wiki/Queen_(band)"), ["https://en.wikipedia.org/wiki/Queen_(band)"]);
         assert_eq!(found("Zażółć https://a.pl! i xhttps://b.pl oraz https:// i http"), ["https://a.pl"]);
         assert!(found("no address, just httpd").is_empty());
+    }
+
+    #[test]
+    fn a_pan_past_the_reply_point_meets_resistance() {
+        assert_eq!(rubber(0.), 0.);
+        assert_eq!(rubber(SWIPE_REPLY), SWIPE_REPLY);
+        assert!((rubber(2. * SWIPE_REPLY) - 1.3 * SWIPE_REPLY).abs() < 1e-4);
+    }
+
+    #[test]
+    fn only_a_few_new_messages_in_a_chat_open_a_moment_arrive() {
+        let open = Duration::from_secs(2);
+        assert!(arrived(10, 1, open));
+        assert!(arrived(10, MAX_ARRIVALS, open));
+        assert!(!arrived(0, 1, open), "the first load");
+        assert!(!arrived(10, MAX_ARRIVALS + 1, open), "a page of history");
+        assert!(!arrived(10, 1, Duration::from_millis(100)), "catching up after opening");
+    }
+
+    #[test]
+    fn a_few_emoji_alone_are_drawn_large() {
+        for big in ["👍", "🎉🎉🎉", "❤️", "👨‍👩‍👧", "🇵🇱", "👍🏽 🙏"] {
+            assert!(emoji_only(big), "{big}");
+        }
+        for small in ["", "k", "ok 👍", "🎉🎉🎉🎉", "🇵🇱🇩🇪🇫🇷🇮🇹", "1"] {
+            assert!(!emoji_only(small), "{small}");
+        }
     }
 
     #[test]
