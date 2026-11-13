@@ -34,7 +34,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::{
     AbortOnDrop, DELETED, Delivery, Ev, Kind, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, Reaction, UTD, content, display_name, link_preview, mark_read,
-    marks, network, other_person, plain, sticker,
+    format, marks, network, other_person, plain, sticker,
 };
 
 /// Beeper's bridges say in events of this type what the network did with a message.
@@ -359,6 +359,7 @@ fn fill(m: &mut Msg, kind: &MsgLikeKind, own: &UserId) {
             }
             // The place's description is told with the place.
             m.body = if m.place.is_some() { String::new() } else { text };
+            format(m, message.msgtype());
             (m.mentions, m.mentioned) = marks(&m.body, message.msgtype(), message.mentions(), own);
             m.mentioned &= !m.own;
             m.edited = message.is_edited();

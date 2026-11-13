@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 mod cards;
 mod panels;
+mod rich;
 
 use std::path::PathBuf;
 
@@ -1269,7 +1270,10 @@ impl BeeperApp {
                                 .text_size(px(16.))
                                 .line_height(px(22.))
                                 .when(faded, |el| el.italic().text_color(inside.faint))
-                                .child(StyledText::new(m.body.clone()).with_highlights(marks)),
+                                .child(match m.rich.as_ref().filter(|_| !faded) {
+                                    Some(rich) => rich::body(m, rich, inside, ink),
+                                    None => StyledText::new(m.body.clone()).with_highlights(marks).into_any_element(),
+                                }),
                         )
                     })
                     .children(link_card)

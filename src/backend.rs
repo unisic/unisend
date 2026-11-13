@@ -49,7 +49,7 @@ use matrix_sdk::{
             room::{
                 EncryptedFile, MediaSource,
                 message::{
-                    AddMentions, MessageType, Relation, RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
+                    AddMentions, MessageFormat, MessageType, Relation, RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
                     sanitize::remove_plain_reply_fallback,
                 },
             },
@@ -242,7 +242,10 @@ pub struct Msg {
     pub kind: Kind,
     pub sender: String,
     pub from: OwnedUserId,
+    /// The text as plain text; the formatted body's, when there is one.
     pub body: String,
+    /// `body` as the sender formatted it. Its runs point into `body`.
+    pub rich: Option<Rich>,
     pub own: bool,
     /// Origin server time, ms since the epoch.
     pub ts: u64,
@@ -319,6 +322,7 @@ impl Msg {
             sender: String::new(),
             from,
             body: String::new(),
+            rich: None,
             own: false,
             ts: 0,
             order: 0,
@@ -1659,6 +1663,7 @@ async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> (Vec<Msg>, Vec<Msg>) 
                     let text = if reply { remove_plain_reply_fallback(&text).to_owned() } else { text };
                     // The place's description is told with the place.
                     m.body = if m.place.is_some() { String::new() } else { text };
+                    format(&mut m, msgtype);
                     (m.mentions, m.mentioned) = marks(&m.body, msgtype, mentions, &own);
                 }
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(r))) => {
@@ -1766,6 +1771,28 @@ fn link_preview(content: &serde_json::Value) -> Option<Link> {
         });
         Some(Link { url, title, description, site, image })
     })
+}
+
+/// The HTML form of a text message, when the sender gave one.
+fn html(msgtype: &MessageType) -> Option<&str> {
+    let f = match msgtype {
+        MessageType::Text(c) => c.formatted.as_ref(),
+        MessageType::Notice(c) => c.formatted.as_ref(),
+        MessageType::Emote(c) => c.formatted.as_ref(),
+        _ => None,
+    }?;
+    (f.format == MessageFormat::Html).then_some(f.body.as_str())
+}
+
+/// Reads the message's formatted body: `body` becomes its plain text (no markdown, no reply
+/// fallback), `rich` its styled form. Without a formatted body `body` stays as it is.
+fn format(m: &mut Msg, msgtype: &MessageType) {
+    if m.place.is_some() {
+        return;
+    }
+    if let Some((plain, rich)) = html(msgtype).and_then(rich::parse) {
+        (m.body, m.rich) = (plain, Some(rich));
+    }
 }
 
 /// Where `body` mentions someone, and whether it mentions `own`. Matrix writes a mention twice:
@@ -2038,6 +2065,8 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
 }
 
 mod polls;
+mod rich;
+pub use rich::{Block, Rich, Run};
 pub use polls::{Place, Poll};
 
 mod timeline;
