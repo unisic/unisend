@@ -41,7 +41,7 @@ use matrix_sdk::{
             error::ErrorKind,
         },
         events::{
-            AnySyncMessageLikeEvent, AnySyncTimelineEvent, StateEventType, SyncMessageLikeEvent,
+            AnySyncMessageLikeEvent, AnySyncTimelineEvent, Mentions, StateEventType, SyncMessageLikeEvent,
             receipt::ReceiptThread,
             AnyMessageLikeEventContent,
             reaction::ReactionEventContent,
@@ -182,6 +182,9 @@ pub struct RoomSummary {
     pub network: Option<String>,
     #[serde(default)]
     pub unread: u64,
+    /// Unread messages that mention the user.
+    #[serde(default)]
+    pub mentions: u64,
     /// One-to-one chat: bubbles need no sender names.
     #[serde(default)]
     pub dm: bool,
@@ -230,6 +233,10 @@ pub struct Msg {
     pub media: Option<Media>,
     /// The account's push rules ask for a notification (false when they were not evaluated).
     pub notify: bool,
+    /// Byte ranges of `body` that mention someone.
+    pub mentions: Vec<std::ops::Range<usize>>,
+    /// Someone else mentions the user, by name or with the whole room.
+    pub mentioned: bool,
     /// Filled by the UI from `Item::Reaction`.
     pub reactions: Vec<Reaction>,
 }
@@ -285,7 +292,7 @@ pub struct Reaction {
 #[allow(clippy::large_enum_variant)]
 pub enum Item {
     Msg(Msg),
-    Edit { target: String, body: String },
+    Edit { target: String, body: String, mentions: Vec<std::ops::Range<usize>> },
     Reaction { target: String, reaction: Reaction },
     /// A message or a reaction was deleted.
     Redact { target: String },
@@ -927,6 +934,23 @@ fn announce(summary: &RoomSummary, prev: Option<&RoomSummary>, items: &[Item]) {
     }
 }
 
+/// Unread messages that mention the user, counted here because a server cannot see into
+/// encrypted messages. The last `unread` messages from others are the unread ones; `items` are the
+/// newest, oldest first, and `before` is the count from earlier items.
+fn unread_mentions(before: u64, unread: u64, items: &[Item]) -> u64 {
+    let theirs: Vec<&Msg> = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Msg(m) if !m.own => Some(m),
+            _ => None,
+        })
+        .collect();
+    let fresh = theirs.iter().rev().take(usize::try_from(unread).unwrap_or(usize::MAX)).filter(|m| m.mentioned).count() as u64;
+    // When the unread ones reach back past these items, what was counted before still stands.
+    let earlier = if (theirs.len() as u64) < unread { before } else { 0 };
+    (earlier + fresh).min(unread)
+}
+
 /// Ends a background task with the task that owns it.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
@@ -1133,12 +1157,15 @@ async fn summarize(
         Ok(Some(raw)) => raw.get_field::<Done>("content").ok().flatten().unwrap_or_default(),
         _ => Done::default(),
     };
+    let counts = room.unread_notification_counts();
     let mut s = RoomSummary {
         name,
         network,
         dm: peer.is_some(),
         preview: current(seen.preview),
-        unread: room.unread_notification_counts().notification_count,
+        unread: counts.notification_count,
+        // Once the chat is read nothing in it is an unread mention.
+        mentions: seen.mentions.max(counts.highlight_count).min(counts.notification_count),
         pinned: room.is_favourite(),
         low_priority: room.is_low_priority(),
         muted: matches!(mode, Some(RoomNotificationMode::Mute | RoomNotificationMode::MentionsAndKeywordsOnly)),
@@ -1265,6 +1292,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 order: order.max().max(prev.as_ref().map(|p| p.order)).unwrap_or(0),
                 unread: 0,
                 dm,
+                mentions: prev.as_ref().map_or(0, |p| p.mentions),
                 pinned: false,
                 low_priority: false,
                 muted: false,
@@ -1272,7 +1300,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 archived: false,
                 dated,
             };
-            let summary = summarize(&room, &notif, peer, seen).await;
+            let mut summary = summarize(&room, &notif, peer, seen).await;
+            summary.mentions = unread_mentions(summary.mentions, summary.unread, &items);
             announce(&summary, prev.as_ref(), &items);
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
             changed.push(summary);
@@ -1317,6 +1346,7 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
         let Some(id) = event.event_id().map(|e| e.to_string()) else { continue };
         let Some(sender) = event.sender() else { continue };
         let (mut reply_to, mut deleted, mut media) = (None, false, None);
+        let (mut mentions, mut mentioned) = (Vec::new(), false);
         // A deleted event in an encrypted room is an empty `m.room.encrypted`: nothing says whether
         // it was a message or a reaction, so it gets no placeholder.
         let body = if event.kind.is_utd() {
@@ -1331,7 +1361,8 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
                 ))) => match m.content.relates_to {
                     Some(Relation::Replacement(r)) => {
                         let body = r.new_content.msgtype.body().to_owned();
-                        out.push(Item::Edit { target: r.event_id.to_string(), body });
+                        let (mentions, _) = marks(&body, &r.new_content.msgtype, r.new_content.mentions.as_ref(), &own);
+                        out.push(Item::Edit { target: r.event_id.to_string(), body, mentions });
                         continue;
                     }
                     relation => {
@@ -1341,7 +1372,9 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
                         let (found, text) = content(&m.content.msgtype);
                         media = found;
                         // Older clients and bridges prepend the quoted message to the body.
-                        if reply_to.is_some() { remove_plain_reply_fallback(&text).to_owned() } else { text }
+                        let text = if reply_to.is_some() { remove_plain_reply_fallback(&text).to_owned() } else { text };
+                        (mentions, mentioned) = marks(&text, &m.content.msgtype, m.content.mentions.as_ref(), &own);
+                        text
                     }
                 },
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
@@ -1418,8 +1451,95 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
             edited: false,
             media,
             notify: event.push_actions().is_some_and(|actions| actions.iter().any(|a| a.should_notify())),
+            mentions,
+            mentioned: mentioned && !own,
             reactions: Vec::new(),
         }));
+    }
+    out
+}
+
+/// Where `body` mentions someone, and whether it mentions `own`. Matrix writes a mention twice:
+/// as a link to the user in the HTML form, and in `m.mentions`.
+fn marks(body: &str, msgtype: &MessageType, mentions: Option<&Mentions>, own: &UserId) -> (Vec<std::ops::Range<usize>>, bool) {
+    let html = match msgtype {
+        MessageType::Text(c) => c.formatted.as_ref(),
+        MessageType::Notice(c) => c.formatted.as_ref(),
+        MessageType::Emote(c) => c.formatted.as_ref(),
+        _ => None,
+    };
+    let linked = html.map(|f| linked_users(&f.body)).unwrap_or_default();
+    let room = mentions.is_some_and(|m| m.room);
+    let mentioned = room || mentions.is_some_and(|m| m.user_ids.contains(own)) || linked.iter().any(|(user, _)| user == own.as_str());
+    let names: Vec<&str> = linked.iter().map(|(_, name)| name.as_str()).collect();
+    (mention_ranges(body, &names, room), mentioned)
+}
+
+/// Users linked in a message's HTML as (user ID, link text).
+fn linked_users(html: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(at) = rest.find("<a ") {
+        rest = &rest[at + 3..];
+        let Some(close) = rest.find('>') else { break };
+        let (tag, after) = (&rest[..close], &rest[close + 1..]);
+        let Some(end) = after.find("</a>") else { break };
+        rest = &after[end..];
+        let href = tag.split_once("href=\"").and_then(|(_, h)| h.split('"').next()).unwrap_or_default();
+        let Some((_, target)) = href.split_once("matrix.to/#/") else { continue };
+        let user = target.split(['?', '/']).next().unwrap_or_default().replace("%40", "@").replace("%3A", ":").replace("%3a", ":");
+        if !user.starts_with('@') {
+            continue;
+        }
+        // Link text may carry markup of its own.
+        let mut name = String::new();
+        let mut in_tag = false;
+        for ch in after[..end].chars() {
+            match ch {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag => name.push(ch),
+                _ => {}
+            }
+        }
+        let name = name.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&");
+        out.push((user, name.trim().to_owned()));
+    }
+    out
+}
+
+/// Byte ranges of `body` to draw as mentions: each linked name with the `@` before it, and, when
+/// the whole room is addressed, every `@word` (networks name it differently: @room, @everyone).
+fn mention_ranges(body: &str, names: &[&str], room: bool) -> Vec<std::ops::Range<usize>> {
+    let word = |c: char| c.is_alphanumeric();
+    let mut found: Vec<std::ops::Range<usize>> = Vec::new();
+    for name in names.iter().filter(|n| !n.is_empty()) {
+        for (at, _) in body.match_indices(name) {
+            let end = at + name.len();
+            let start = if body[..at].ends_with('@') { at - 1 } else { at };
+            // A name inside a longer word is not a mention of it.
+            if !body[..start].ends_with(word) && !body[end..].starts_with(word) {
+                found.push(start..end);
+            }
+        }
+    }
+    if room {
+        for (at, _) in body.match_indices('@') {
+            if !body[..at].ends_with(word) {
+                let len = body[at..].find(char::is_whitespace).unwrap_or(body.len() - at);
+                if len > 1 {
+                    found.push(at..at + len);
+                }
+            }
+        }
+    }
+    found.sort_by_key(|r| (r.start, std::cmp::Reverse(r.end)));
+    let mut out: Vec<std::ops::Range<usize>> = Vec::with_capacity(found.len());
+    for r in found {
+        match out.last() {
+            Some(last) if r.start < last.end => {}
+            _ => out.push(r),
+        }
     }
     out
 }
@@ -1482,7 +1602,45 @@ async fn avatar(client: &Client, room_id: &RoomId) -> Result<Option<Vec<u8>>> {
     };
     let format = MediaFormat::Thumbnail(MediaThumbnailSettings::with_method(Method::Crop, uint!(96), uint!(96)));
     let request = MediaRequestParameters { source: MediaSource::Plain(url), format };
-    Ok(Some(client.media().get_media_content(&request, true).await?))
+    Ok(Some(square(client.media().get_media_content(&request, true).await?)))
+}
+
+/// Side of a stored avatar, in pixels.
+const AVATAR_PX: u32 = 96;
+/// Largest picture decoded to make an avatar: some servers answer a thumbnail request with the
+/// original upload.
+const AVATAR_SOURCE_PX: u32 = 4096;
+
+/// A picture as an upright square for a round frame. Servers return some avatars uncropped and
+/// with their rotation in EXIF, which the renderer does not read. Anything that cannot be decoded
+/// is passed on as it came.
+fn square(bytes: Vec<u8>) -> Vec<u8> {
+    use image::ImageDecoder as _;
+    let upright = || {
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?;
+        let mut limits = image::Limits::default();
+        (limits.max_image_width, limits.max_image_height) = (Some(AVATAR_SOURCE_PX), Some(AVATAR_SOURCE_PX));
+        reader.limits(limits);
+        let mut decoder = reader.into_decoder().ok()?;
+        let orientation = decoder.orientation().ok()?;
+        let mut picture = image::DynamicImage::from_decoder(decoder).ok()?;
+        picture.apply_orientation(orientation);
+        Some((picture, orientation != image::metadata::Orientation::NoTransforms))
+    };
+    let Some((picture, turned)) = upright() else { return bytes };
+    let (w, h) = (picture.width(), picture.height());
+    if w == h && w <= AVATAR_PX && !turned {
+        return bytes;
+    }
+    let side = w.min(h);
+    let cropped = picture.crop_imm((w - side) / 2, (h - side) / 2, side, side);
+    // `thumbnail` also enlarges.
+    let cropped = if side > AVATAR_PX { cropped.thumbnail(AVATAR_PX, AVATAR_PX) } else { cropped };
+    let mut out = Vec::new();
+    match cropped.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png) {
+        Ok(()) => out,
+        Err(_) => bytes,
+    }
 }
 
 fn dims(width: Option<UInt>, height: Option<UInt>) -> Option<(u32, u32)> {

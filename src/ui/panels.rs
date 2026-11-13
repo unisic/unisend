@@ -6,6 +6,10 @@ use gpui_kit::component::switch::Switch;
 
 use super::*;
 use crate::ThemeChoice;
+
+/// A settings row, and the widest a settings page grows.
+const ROW_H: f32 = 52.;
+const PANEL_W: f32 = 560.;
 use crate::bridges::{self, Step, StepKind};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -26,7 +30,7 @@ impl BeeperApp {
         cx.notify();
     }
 
-    /// One level up: the login and the network list lead back to where they were opened from.
+    /// One level up: a login leads back to the networks, a destination back to the chats.
     pub(super) fn back(&mut self, cx: &mut Context<Self>) {
         self.panel = match self.panel {
             Some(Panel::Login) => {
@@ -34,7 +38,6 @@ impl BeeperApp {
                 Some(Panel::Networks)
             }
             Some(Panel::Add) => Some(Panel::Networks),
-            Some(Panel::Networks) => Some(Panel::Settings),
             _ => None,
         };
         cx.notify();
@@ -144,37 +147,56 @@ impl BeeperApp {
         }
     }
 
-    pub(super) fn render_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_panel(&mut self, panel: Panel, narrow: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let (title, body) = match panel {
             Panel::Settings => ("Settings", self.render_settings(cx).into_any_element()),
-            Panel::Networks => ("Chat networks", self.render_networks(cx).into_any_element()),
+            Panel::Networks => ("Networks", self.render_networks(cx).into_any_element()),
             Panel::Add => ("Add an account", self.render_add(cx).into_any_element()),
             Panel::Login => ("Sign in", self.render_login_step(window, cx).into_any_element()),
         };
+        // The destinations are reached from the navigation; only what lies under them leads back.
+        let deep = matches!(panel, Panel::Add | Panel::Login);
+        let edge = if narrow { GUTTER } else { GUTTER + 6. };
         v_flex()
             .size_full()
             .child(
-                header(cx)
-                    .gap_2()
-                    .child(Button::new("panel-back").ghost().icon(IconName::ArrowLeft).tooltip("Back").on_click(cx.listener(
-                        |this, _, _, cx| this.back(cx),
-                    )))
-                    .child(div().text_size(px(17.)).font_weight(FontWeight::BOLD).child(title)),
+                header()
+                    .when(deep, |el| el.child(round_button("panel-back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
+                    .when(!deep, |el| el.pl(px(edge)))
+                    .child(screen_title(title)),
             )
-            .child(div().id("panel-body").flex_1().min_h_0().overflow_y_scroll().child(v_flex().w_full().max_w(px(560.)).p_4().gap_5().child(body)))
+            .child(
+                div().id("panel-body").flex_1().min_h_0().overflow_y_scroll().child(
+                    v_flex().w_full().max_w(px(PANEL_W)).px(px(edge)).pt(px(8.)).pb(px(GAP * 2.)).gap(px(GAP * 2.)).child(body),
+                ),
+            )
             .into_any_element()
     }
 
     fn render_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = Palette::of(cx);
         let theme = self.settings.theme;
         let choice = |label: &'static str, value: ThemeChoice, cx: &mut Context<Self>| {
-            Button::new(label)
-                .label(label)
-                .when(theme == value, |b| b.primary())
+            let on = theme == value;
+            div()
+                .id(label)
+                .h(px(36.))
+                .px(px(GAP))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .text_size(px(14.))
+                .text_color(if on { p.ground } else { p.muted })
+                .when(on, |el| el.bg(p.text))
+                .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| this.set_theme(value, window, cx)))
+                .child(label)
         };
         let themes = h_flex()
-            .gap_2()
+            .flex_none()
+            .p(px(4.))
+            .rounded_full()
+            .bg(p.raised)
             .child(choice("Dark", ThemeChoice::Dark, cx))
             .child(choice("Light", ThemeChoice::Light, cx))
             .child(choice("System", ThemeChoice::System, cx));
@@ -182,86 +204,93 @@ impl BeeperApp {
         let incognito = Switch::new("incognito").checked(self.settings.incognito).on_click(move |on, _, cx| {
             let _ = weak.update(cx, |this, cx| this.set_incognito(*on, cx));
         });
+        let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
         v_flex()
-            .gap_5()
-            .child(section("Appearance", cx).child(row("Theme", "", cx).child(themes)))
-            .child(section("Privacy", cx).child(
-                row("Incognito mode", "Others do not see that you have read their messages.", cx).child(incognito),
-            ))
+            .gap(px(GAP * 2.))
+            .child(section("Appearance", cx).child(card(cx).child(row("Theme", "", cx).child(themes))))
+            .child(section("Privacy", cx).child(card(cx).child(
+                row("Incognito", "Others do not see that you have read their messages.", cx).child(incognito),
+            )))
             .child(
-                section("Chat networks", cx).child(
-                    row("Accounts", "WhatsApp, Messenger, Signal and the rest: see what is connected, add one, sign out.", cx).child(
-                        Button::new("open-networks")
-                            .label("Manage")
-                            .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Networks, cx))),
+                section("Account", cx).child(
+                    card(cx).child(row("Beeper", &user, cx)).child(
+                        h_flex()
+                            .id("sign-out")
+                            .min_h(px(ROW_H))
+                            .text_size(px(16.))
+                            .text_color(p.negative)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                crate::background(false);
+                                this.panel = None;
+                                this.send(Cmd::SignOut, cx);
+                            }))
+                            .child("Sign out"),
                     ),
                 ),
             )
-            .child(section("Account", cx).child(
-                row("Beeper", &self.user.as_ref().map(ToString::to_string).unwrap_or_default(), cx).child(
-                    Button::new("sign-out").danger().label("Sign out").on_click(cx.listener(|this, _, _, cx| {
-                        crate::background(false);
-                        this.panel = None;
-                        this.send(Cmd::SignOut, cx);
-                    })),
-                ),
-            ))
-            .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child(concat!("beeper-gpui ", env!("CARGO_PKG_VERSION"))))
+            .child(div().text_size(px(12.)).text_color(p.faint).child(concat!("beeper-gpui ", env!("CARGO_PKG_VERSION"))))
     }
 
     fn render_networks(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let dim = cx.theme().muted_foreground;
+        let p = Palette::of(cx);
+        let note = |text: &'static str| div().text_size(px(14.)).text_color(p.faint).child(text);
         let list = match &self.networks {
-            None => div().text_color(dim).child(if self.working { "Loading…" } else { "Could not load the networks." }).into_any_element(),
-            Some(networks) if networks.is_empty() => div().text_color(dim).child("No chat networks are connected yet.").into_any_element(),
+            None => note(if self.working { "Loading..." } else { "Could not load the networks." }).into_any_element(),
+            Some(networks) if networks.is_empty() => note("No chat network is connected yet.").into_any_element(),
             Some(networks) => v_flex()
-                .gap_3()
+                .gap(px(GAP * 2.))
                 .children(networks.iter().map(|network| {
                     let stopped = network.state != "RUNNING";
-                    section(&network.name, cx)
-                        .when(stopped, |el| el.child(div().text_size(px(13.)).text_color(dim).child(format!("Bridge: {}", pretty(&network.state)))))
-                        .when(network.logins.is_empty() && !stopped, |el| el.child(div().text_size(px(13.)).text_color(dim).child("Not signed in")))
-                        .children(network.logins.iter().map(|login| {
-                            let (bridge, id) = (network.bridge.clone(), login.id.clone());
-                            let ok = login.state == "CONNECTED";
-                            row(&login.name, &pretty(&login.state), cx)
-                                .when(!ok, |el| el.text_color(cx.theme().danger))
-                                .child(Button::new(SharedString::from(format!("logout-{}-{}", network.bridge, login.id))).label("Sign out").on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.working = this.send(Cmd::Logout { bridge: bridge.clone(), login: id.clone() }, cx);
-                                    }),
-                                ))
-                        }))
+                    section(&network.name, cx).child(
+                        card(cx)
+                            .when(stopped, |el| el.child(row(&format!("Bridge {}", pretty(&network.state).to_lowercase()), "", cx).text_color(p.warning)))
+                            .when(network.logins.is_empty() && !stopped, |el| el.child(row("Not signed in", "", cx).text_color(p.faint)))
+                            .children(network.logins.iter().map(|login| {
+                                let (bridge, id) = (network.bridge.clone(), login.id.clone());
+                                let ok = login.state == "CONNECTED";
+                                row(&login.name, &pretty(&login.state), cx).when(!ok, |el| el.text_color(p.negative)).child(
+                                    h_flex()
+                                        .id(SharedString::from(format!("logout-{}-{}", network.bridge, login.id)))
+                                        .h(px(TAP))
+                                        .flex_none()
+                                        .text_size(px(14.))
+                                        .text_color(p.negative)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.working = this.send(Cmd::Logout { bridge: bridge.clone(), login: id.clone() }, cx);
+                                        }))
+                                        .child("Sign out"),
+                                )
+                            })),
+                    )
                 }))
                 .into_any_element(),
         };
         v_flex()
-            .gap_4()
-            .child(list)
-            .child(h_flex().child(Button::new("add-network").primary().label("Add an account").on_click(cx.listener(|this, _, _, cx| {
+            .gap(px(GAP * 2.))
+            .child(h_flex().child(Button::new("add-network").primary().h(px(TAP)).px(px(GUTTER + 4.)).label("Add an account").on_click(cx.listener(|this, _, _, cx| {
                 this.open_panel(Panel::Add, cx);
             }))))
+            .child(list)
     }
 
     fn render_add(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = Palette::of(cx);
         v_flex()
-            .gap_2()
-            .child(div().text_size(px(13.)).text_color(cx.theme().muted_foreground).child(
+            .gap(px(GAP))
+            .child(div().text_size(px(14.)).line_height(px(20.)).text_color(p.muted).child(
                 "The account is added to Beeper itself, so every Beeper app you use gets it, not only this one.",
             ))
-            .children(bridges::KNOWN.iter().map(|&(bridge, name)| {
+            .child(card(cx).children(bridges::KNOWN.iter().map(|&(bridge, name)| {
                 h_flex()
                     .id(bridge)
-                    .h(px(52.))
-                    .px_3()
-                    .rounded(px(12.))
-                    .bg(cx.theme().secondary)
-                    .hover(|el| el.bg(cx.theme().secondary_hover))
+                    .h(px(ROW_H))
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| this.choose_network(bridge, cx)))
                     .child(div().flex_1().text_size(px(16.)).child(name))
-                    .child(Icon::new(IconName::ChevronRight).size_4().text_color(cx.theme().muted_foreground))
-            }))
+                    .child(Icon::new(IconName::ChevronRight).size_4().text_color(p.faint))
+            })))
     }
 
     fn render_login_step(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -303,7 +332,7 @@ impl BeeperApp {
                         };
                         self.field_subs.push(cx.subscribe_in(&state, window, move |this, _, event: &InputEvent, _, cx| match event {
                             InputEvent::PressEnter { .. } => this.submit_fields(cx),
-                            other => keyboard_follows(other, keyboard),
+                            other => keyboard_follows(other, keyboard, cx),
                         }));
                         self.fields.push((field.id.clone(), state));
                     }
@@ -363,7 +392,7 @@ impl BeeperApp {
                 .map(|el| match (&self.qr, kind.as_str()) {
                     (Some(qr), _) => el.child(img(qr.clone()).size(px(240.)).rounded(px(12.))),
                     (None, "nothing") => el,
-                    (None, _) => el.child(div().text_size(px(28.)).font_weight(FontWeight::BOLD).child(data.clone())),
+                    (None, _) => el.child(div().text_size(px(28.)).font_weight(FontWeight::SEMIBOLD).child(data.clone())),
                 })
                 .child(note("Waiting for the other device…"))
                 .into_any_element(),
@@ -376,7 +405,7 @@ impl BeeperApp {
         };
         v_flex()
             .gap_4()
-            .child(div().text_size(px(20.)).font_weight(FontWeight::BOLD).child(name))
+            .child(div().text_size(px(20.)).font_weight(FontWeight::SEMIBOLD).child(name))
             .when(!step.instructions.is_empty(), |el| el.child(div().text_size(px(15.)).child(step.instructions.clone())))
             .child(body)
             .into_any_element()
@@ -390,20 +419,26 @@ fn pretty(state: &str) -> String {
     chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
 
+/// A titled group of settings.
 fn section(title: &str, cx: &App) -> Div {
-    v_flex().gap_2().child(
-        div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(cx.theme().muted_foreground).child(title.to_owned()),
-    )
+    let p = Palette::of(cx);
+    v_flex().gap(px(8.)).child(div().px(px(GAP)).text_size(px(12.)).text_color(p.faint).child(title.to_owned()))
 }
 
-/// A label with an optional explanation on the left; the caller adds the control on the right.
+/// The rows of one group, on one surface.
+fn card(cx: &App) -> Div {
+    v_flex().px(px(GAP)).py(px(4.)).rounded(px(RADIUS)).bg(Palette::of(cx).surface)
+}
+
+/// A setting: what it is, a line about it, and its control after it.
 fn row(label: &str, detail: &str, cx: &App) -> Div {
-    h_flex().gap_3().p_3().rounded(px(12.)).bg(cx.theme().secondary).child(
+    let p = Palette::of(cx);
+    h_flex().min_h(px(ROW_H)).py(px(8.)).gap(px(GAP)).child(
         v_flex()
             .flex_1()
             .min_w_0()
-            .child(div().text_size(px(16.)).child(label.to_owned()))
-            .when(!detail.is_empty(), |el| el.child(div().text_size(px(13.)).text_color(cx.theme().muted_foreground).child(detail.to_owned()))),
+            .child(div().text_size(px(16.)).line_height(px(22.)).child(label.to_owned()))
+            .when(!detail.is_empty(), |el| el.child(div().text_size(px(13.)).line_height(px(18.)).text_color(p.muted).child(detail.to_owned()))),
     )
 }
 

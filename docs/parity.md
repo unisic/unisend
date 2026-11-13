@@ -60,7 +60,7 @@ is not started.
 | Video, audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. No inline player |
 | Stickers, GIFs, custom emoji | todo | `m.sticker`, `fi.mau.gif`, `m.image_pack` |
 | Link previews | todo | `com.beeper.linkpreviews` |
-| Formatted text, mentions, code blocks | todo | `org.matrix.custom.html`, `m.mentions` |
+| Formatted text, mentions, code blocks | part | mentions are drawn in the accent, a message that mentions the user is marked, and the chat list shows an `@` (from the HTML links and `m.mentions`; counted locally, a server cannot see into encrypted rooms). Bold, italics, links and code blocks: todo |
 | Send state (sending, sent, delivered, seen, failed) | todo | `com.beeper.message_send_status`, receipts |
 | Read receipts of others, typing | todo | `m.receipt`, `m.typing` |
 | Polls, locations, contacts | todo | `m.poll.*`, `m.location` |

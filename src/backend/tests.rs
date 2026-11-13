@@ -144,7 +144,7 @@ async fn login_sync_decrypt_send_recover() {
     })
     .await;
     assert!(bodies(&history).contains(&"hello from bob".to_owned()), "history: {:?}", bodies(&history));
-    assert!(history.iter().any(|i| matches!(i, Item::Edit { target, body } if *target == sent.response.event_id.to_string() && body == "hello from bob (edited)")));
+    assert!(history.iter().any(|i| matches!(i, Item::Edit { target, body, .. } if *target == sent.response.event_id.to_string() && body == "hello from bob (edited)")));
     assert!(!bodies(&history).iter().any(|b| b == UTD));
 
     // Send path: Bob receives Alice's message decrypted.
@@ -280,7 +280,7 @@ async fn login_sync_decrypt_send_recover() {
     };
     alice2.handle(Cmd::Send { room: room.clone(), body: "yes!".into(), reply_to: None, edit: Some(reply_id.clone()) }).await.unwrap();
     loop {
-        if next_live(&mut alice2_rx, &room_id).await.iter().any(|i| matches!(i, Item::Edit { target, body } if *target == reply_id && body == "yes!")) {
+        if next_live(&mut alice2_rx, &room_id).await.iter().any(|i| matches!(i, Item::Edit { target, body, .. } if *target == reply_id && body == "yes!")) {
             break;
         }
     }
@@ -469,6 +469,14 @@ async fn gui_fixture() {
     for who in [&carol_group, &group] {
         who.send(ReactionEventContent::new(Annotation::new(question.clone(), "👍".into()))).await.unwrap();
     }
+    // Mentions, as Matrix writes them: a link in the HTML form plus `m.mentions`.
+    let me = alice.user_id().unwrap();
+    let asks = RoomMessageEventContent::text_html(
+        format!("@{} can you bring the tent?", me.localpart()),
+        format!("<a href=\"https://matrix.to/#/{me}\">{}</a> can you bring the tent?", me.localpart()),
+    );
+    bob_group.send(asks.add_mentions(Mentions::with_user_ids([me.to_owned()]))).await.unwrap();
+    carol_group.send(RoomMessageEventContent::text_plain("@room we leave at 9 sharp").add_mentions(Mentions::with_room_mention())).await.unwrap();
 
     let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     req.name = Some("Mum".into());
@@ -525,6 +533,7 @@ fn archive_rule_matches_beeper() {
         ts,
         network: None,
         unread,
+        mentions: 0,
         dm: false,
         pinned,
         low_priority: false,
@@ -575,6 +584,8 @@ fn notifications_follow_the_push_rules() {
             edited: false,
             media: None,
             notify,
+            mentions: Vec::new(),
+            mentioned: false,
             reactions: Vec::new(),
         })
     };
@@ -585,6 +596,7 @@ fn notifications_follow_the_push_rules() {
         ts: 1,
         network: None,
         unread: 1,
+        mentions: 0,
         dm,
         pinned: false,
         low_priority: false,
@@ -604,4 +616,67 @@ fn notifications_follow_the_push_rules() {
     assert_eq!(notification(&chat(false), &[msg("Ann", false, true), msg("Me", true, true)], now).as_deref(), Some("Ann: hello"));
     // History a bridge brings in later is not news.
     assert_eq!(notification(&chat(false), &[msg("Ann", false, true)], now + 3_600_000), None);
+}
+
+#[test]
+fn mentions_are_found_in_the_body() {
+    let html = r#"Liquid chc\u{119} <a href="https://matrix.to/#/@facebookgo_1:beeper.local">Piotr Iwan</a> i <a href="https://matrix.to/#/%40me%3Abeeper.com?via=beeper.com"><b>Jan &amp; Ola</b></a>, <a href="https://example.org">link</a>"#;
+    let linked = linked_users(html);
+    assert_eq!(linked, [("@facebookgo_1:beeper.local".to_owned(), "Piotr Iwan".to_owned()), ("@me:beeper.com".to_owned(), "Jan & Ola".to_owned())]);
+
+    let body = "Liquid chc\u{119} @Piotr Iwan, Piotr Iwanowski nie";
+    let marked: Vec<&str> = mention_ranges(body, &["Piotr Iwan"], false).into_iter().map(|r| &body[r]).collect();
+    assert_eq!(marked, ["@Piotr Iwan"], "the @ belongs to the mention; a longer word is not one");
+
+    let body = "@wszyscy mail a@b.pl @ @Ann";
+    let marked: Vec<&str> = mention_ranges(body, &["Ann"], true).into_iter().map(|r| &body[r]).collect();
+    assert_eq!(marked, ["@wszyscy", "@Ann"]);
+    assert!(mention_ranges(body, &[], false).is_empty());
+}
+
+#[test]
+fn unread_mentions_are_counted_among_the_unread() {
+    let msg = |own, mentioned| {
+        Item::Msg(Msg {
+            id: "$e".into(),
+            sender: "Ann".into(),
+            from: matrix_sdk::ruma::user_id!("@a:example.org").to_owned(),
+            body: String::new(),
+            own,
+            ts: 1,
+            order: 0,
+            reply_to: None,
+            deleted: false,
+            edited: false,
+            media: None,
+            notify: true,
+            mentions: Vec::new(),
+            mentioned,
+            reactions: Vec::new(),
+        })
+    };
+    // Two unread: the mention before them was read already.
+    assert_eq!(unread_mentions(0, 2, &[msg(false, true), msg(false, false), msg(false, true)]), 1);
+    // More unread than this batch holds: the earlier count stands.
+    assert_eq!(unread_mentions(1, 5, &[msg(false, true), msg(true, false)]), 2);
+    // Read: nothing left.
+    assert_eq!(unread_mentions(3, 0, &[msg(false, true)]), 0);
+}
+
+#[test]
+fn avatars_become_upright_squares() {
+    let encode = |w, h| {
+        let mut out = Vec::new();
+        image::DynamicImage::new_rgb8(w, h).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    };
+    let size = |bytes: &[u8]| {
+        let picture = image::load_from_memory(bytes).unwrap();
+        (picture.width(), picture.height())
+    };
+    assert_eq!(size(&square(encode(300, 120))), (96, 96));
+    assert_eq!(size(&square(encode(40, 90))), (40, 40));
+    let small = encode(64, 64);
+    assert_eq!(square(small.clone()), small, "already square: untouched");
+    assert_eq!(square(b"not a picture".to_vec()), b"not a picture");
 }

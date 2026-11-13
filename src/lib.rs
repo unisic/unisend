@@ -20,6 +20,8 @@ gpui_kit::assets::icon_assets!(
     [
         Archive,
         ArchiveRestore,
+        ArrowUp,
+        AtSign,
         BellOff,
         ChevronsDown,
         ClipboardPaste,
@@ -38,6 +40,7 @@ gpui_kit::assets::icon_assets!(
         SendHorizontal,
         Trash,
         Video,
+        Waypoints,
         X
     ]
 );
@@ -63,8 +66,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::init(cx);
     #[cfg(not(target_os = "android"))]
     bundled_emoji(cx);
-    #[cfg(target_os = "android")]
-    extra_fonts(cx);
+    fonts(cx);
     let settings = Settings::load(&dir);
     cx.set_global(settings.theme);
     sync_theme(None, cx);
@@ -92,7 +94,7 @@ fn bundled_emoji(cx: &mut App) {
     }
 }
 
-/// Follows the system's light or dark mode and puts Beeper's colors over the library's.
+/// Follows the chosen or the system's light or dark mode and puts the app's colours over the library's.
 pub(crate) fn sync_theme(window: Option<&mut Window>, cx: &mut App) {
     use gpui_kit::component::ThemeMode;
     match cx.try_global::<ThemeChoice>().copied().unwrap_or_default() {
@@ -146,40 +148,125 @@ impl Settings {
     }
 }
 
-/// Beeper's colors. The dark set is sampled from Beeper Android 4.64; the light set mirrors it in
-/// the same hue. The accent is this project's choice: Beeper's could not be read from the apps.
+/// The app's colours, by role; `docs/design.md` says what each is for.
+#[derive(Clone, Copy)]
+pub(crate) struct Palette {
+    pub ground: Hsla,
+    pub surface: Hsla,
+    pub raised: Hsla,
+    pub rule: Hsla,
+    pub text: Hsla,
+    pub muted: Hsla,
+    pub faint: Hsla,
+    /// Fill behind what is addressed to the user; `on_accent` is the text on it.
+    pub accent: Hsla,
+    pub on_accent: Hsla,
+    /// The accent as text: the fill itself is unreadable on a light ground.
+    pub accent_ink: Hsla,
+    pub negative: Hsla,
+    pub warning: Hsla,
+    pub warning_bg: Hsla,
+}
+
+impl Global for Palette {}
+
+impl Palette {
+    pub fn of(cx: &App) -> Self {
+        *cx.global()
+    }
+}
+
+/// Sets `Palette` for the current mode and lays it over the component library's theme.
 fn apply_palette(cx: &mut App) {
     let c = |hex: u32| -> Hsla { rgb(hex).into() };
-    let (bg, fg, dim, raised, raised_2, bar) = if Theme::global(cx).is_dark() {
-        (0x110b1a, 0xefe0ff, 0xb4a5c8, 0x231c2c, 0x2d2539, 0x171022)
+    let p = if Theme::global(cx).is_dark() {
+        Palette {
+            ground: c(0x000000),
+            surface: c(0x111111),
+            raised: c(0x2a2a2a),
+            rule: c(0x1a1a1a),
+            text: c(0xffffff),
+            muted: c(0xb4b4b4),
+            faint: c(0x949494),
+            accent: c(0xc6f24e),
+            on_accent: c(0x000000),
+            accent_ink: c(0xc6f24e),
+            negative: c(0xe5484d),
+            warning: c(0xe5a93b),
+            warning_bg: c(0x2b2414),
+        }
     } else {
-        (0xffffff, 0x1b1326, 0x6f637f, 0xf3eef9, 0xe6ddf1, 0xf7f3fb)
+        Palette {
+            ground: c(0xffffff),
+            surface: c(0xf2f2f2),
+            raised: c(0xe2e2e2),
+            rule: c(0xe8e8e8),
+            text: c(0x000000),
+            muted: c(0x4f4f4f),
+            faint: c(0x6e6e6e),
+            accent: c(0xc6f24e),
+            on_accent: c(0x000000),
+            accent_ink: c(0x486b00),
+            negative: c(0xc62f35),
+            warning: c(0x7a5200),
+            warning_bg: c(0xfbefd2),
+        }
     };
-    let (accent, accent_hover, on_accent) = (0x6d5ef5, 0x7b6df7, 0xffffff);
+    cx.set_global(p);
+    // The system bars share the ground, with their icons in the ink that shows on it.
+    #[cfg(target_os = "android")]
+    {
+        let dark = Theme::global(cx).is_dark();
+        let ground = if dark { 0x000000 } else { 0xffffff };
+        gpui_mobile::set_system_chrome(&gpui_mobile::SystemChromeStyle {
+            status_bar_color: Some(ground),
+            status_bar_style: if dark { gpui_mobile::StatusBarContentStyle::Light } else { gpui_mobile::StatusBarContentStyle::Dark },
+            navigation_bar_color: Some(ground),
+        });
+    }
     Theme::update(cx, |theme| {
+        // Depth is a lightness step: nothing casts a shadow.
+        theme.shadow = false;
+        theme.font_family = FACE.into();
+        // Controls are fully round: no single-line control is taller than twice this.
+        (theme.radius, theme.radius_lg) = (px(22.), px(20.));
         let k = &mut theme.colors;
-        (k.background, k.foreground, k.muted_foreground) = (c(bg), c(fg), c(dim));
-        (k.muted, k.secondary, k.secondary_hover, k.secondary_active) = (c(raised), c(raised), c(raised_2), c(raised_2));
-        (k.secondary_foreground, k.accent, k.accent_foreground) = (c(fg), c(raised), c(fg));
-        (k.list, k.list_hover, k.list_active, k.list_even) = (c(bg), c(raised), c(raised_2), c(bg));
-        (k.border, k.input, k.title_bar, k.title_bar_border) = (c(raised_2), c(raised_2), c(bar), c(raised_2));
-        (k.popover, k.popover_foreground, k.sidebar, k.sidebar_foreground) = (c(bar), c(fg), c(bg), c(fg));
-        (k.primary, k.primary_hover, k.primary_active, k.primary_foreground) = (c(accent), c(accent_hover), c(accent), c(on_accent));
-        (k.button_primary, k.button_primary_hover, k.button_primary_active) = (c(accent), c(accent_hover), c(accent));
-        (k.button_primary_foreground, k.ring, k.caret) = (c(on_accent), c(accent), c(fg));
+        (k.background, k.foreground, k.muted_foreground) = (p.ground, p.text, p.muted);
+        (k.muted, k.secondary, k.secondary_hover, k.secondary_active) = (p.surface, p.raised, p.raised, p.raised);
+        (k.secondary_foreground, k.accent, k.accent_foreground) = (p.text, p.raised, p.text);
+        (k.list, k.list_hover, k.list_active, k.list_even) = (p.ground, p.surface, p.raised, p.ground);
+        (k.border, k.input, k.title_bar, k.title_bar_border) = (p.rule, p.raised, p.ground, p.rule);
+        (k.popover, k.popover_foreground, k.sidebar, k.sidebar_foreground) = (p.surface, p.text, p.ground, p.text);
+        // The primary control is the inverted one.
+        (k.primary, k.primary_hover, k.primary_active, k.primary_foreground) = (p.text, p.muted, p.muted, p.ground);
+        (k.button_primary, k.button_primary_hover, k.button_primary_active) = (p.text, p.muted, p.muted);
+        (k.button_primary_foreground, k.ring, k.caret) = (p.ground, p.faint, p.text);
+        (k.danger, k.danger_hover, k.danger_active) = (p.negative, p.negative, p.negative);
+        (k.switch, k.switch_thumb, k.selection) = (p.faint.opacity(0.5), p.ground, p.text.opacity(0.28));
     });
 }
 
-/// Fonts gpui-mobile does not load: a bold Roboto (the system's is one variable font, which the
-/// shaper does not embolden), and the system symbols font for mathematical alphanumerics (names
-/// typed in "fancy" letters), circled letters and arrows. About 1.3 MB of font data.
-#[cfg(target_os = "android")]
-fn extra_fonts(cx: &mut App) {
-    let bold: &[u8] = include_bytes!("../assets/fonts/Roboto-Bold.ttf");
-    let files = ["NotoSansSymbols-Regular-Subsetted.ttf", "NotoSansSymbols-Regular-Subsetted2.ttf", "SECFallback.ttf"];
-    let system = files.iter().filter_map(|f| std::fs::read(format!("/system/fonts/{f}")).ok()).map(Into::into);
-    if let Err(e) = cx.text_system().add_fonts(std::iter::once(bold.into()).chain(system).collect()) {
-        log::warn!("extra fonts: {e}");
+/// The app's face, in the three weights the design uses.
+pub(crate) const FACE: &str = "Inter";
+
+/// Loads the app's face (about 1.25 MB) and, on Android, the system symbols fonts gpui-mobile
+/// leaves out: mathematical alphanumerics (names typed in "fancy" letters), circled letters, arrows.
+fn fonts(cx: &mut App) {
+    let faces: [&[u8]; 3] = [
+        include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+        include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+        include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+    ];
+    #[cfg_attr(not(target_os = "android"), expect(unused_mut))]
+    let mut fonts: Vec<std::borrow::Cow<'static, [u8]>> = faces.into_iter().map(Into::into).collect();
+    #[cfg(target_os = "android")]
+    {
+        // Not NotoSansSymbols-Regular-Subsetted2: it holds only plain versions of emoji.
+        let files = ["NotoSansSymbols-Regular-Subsetted.ttf", "SECFallback.ttf"];
+        fonts.extend(files.iter().filter_map(|f| std::fs::read(format!("/system/fonts/{f}")).ok()).map(Into::into));
+    }
+    if let Err(e) = cx.text_system().add_fonts(fonts) {
+        log::warn!("fonts: {e}");
     }
 }
 

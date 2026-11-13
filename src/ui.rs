@@ -5,11 +5,10 @@ use chrono::{Datelike as _, Local, TimeZone as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _,
-    avatar::Avatar,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
-    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
+    menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
     v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -23,16 +22,33 @@ use std::path::PathBuf;
 
 use panels::Panel;
 
-use crate::Keyboard;
+use crate::{Keyboard, Palette};
 use crate::bridges::{Flow, Network, Step};
 use crate::backend::{ChatAction, Cmd, DELETED, Ev, Item, Media, MediaKind, Msg, RoomSummary, UTD};
 
 const NARROW: f32 = 720.;
-// Chat list metrics, measured from Beeper Android 4.64 at 3x density.
-const ROOM_ROW_H: f32 = 80.;
-const AVATAR: f32 = 46.;
-const GUTTER: f32 = 24.;
-const BAR_H: f32 = 48.;
+// Metrics; `docs/design.md` gives the reasons.
+const ROOM_ROW_H: f32 = 72.;
+const AVATAR: f32 = 48.;
+/// From the screen edge to content.
+const GUTTER: f32 = 16.;
+/// Between neighbouring things.
+const GAP: f32 = 14.;
+const BAR_H: f32 = 56.;
+const NAV_H: f32 = 64.;
+/// Smallest thing a finger is asked to hit.
+const TAP: f32 = 44.;
+const RADIUS: f32 = 20.;
+/// Width of the navigation and of the chat list beside an open chat on a wide window.
+const NAV_W: f32 = 210.;
+const LIST_W: f32 = 384.;
+/// Widest a message and a sheet grow on a wide window.
+const BUBBLE_W: f32 = 560.;
+const SHEET_W: f32 = 480.;
+/// Sender's picture beside a run of messages in a group.
+const SENDER: f32 = 28.;
+/// A pause this long starts a new run of messages, with its own time.
+const RUN_PAUSE_MS: u64 = 10 * 60 * 1000;
 /// Edits, reactions and deletions kept until the message they target is paged in.
 const MAX_PENDING: usize = 512;
 /// Inline thumbnails kept decoded; each is at most 2.6 MB of pixels.
@@ -47,7 +63,7 @@ enum Compose {
     Edit(String),
 }
 
-/// Chat list sections, as in Beeper.
+/// Which chats the list holds.
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Inbox,
@@ -55,10 +71,20 @@ enum View {
     LowPriority,
 }
 
-const VIEWS: [(View, &str, &str, IconName); 3] = [
-    (View::Inbox, "Inbox", "You've hit inbox zero!", IconName::Inbox),
-    (View::Archive, "Archive", "Your Archive is empty", IconName::Archive),
-    (View::LowPriority, "Low Priority", "No messages in Low Priority", IconName::ChevronsDown),
+/// Where the navigation points. Derived from `panel` and `view`, not stored.
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Chats,
+    Archive,
+    Networks,
+    Settings,
+}
+
+const TABS: [(Tab, &str, IconName); 4] = [
+    (Tab::Chats, "Chats", IconName::MessageCircle),
+    (Tab::Archive, "Archive", IconName::Archive),
+    (Tab::Networks, "Networks", IconName::Waypoints),
+    (Tab::Settings, "Settings", IconName::Settings),
 ];
 
 #[derive(PartialEq)]
@@ -122,6 +148,8 @@ pub struct BeeperApp {
     uploads: usize,
     /// Message whose actions are showing.
     picked: Option<String>,
+    /// The open chat's actions are showing.
+    chat_sheet: bool,
     compose: Compose,
     more: bool,
     loading: bool,
@@ -160,18 +188,14 @@ impl BeeperApp {
         ] {
             subs.push(cx.subscribe_in(input, window, move |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { shift: false, .. } => on_enter(this, window, cx),
-                InputEvent::Focus => crate::show_keyboard(keyboard),
-                InputEvent::Blur => crate::hide_keyboard(),
-                _ => {}
+                other => keyboard_follows(other, keyboard, cx),
             }));
         }
 
-        subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, _| keyboard_follows(ev, Keyboard::Key)));
+        subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
         subs.push(cx.subscribe_in(&search, window, |this, _, ev: &InputEvent, _, cx| match ev {
             InputEvent::Change => this.refilter(cx),
-            InputEvent::Focus => crate::show_keyboard(Keyboard::Text),
-            InputEvent::Blur => crate::hide_keyboard(),
-            InputEvent::PressEnter { .. } => {}
+            other => keyboard_follows(other, Keyboard::Text, cx),
         }));
 
         subs.push(cx.observe_window_appearance(window, |_, window, cx| crate::sync_theme(Some(window), cx)));
@@ -234,6 +258,7 @@ impl BeeperApp {
             fetching: HashSet::new(),
             uploads: 0,
             picked: None,
+            chat_sheet: false,
             compose: Compose::New,
             more: false,
             loading: false,
@@ -449,38 +474,12 @@ impl BeeperApp {
     }
 
     /// Menu of what can be done to a chat; shared by the row's context menu and the chat header.
+    /// The chat's actions as a popup, for a right-click on its row.
     fn chat_menu(
         room: &RoomSummary,
         this: WeakEntity<Self>,
     ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-        let unread = room.is_unread();
-        let entries = [
-            if unread {
-                ("Mark as Read", IconName::MailOpen, ChatAction::Unread(false))
-            } else {
-                ("Mark as Unread", IconName::Mail, ChatAction::Unread(true))
-            },
-            if room.pinned {
-                ("Unpin", IconName::PinOff, ChatAction::Pin(false))
-            } else {
-                ("Pin", IconName::Pin, ChatAction::Pin(true))
-            },
-            if room.muted {
-                ("Unmute", IconName::Bell, ChatAction::Mute(false))
-            } else {
-                ("Mute", IconName::BellOff, ChatAction::Mute(true))
-            },
-            if room.archived {
-                ("Unarchive", IconName::ArchiveRestore, ChatAction::Archive(false))
-            } else {
-                ("Archive", IconName::Archive, ChatAction::Archive(true))
-            },
-            if room.low_priority {
-                ("Move to Inbox", IconName::Inbox, ChatAction::LowPriority(false))
-            } else {
-                ("Move to Low Priority", IconName::ChevronsDown, ChatAction::LowPriority(true))
-            },
-        ];
+        let entries = chat_actions(room);
         let id = room.id.clone();
         move |menu, _, _| {
             entries.iter().fold(menu, |menu, &(label, icon, action)| {
@@ -562,7 +561,7 @@ impl BeeperApp {
         let narrow = window.viewport_size().width < px(NARROW);
         if self.viewer.is_some() {
             self.close_viewer(cx);
-        } else if self.picked.take().is_some() {
+        } else if self.picked.take().is_some() || std::mem::take(&mut self.chat_sheet) {
             cx.notify();
         } else if self.compose != Compose::New {
             self.start_compose(Compose::New, window, cx);
@@ -636,7 +635,8 @@ impl BeeperApp {
             cx.stop_propagation();
             this.open_media(id.clone(), owned.clone(), cx);
         });
-        let raised = cx.theme().list_active;
+        // Lighter than either kind of bubble it may sit in.
+        let raised = cx.theme().foreground.opacity(0.1);
         let pictured = matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video);
         if pictured && (media.kind != MediaKind::Video || media.dims.is_some()) {
             // The picture's own shape, within what a bubble may take.
@@ -731,7 +731,7 @@ impl BeeperApp {
                         MediaKind::Voice => "Voice Note".to_owned(),
                         _ => media.name.clone(),
                     }))
-                    .child(div().text_size(px(12.)).opacity(0.7).child(detail)),
+                    .when(!detail.is_empty(), |el| el.child(div().text_size(px(12.)).opacity(0.7).child(detail))),
             )
             .into_any_element()
     }
@@ -769,7 +769,7 @@ impl BeeperApp {
         }
         self.close_viewer(cx);
         self.fetching.clear();
-        self.picked = None;
+        (self.picked, self.chat_sheet) = (None, false);
         self.compose = Compose::New;
         self.timeline.reset(0);
         self.more = false;
@@ -789,22 +789,25 @@ impl BeeperApp {
         } else {
             ("Sign in to Beeper", "We will email you a sign-in code.", &self.email, "Send code")
         };
+        let p = Palette::of(cx);
         v_flex()
             .size_full()
             .items_center()
             .justify_center()
-            .p_6()
+            .p(px(GUTTER + 8.))
             .child(
                 v_flex()
                     .w_full()
                     .max_w(px(360.))
-                    .gap_3()
-                    .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(title))
-                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(hint))
-                    .child(Input::new(input))
+                    .gap(px(GAP))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(p.faint).child("Beeper"))
+                    .child(screen_title(title))
+                    .child(div().pb(px(8.)).text_size(px(14.)).line_height(px(20.)).text_color(p.muted).child(hint))
+                    .child(Input::new(input).large())
                     .child(
                         Button::new("login-submit")
                             .primary()
+                            .h(px(TAP))
                             .label(label)
                             .loading(self.busy)
                             .disabled(self.busy)
@@ -821,8 +824,36 @@ impl BeeperApp {
                             }),
                         ))
                     })
-                    .children(self.error.clone().map(|e| div().text_sm().text_color(cx.theme().danger).child(e))),
+                    .children(self.error.clone().map(|e| div().text_size(px(14.)).text_color(p.negative).child(e))),
             )
+    }
+
+    fn tab(&self) -> Tab {
+        match (self.panel, self.view) {
+            (Some(Panel::Settings), _) => Tab::Settings,
+            (Some(_), _) => Tab::Networks,
+            (None, View::Archive) => Tab::Archive,
+            (None, _) => Tab::Chats,
+        }
+    }
+
+    fn set_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        if tab == self.tab() {
+            return;
+        }
+        if self.searching {
+            self.set_searching(false, window, cx);
+        }
+        match tab {
+            Tab::Chats | Tab::Archive => {
+                self.panel = None;
+                self.only_unread = false;
+                self.set_view(if tab == Tab::Archive { View::Archive } else { View::Inbox }, cx);
+            }
+            Tab::Networks => self.open_panel(Panel::Networks, cx),
+            Tab::Settings => self.open_panel(Panel::Settings, cx),
+        }
+        cx.notify();
     }
 
     fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
@@ -830,19 +861,60 @@ impl BeeperApp {
         self.refilter(cx);
     }
 
+    fn set_filter(&mut self, view: View, only_unread: bool, cx: &mut Context<Self>) {
+        self.only_unread = only_unread;
+        self.set_view(view, cx);
+    }
+
     fn set_searching(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.searching = on;
-        self.search.update(cx, |s, cx| {
-            if on {
-                s.focus(window, cx);
-            } else {
-                s.set_value("", window, cx);
-            }
-        });
+        if on {
+            self.search.update(cx, |input, cx| input.focus(window, cx));
+        } else {
+            self.search.update(cx, |input, cx| input.set_value("", window, cx));
+        }
         self.refilter(cx);
     }
 
+    /// The destinations: a bar under a phone's screen, a column beside a wide window's.
+    fn render_nav(&mut self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = Palette::of(cx);
+        let current = self.tab();
+        let items = TABS.map(|(tab, label, icon)| {
+            let ink = if tab == current { p.text } else { p.faint };
+            div()
+                .id(label)
+                .flex()
+                .items_center()
+                .text_color(ink)
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| this.set_tab(tab, window, cx)))
+                .map(|el| {
+                    if narrow {
+                        el.flex_1().h_full().flex_col().justify_center().gap(px(4.)).text_size(px(12.))
+                    } else {
+                        el.h(px(TAP)).px(px(GAP)).gap(px(GAP)).rounded(px(RADIUS)).hover(|el| el.bg(p.surface))
+                    }
+                })
+                .child(Icon::new(icon).size_5())
+                .child(label)
+        });
+        if narrow {
+            h_flex().flex_none().h(px(NAV_H)).border_t_1().border_color(p.rule).children(items)
+        } else {
+            v_flex()
+                .flex_none()
+                .w(px(NAV_W))
+                .h_full()
+                .px(px(8.))
+                .gap(px(2.))
+                .child(h_flex().h(px(BAR_H)).px(px(GAP)).text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Beeper"))
+                .children(items)
+        }
+    }
+
     fn render_rooms(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = Palette::of(cx);
         let weak = cx.entity().downgrade();
         let list = uniform_list(
             "rooms",
@@ -855,65 +927,63 @@ impl BeeperApp {
                         let selected = this.open.as_ref() == Some(&room.id);
                         let id = room.id.clone();
                         let unread = room.is_unread();
-                        let dim = cx.theme().muted_foreground;
-                        let mark = |icon: IconName| Icon::new(icon).size_3p5().flex_none().text_color(dim);
-                        // Beeper shows a bare "Message" when it has nothing readable to preview.
+                        let mark = |icon: IconName| Icon::new(icon).size_3p5().flex_none().text_color(p.faint);
+                        // Nothing readable to preview: an undecrypted message says no more than "Message".
                         let preview = room.preview.as_deref().filter(|p| !p.ends_with(UTD));
+                        let meta = match (room.network.as_deref().map(short_network), short_time(room.ts)) {
+                            (Some(network), time) if time.is_empty() => network.to_owned(),
+                            (Some(network), time) => format!("{network} · {time}"),
+                            (None, time) => time,
+                        };
                         h_flex()
                             .id(SharedString::from(room.id.to_string()))
                             .w_full()
                             .h(px(ROOM_ROW_H))
-                            .pl(px(GUTTER))
-                            .gap(px(10.))
-                            .when(unread, |el| el.bg(cx.theme().list_hover))
-                            .when(selected, |el| el.bg(cx.theme().list_active))
-                            .hover(|el| el.bg(cx.theme().list_hover))
+                            .px(px(GUTTER))
+                            .gap(px(GAP))
+                            .hover(|el| el.bg(p.surface))
+                            .when(selected, |el| el.bg(p.raised))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| this.open_room(id.clone(), cx)))
-                            .child(avatar(room, this.avatars.get(&room.id)))
+                            .child(avatar(&room.name, this.avatars.get(&room.id), AVATAR, cx))
                             .child(
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .h_full()
-                                    .pt(px(9.))
-                                    .pr(px(GUTTER))
-                                    .border_b_1()
-                                    .border_color(cx.theme().border)
+                                    .gap(px(3.))
                                     .child(
                                         h_flex()
-                                            .gap_2()
+                                            .gap(px(8.))
                                             .child(
                                                 div()
                                                     .flex_1()
                                                     .min_w_0()
                                                     .truncate()
-                                                    .text_size(px(17.))
+                                                    .text_size(px(16.))
                                                     .line_height(px(22.))
-                                                    .font_weight(FontWeight::BOLD)
+                                                    .when(unread, |el| el.font_weight(FontWeight::SEMIBOLD))
                                                     .child(room.name.clone()),
                                             )
-                                            .when(room.pinned, |el| el.child(mark(IconName::Pin)))
-                                            .when(room.muted, |el| el.child(mark(IconName::BellOff)))
-                                            .child(
-                                                div().flex_none().text_size(px(14.)).text_color(dim).child(short_time(room.ts)),
-                                            ),
+                                            .child(div().flex_none().text_size(px(12.)).text_color(p.faint).child(meta)),
                                     )
                                     .child(
                                         h_flex()
-                                            .items_start()
-                                            .gap_2()
+                                            .gap(px(8.))
                                             .child(
                                                 div()
                                                     .flex_1()
                                                     .min_w_0()
-                                                    .line_clamp(2)
-                                                    .text_size(px(15.))
+                                                    .truncate()
+                                                    .text_size(px(14.))
                                                     .line_height(px(20.))
-                                                    .text_color(dim)
-                                                    .when(preview.is_none(), |el| el.italic())
+                                                    .text_color(if unread { p.text } else { p.muted })
                                                     .child(preview.unwrap_or("Message").to_owned()),
                                             )
+                                            .when(room.pinned, |el| el.child(mark(IconName::Pin)))
+                                            .when(room.muted, |el| el.child(mark(IconName::BellOff)))
+                                            .when(room.mentions > 0, |el| {
+                                                el.child(Icon::new(IconName::AtSign).size_4().flex_none().text_color(p.accent_ink))
+                                            })
                                             .when(unread, |el| el.child(count_pill(room.unread, room.muted, cx))),
                                     ),
                             )
@@ -925,127 +995,83 @@ impl BeeperApp {
         .track_scroll(&self.rooms_scroll)
         .size_full();
 
-        let view_ix = VIEWS.iter().position(|v| v.0 == self.view).unwrap_or(0);
+        let archive = self.view == View::Archive;
         let has_query = !self.search.read(cx).value().trim().is_empty();
         let empty = if self.rooms.is_empty() {
             "Syncing chats..."
         } else if has_query {
-            "No results found"
+            "No chat matches"
         } else if self.only_unread {
-            "No unread chats"
+            "Nothing unread"
         } else {
-            VIEWS[view_ix].2
+            match self.view {
+                View::Inbox => "No chats here yet",
+                View::Archive => "Nothing archived",
+                View::LowPriority => "Nothing in low priority",
+            }
         };
-        let title = if self.searching {
+        let top = if self.searching {
             h_flex()
-                .w_full()
-                .gap_2()
-                .child(div().flex_1().min_w_0().child(Input::new(&self.search).prefix(Icon::new(IconName::Search).size_4())))
-                .child(Button::new("close-search").ghost().icon(IconName::X).tooltip("Close search").on_click(cx.listener(
-                    |this, _, window, cx| this.set_searching(false, window, cx),
-                )))
-                .into_any_element()
-        } else {
-            let weak = cx.entity().downgrade();
-            Button::new("view")
-                .ghost()
-                .large()
-                .child(div().text_size(px(20.)).font_weight(FontWeight::MEDIUM).child(VIEWS[view_ix].1))
-                .dropdown_caret(true)
-                .dropdown_menu(move |menu, _, _| {
-                    let sections = VIEWS.iter().fold(menu, |menu, &(view, label, _, icon)| {
-                        let weak = weak.clone();
-                        menu.item(PopupMenuItem::new(label).icon(icon).on_click(move |_, _, cx| {
-                            let _ = weak.update(cx, |this, cx| this.set_view(view, cx));
-                        }))
-                    });
-                    let weak = weak.clone();
-                    sections.separator().item(PopupMenuItem::new("Settings").icon(IconName::Settings).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |this, cx| this.open_panel(Panel::Settings, cx));
-                    }))
-                })
-                .into_any_element()
-        };
-        // Floating bar, as in Beeper: filter, sections, search.
-        let bar = cx.theme().title_bar;
-        let chip = cx.theme().list_active;
-        let round = |id: &'static str, icon: IconName, on: bool| {
-            div()
-                .id(id)
-                .size(px(BAR_H))
-                .flex()
-                .items_center()
-                .justify_center()
+                .flex_1()
+                .h(px(TAP))
+                .pl(px(GAP))
+                .pr(px(4.))
                 .rounded_full()
-                .bg(if on { chip } else { bar })
-                .shadow_lg()
-                .cursor_pointer()
-                // Floats over the list: without this a tap also opens the chat underneath.
-                .occlude()
-                .child(Icon::new(icon).size_5())
+                .bg(p.surface)
+                .child(Icon::new(IconName::Search).size_4().flex_none().text_color(p.faint))
+                .child(div().flex_1().min_w_0().child(Input::new(&self.search).appearance(false)))
+                .child(round_button("close-search", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| {
+                    this.set_searching(false, window, cx);
+                })))
+        } else {
+            h_flex()
+                .flex_1()
+                .child(div().flex_1().child(screen_title(if archive { "Archive" } else { "Chats" })))
+                .child(round_button("search", IconName::Search, cx).on_click(cx.listener(|this, _, window, cx| {
+                    this.set_searching(true, window, cx);
+                })))
         };
-        let sections = h_flex().h(px(BAR_H)).p(px(4.)).gap(px(4.)).rounded_full().bg(bar).shadow_lg().occlude().children(
-            VIEWS.iter().enumerate().map(|(ix, &(view, label, _, icon))| {
-                div()
-                    .id(label)
-                    .w(px(60.))
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
+        let waiting = self.rooms.iter().filter(|r| !r.archived && !r.low_priority && r.is_unread()).count();
+        let filters = [
+            ("All", View::Inbox, false, 0),
+            ("Unread", View::Inbox, true, waiting),
+            ("Low priority", View::LowPriority, false, 0),
+        ]
+        .map(|(label, view, only_unread, count)| {
+            let on = self.view == view && self.only_unread == only_unread;
+            // The pill is slimmer than what a finger needs; the target around it is not.
+            h_flex().id(label).h(px(TAP)).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.set_filter(view, only_unread, cx))).child(
+                h_flex()
+                    .h(px(36.))
+                    .px(px(GAP))
+                    .gap(px(6.))
                     .rounded_full()
-                    .when(ix == view_ix, |el| el.bg(chip))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_view(view, cx)))
-                    .child(Icon::new(icon).size_5())
-            }),
-        );
+                    .text_size(px(14.))
+                    .text_color(if on { p.text } else { p.muted })
+                    .when(on, |el| el.bg(p.raised))
+                    .child(label)
+                    .when(count > 0, |el| el.child(div().text_color(p.faint).child(count.to_string()))),
+            )
+        });
         v_flex()
             .size_full()
-            .child(h_flex().flex_none().h(px(56.)).px(px(GUTTER - 12.)).child(title))
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(if self.shown.is_empty() {
-                        div()
-                            .px(px(GUTTER))
-                            .py_4()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(empty)
-                            .into_any_element()
-                    } else {
-                        list.into_any_element()
-                    })
-                    .child(
-                        h_flex()
-                            .absolute()
-                            .bottom(px(16.))
-                            .left_0()
-                            .right_0()
-                            .justify_center()
-                            .gap(px(8.))
-                            .child(round("only-unread", IconName::ListFilter, self.only_unread).on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.only_unread = !this.only_unread;
-                                    this.refilter(cx);
-                                },
-                            )))
-                            .child(sections)
-                            .child(round("search", IconName::Search, self.searching).on_click(cx.listener(
-                                |this, _, window, cx| this.set_searching(!this.searching, window, cx),
-                            ))),
-                    ),
-            )
+            .child(h_flex().flex_none().h(px(BAR_H)).pl(px(GUTTER)).pr(px(if self.searching { GUTTER } else { GUTTER - 10. })).child(top))
+            .when(!archive && !self.searching, |el| {
+                el.child(h_flex().flex_none().px(px(GUTTER)).pb(px(4.)).gap(px(4.)).children(filters))
+            })
+            .child(div().flex_1().min_h_0().child(if self.shown.is_empty() {
+                div().px(px(GUTTER)).py(px(GAP)).text_size(px(14.)).text_color(p.faint).child(empty).into_any_element()
+            } else {
+                list.into_any_element()
+            }))
     }
 
     fn render_chat(&mut self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = Palette::of(cx);
         let room = self.open.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id));
         let name = room.map(|r| r.name.clone()).unwrap_or_default();
         let network = room.and_then(|r| r.network.clone());
-        let header_avatar = room.map(|r| avatar(r, self.avatars.get(&r.id)).with_size(px(36.)));
-        let menu = room.map(|r| Self::chat_menu(r, cx.entity().downgrade()));
+        let header_avatar = room.map(|r| avatar(&r.name, self.avatars.get(&r.id), 36., cx));
         let dm = room.is_some_and(|r| r.dm);
         let timeline = list(
             self.timeline.clone(),
@@ -1054,8 +1080,12 @@ impl BeeperApp {
                 let m = &this.msgs[ix];
                 let attachment = m.media.as_ref().filter(|_| !m.deleted).map(|media| this.render_media(m, media, cx));
                 let prev = ix.checked_sub(1).map(|p| &this.msgs[p]);
+                let next = this.msgs.get(ix + 1);
                 let new_day = prev.is_none_or(|p| day(p.ts) != day(m.ts));
-                let first = new_day || prev.is_none_or(|p| p.from != m.from);
+                // A run: one person's messages with no long pause between them.
+                let joined = |a: &Msg, b: &Msg| a.from == b.from && day(a.ts) == day(b.ts) && b.ts.saturating_sub(a.ts) < RUN_PAUSE_MS;
+                let first = prev.is_none_or(|p| !joined(p, m));
+                let last = next.is_none_or(|n| !joined(m, n));
                 let faded = m.deleted || m.body == UTD;
                 let picked = this.picked.as_deref() == Some(m.id.as_str());
                 let quote = m.reply_to.as_ref().map(|id| match this.msgs.iter().rfind(|x| &x.id == id) {
@@ -1063,60 +1093,44 @@ impl BeeperApp {
                     None => (String::new(), "Message unavailable".to_owned()),
                 });
                 let id = m.id.clone();
+                let ink = HighlightStyle { color: Some(p.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
                 let bubble = v_flex()
                     .id(SharedString::from(m.id.clone()))
-                    .max_w(relative(0.8))
-                    .px(px(14.))
-                    .py_2()
-                    .rounded(px(20.))
+                    // Without this a flex child is as wide as its longest line and leaves the screen.
+                    .min_w_0()
+                    .px(px(GAP))
+                    .py(px(9.))
+                    .gap(px(4.))
+                    .rounded(px(RADIUS))
+                    .bg(if m.own || picked { p.raised } else { p.surface })
                     .cursor_pointer()
-                    .when(picked, |el| el.border_2().border_color(cx.theme().ring))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.picked = (this.picked.as_ref() != Some(&id)).then(|| id.clone());
                         cx.notify();
                     }))
-                    .when(!m.own, |el| {
-                        el.bg(cx.theme().secondary).when(first && !dm, |el| {
-                            el.child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(m.sender.clone()),
-                            )
-                        })
-                    })
-                    .when(m.own, |el| el.bg(cx.theme().primary).text_color(cx.theme().primary_foreground))
                     .children(quote.map(|(who, text)| {
                         v_flex()
-                            .my_1()
-                            .pl_2()
-                            .border_l_2()
-                            .border_color(cx.theme().ring)
-                            .text_xs()
-                            .opacity(0.8)
+                            .min_w_0()
+                            .px(px(10.))
+                            .py(px(6.))
+                            .rounded(px(12.))
+                            .bg(p.text.opacity(0.07))
+                            .text_size(px(13.))
+                            .line_height(px(18.))
                             .when(!who.is_empty(), |el| el.child(div().font_weight(FontWeight::SEMIBOLD).child(who)))
-                            .child(div().line_clamp(2).child(text))
+                            .child(div().line_clamp(2).text_color(p.muted).child(text))
                     }))
-                    .children(attachment.map(|a| div().py_1().child(a)))
+                    .children(attachment)
                     .when(!m.body.is_empty(), |el| {
                         el.child(
                             div()
                                 .text_size(px(16.))
                                 .line_height(px(22.))
-                                .when(faded, |el| el.italic().opacity(0.7))
-                                .child(m.body.clone()),
+                                .when(faded, |el| el.italic().text_color(p.faint))
+                                .child(StyledText::new(m.body.clone()).with_highlights(m.mentions.iter().map(|r| (r.clone(), ink)))),
                         )
                     })
-                    .child(
-                        h_flex()
-                            .justify_end()
-                            .gap_1()
-                            .text_size(px(11.))
-                            .opacity(0.6)
-                            .when(m.edited && !m.deleted, |el| el.child("Edited"))
-                            .child(clock(m.ts)),
-                    );
+                    .when(m.edited && !m.deleted, |el| el.child(div().text_size(px(12.)).text_color(p.faint).child("Edited")));
                 // One chip per emoji, in order of first use.
                 let mut chips: Vec<(&str, usize, bool)> = Vec::new();
                 for r in &m.reactions {
@@ -1126,48 +1140,73 @@ impl BeeperApp {
                     }
                 }
                 let reactions = (!chips.is_empty()).then(|| {
-                    h_flex().flex_wrap().gap_1().pt_0p5().children(chips.into_iter().enumerate().map(|(n, (key, count, mine))| {
+                    h_flex().flex_wrap().gap(px(4.)).pt(px(4.)).children(chips.into_iter().enumerate().map(|(n, (key, count, mine))| {
                         let (id, key_owned) = (m.id.clone(), key.to_owned());
                         h_flex()
                             .id(SharedString::from(format!("{}-reaction-{n}", m.id)))
-                            .gap_1()
-                            .px_1p5()
+                            .h(px(32.))
+                            .px(px(10.))
+                            .gap(px(5.))
                             .rounded_full()
-                            .border_1()
-                            .border_color(if mine { cx.theme().ring } else { cx.theme().border })
-                            .bg(cx.theme().secondary)
-                            .py_0p5()
+                            .bg(if mine { p.raised } else { p.surface })
                             .text_size(px(13.))
+                            .text_color(if mine { p.text } else { p.muted })
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, &key_owned, cx)))
                             .child(key.to_owned())
                             .when(count > 1, |el| el.child(count.to_string()))
                     }))
                 });
+                // In a group, the sender's picture stands beside the last message of the run.
+                let faces = !dm && !m.own;
+                let side = if faces { px(SENDER + 8.) } else { px(0.) };
                 v_flex()
                     .w_full()
-                    .px_3()
-                    .pt(if first { px(10.) } else { px(3.) })
+                    .px(px(GUTTER))
+                    .pt(if first { px(GAP) } else { px(3.) })
                     .when(new_day, |el| {
                         el.child(
-                            div().w_full().py_3().flex().justify_center().child(
-                                div()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_full()
-                                    .bg(cx.theme().secondary)
-                                    .text_size(px(12.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(day_label(m.ts)),
-                            ),
+                            div().w_full().pb(px(GAP)).flex().justify_center().text_size(px(12.)).text_color(p.faint).child(day_label(m.ts)),
+                        )
+                    })
+                    .when(faces && first, |el| {
+                        el.child(
+                            div()
+                                .pl(side + px(GAP))
+                                .pb(px(4.))
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(p.muted)
+                                .child(m.sender.clone()),
                         )
                     })
                     .child(
+                        h_flex()
+                            .w_full()
+                            .items_end()
+                            .gap(px(8.))
+                            .when(m.own, |el| el.flex_row_reverse())
+                            .when(faces, |el| {
+                                el.child(if last { avatar(&m.sender, None, SENDER, cx) } else { div().w(px(SENDER)).flex_none() })
+                            })
+                            .child(
+                                h_flex()
+                                    .max_w(if narrow { relative(0.8) } else { px(BUBBLE_W).into() })
+                                    .min_w_0()
+                                    .items_stretch()
+                                    .gap(px(6.))
+                                    // Addressed to the user: the one place a message carries colour.
+                                    .when(m.mentioned, |el| el.child(div().w(px(3.)).flex_none().rounded_full().bg(p.accent)))
+                                    .child(bubble),
+                            ),
+                    )
+                    .child(
                         v_flex()
                             .w_full()
+                            .pl(side)
                             .map(|el| if m.own { el.items_end() } else { el.items_start() })
-                            .child(bubble)
-                            .children(reactions),
+                            .children(reactions)
+                            .when(last, |el| el.child(div().px(px(GAP)).pt(px(4.)).text_size(px(12.)).text_color(p.faint).child(clock(m.ts)))),
                     )
                     .into_any_element()
             }),
@@ -1177,202 +1216,246 @@ impl BeeperApp {
         v_flex()
             .size_full()
             .child(
-                header(cx)
-                    .gap_2()
+                header()
                     .when(narrow, |el| {
-                        el.child(
-                            Button::new("back").ghost().icon(IconName::ArrowLeft).tooltip("Back").on_click(cx.listener(
-                                |this, _, _, cx| {
-                                    this.close_room(cx);
-                                    cx.notify();
-                                },
-                            )),
-                        )
+                        el.child(round_button("back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| {
+                            this.close_room(cx);
+                            cx.notify();
+                        })))
                     })
+                    .when(!narrow, |el| el.pl(px(GUTTER)))
                     .children(header_avatar)
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_size(px(17.)).font_weight(FontWeight::BOLD).truncate().child(name))
-                            .children(network.map(|n| {
-                                div().text_size(px(13.)).text_color(cx.theme().muted_foreground).child(n)
-                            })),
+                            .pl(px(8.))
+                            .child(div().text_size(px(16.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
+                            .children(network.map(|n| div().text_size(px(12.)).line_height(px(16.)).text_color(p.faint).truncate().child(n))),
                     )
-                    .children(menu.map(|menu| {
-                        Button::new("chat-menu")
-                            .ghost()
-                            .icon(IconName::Ellipsis)
-                            .tooltip("Chat actions")
-                            .dropdown_menu_with_anchor(Anchor::TopRight, menu)
-                    })),
+                    .when(room.is_some(), |el| {
+                        el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, _, _, cx| {
+                            this.chat_sheet = true;
+                            cx.notify();
+                        })))
+                    }),
             )
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
-                    .pb_2()
                     .child(timeline)
                     .when(self.loading && self.msgs.is_empty(), |el| {
-                        el.child(div().p_4().text_sm().text_color(cx.theme().muted_foreground).child("Loading messages..."))
+                        el.child(div().p(px(GUTTER)).text_size(px(14.)).text_color(p.faint).child("Loading messages..."))
                     }),
             )
-            .children(self.render_message_actions(cx))
             .children(self.render_compose_strip(cx))
             .when(self.uploads > 0, |el| {
-                el.child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_size(px(12.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Sending attachment…"),
-                )
+                el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(px(12.)).text_color(p.faint).child("Sending attachment..."))
             })
             .child(
                 h_flex()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .child(
-                        Button::new("attach")
-                            .ghost()
-                            .icon(IconName::Paperclip)
-                            .tooltip("Attach a file")
-                            .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
-                    )
+                    .items_end()
+                    .gap(px(6.))
+                    // The paperclip's own padding stands in for the rest of the left margin.
+                    .pl(px(GUTTER - 10.))
+                    .pr(px(GUTTER))
+                    .py(px(8.))
+                    .child(round_button("attach", IconName::Paperclip, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| this.attach(cx))))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .px_2()
-                            .rounded(px(22.))
-                            .bg(cx.theme().secondary)
+                            .min_h(px(TAP))
+                            .px(px(6.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(TAP / 2.))
+                            .bg(p.surface)
                             .child(Input::new(&self.composer).appearance(false).large()),
                     )
                     .child(
                         div()
                             .id("send")
-                            .size(px(44.))
+                            .size(px(TAP))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded_full()
-                            .bg(cx.theme().primary)
-                            .text_color(cx.theme().primary_foreground)
+                            .bg(p.text)
+                            .text_color(p.ground)
                             .cursor_pointer()
-                            .hover(|el| el.bg(cx.theme().primary_hover))
+                            .hover(|el| el.bg(p.muted))
                             .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
-                            .child(Icon::new(IconName::SendHorizontal).size_5()),
+                            .child(Icon::new(IconName::ArrowUp).size_5()),
                     ),
             )
     }
 
-    /// Actions for the picked message. A bar rather than a context menu: touch has no right-click.
-    fn render_message_actions(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let m = self.msgs.iter().find(|m| Some(&m.id) == self.picked.as_ref())?;
-        if m.deleted {
-            return None;
-        }
+    /// Rows that rise from the bottom over a dimmed screen: the app's menus. Touch has no
+    /// right-click, and a popup's rows are too small for a finger.
+    fn sheet(&self, top: Option<AnyElement>, rows: Vec<Stateful<Div>>, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let (_, bottom) = crate::insets();
+        div()
+            .id("sheet")
+            .absolute()
+            .inset_0()
+            .flex()
+            .flex_col()
+            .justify_end()
+            .items_center()
+            .bg(gpui_kit::black().opacity(0.6))
+            .occlude()
+            .on_click(cx.listener(|this, _, _, cx| {
+                (this.picked, this.chat_sheet) = (None, false);
+                cx.notify();
+            }))
+            .child(
+                v_flex()
+                    .id("sheet-rows")
+                    .w_full()
+                    .max_w(px(SHEET_W))
+                    .pt(px(8.))
+                    .pb(px(bottom + 8.))
+                    .rounded_t(px(RADIUS))
+                    .bg(p.surface)
+                    // A tap between the rows is not a tap outside the sheet.
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .children(top)
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
+    /// Actions for the picked message.
+    fn render_message_sheet(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = Palette::of(cx);
+        let m = self.msgs.iter().find(|m| Some(&m.id) == self.picked.as_ref()).filter(|m| !m.deleted)?;
         let (id, body, own) = (m.id.clone(), m.body.clone(), m.own);
-        let action = |name: &'static str, icon: IconName, tip: &'static str| Button::new(name).ghost().icon(icon).tooltip(tip);
-        Some(
-            h_flex()
-                .flex_wrap()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .border_t_1()
-                .border_color(cx.theme().border)
-                .children(QUICK_REACTIONS.iter().enumerate().map(|(n, key)| {
-                    let id = id.clone();
-                    Button::new(("quick-reaction", n))
-                        .ghost()
-                        .label(*key)
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, key, cx)))
-                }))
-                .child(div().flex_1())
-                .child(action("reply", IconName::Reply, "Reply").on_click(cx.listener({
-                    let id = id.clone();
-                    move |this, _, window, cx| this.start_compose(Compose::Reply(id.clone()), window, cx)
-                })))
-                .child(action("copy", IconName::Copy, "Copy").on_click(cx.listener(move |this, _, _, cx| {
-                    crate::copy(cx, body.clone());
-                    this.picked = None;
+        let reactions = h_flex().px(px(GUTTER)).pb(px(8.)).justify_between().children(QUICK_REACTIONS.iter().enumerate().map(|(n, key)| {
+            let id = id.clone();
+            div()
+                .id(("quick-reaction", n))
+                .size(px(TAP))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(p.raised)
+                .text_size(px(20.))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, key, cx)))
+                .child(*key)
+        }));
+        let mut rows = vec![
+            sheet_row("reply", IconName::Reply, "Reply", p.text).on_click(cx.listener({
+                let id = id.clone();
+                move |this, _, window, cx| this.start_compose(Compose::Reply(id.clone()), window, cx)
+            })),
+            sheet_row("copy", IconName::Copy, "Copy text", p.text).on_click(cx.listener(move |this, _, _, cx| {
+                crate::copy(cx, body.clone());
+                this.picked = None;
+                cx.notify();
+            })),
+        ];
+        if own {
+            rows.push(sheet_row("edit", IconName::Pencil, "Edit", p.text).on_click(cx.listener({
+                let id = id.clone();
+                move |this, _, window, cx| this.start_compose(Compose::Edit(id.clone()), window, cx)
+            })));
+            rows.push(sheet_row("delete", IconName::Trash, "Delete", p.negative).on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(room) = this.open.clone() {
+                    this.send(Cmd::Delete { room, target: id.clone() }, cx);
+                }
+                this.picked = None;
+                cx.notify();
+            })));
+        }
+        Some(self.sheet(Some(reactions.into_any_element()), rows, cx))
+    }
+
+    /// Actions for the open chat.
+    fn render_chat_sheet(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = Palette::of(cx);
+        let room = self.open.as_ref().filter(|_| self.chat_sheet).and_then(|id| self.rooms.iter().find(|r| &r.id == id))?;
+        let id = room.id.clone();
+        let rows = chat_actions(room)
+            .into_iter()
+            .map(|(label, icon, action)| {
+                let id = id.clone();
+                sheet_row(label, icon, label, p.text).on_click(cx.listener(move |this, _, _, cx| {
+                    this.send(Cmd::Chat(id.clone(), action), cx);
+                    this.chat_sheet = false;
                     cx.notify();
-                })))
-                .when(own, |el| {
-                    el.child(action("edit", IconName::Pencil, "Edit").on_click(cx.listener({
-                        let id = id.clone();
-                        move |this, _, window, cx| this.start_compose(Compose::Edit(id.clone()), window, cx)
-                    })))
-                    .child(action("delete", IconName::Trash, "Delete").on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(room) = this.open.clone() {
-                            this.send(Cmd::Delete { room, target: id.clone() }, cx);
-                        }
-                        this.picked = None;
-                    })))
-                }),
-        )
+                }))
+            })
+            .collect();
+        Some(self.sheet(None, rows, cx))
     }
 
     /// What the composer is replying to or editing, with a way out.
     fn render_compose_strip(&mut self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let p = Palette::of(cx);
         let (title, id) = match &self.compose {
             Compose::New => return None,
-            Compose::Reply(id) => ("Replying to:", id),
-            Compose::Edit(id) => ("Edit message", id),
+            Compose::Reply(id) => ("Replying to", id),
+            Compose::Edit(id) => ("Editing", id),
         };
         let quoted = self.msgs.iter().find(|m| &m.id == id).map(|m| format!("{}: {}", m.sender, m.summary())).unwrap_or_default();
         Some(
             h_flex()
-                .gap_2()
-                .px_3()
-                .py_1()
-                .border_t_1()
-                .border_color(cx.theme().border)
+                .mx(px(GUTTER))
+                .mt(px(8.))
+                .pl(px(GAP))
+                .rounded(px(RADIUS))
+                .bg(p.surface)
                 .child(
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .text_xs()
+                        .py(px(8.))
+                        .text_size(px(13.))
+                        .line_height(px(18.))
                         .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
-                        .child(div().truncate().text_color(cx.theme().muted_foreground).child(quoted)),
+                        .child(div().truncate().text_color(p.muted).child(quoted)),
                 )
-                .child(Button::new("cancel-compose").ghost().icon(IconName::Close).tooltip("Cancel").on_click(cx.listener(
-                    |this, _, window, cx| this.start_compose(Compose::New, window, cx),
-                ))),
+                .child(round_button("cancel-compose", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| {
+                    this.start_compose(Compose::New, window, cx);
+                }))),
         )
     }
 
     fn render_banners(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = Palette::of(cx);
+        let card = || v_flex().mx(px(GUTTER)).mt(px(8.)).p(px(GAP)).gap(px(10.)).rounded(px(RADIUS)).text_size(px(14.)).line_height(px(20.));
         v_flex()
             .when(self.need_recovery, |el| {
                 el.child(
-                    v_flex()
-                        .gap_2()
-                        .p_3()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().secondary)
-                        .child(div().text_sm().child(
+                    card()
+                        .bg(p.warning_bg)
+                        .child(div().text_color(p.warning).child(
                             "Encrypted messages are locked on this device. Copy your Beeper recovery code \
                              from a device where you are signed in, then paste it here.",
                         ))
                         .child(div().w_full().child(Input::new(&self.recovery)))
                         .child(
                             h_flex()
-                                .gap_2()
+                                .gap(px(8.))
                                 .justify_end()
                                 .child(
                                     Button::new("paste-recovery")
+                                        .h(px(TAP))
+                                        .px(px(GUTTER))
                                         .label("Paste")
                                         .on_click(cx.listener(|this, _, window, cx| this.paste_recovery(window, cx))),
                                 )
                                 .child(
                                     Button::new("recover")
                                         .primary()
+                                        .h(px(TAP))
+                                        .px(px(GUTTER))
                                         .label("Unlock")
                                         .loading(self.busy)
                                         .disabled(self.busy)
@@ -1382,43 +1465,122 @@ impl BeeperApp {
                 )
             })
             .children(self.error.clone().map(|e| {
-                h_flex()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(div().flex_1().text_sm().text_color(cx.theme().danger).child(e))
-                    .child(Button::new("dismiss-error").ghost().label("Dismiss").on_click(cx.listener(|this, _, _, cx| {
+                card().bg(p.surface).child(div().text_color(p.negative).child(e)).child(h_flex().justify_end().child(
+                    Button::new("dismiss-error").h(px(TAP)).px(px(GUTTER)).label("Dismiss").on_click(cx.listener(|this, _, _, cx| {
                         this.error = None;
                         cx.notify();
-                    })))
+                    })),
+                ))
             }))
     }
 }
 
-fn header(cx: &App) -> Div {
-    h_flex().h(px(56.)).flex_none().px_3().items_center().border_b_1().border_color(cx.theme().border)
+/// Bar across the top of a screen. It shares the ground: no line, no fill.
+fn header() -> Div {
+    h_flex().h(px(BAR_H)).flex_none().px(px(GUTTER - 10.)).gap(px(4.)).items_center()
 }
 
-fn avatar(room: &RoomSummary, image: Option<&Option<Arc<Image>>>) -> Avatar {
-    Avatar::new().name(room.name.clone()).with_size(px(AVATAR)).when_some(image.cloned().flatten(), |a, img| a.src(img))
+fn screen_title(title: &'static str) -> Div {
+    div().text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::SEMIBOLD).child(title)
 }
 
-/// Unread count; a bare dot for a chat marked unread by hand, greyed when muted.
+/// An icon to tap, with a finger-sized target.
+fn round_button(id: &'static str, icon: IconName, cx: &App) -> Stateful<Div> {
+    let p = Palette::of(cx);
+    div()
+        .id(id)
+        .size(px(TAP))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .hover(|el| el.bg(p.surface))
+        .child(Icon::new(icon).size_5())
+}
+
+/// A chat's or a person's picture; until there is one, initials on a neutral disc.
+fn avatar(name: &str, image: Option<&Option<Arc<Image>>>, size: f32, cx: &App) -> Div {
+    let p = Palette::of(cx);
+    let disc = div().size(px(size)).flex_none();
+    match image.cloned().flatten() {
+        Some(image) => disc.child(img(image).size_full().rounded_full().object_fit(ObjectFit::Cover)),
+        None => {
+            let initials: String =
+                name.split_whitespace().filter_map(|w| w.chars().find(|c| c.is_alphanumeric())).take(2).flat_map(char::to_uppercase).collect();
+            disc.flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(p.raised)
+                .text_color(p.muted)
+                .text_size(px(size * 0.36))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(initials)
+        }
+    }
+}
+
+/// What can be done with a chat, each as the opposite of its current state.
+fn chat_actions(room: &RoomSummary) -> [(&'static str, IconName, ChatAction); 5] {
+    [
+        if room.is_unread() {
+            ("Mark as read", IconName::MailOpen, ChatAction::Unread(false))
+        } else {
+            ("Mark as unread", IconName::Mail, ChatAction::Unread(true))
+        },
+        if room.pinned { ("Unpin", IconName::PinOff, ChatAction::Pin(false)) } else { ("Pin", IconName::Pin, ChatAction::Pin(true)) },
+        if room.muted { ("Unmute", IconName::Bell, ChatAction::Mute(false)) } else { ("Mute", IconName::BellOff, ChatAction::Mute(true)) },
+        if room.archived {
+            ("Unarchive", IconName::ArchiveRestore, ChatAction::Archive(false))
+        } else {
+            ("Archive", IconName::Archive, ChatAction::Archive(true))
+        },
+        if room.low_priority {
+            ("Move to chats", IconName::Inbox, ChatAction::LowPriority(false))
+        } else {
+            ("Move to low priority", IconName::ChevronsDown, ChatAction::LowPriority(true))
+        },
+    ]
+}
+
+/// One action in a sheet.
+fn sheet_row(id: &'static str, icon: IconName, label: &'static str, ink: Hsla) -> Stateful<Div> {
+    h_flex()
+        .id(id)
+        .h(px(52.))
+        .px(px(GUTTER + 4.))
+        .gap(px(GAP))
+        .text_size(px(16.))
+        .text_color(ink)
+        .cursor_pointer()
+        .child(Icon::new(icon).size_5())
+        .child(label)
+}
+
+/// A network's name as the chat list has room for it: "Facebook Messenger" is Messenger there,
+/// "Google Messages (SMS)" is SMS.
+fn short_network(name: &str) -> &str {
+    let inner = name.split_once('(').and_then(|(_, rest)| rest.split_once(')')).map(|(inner, _)| inner);
+    inner.unwrap_or_else(|| name.strip_prefix("Facebook ").unwrap_or(name))
+}
+
+/// Unread count; a bare dot for a chat marked unread by hand, grey when muted.
 fn count_pill(n: u64, muted: bool, cx: &App) -> Div {
+    let p = Palette::of(cx);
     div()
         .flex_none()
         .min_w(px(20.))
         .h(px(20.))
-        .px_1p5()
+        .px(px(6.))
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
-        .bg(if muted { cx.theme().muted_foreground } else { cx.theme().primary })
-        .text_color(cx.theme().primary_foreground)
-        .text_xs()
+        .bg(if muted { p.raised } else { p.accent })
+        .text_color(if muted { p.text } else { p.on_accent })
+        .text_size(px(12.))
         .font_weight(FontWeight::SEMIBOLD)
         .children((n > 0).then(|| if n > 99 { "99+".to_string() } else { n.to_string() }))
 }
@@ -1491,11 +1653,25 @@ fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
 
 /// Raises the on-screen keyboard while an input has focus. Android shows none by itself for a
 /// GPUI input, so every input needs this.
-fn keyboard_follows(event: &InputEvent, kind: Keyboard) {
+fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperApp>) {
     match event {
         InputEvent::Focus => crate::show_keyboard(kind),
         InputEvent::Blur => crate::hide_keyboard(),
-        _ => {}
+        _ => return,
+    }
+    // shortcut: timed redraws, because gpui-mobile changes the insets when the keyboard has moved
+    // without asking for a frame, and the layout then keeps the keyboard's gap until the next
+    // touch. Replace with its callback once it has one.
+    if cfg!(target_os = "android") {
+        cx.spawn(async move |this, cx| {
+            for wait_ms in [150, 350, 700] {
+                cx.background_executor().timer(std::time::Duration::from_millis(wait_ms)).await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 }
 
@@ -1504,9 +1680,9 @@ fn keyboard_follows(event: &InputEvent, kind: Keyboard) {
 fn apply(msgs: &mut [Msg], item: &Item) -> Option<usize> {
     let find = |msgs: &[Msg], id: &str| msgs.iter().rposition(|m| m.id == id);
     match item {
-        Item::Edit { target, body } => {
+        Item::Edit { target, body, mentions } => {
             let ix = find(msgs, target)?;
-            (msgs[ix].body, msgs[ix].edited) = (body.clone(), true);
+            (msgs[ix].body, msgs[ix].mentions, msgs[ix].edited) = (body.clone(), mentions.clone(), true);
             Some(ix)
         }
         Item::Reaction { target, reaction } => {
@@ -1520,6 +1696,8 @@ fn apply(msgs: &mut [Msg], item: &Item) -> Option<usize> {
             if let Some(ix) = find(msgs, target) {
                 let m = &mut msgs[ix];
                 (m.body, m.deleted, m.reply_to) = (DELETED.to_owned(), true, None);
+                // Ranges into the old body.
+                m.mentions.clear();
                 m.reactions.clear();
                 return Some(ix);
             }
@@ -1533,6 +1711,7 @@ fn apply(msgs: &mut [Msg], item: &Item) -> Option<usize> {
 
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = Palette::of(cx);
         let (top, bottom) = crate::insets();
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
@@ -1547,54 +1726,59 @@ impl Render for BeeperApp {
             .size_full()
             .pt(px(top))
             .pb(px(bottom))
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground);
+            .font_family(crate::FACE)
+            .bg(p.ground)
+            .text_color(p.text);
         match self.screen {
             Screen::Starting => root
                 .items_center()
                 .justify_center()
-                .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Connecting..."))
+                .child(div().text_size(px(14.)).text_color(p.faint).child("Connecting..."))
                 .into_any_element(),
             Screen::Email | Screen::Code => root.child(self.render_login(cx)).into_any_element(),
             Screen::Main => {
                 let narrow = window.viewport_size().width < px(NARROW);
-                let panel = self.panel.map(|panel| self.render_panel(panel, window, cx));
+                let panel = self.panel.map(|panel| self.render_panel(panel, narrow, window, cx));
                 let body = if narrow {
-                    if let Some(panel) = panel {
+                    // One thing at a time; the destinations stay in reach wherever they lead.
+                    let deep = self.open.is_some() || self.searching || matches!(self.panel, Some(Panel::Add | Panel::Login));
+                    let screen = if let Some(panel) = panel {
                         panel
                     } else if self.open.is_some() {
                         self.render_chat(true, cx).into_any_element()
                     } else {
                         self.render_rooms(cx).into_any_element()
-                    }
-                } else {
-                    h_flex()
+                    };
+                    v_flex()
                         .size_full()
-                        .child(
-                            div()
-                                .w(px(360.))
-                                .flex_none()
-                                .h_full()
-                                .border_r_1()
-                                .border_color(cx.theme().border)
-                                .child(self.render_rooms(cx)),
-                        )
-                        .child(div().flex_1().min_w_0().h_full().child(if let Some(panel) = panel {
-                            panel
-                        } else if self.open.is_some() {
-                            self.render_chat(false, cx).into_any_element()
-                        } else {
-                            v_flex()
-                                .size_full()
-                                .items_center()
-                                .justify_center()
-                                .gap_3()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(Icon::new(IconName::MessageCircle).size_10())
-                                .child("Select a chat")
-                                .into_any_element()
-                        }))
+                        .child(div().flex_1().min_h_0().child(screen))
+                        .when(!deep, |el| el.child(self.render_nav(true, cx)))
                         .into_any_element()
+                } else {
+                    let main = if let Some(panel) = panel {
+                        div().flex_1().min_w_0().h_full().child(panel).into_any_element()
+                    } else {
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(div().w(px(LIST_W)).flex_none().h_full().child(self.render_rooms(cx)))
+                            .child(div().flex_1().min_w_0().h_full().child(if self.open.is_some() {
+                                self.render_chat(false, cx).into_any_element()
+                            } else {
+                                div()
+                                    .size_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(14.))
+                                    .text_color(p.faint)
+                                    .child("Choose a chat")
+                                    .into_any_element()
+                            }))
+                            .into_any_element()
+                    };
+                    h_flex().size_full().child(self.render_nav(false, cx)).child(main).into_any_element()
                 };
                 let viewer = self.viewer.as_ref().map(|(id, full)| {
                     // The thumbnail stands in until the full picture arrives.
@@ -1606,19 +1790,21 @@ impl Render for BeeperApp {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .bg(gpui_kit::black().opacity(0.94))
+                        .bg(gpui_kit::black())
                         .text_color(gpui_kit::white())
                         .occlude()
                         .on_click(cx.listener(|this, _, _, cx| this.close_viewer(cx)))
                         .map(|el| match shown {
                             Some(image) => el.child(img(image).size_full().object_fit(ObjectFit::Contain)),
-                            None => el.child("Loading…"),
+                            None => el.child("Loading..."),
                         })
-                        .child(div().absolute().top(px(top + 12.)).right_3().child(Icon::new(IconName::X).size_6()))
+                        .child(div().absolute().top(px(top + 12.)).right(px(GUTTER)).child(Icon::new(IconName::X).size_6()))
                 });
+                let sheet = self.render_message_sheet(cx).or_else(|| self.render_chat_sheet(cx));
                 root.relative()
                     .child(self.render_banners(cx))
                     .child(div().flex_1().min_h_0().child(body))
+                    .children(sheet)
                     .children(viewer)
                     .into_any_element()
             }
