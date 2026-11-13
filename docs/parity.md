@@ -54,13 +54,13 @@ is not started.
 | Day separators | done | the timeline's own |
 | Unread divider | done | "New" above what arrived since the chat was last read (`m.fully_read`) |
 | Replies (quote shown) | done | `m.in_reply_to`; a quoted message that is not loaded is fetched; a touch goes to it when it is loaded |
-| Reactions (show, add, remove) | part | `m.reaction`; six quick emoji in the message's panel, a double tap for the heart; no picker, no custom emoji |
+| Reactions (show, add, remove) | part | `m.reaction`; Signal's six in a bar over the held message (touch) or from the react button beside it (pointer), a double tap for the heart, the user's own reaction marked and taken back with a second touch. No full emoji picker, no custom emoji |
 | Deleted messages | done | `m.room.redaction`; stays a "Message deleted" row |
 | Images, stickers | done | inline thumbnail (800px at most), full-screen view (2048px); plain and encrypted |
 | Video, audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. No inline player |
 | Stickers, GIFs, custom emoji | todo | `m.sticker`, `fi.mau.gif`, `m.image_pack` |
 | Link previews | part | shows the preview that came with a message (`com.beeper.linkpreviews`); links are underlined and open in the browser. Does not make a preview for a link that has none, and attaches none to messages sent from here |
-| Formatted text, mentions, code blocks | part | mentions are drawn in the accent, a message that mentions the user is marked, and the chat list shows an `@` (from the HTML links and `m.mentions`; counted locally, a server cannot see into encrypted rooms). Bold, italics, links and code blocks: todo |
+| Formatted text, mentions, code blocks | part | `formatted_body` (HTML) drawn: bold, italics, strikethrough, underline, links with their own text, quotes, code blocks, lists; previews and notifications read its plain text. Mentions are drawn in the accent, a message that mentions the user is marked, and the chat list shows an `@` (counted locally, a server cannot see into encrypted rooms). Inline code is tinted, not monospace; spoilers are plain text; formatted captions under media are not read |
 | Send state (sending, sent, delivered, seen, failed) | done | a message shows at once and is sent from a queue that survives being offline and restarts; a failed one can be sent again or dropped. Under the newest own message: Sending, Sent, Delivered (`com.beeper.message_send_status` with `delivered_to_users`), Seen (`m.receipt`), or the failure with the bridge's reason |
 | Read receipts of others, typing | part | "Seen" in a one-to-one chat, "Seen by ..." in a group; who is typing in the open chat, and the user's own typing is sent unless incognito is on (Beeper keeps sending it and asks separately). No per-message receipts, no typing in the chat list |
 | Polls, locations, contacts | part | polls of the `org.matrix.msc3381` types (what bridges send) are shown with their votes, counted by the SDK, and can be voted on; the stable `m.poll.*` types only reach the chat list's preview. Locations show a card with coordinates that opens in maps (Android: the maps app; elsewhere OpenStreetMap). Neither can be created; contact cards are not handled |
@@ -136,13 +136,12 @@ them was taken from its desktop bundle, and the state events were checked agains
 
 1. Message requests labelled and accepted, Matrix invitations. M.
 2. Typing in the chat list, per-message read state. S.
-3. Rich text: bold, italics, links, code (every network). M.
-4. Inline playback for voice notes, audio and video, and recording voice notes. M each.
-5. Creating and ending polls, sending a location. S each.
-6. Mentions autocomplete; forward; paste and drag and drop attachments. S each.
-7. Disappearing-message timer shown. S.
-8. New chat from a contact, chat info and group admin. L.
-9. Notifications on the desktop, and without the app running (needs Google's push, FCM). L.
+3. Inline playback for voice notes, audio and video, and recording voice notes. M each.
+4. Creating and ending polls, sending a location. S each.
+5. Mentions autocomplete; forward; paste and drag and drop attachments. S each.
+6. Disappearing-message timer shown. S.
+7. New chat from a contact, chat info and group admin. L.
+8. Notifications on the desktop, and without the app running (needs Google's push, FCM). L.
 
 ## How Beeper stores chat state
 
