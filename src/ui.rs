@@ -11,10 +11,9 @@ use gpui_kit::component::{
     input::{Input, InputEvent, InputState},
     v_flex,
 };
-use gpui_kit::base::{Presence, Transition, transition};
+use gpui_kit::base::{Presence, PresencePhase, Transition, spring, transition};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use gpui_kit::base::{Presence, PresencePhase, Transition, spring, transition};
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
 use tokio::sync::mpsc;
 
