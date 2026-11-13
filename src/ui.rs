@@ -645,11 +645,14 @@ impl BeeperApp {
             let scale = (max_w / w).min(max_h / h).min(1.);
             let thumb = self.thumbs.get(&m.id).cloned();
             let video = media.kind == MediaKind::Video;
+            let (w, h) = ((w * scale).max(80.), (h * scale).max(60.));
             return div()
                 .id(SharedString::from(format!("{}-media", m.id)))
                 .relative()
-                .w(px((w * scale).max(80.)))
-                .h(px((h * scale).max(60.)))
+                // Narrower when the bubble is: a phone's bubble has less room than the picture asks for.
+                .w(px(w))
+                .max_w_full()
+                .aspect_ratio(w / h)
                 .rounded(px(14.))
                 .overflow_hidden()
                 .bg(raised)
@@ -941,7 +944,7 @@ impl BeeperApp {
                             .h(px(ROOM_ROW_H))
                             .px(px(GUTTER))
                             .gap(px(GAP))
-                            .hover(|el| el.bg(p.surface))
+                            .hover(|el| el.bg(if selected { p.raised } else { p.surface }))
                             .when(selected, |el| el.bg(p.raised))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| this.open_room(id.clone(), cx)))
@@ -1118,7 +1121,7 @@ impl BeeperApp {
                             .text_size(px(13.))
                             .line_height(px(18.))
                             .when(!who.is_empty(), |el| el.child(div().font_weight(FontWeight::SEMIBOLD).child(who)))
-                            .child(div().line_clamp(2).text_color(p.muted).child(text))
+                            .child(div().line_clamp(2).text_ellipsis().text_color(p.muted).child(text))
                     }))
                     .children(attachment)
                     .when(!m.body.is_empty(), |el| {
