@@ -2,8 +2,11 @@ package dev.gpui.beeper;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.os.Bundle;
+import android.os.Message;
 import android.webkit.CookieManager;
+import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -54,12 +57,47 @@ public final class WebLogin extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         web = new WebView(this);
+        // Debug builds can be inspected from a computer (chrome://inspect), to see why a page fails.
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            WebView.setWebContentsDebuggingEnabled(true);
+        }
         WebSettings settings = web.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        // The bridge asks for its own, desktop, user agent, so sites send their desktop pages:
+        // lay those out at desktop width and let the user zoom, or parts end up off screen.
+        settings.setUseWideViewPort(true);
+        settings.setLoadWithOverviewMode(true);
+        settings.setSupportZoom(true);
+        settings.setBuiltInZoomControls(true);
+        settings.setDisplayZoomControls(false);
+        // Captchas and identity checks open in new windows and embed other sites' frames.
+        settings.setJavaScriptCanOpenWindowsAutomatically(true);
+        settings.setSupportMultipleWindows(true);
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+        settings.setMediaPlaybackRequiresUserGesture(false);
         if (userAgent != null && !userAgent.isEmpty()) {
             settings.setUserAgentString(userAgent);
         }
+        web.setWebChromeClient(new WebChromeClient() {
+            // A new window loads in this one: there is only one view to show it in.
+            @Override
+            public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
+                WebView popup = new WebView(WebLogin.this);
+                popup.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView v, android.webkit.WebResourceRequest request) {
+                        web.loadUrl(request.getUrl().toString());
+                        v.destroy();
+                        return true;
+                    }
+                });
+                ((WebView.WebViewTransport) resultMsg.obj).setWebView(popup);
+                resultMsg.sendToTarget();
+                return true;
+            }
+        });
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true);
         web.setWebViewClient(new WebViewClient() {

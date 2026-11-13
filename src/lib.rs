@@ -23,10 +23,13 @@ gpui_kit::assets::icon_assets!(
         BellOff,
         ChevronsDown,
         ClipboardPaste,
+        Image,
         ListFilter,
         Mail,
         MailOpen,
         MessageCircle,
+        Mic,
+        Music,
         Paperclip,
         Pencil,
         Pin,
@@ -34,6 +37,7 @@ gpui_kit::assets::icon_assets!(
         Reply,
         SendHorizontal,
         Trash,
+        Video,
         X
     ]
 );
@@ -437,4 +441,29 @@ pub(crate) fn insets() -> (f32, f32) {
     }
     #[allow(unreachable_code)]
     (0., 0.)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Assets;
+    use gpui_kit::AssetSource as _;
+
+    /// An icon the UI names but the build does not embed draws as nothing, with only a log line.
+    #[test]
+    fn every_icon_the_ui_uses_is_embedded() {
+        for source in [include_str!("ui.rs"), include_str!("ui/panels.rs")] {
+            for name in source.split("IconName::").skip(1) {
+                let name: String = name.chars().take_while(char::is_ascii_alphanumeric).collect();
+                let mut file = String::new();
+                for (ix, c) in name.chars().enumerate() {
+                    if c.is_ascii_uppercase() && ix > 0 {
+                        file.push('-');
+                    }
+                    file.push(c.to_ascii_lowercase());
+                }
+                let path = format!("icons/{file}.svg");
+                assert!(matches!(Assets.load(&path), Ok(Some(_))), "{path} is used but not embedded");
+            }
+        }
+    }
 }
