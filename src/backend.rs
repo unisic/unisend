@@ -80,6 +80,8 @@ const VIEW_PX: u32 = 2048;
 /// Larger files are not fetched to make a thumbnail, and not sent.
 const MAX_THUMB_SOURCE: u64 = 16 * 1024 * 1024;
 const MAX_UPLOAD: u64 = 100 * 1024 * 1024;
+/// History pages a preview refresh reads back looking for the last message.
+const MAX_PREVIEW_PAGES: usize = 3;
 /// Backup key downloads per history page.
 const MAX_KEY_FETCHES: usize = 8;
 
@@ -666,13 +668,22 @@ impl State {
                     let (ev, permits, rooms) = (self.ev.clone(), self.fetches.clone(), self.rooms.clone());
                     tokio::spawn(async move {
                         let Ok(_permit) = permits.acquire().await else { return };
-                        let resp = match messages(&room, None, SYNC_TIMELINE_LIMIT * 2).await {
-                            Ok(r) => r,
-                            Err(e) => return log::debug!("preview {room_id}: {e:#}"),
-                        };
-                        let mut chunk = resp.chunk;
-                        chunk.reverse();
-                        let items = to_items(&room, &chunk).await;
+                        // A room the bridge has just set up ends in a run of state events, so the
+                        // newest page may hold no message at all.
+                        let (mut from, mut items) = (None, Vec::new());
+                        for _ in 0..MAX_PREVIEW_PAGES {
+                            let resp = match messages(&room, from.as_deref(), PAGE).await {
+                                Ok(r) => r,
+                                Err(e) => return log::debug!("preview {room_id}: {e:#}"),
+                            };
+                            let mut chunk = resp.chunk;
+                            chunk.reverse();
+                            items = to_items(&room, &chunk).await;
+                            from = resp.end;
+                            if from.is_none() || items.iter().any(|i| matches!(i, Item::Msg(_))) {
+                                break;
+                            }
+                        }
                         let Some(text) = preview(&items, other_person(&room).await.is_some()) else {
                             return;
                         };
