@@ -1385,7 +1385,9 @@ async fn probe_queue(client: Client, rooms: Rooms, ev: mpsc::Sender<Ev>, queue: 
 /// A cached preview in today's form. Caches written by earlier builds held bracketed media labels,
 /// which are dropped so the row reads the message again, and previews of several paragraphs.
 fn current(preview: Option<String>) -> Option<String> {
-    let stale = |p: &String| ["[Photo]", "[Video]", "[Audio]", "[File]", "[Location]"].iter().any(|old| p.contains(old));
+    // A markdown link: a bridge's plain body, cached before formatted bodies were read.
+    // shortcut: a message whose formatted form keeps "](http" is re-read at every start, one request each; drop the rule once old caches are gone.
+    let stale = |p: &String| ["[Photo]", "[Video]", "[Audio]", "[File]", "[Location]", "](http"].iter().any(|old| p.contains(old));
     preview.filter(|p| !stale(p)).map(|p| p.replace('\n', " "))
 }
 
@@ -1779,6 +1781,11 @@ fn html(msgtype: &MessageType) -> Option<&str> {
         MessageType::Text(c) => c.formatted.as_ref(),
         MessageType::Notice(c) => c.formatted.as_ref(),
         MessageType::Emote(c) => c.formatted.as_ref(),
+        // A caption: an Instagram story reply is a picture whose caption is the quote and link.
+        MessageType::Image(c) => c.formatted.as_ref(),
+        MessageType::Video(c) => c.formatted.as_ref(),
+        MessageType::Audio(c) => c.formatted.as_ref(),
+        MessageType::File(c) => c.formatted.as_ref(),
         _ => None,
     }?;
     (f.format == MessageFormat::Html).then_some(f.body.as_str())
@@ -1787,7 +1794,8 @@ fn html(msgtype: &MessageType) -> Option<&str> {
 /// Reads the message's formatted body: `body` becomes its plain text (no markdown, no reply
 /// fallback), `rich` its styled form. Without a formatted body `body` stays as it is.
 fn format(m: &mut Msg, msgtype: &MessageType) {
-    if m.place.is_some() {
+    // Media without a caption has nothing to format, whatever HTML came with it.
+    if m.place.is_some() || (m.media.is_some() && m.body.is_empty()) {
         return;
     }
     if let Some((plain, rich)) = html(msgtype).and_then(rich::parse) {

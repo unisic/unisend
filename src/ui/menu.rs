@@ -126,11 +126,13 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
     // A message that has not reached the server can be sent again or dropped, nothing else.
     let sent = m.id.starts_with('$');
     let failed = matches!(m.delivery, Delivery::Failed(_));
+    // An edit sends text: a picture, poll or place edited this way would turn into text.
+    let editable = m.own && sent && m.media.is_none() && m.poll.is_none() && m.place.is_none() && !m.deleted;
     let link = m.link.as_ref().map(|link| link.url.clone()).or_else(|| urls(&m.body).into_iter().next().map(|r| m.body[r].to_owned()));
     let mut out = Vec::new();
     if kind == MenuKind::Touch {
         out.extend(sent.then_some(Act::Reply));
-        out.extend((m.own && sent).then_some(Act::Edit));
+        out.extend(editable.then_some(Act::Edit));
         out.extend((!sent && failed).then_some(Act::Retry));
         out.extend(link.map(Act::Link));
         out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
@@ -140,7 +142,7 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
             out.extend([Act::Reply, Act::React]);
         }
         out.extend(link.map(Act::Link));
-        out.extend((m.own && sent).then_some(Act::Edit));
+        out.extend(editable.then_some(Act::Edit));
         out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
         out.extend(m.own.then_some(Act::Delete));
         out.extend((!sent && failed).then_some(Act::Retry));
