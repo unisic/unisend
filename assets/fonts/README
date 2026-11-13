@@ -1,0 +1,4 @@
+Roboto-Bold.ttf: Roboto Bold, Copyright 2015 Google Inc., Apache License 2.0
+(https://www.apache.org/licenses/LICENSE-2.0), from github.com/googlefonts/roboto-2.
+Compiled into the Android build: the system's Roboto is one variable font, which the
+text shaper does not embolden, so bold text needs a bold face of the same family.

@@ -1429,14 +1429,15 @@ fn clock(ts_ms: u64) -> String {
     local(ts_ms).map(|t| t.format("%H:%M").to_string()).unwrap_or_default()
 }
 
-/// Room list time: clock today, weekday this week, date otherwise.
+/// Room list time: clock today, "Yesterday", weekday this week, date otherwise.
 fn short_time(ts_ms: u64) -> String {
     let Some(t) = local(ts_ms) else { return String::new() };
     let today = Local::now().date_naive();
     let days = (today - t.date_naive()).num_days();
     let format = match days {
         0 => "%H:%M",
-        1..=6 => "%a",
+        1 => return "Yesterday".to_owned(),
+        2..=6 => "%a",
         _ if t.year() == today.year() => "%-d %b",
         _ => "%-d.%m.%Y",
     };

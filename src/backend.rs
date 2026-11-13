@@ -998,6 +998,13 @@ fn is_done(done: &Done, s: &RoomSummary, now: i64) -> bool {
     done.updated_ts.is_some_and(|upto| upto > 0 && upto >= s.ts as i64 && upto < now && !s.is_unread())
 }
 
+/// A cached preview in today's form. Caches written by earlier builds held bracketed media labels,
+/// which are dropped so the row reads the message again, and previews of several paragraphs.
+fn current(preview: Option<String>) -> Option<String> {
+    let stale = |p: &String| ["[Photo]", "[Video]", "[Audio]", "[File]", "[Location]"].iter().any(|old| p.contains(old));
+    preview.filter(|p| !stale(p)).map(|p| p.replace('\n', " "))
+}
+
 /// Everything the local store knows about a room. `preview`, `ts` and `order` come from the
 /// timeline, so the caller passes what it saw; the rest is read here.
 async fn summarize(
@@ -1025,8 +1032,7 @@ async fn summarize(
         name,
         network,
         dm: peer.is_some(),
-        // Cached before previews were kept to one paragraph.
-        preview: seen.preview.map(|p| p.replace('\n', " ")),
+        preview: current(seen.preview),
         unread: room.unread_notification_counts().notification_count,
         pinned: room.is_favourite(),
         low_priority: room.is_low_priority(),
@@ -1048,7 +1054,7 @@ async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &R
         let fresh = summarize(&room, notif, other_person(&room).await, seen).await;
         if let Some(r) = rooms.lock().unwrap().get_mut(&fresh.id) {
             // A preview refresh may have updated the entry meanwhile.
-            *r = RoomSummary { preview: r.preview.clone(), ..fresh };
+            *r = RoomSummary { preview: current(r.preview.take()), ..fresh };
             out.push(r.clone());
         }
     }

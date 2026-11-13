@@ -166,13 +166,15 @@ fn apply_palette(cx: &mut App) {
     });
 }
 
-/// Fonts for letters outside the list gpui-mobile loads: mathematical alphanumerics (names typed
-/// in "fancy" letters), circled letters, arrows. About 0.75 MB of font data.
+/// Fonts gpui-mobile does not load: a bold Roboto (the system's is one variable font, which the
+/// shaper does not embolden), and the system symbols font for mathematical alphanumerics (names
+/// typed in "fancy" letters), circled letters and arrows. About 1.3 MB of font data.
 #[cfg(target_os = "android")]
 fn extra_fonts(cx: &mut App) {
+    let bold: &[u8] = include_bytes!("../assets/fonts/Roboto-Bold.ttf");
     let files = ["NotoSansSymbols-Regular-Subsetted.ttf", "NotoSansSymbols-Regular-Subsetted2.ttf", "SECFallback.ttf"];
-    let fonts = files.iter().filter_map(|f| std::fs::read(format!("/system/fonts/{f}")).ok()).map(Into::into).collect();
-    if let Err(e) = cx.text_system().add_fonts(fonts) {
+    let system = files.iter().filter_map(|f| std::fs::read(format!("/system/fonts/{f}")).ok()).map(Into::into);
+    if let Err(e) = cx.text_system().add_fonts(std::iter::once(bold.into()).chain(system).collect()) {
         log::warn!("extra fonts: {e}");
     }
 }
