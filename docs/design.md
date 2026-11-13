@@ -78,6 +78,15 @@ an answer votes for it; touching your only choice takes it back.
 A location is a card in the bubble: a map pin, the description when it says more than the
 coordinates, and the coordinates to five decimals. Touching it opens the place in maps.
 
+Lines about the chat itself (someone joined or left, a new name) are centred `faint` text with no
+bubble; joins that follow one another are one line. "New", in the accent, stands above what
+arrived since the chat was last read.
+
+Under the newest message, when it is the user's, one `faint` line after the time says where it
+is: Sending, Sent, Delivered, Seen. A message that failed says so in `negative` wherever it is,
+and its panel offers to try again. A message that has not reached the server is drawn at 60%.
+Who is typing is one `faint` line above the composer.
+
 A lost connection is a state, not an error: one quiet line at the top while it is retried, gone
 when it is back.
 

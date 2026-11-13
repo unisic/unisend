@@ -39,6 +39,7 @@ gpui_kit::assets::icon_assets!(
         Pin,
         PinOff,
         Reply,
+        RotateCw,
         SendHorizontal,
         Trash,
         Video,

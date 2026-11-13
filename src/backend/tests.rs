@@ -8,6 +8,8 @@ use hmac::{Hmac, Mac as _};
 use matrix_sdk::ruma::events::room::message::ReplacementMetadata;
 use sha2::Sha256;
 
+use matrix_sdk::ruma::events::{reaction::ReactionEventContent, relation::Annotation};
+
 use super::*;
 
 fn jwt(secret: &str, sub: &str) -> String {
@@ -19,7 +21,36 @@ fn jwt(secret: &str, sub: &str) -> String {
     format!("{header}.{payload}.{sig}")
 }
 
-fn state(dir: PathBuf, hs: &str) -> (State, mpsc::Receiver<Ev>) {
+/// What a UI holds: the events coming in and the rows of the open conversation, which every
+/// change has to reach in order, whatever else is being waited for.
+struct Seat {
+    rx: mpsc::Receiver<Ev>,
+    rows: Vec<Msg>,
+}
+
+impl Seat {
+    async fn next(&mut self, what: &str, deadline: tokio::time::Instant) -> Option<Ev> {
+        let ev = tokio::time::timeout_at(deadline, self.rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}; rows: {:?}", bodies(&self.rows)))
+            .expect("event channel closed");
+        match ev {
+            Ev::Timeline { diffs, .. } => {
+                for diff in diffs {
+                    apply(&mut self.rows, diff);
+                }
+                None
+            }
+            Ev::Error(e) => {
+                eprintln!("backend error while waiting for {what}: {e}");
+                Some(Ev::Error(e))
+            }
+            ev => Some(ev),
+        }
+    }
+}
+
+fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
     std::fs::create_dir_all(&dir).unwrap();
     let (ev, rx) = mpsc::channel(CHANNEL_CAP);
     let st = State {
@@ -33,23 +64,16 @@ fn state(dir: PathBuf, hs: &str) -> (State, mpsc::Receiver<Ev>) {
         rooms: Rooms::default(),
         fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)),
         notif: None,
-        incognito: true,
+        incognito: Arc::new(AtomicBool::new(true)),
         tasks: Vec::new(),
     };
-    (st, rx)
+    (st, Seat { rx, rows: Vec::new() })
 }
 
-async fn wait_for<T>(rx: &mut mpsc::Receiver<Ev>, what: &str, mut pick: impl FnMut(Ev) -> Option<T>) -> T {
+async fn wait_for<T>(seat: &mut Seat, what: &str, mut pick: impl FnMut(Ev) -> Option<T>) -> T {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
-        let ev = tokio::time::timeout_at(deadline, rx.recv())
-            .await
-            .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
-            .expect("event channel closed");
-        if let Ev::Error(e) = &ev {
-            eprintln!("backend error while waiting for {what}: {e}");
-        }
-        if let Some(v) = pick(ev) {
+        if let Some(v) = seat.next(what, deadline).await.and_then(&mut pick) {
             return v;
         }
     }
@@ -67,22 +91,16 @@ fn root_photo(dir: &Path) -> PathBuf {
     path
 }
 
-async fn next_live(rx: &mut mpsc::Receiver<Ev>, room_id: &OwnedRoomId) -> Vec<Item> {
-    wait_for(rx, "live items", |e| match e {
-        Ev::Live { room, items } if room == *room_id => Some(items),
-        _ => None,
-    })
-    .await
+/// Waits until `done` holds for the rows of the open conversation.
+async fn until(seat: &mut Seat, what: &str, done: impl Fn(&[Msg]) -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while !done(&seat.rows) {
+        seat.next(what, deadline).await;
+    }
 }
 
-fn bodies(items: &[Item]) -> Vec<String> {
-    items
-        .iter()
-        .filter_map(|i| match i {
-            Item::Msg(m) => Some(m.body.clone()),
-            _ => None,
-        })
-        .collect()
+fn bodies(msgs: &[Msg]) -> Vec<String> {
+    msgs.iter().filter(|m| m.kind == Kind::Message).map(|m| m.body.clone()).collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -126,40 +144,45 @@ async fn login_sync_decrypt_send_recover() {
         .make_replacement(ReplacementMetadata::new(sent.response.event_id.clone(), None));
     bob_room.send(edit).await.unwrap();
 
-    // Live path: decrypted message arrives through the sync loop and becomes the preview.
-    let live = wait_for(&mut alice_rx, "live message", |e| match e {
-        Ev::Live { room, items } if room == room_id && bodies(&items).iter().any(|b| b == "hello from bob") => {
-            Some(items)
-        }
+    // List path: the decrypted message arrives through the sync loop and becomes the preview.
+    wait_for(&mut alice_rx, "preview of the new message", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id && s.preview.as_deref() == Some("hello from bob") && s.unread > 0).then_some(()),
         _ => None,
     })
     .await;
-    assert!(matches!(live.iter().find(|i| matches!(i, Item::Msg(_))), Some(Item::Msg(m)) if !m.own && !m.sender.is_empty() && m.notify));
 
-    // History path: Open returns the message (decrypted) and the edit targeting it.
+    // Conversation: opening it gives the message, decrypted and as its edit left it.
     alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
-    let history = wait_for(&mut alice_rx, "history", |e| match e {
-        Ev::History { room, items, reset: true, .. } if room == room_id => Some(items),
-        _ => None,
+    until(&mut alice_rx, "the edited message", |rows| {
+        rows.iter().any(|m| m.id == sent.response.event_id.as_str() && m.body == "hello from bob (edited)" && m.edited && !m.own && !m.sender.is_empty())
     })
     .await;
-    assert!(bodies(&history).contains(&"hello from bob".to_owned()), "history: {:?}", bodies(&history));
-    assert!(history.iter().any(|i| matches!(i, Item::Edit { target, body, .. } if *target == sent.response.event_id.to_string() && body == "hello from bob (edited)")));
-    assert!(!bodies(&history).iter().any(|b| b == UTD));
+    assert!(!bodies(&alice_rx.rows).iter().any(|b| b == UTD), "{:?}", bodies(&alice_rx.rows));
+    assert!(alice_rx.rows.iter().any(|m| m.kind == Kind::Day), "a day row heads the messages");
 
-    // Send path: Bob receives Alice's message decrypted.
+    // Send path: the message shows at once, becomes an event, and Bob receives it decrypted.
     alice.handle(Cmd::Send { room: room_id.clone(), body: "hi bob".into(), reply_to: None, edit: None }).await.unwrap();
+    until(&mut alice_rx, "the sent message as an event", |rows| {
+        rows.iter().any(|m| m.body == "hi bob" && m.own && m.id.starts_with('$') && m.delivery == Delivery::Sent)
+    })
+    .await;
     let mut got = false;
     for _ in 0..20 {
         let resp = bob.sync_once(SyncSettings::default().timeout(Duration::from_secs(2))).await.unwrap();
         if let Some(update) = resp.rooms.joined.get(&room_id) {
-            got |= bodies(&to_items(&bob_room, &update.timeline.events).await).contains(&"hi bob".to_owned());
+            got |= bodies(&to_msgs(&bob_room, &update.timeline.events).await).contains(&"hi bob".to_owned());
         }
         if got {
             break;
         }
     }
     assert!(got, "bob never saw alice's message");
+
+    // Bob reads it: his receipt lands on a row at or under the message.
+    let hi_id = alice_rx.rows.iter().rfind(|m| m.body == "hi bob").unwrap().id.clone();
+    bob_room.send_single_receipt(create_receipt::v3::ReceiptType::Read, ReceiptThread::Unthreaded, EventId::parse(&hi_id).unwrap()).await.unwrap();
+    let bob_id = bob.user_id().unwrap().to_owned();
+    until(&mut alice_rx, "bob's read receipt", |rows| rows.iter().skip_while(|m| m.id != hi_id).any(|m| m.seen.contains(&bob_id))).await;
 
     // Recovery: a second Alice device unlocks history with the recovery key.
     // Beeper accounts already have cross-signing; a fresh test account needs it bootstrapped.
@@ -178,12 +201,7 @@ async fn login_sync_decrypt_send_recover() {
 
     // Before recovery the history is locked.
     alice2.handle(Cmd::Open(room_id.clone())).await.unwrap();
-    let locked = wait_for(&mut alice2_rx, "locked history", |e| match e {
-        Ev::History { room, items, .. } if room == room_id => Some(items),
-        _ => None,
-    })
-    .await;
-    assert!(bodies(&locked).iter().any(|b| b == UTD), "expected UTD before recovery: {:?}", bodies(&locked));
+    until(&mut alice2_rx, "locked history", |rows| bodies(rows).iter().any(|b| b == UTD)).await;
 
     let other = matrix_sdk_crypto::secret_storage::SecretStorageKey::new().to_base58();
     let wrong = alice2.handle(Cmd::Recover(other)).await.unwrap_err().to_string();
@@ -196,14 +214,12 @@ async fn login_sync_decrypt_send_recover() {
     alice2.handle(Cmd::Recover(format!("  {spaced}\n"))).await.unwrap();
     wait_for(&mut alice2_rx, "NeedRecovery(false)", |e| matches!(e, Ev::NeedRecovery(false)).then_some(())).await;
 
-    // The first open after recovery pulls the missing keys from the backup itself.
-    alice2.handle(Cmd::Open(room_id.clone())).await.unwrap();
-    let items = wait_for(&mut alice2_rx, "history on device 2", |e| match e {
-        Ev::History { room, items, .. } if room == room_id => Some(items),
-        _ => None,
+    // With the keys' backup unlocked, the open conversation reads itself.
+    until(&mut alice2_rx, "history on device 2", |rows| {
+        let read = bodies(rows);
+        read.contains(&"hello from bob (edited)".to_owned()) && read.contains(&"hi bob".to_owned()) && !read.iter().any(|b| b == UTD)
     })
     .await;
-    assert!(bodies(&items).contains(&"hello from bob".to_owned()), "after recovery: {:?}", bodies(&items));
 
     alice2.handle(Cmd::Previews(vec![room_id.clone()])).await.unwrap();
     let preview = wait_for(&mut alice2_rx, "refreshed preview", |e| match e {
@@ -256,56 +272,30 @@ async fn login_sync_decrypt_send_recover() {
     })
     .await;
 
-    // React, reply, edit, delete: each comes back through sync as the item the UI applies.
+    // React, reply, edit, delete: each shows on the rows of the open conversation.
     let room = room_id.clone();
+    let reacted = |rows: &[Msg]| rows.iter().find(|m| m.id == ping.as_str()).is_some_and(|m| m.reactions.iter().any(|r| r.key == "👍" && r.own && r.count == 1));
+    until(&mut alice2_rx, "the new message", |rows| rows.iter().any(|m| m.id == ping.as_str())).await;
     alice2.handle(Cmd::React { room: room.clone(), target: ping.to_string(), key: "👍".into() }).await.unwrap();
-    let reaction_id = loop {
-        let found = next_live(&mut alice2_rx, &room_id).await.into_iter().find_map(|i| match i {
-            Item::Reaction { target, reaction } if target == ping.as_str() && reaction.key == "👍" && reaction.own => Some(reaction.id),
-            _ => None,
-        });
-        if let Some(id) = found {
-            break id;
-        }
-    };
+    until(&mut alice2_rx, "the reaction", reacted).await;
     alice2.handle(Cmd::Send { room: room.clone(), body: "yes".into(), reply_to: Some(ping.to_string()), edit: None }).await.unwrap();
-    let reply_id = loop {
-        let found = next_live(&mut alice2_rx, &room_id).await.into_iter().find_map(|i| match i {
-            Item::Msg(m) if m.body == "yes" && m.reply_to.as_deref() == Some(ping.as_str()) => Some(m.id),
-            _ => None,
-        });
-        if let Some(id) = found {
-            break id;
-        }
-    };
+    let replied = |m: &&Msg| m.body == "yes" && m.own && m.id.starts_with('$') && m.reply.as_ref().is_some_and(|q| q.id == ping.as_str() && q.text == "are you there?");
+    until(&mut alice2_rx, "the reply with its quote", |rows| rows.iter().any(|m| replied(&m))).await;
+    let reply_id = alice2_rx.rows.iter().find(replied).unwrap().id.clone();
     alice2.handle(Cmd::Send { room: room.clone(), body: "yes!".into(), reply_to: None, edit: Some(reply_id.clone()) }).await.unwrap();
-    loop {
-        if next_live(&mut alice2_rx, &room_id).await.iter().any(|i| matches!(i, Item::Edit { target, body, .. } if *target == reply_id && body == "yes!")) {
-            break;
-        }
-    }
-    for target in [reaction_id, reply_id.clone()] {
-        alice2.handle(Cmd::Delete { room: room.clone(), target: target.clone() }).await.unwrap();
-        loop {
-            if next_live(&mut alice2_rx, &room_id).await.iter().any(|i| matches!(i, Item::Redact { target: t } if *t == target)) {
-                break;
-            }
-        }
-    }
+    until(&mut alice2_rx, "the edit", |rows| rows.iter().any(|m| m.id == reply_id && m.body == "yes!" && m.edited)).await;
+    // The same reaction again takes it back.
+    alice2.handle(Cmd::React { room: room.clone(), target: ping.to_string(), key: "👍".into() }).await.unwrap();
+    until(&mut alice2_rx, "the reaction gone", |rows| !reacted(rows)).await;
+    alice2.handle(Cmd::Delete { room: room.clone(), target: reply_id.clone() }).await.unwrap();
+    until(&mut alice2_rx, "the deletion", |rows| rows.iter().any(|m| m.id == reply_id && m.deleted)).await;
     // Media: a picture sent to an encrypted room comes back with its shape, a thumbnail and a
     // viewing copy no larger than their limits, and downloads byte for byte.
     let picture = root.join("holiday photo.png");
     image::RgbImage::from_fn(2400, 1200, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])).save(&picture).unwrap();
     alice2.handle(Cmd::Attach { room: room.clone(), path: picture.clone(), reply_to: None }).await.unwrap();
-    let (photo_id, media) = loop {
-        let found = next_live(&mut alice2_rx, &room_id).await.into_iter().find_map(|i| match i {
-            Item::Msg(m) => m.media.clone().map(|media| (m.id, media)),
-            _ => None,
-        });
-        if let Some(found) = found {
-            break found;
-        }
-    };
+    until(&mut alice2_rx, "the picture", |rows| rows.iter().any(|m| m.media.is_some() && m.id.starts_with('$'))).await;
+    let (photo_id, media) = alice2_rx.rows.iter().find_map(|m| m.media.clone().map(|media| (m.id.clone(), media))).unwrap();
     assert_eq!((media.kind, media.dims, media.name.as_str()), (MediaKind::Image, Some((2400, 1200)), "holiday photo.png"));
     let longest = |bytes: &[u8]| {
         let image = image::load_from_memory(bytes).unwrap();
@@ -381,15 +371,12 @@ async fn login_sync_decrypt_send_recover() {
     })
     .await;
 
-    // After a reload the deleted reply and reaction are gone, not "unable to decrypt".
+    // After a reload the deleted reply is still a deleted message, not "unable to decrypt".
+    alice2.handle(Cmd::Close).await.unwrap();
     alice2.handle(Cmd::Open(room.clone())).await.unwrap();
-    let items = wait_for(&mut alice2_rx, "history after deletions", |e| match e {
-        Ev::History { room, items, .. } if room == room_id => Some(items),
-        _ => None,
-    })
-    .await;
-    assert!(!items.iter().any(|i| matches!(i, Item::Msg(m) if m.id == reply_id)));
-    assert!(!bodies(&items).iter().any(|b| b == UTD), "{:?}", bodies(&items));
+    until(&mut alice2_rx, "the conversation again", |rows| rows.iter().any(|m| m.id == reply_id)).await;
+    assert!(alice2_rx.rows.iter().any(|m| m.id == reply_id && m.deleted));
+    assert!(!bodies(&alice2_rx.rows).iter().any(|b| b == UTD), "{:?}", bodies(&alice2_rx.rows));
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -457,6 +444,10 @@ async fn gui_fixture() {
     say(&bob_dm, "Are we still on for Saturday?").await;
     say(&dm, "Yes, 10 at the station").await;
     say(&bob_dm, "Great, I'll bring the map").await;
+    // The user's last word, which the other side has read.
+    let last = say(&dm, "See you there").await;
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    bob_dm.send_single_receipt(create_receipt::v3::ReceiptType::Read, ReceiptThread::Unthreaded, last).await.unwrap();
 
     let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     req.name = Some("Weekend trip".into());
@@ -481,23 +472,26 @@ async fn gui_fixture() {
     );
     bob_group.send(asks.add_mentions(Mentions::with_user_ids([me.to_owned()]))).await.unwrap();
     carol_group.send(RoomMessageEventContent::text_plain("@room we leave at 9 sharp").add_mentions(Mentions::with_room_mention())).await.unwrap();
-    // A poll with votes from two people, and a shared place.
+    // A poll with votes from two people, as bridges send them (the `org.matrix.msc3381` names),
+    // and a shared place.
+    let text = |text: &str| serde_json::json!({ "org.matrix.msc1767.text": text });
+    let answer = |id: &str, text: &str| serde_json::json!({ "id": id, "org.matrix.msc1767.text": text });
     let poll = serde_json::json!({
-        "m.poll": {
-            "question": { "m.text": [{ "body": "Which day do we leave?" }] },
+        "org.matrix.msc3381.poll.start": {
+            "question": text("Which day do we leave?"),
+            "kind": "org.matrix.msc3381.poll.disclosed",
             "max_selections": 1,
-            "answers": [
-                { "m.id": "fri", "m.text": [{ "body": "Friday evening" }] },
-                { "m.id": "sat", "m.text": [{ "body": "Saturday morning" }] },
-                { "m.id": "sun", "m.text": [{ "body": "Sunday" }] },
-            ],
+            "answers": [answer("fri", "Friday evening"), answer("sat", "Saturday morning"), answer("sun", "Sunday")],
         },
-        "m.text": [{ "body": "Which day do we leave?" }],
+        "org.matrix.msc1767.text": "Which day do we leave?",
     });
-    let poll_id = bob_group.send_raw("m.poll.start", poll).await.unwrap().response.event_id;
+    let poll_id = bob_group.send_raw("org.matrix.msc3381.poll.start", poll).await.unwrap().response.event_id;
     for (who, answer) in [(&carol_group, "sat"), (&group, "fri")] {
-        let vote = serde_json::json!({ "m.selections": [answer], "m.relates_to": { "rel_type": "m.reference", "event_id": poll_id } });
-        who.send_raw("m.poll.response", vote).await.unwrap();
+        let vote = serde_json::json!({
+            "org.matrix.msc3381.poll.response": { "answers": [answer] },
+            "m.relates_to": { "rel_type": "m.reference", "event_id": poll_id },
+        });
+        who.send_raw("org.matrix.msc3381.poll.response", vote).await.unwrap();
     }
     let place = serde_json::json!({ "msgtype": "m.location", "body": "Lakeside cabin", "geo_uri": "geo:52.52008,13.40495" });
     carol_group.send_raw("m.room.message", place).await.unwrap();
@@ -516,6 +510,13 @@ async fn gui_fixture() {
         }],
     });
     bob_group.send_raw("m.room.message", preview).await.unwrap();
+    // Lines about the chat itself: someone comes and goes, the description changes.
+    let dave = login(format!("dave{tag}")).await;
+    group.invite_user_by_id(dave.user_id().unwrap()).await.unwrap();
+    let dave_group = join(&dave, group.room_id()).await;
+    dave_group.leave().await.unwrap();
+    group.set_room_topic("Cabin by the lake").await.unwrap();
+    group.set_room_topic("Cabin by the lake, 14 to 16 June").await.unwrap();
 
     let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     req.name = Some("Mum".into());
@@ -610,29 +611,11 @@ fn file_names_stay_in_their_directory() {
 #[test]
 fn notifications_follow_the_push_rules() {
     let msg = |sender: &str, own, notify| {
-        Item::Msg(Msg {
-            id: "$e".into(),
-            sender: sender.into(),
-            from: matrix_sdk::ruma::user_id!("@a:example.org").to_owned(),
-            body: "hello".into(),
-            own,
-            ts: 1,
-            order: 0,
-            reply_to: None,
-            deleted: false,
-            edited: false,
-            media: None,
-            poll: None,
-            place: None,
-            notify,
-            mentions: Vec::new(),
-            mentioned: false,
-            link: None,
-            reactions: Vec::new(),
-        })
+        let from = matrix_sdk::ruma::user_id!("@a:example.org").to_owned();
+        Msg { sender: sender.into(), body: "hello".into(), own, ts: 1, notify, ..Msg::bare("$e".into(), Kind::Message, from) }
     };
     let now = 60_000;
-    let said = |items: &[Item]| notes(items, now).into_iter().map(|n| format!("{}: {}", n.sender, n.text)).collect::<Vec<_>>();
+    let said = |items: &[Msg]| notes(items, now).into_iter().map(|n| format!("{}: {}", n.sender, n.text)).collect::<Vec<_>>();
     assert_eq!(said(&[msg("Ann", false, true)]), ["Ann: hello"]);
     // Muted or mentions-only chats, and one's own messages from another device.
     assert!(said(&[msg("Ann", false, false)]).is_empty());
@@ -640,7 +623,7 @@ fn notifications_follow_the_push_rules() {
     // Those that qualify, oldest first, past the ones that do not.
     assert_eq!(said(&[msg("Ann", false, true), msg("Me", true, true), msg("Bob", false, true)]), ["Ann: hello", "Bob: hello"]);
     // A burst keeps its last few.
-    let burst: Vec<Item> = (0..10).map(|_| msg("Ann", false, true)).collect();
+    let burst: Vec<Msg> = (0..10).map(|_| msg("Ann", false, true)).collect();
     assert_eq!(said(&burst).len(), MAX_NOTES);
     // History a bridge brings in later is not news.
     assert!(notes(&[msg("Ann", false, true)], now + 3_600_000).is_empty());
@@ -665,26 +648,8 @@ fn mentions_are_found_in_the_body() {
 #[test]
 fn unread_mentions_are_counted_among_the_unread() {
     let msg = |own, mentioned| {
-        Item::Msg(Msg {
-            id: "$e".into(),
-            sender: "Ann".into(),
-            from: matrix_sdk::ruma::user_id!("@a:example.org").to_owned(),
-            body: String::new(),
-            own,
-            ts: 1,
-            order: 0,
-            reply_to: None,
-            deleted: false,
-            edited: false,
-            media: None,
-            poll: None,
-            place: None,
-            notify: true,
-            mentions: Vec::new(),
-            mentioned,
-            link: None,
-            reactions: Vec::new(),
-        })
+        let from = matrix_sdk::ruma::user_id!("@a:example.org").to_owned();
+        Msg { sender: "Ann".into(), own, ts: 1, notify: true, mentioned, ..Msg::bare("$e".into(), Kind::Message, from) }
     };
     // Two unread: the mention before them was read already.
     assert_eq!(unread_mentions(0, 2, &[msg(false, true), msg(false, false), msg(false, true)]), 1);
@@ -748,4 +713,29 @@ fn link_previews_are_read_from_the_message() {
     assert!(link_preview(&bare).is_none(), "nothing to show");
     let long = serde_json::json!({ "com.beeper.linkpreviews": [{ "matched_url": "https://example.org", "og:title": "x".repeat(5000) }] });
     assert_eq!(link_preview(&long).unwrap().title.len(), LINK_TEXT_MAX);
+}
+
+#[test]
+fn timeline_changes_keep_the_rows_and_tell_the_list() {
+    let row = |id: &str| Msg::bare(id.into(), Kind::Message, matrix_sdk::ruma::user_id!("@a:example.org").to_owned());
+    let ids = |rows: &[Msg]| rows.iter().map(|m| m.id.clone()).collect::<Vec<_>>().join("");
+    let mut rows = Vec::new();
+    assert_eq!(apply(&mut rows, Diff::Reset { values: [row("b"), row("c")].into_iter().collect() }), None);
+    assert_eq!(apply(&mut rows, Diff::PushFront { value: row("a") }), Some((0..0, 1)));
+    assert_eq!(apply(&mut rows, Diff::PushBack { value: row("e") }), Some((3..3, 1)));
+    assert_eq!(apply(&mut rows, Diff::Insert { index: 3, value: row("d") }), Some((3..3, 1)));
+    assert_eq!(apply(&mut rows, Diff::Set { index: 1, value: row("B") }), Some((1..2, 1)));
+    assert_eq!(apply(&mut rows, Diff::Append { values: [row("f"), row("g")].into_iter().collect() }), Some((5..5, 2)));
+    assert_eq!(ids(&rows), "aBcdefg");
+    assert_eq!(apply(&mut rows, Diff::Remove { index: 2 }), Some((2..3, 0)));
+    assert_eq!(apply(&mut rows, Diff::PopFront), Some((0..1, 0)));
+    assert_eq!(apply(&mut rows, Diff::PopBack), Some((4..5, 0)));
+    assert_eq!(apply(&mut rows, Diff::Truncate { length: 3 }), Some((3..4, 0)));
+    assert_eq!(ids(&rows), "Bde");
+    // A change that does not fit the rows asks for a redraw instead of panicking.
+    assert_eq!(apply(&mut rows, Diff::Set { index: 9, value: row("x") }), None);
+    assert_eq!(apply(&mut rows, Diff::Remove { index: 3 }), None);
+    assert_eq!(ids(&rows), "Bde");
+    assert_eq!(apply(&mut rows, Diff::Clear), None);
+    assert!(rows.is_empty() && apply(&mut rows, Diff::PopBack).is_none());
 }

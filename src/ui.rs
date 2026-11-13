@@ -24,7 +24,7 @@ use panels::Panel;
 
 use crate::{Keyboard, Palette};
 use crate::bridges::{Flow, Network, Step};
-use crate::backend::{ChatAction, Cmd, DELETED, Ev, Item, Media, MediaKind, Msg, RoomSummary, UTD};
+use crate::backend::{ChatAction, Cmd, Delivery, Ev, Kind, Media, MediaKind, Msg, RoomSummary, UTD};
 
 const NARROW: f32 = 720.;
 // Metrics; `docs/design.md` gives the reasons.
@@ -59,12 +59,17 @@ const MENU_GAP: f32 = 28.;
 const SWIPE_REPLY: f32 = 56.;
 /// How far a message's reactions reach up over its bubble.
 const REACTION_LAP: f32 = 10.;
+/// Joins counted into one line; a longer burst says so of the last hundred.
+const MAX_JOINED: usize = 100;
 /// The reaction a double tap gives.
 const LIKE: &str = QUICK_REACTIONS[1];
 /// A pause this long starts a new run of messages, with its own time.
 const RUN_PAUSE_MS: u64 = 10 * 60 * 1000;
-/// Edits, reactions and deletions kept until the message they target is paged in.
-const MAX_PENDING: usize = 512;
+/// How often the others are told again that the user is still writing.
+const TYPING_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
+/// How long a message sent through a bridge may go without the bridge's word before it is taken
+/// as sent: some bridges never give one.
+const BRIDGE_WAIT_MS: u64 = 2 * 60 * 1000;
 /// Inline thumbnails kept decoded; each is at most 2.6 MB of pixels.
 const MAX_THUMBS: usize = 60;
 /// Sender pictures kept for the open chat; people past that many keep their initials.
@@ -152,8 +157,14 @@ pub struct BeeperApp {
     /// Indices into `rooms` that pass the current view, filter and search.
     shown: Vec<usize>,
     open: Option<OwnedRoomId>,
+    /// Rows of the open conversation, mirrored from the backend's timeline.
     msgs: Vec<Msg>,
-    pending: Vec<Item>,
+    /// Who is writing in the open conversation.
+    typing: Vec<String>,
+    /// When the others were last told that the user is writing.
+    typing_sent: Option<std::time::Instant>,
+    /// Row of the newest message, when it is the user's own.
+    tail: Option<usize>,
     /// Inline thumbnails by event ID, oldest first in `thumb_order`.
     thumbs: HashMap<String, Arc<Image>>,
     thumb_order: VecDeque<String>,
@@ -218,6 +229,11 @@ impl BeeperApp {
         }
 
         subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
+        subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
+            if matches!(ev, InputEvent::Change) {
+                this.typed(cx);
+            }
+        }));
         subs.push(cx.subscribe_in(&search, window, |this, _, ev: &InputEvent, _, cx| match ev {
             InputEvent::Change => this.refilter(cx),
             other => keyboard_follows(other, Keyboard::Text, cx),
@@ -280,7 +296,9 @@ impl BeeperApp {
             shown: Vec::new(),
             open: None,
             msgs: Vec::new(),
-            pending: Vec::new(),
+            typing: Vec::new(),
+            typing_sent: None,
+            tail: None,
             thumbs: HashMap::new(),
             thumb_order: VecDeque::new(),
             asked: HashSet::new(),
@@ -405,52 +423,28 @@ impl BeeperApp {
                     self.close_room(cx);
                 }
             }
-            Ev::History { room, items, reset, more } => {
+            Ev::Timeline { room, diffs } => {
                 if self.open.as_ref() != Some(&room) {
                     return;
                 }
-                self.loading = false;
-                self.more = more;
-                let (mut page, mut relations) = (Vec::new(), Vec::new());
-                for item in items {
-                    match item {
-                        Item::Msg(m) => page.push(m),
-                        other => relations.push(other),
+                for diff in diffs {
+                    match crate::backend::apply(&mut self.msgs, diff) {
+                        Some((old, new)) => self.timeline.splice(old, new),
+                        None => self.timeline.reset(self.msgs.len()),
                     }
                 }
-                if reset {
-                    self.timeline.reset(page.len());
-                    self.msgs = page;
-                    self.pending.clear();
-                } else {
-                    self.timeline.splice(0..0, page.len());
-                    page.append(&mut self.msgs);
-                    self.msgs = page;
-                    // The page may hold the messages that earlier relations were waiting for.
-                    relations.splice(0..0, self.pending.drain(..));
-                }
-                self.relate(relations);
             }
-            Ev::Live { room, items } => {
-                if self.open.as_ref() != Some(&room) || self.loading && self.msgs.is_empty() {
+            Ev::Paged { room, more } => {
+                if self.open.as_ref() != Some(&room) {
                     return;
                 }
-                let mut relations = Vec::new();
-                for item in items {
-                    match item {
-                        Item::Msg(m) => {
-                            // A just-fetched history page can already contain events from this sync.
-                            if self.msgs.iter().rev().take(64).any(|x| x.id == m.id) {
-                                continue;
-                            }
-                            let at = self.msgs.len();
-                            self.msgs.push(m);
-                            self.timeline.splice(at..at, 1);
-                        }
-                        other => relations.push(other),
-                    }
+                (self.loading, self.more) = (false, more);
+            }
+            Ev::Typing { room, names } => {
+                if self.open.as_ref() != Some(&room) {
+                    return;
                 }
-                self.relate(relations);
+                self.typing = names;
             }
             Ev::Online(online) => self.offline = !online,
             Ev::Error(e) => {
@@ -538,14 +532,16 @@ impl BeeperApp {
         }
     }
 
-    /// Applies edits, reactions and deletions to loaded messages; the rest wait in `pending`.
-    fn relate(&mut self, items: Vec<Item>) {
-        for item in items {
-            match apply(&mut self.msgs, &item) {
-                Some(ix) => self.timeline.splice(ix..ix + 1, 1),
-                None if self.pending.len() < MAX_PENDING => self.pending.push(item),
-                None => {}
-            }
+    /// Tells the others that the user is writing, every few seconds while they are, and when
+    /// they stop.
+    fn typed(&mut self, cx: &mut Context<Self>) {
+        let Some(room) = self.open.clone() else { return };
+        let writing = !self.composer.read(cx).value().is_empty();
+        let fresh = self.typing_sent.is_some_and(|at| at.elapsed() < TYPING_EVERY);
+        if writing != self.typing_sent.is_some() || writing && !fresh {
+            self.typing_sent = writing.then(std::time::Instant::now);
+            // Not worth an error when the channel is busy: the next keystroke tries again.
+            let _ = self.cmd.try_send(Cmd::Typing(room, writing));
         }
     }
 
@@ -781,13 +777,8 @@ impl BeeperApp {
     /// Adds the reaction, or removes it when it is already ours.
     fn toggle_reaction(&mut self, target: &str, key: &str, cx: &mut Context<Self>) {
         let Some(room) = self.open.clone() else { return };
-        let mine = self.msgs.iter().find(|m| m.id == target).and_then(|m| m.reactions.iter().find(|r| r.own && r.key == key));
-        let cmd = match mine {
-            Some(r) => Cmd::Delete { room, target: r.id.clone() },
-            None => Cmd::React { room, target: target.to_owned(), key: key.to_owned() },
-        };
         self.picked = None;
-        self.send(cmd, cx);
+        self.send(Cmd::React { room, target: target.to_owned(), key: key.to_owned() }, cx);
     }
 
     /// Opens the chat a tapped notification was for.
@@ -818,9 +809,14 @@ impl BeeperApp {
     }
 
     fn close_room(&mut self, cx: &mut Context<Self>) {
-        self.open = None;
+        if let Some(room) = self.open.take() {
+            if self.typing_sent.take().is_some() {
+                let _ = self.cmd.try_send(Cmd::Typing(room, false));
+            }
+            self.send(Cmd::Close, cx);
+        }
         self.msgs.clear();
-        self.pending.clear();
+        self.typing.clear();
         self.asked.clear();
         self.thumb_order.clear();
         for (_, image) in self.thumbs.drain() {
@@ -1146,28 +1142,34 @@ impl BeeperApp {
         let network = room.and_then(|r| r.network.clone());
         let header_avatar = room.map(|r| avatar(&r.name, self.avatars.get(&r.id), 36., cx));
         let dm = room.is_some_and(|r| r.dm);
+        // The newest message, when it is the user's: the one whose way to the others is told.
+        self.tail = self.msgs.iter().rposition(|m| m.kind == Kind::Message).filter(|&ix| self.msgs[ix].own);
         let timeline = list(
             self.timeline.clone(),
             cx.processor(move |this, ix: usize, window, cx| {
                 this.want_thumb(ix);
                 let m = &this.msgs[ix];
+                if m.kind != Kind::Message {
+                    return this.render_line(ix, cx);
+                }
                 // What a bubble has inside: its share of the row, less its padding and a mention's bar.
                 let row = f32::from(window.viewport_size().width) - 2. * GUTTER;
                 let room = if narrow { row * BUBBLE_SHARE } else { BUBBLE_W } - 2. * GAP - 9.;
                 let attachment = m.media.as_ref().filter(|_| !m.deleted).map(|media| this.render_media(m, media, room, cx));
-                let prev = ix.checked_sub(1).map(|p| &this.msgs[p]);
-                let next = this.msgs.get(ix + 1);
-                let new_day = prev.is_none_or(|p| day(p.ts) != day(m.ts));
-                // A run: one person's messages with no long pause between them.
-                let joined = |a: &Msg, b: &Msg| a.from == b.from && day(a.ts) == day(b.ts) && b.ts.saturating_sub(a.ts) < RUN_PAUSE_MS;
+                // Rows that draw nothing do not come between two messages.
+                let drawn = |row: &&Msg| !matches!(row.kind, Kind::Hidden | Kind::Status { .. });
+                let prev = this.msgs[..ix].iter().rev().find(drawn);
+                let next = this.msgs[ix + 1..].iter().find(drawn);
+                // A run: one person's messages with no long pause, and no other row, between them.
+                let joined = |a: &Msg, b: &Msg| b.kind == a.kind && a.from == b.from && b.ts.saturating_sub(a.ts) < RUN_PAUSE_MS;
                 let first = prev.is_none_or(|p| !joined(p, m));
                 let last = next.is_none_or(|n| !joined(m, n));
                 let faded = m.deleted || m.body == UTD;
                 let picked = this.picked.as_deref() == Some(m.id.as_str());
-                let quote = m.reply_to.as_ref().map(|id| match this.msgs.iter().rfind(|x| &x.id == id) {
-                    Some(q) => (id.clone(), q.sender.clone(), q.summary()),
-                    None => (id.clone(), String::new(), "Message unavailable".to_owned()),
-                });
+                let quote = m.reply.as_ref().map(|quote| (quote.id.clone(), quote.sender.clone(), quote.text.clone()));
+                let state = if m.own { this.delivery_line(ix, dm) } else { None };
+                // Still only here, not yet with the server.
+                let leaving = m.delivery == Delivery::Sending && !m.id.starts_with('$');
                 let (id, held) = (m.id.clone(), m.id.clone());
                 let swiped = this.swipe.as_ref().filter(|(on, _)| *on == m.id).map_or(0., |(_, far)| far.clamp(-SWIPE_REPLY - 16., SWIPE_REPLY + 16.));
                 let ink = HighlightStyle { color: Some(p.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
@@ -1266,18 +1268,11 @@ impl BeeperApp {
                     .children(poll_card)
                     .children(place_card)
                     .when(m.edited && !m.deleted, |el| el.child(div().text_size(px(12.)).text_color(p.faint).child("Edited")));
-                // One chip per emoji, in order of first use.
-                let mut chips: Vec<(&str, usize, bool)> = Vec::new();
-                for r in &m.reactions {
-                    match chips.iter_mut().find(|c| c.0 == r.key) {
-                        Some(c) => (c.1, c.2) = (c.1 + 1, c.2 || r.own),
-                        None => chips.push((&r.key, 1, r.own)),
-                    }
-                }
                 // Badges pinned over the bubble's lower edge, ringed in the ground's colour: standing
                 // free under it they read as small messages of their own.
-                let reactions = (!chips.is_empty()).then(|| {
-                    h_flex().flex_wrap().gap(px(2.)).mt(px(-REACTION_LAP)).px(px(8.)).children(chips.into_iter().enumerate().map(|(n, (key, count, mine))| {
+                let reactions = (!m.reactions.is_empty()).then(|| {
+                    h_flex().flex_wrap().gap(px(2.)).mt(px(-REACTION_LAP)).px(px(8.)).children(m.reactions.iter().enumerate().map(|(n, reaction)| {
+                        let (key, count, mine) = (reaction.key.as_str(), reaction.count, reaction.own);
                         let (id, key_owned) = (m.id.clone(), key.to_owned());
                         h_flex()
                             .id(SharedString::from(format!("{}-reaction-{n}", m.id)))
@@ -1310,11 +1305,6 @@ impl BeeperApp {
                     .relative()
                     .px(px(GUTTER))
                     .pt(if first { px(GAP) } else { px(3.) })
-                    .when(new_day, |el| {
-                        el.child(
-                            div().w_full().pb(px(GAP)).flex().justify_center().text_size(px(12.)).text_color(p.faint).child(day_label(m.ts)),
-                        )
-                    })
                     .when(faces && first, |el| {
                         el.child(
                             div()
@@ -1363,6 +1353,7 @@ impl BeeperApp {
                                     .gap(px(6.))
                                     // Addressed to the user: the one place a message carries colour.
                                     .when(m.mentioned, |el| el.child(div().w(px(3.)).flex_none().rounded_full().bg(p.accent)))
+                                    .when(leaving, |el| el.opacity(0.6))
                                     .child(bubble),
                             ),
                     )
@@ -1372,7 +1363,15 @@ impl BeeperApp {
                             .pl(side)
                             .map(|el| if m.own { el.items_end() } else { el.items_start() })
                             .children(reactions)
-                            .when(last, |el| el.child(div().px(px(GAP)).pt(px(4.)).text_size(px(12.)).text_color(p.faint).child(clock(m.ts)))),
+                            .when(last || state.is_some(), |el| {
+                                let failed = state.as_ref().is_some_and(|(_, failed)| *failed);
+                                let text = match (state, last) {
+                                    (Some((state, _)), true) => format!("{} \u{b7} {state}", clock(m.ts)),
+                                    (Some((state, _)), false) => state,
+                                    (None, _) => clock(m.ts),
+                                };
+                                el.child(div().px(px(GAP)).pt(px(4.)).text_size(px(12.)).text_color(if failed { p.negative } else { p.faint }).child(text))
+                            }),
                     )
                     .into_any_element()
             }),
@@ -1415,6 +1414,12 @@ impl BeeperApp {
                         el.child(div().p(px(GUTTER)).text_size(px(14.)).text_color(p.faint).child("Loading messages..."))
                     }),
             )
+            .when(!self.typing.is_empty(), |el| {
+                let names: Vec<&str> = self.typing.iter().map(String::as_str).collect();
+                let (who, many) = people(&names);
+                let line = format!("{who} {} typing...", if many { "are" } else { "is" });
+                el.child(div().px(px(GUTTER + GAP)).pt(px(6.)).text_size(px(12.)).text_color(p.faint).child(line))
+            })
             .children(self.render_compose_strip(cx))
             .when(self.uploads > 0, |el| {
                 el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(px(12.)).text_color(p.faint).child("Sending attachment..."))
@@ -1496,6 +1501,75 @@ impl BeeperApp {
             .into_any_element()
     }
 
+    /// A row that is not a message: a day, a line about the chat, the mark of what is new.
+    fn render_line(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let m = &self.msgs[ix];
+        let (text, ink) = match &m.kind {
+            Kind::Day => (day_label(m.ts), p.faint),
+            Kind::Unread => ("New".to_owned(), p.accent_ink),
+            Kind::Notice => (m.body.clone(), p.faint),
+            // Joins that follow one another are told once, by the last of them.
+            Kind::Joined if self.msgs.get(ix + 1).is_none_or(|next| next.kind != Kind::Joined) => {
+                let mut names: Vec<&str> =
+                    self.msgs[..=ix].iter().rev().take(MAX_JOINED).take_while(|m| m.kind == Kind::Joined).map(|m| m.sender.as_str()).collect();
+                names.reverse();
+                (format!("{} joined", people(&names).0), p.faint)
+            }
+            _ => return div().into_any_element(),
+        };
+        div().w_full().px(px(GUTTER)).pt(px(GAP)).flex().justify_center().text_size(px(12.)).text_color(ink).child(text).into_any_element()
+    }
+
+    /// What became of the user's message at `ix`, and whether that is a failure. Said of the
+    /// newest message of the chat when it is the user's, and of any that failed.
+    fn delivery_line(&self, ix: usize, dm: bool) -> Option<(String, bool)> {
+        let m = &self.msgs[ix];
+        // The bridge's word on it follows it; the latest counts, except as a step back from delivered.
+        let mut state = m.delivery.clone();
+        for row in &self.msgs[ix + 1..] {
+            if let Kind::Status { target, delivery } = &row.kind
+                && *target == m.id
+                && !(state == Delivery::Delivered && *delivery == Delivery::Sent)
+            {
+                state = delivery.clone();
+            }
+        }
+        if let Delivery::Failed(why) = &state {
+            return Some((if why.is_empty() { "Not sent".to_owned() } else { format!("Not sent: {why}") }, true));
+        }
+        if self.tail != Some(ix) {
+            return None;
+        }
+        // A read receipt on this row or under it: that person has read this far.
+        let mut readers: Vec<&OwnedUserId> = Vec::new();
+        for user in self.msgs[ix..].iter().flat_map(|row| &row.seen) {
+            if !readers.contains(&user) {
+                readers.push(user);
+            }
+        }
+        if !readers.is_empty() {
+            if dm {
+                return Some(("Seen".to_owned(), false));
+            }
+            let named: Vec<&str> =
+                readers.iter().filter_map(|user| self.msgs.iter().rev().find(|m| m.from == **user && !m.sender.is_empty())).map(|m| m.sender.as_str()).collect();
+            let who = if named.len() == readers.len() { people(&named).0 } else { readers.len().to_string() };
+            return Some((format!("Seen by {who}"), false));
+        }
+        let waited = (chrono::Utc::now().timestamp_millis() as u64).saturating_sub(m.ts) > BRIDGE_WAIT_MS;
+        Some((
+            match state {
+                Delivery::Sending if m.id.starts_with('$') && waited => "Sent",
+                Delivery::Sending => "Sending...",
+                Delivery::Delivered => "Delivered",
+                Delivery::Sent | Delivery::Failed(_) => "Sent",
+            }
+            .to_owned(),
+            false,
+        ))
+    }
+
     /// Picks a message: its reactions and actions open where it was touched.
     fn pick(&mut self, id: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
         (self.picked, self.picked_at) = (Some(id.to_owned()), at);
@@ -1528,6 +1602,9 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let m = self.msgs.iter().find(|m| Some(&m.id) == self.picked.as_ref()).filter(|m| !m.deleted)?;
         let (id, body, own) = (m.id.clone(), m.body.clone(), m.own);
+        // A message that has not reached the server can be sent again or dropped, nothing else.
+        let sent = id.starts_with('$');
+        let failed = matches!(m.delivery, Delivery::Failed(_));
         let link = m.link.as_ref().map(|link| link.url.clone()).or_else(|| urls(&m.body).into_iter().next().map(|r| m.body[r].to_owned()));
         let reactions = h_flex().children(QUICK_REACTIONS.iter().enumerate().map(|(n, key)| {
             let id = id.clone();
@@ -1546,22 +1623,36 @@ impl BeeperApp {
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, key, cx)))
                 .child(*key)
         }));
-        let mut rows = vec![
-            menu_row("reply", IconName::Reply, "Reply", p.text, cx).on_click(cx.listener({
+        let mut rows = Vec::new();
+        if sent {
+            rows.push(menu_row("reply", IconName::Reply, "Reply", p.text, cx).on_click(cx.listener({
                 let id = id.clone();
                 move |this, _, window, cx| this.start_compose(Compose::Reply(id.clone()), window, cx)
-            })),
-            menu_row("copy", IconName::Copy, "Copy text", p.text, cx).on_click(cx.listener(move |this, _, _, cx| {
-                crate::copy(cx, body.clone());
-                this.picked = None;
-                cx.notify();
-            })),
-        ];
-        if own {
-            rows.push(menu_row("edit", IconName::Pencil, "Edit", p.text, cx).on_click(cx.listener({
-                let id = id.clone();
-                move |this, _, window, cx| this.start_compose(Compose::Edit(id.clone()), window, cx)
             })));
+        } else if failed {
+            rows.push(menu_row("retry", IconName::RotateCw, "Try again", p.text, cx).on_click(cx.listener({
+                let id = id.clone();
+                move |this, _, _, cx| {
+                    if let Some(room) = this.open.clone() {
+                        this.send(Cmd::Retry { room, target: id.clone() }, cx);
+                    }
+                    this.picked = None;
+                    cx.notify();
+                }
+            })));
+        }
+        rows.push(menu_row("copy", IconName::Copy, "Copy text", p.text, cx).on_click(cx.listener(move |this, _, _, cx| {
+            crate::copy(cx, body.clone());
+            this.picked = None;
+            cx.notify();
+        })));
+        if own {
+            if sent {
+                rows.push(menu_row("edit", IconName::Pencil, "Edit", p.text, cx).on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _, window, cx| this.start_compose(Compose::Edit(id.clone()), window, cx)
+                })));
+            }
             rows.push(menu_row("delete", IconName::Trash, "Delete", p.negative, cx).on_click(cx.listener({
                 let id = id.clone();
                 move |this, _, _, cx| {
@@ -1584,7 +1675,7 @@ impl BeeperApp {
         // Under the finger when there is room, over it otherwise; never off the screen.
         let (top, bottom) = crate::insets();
         let view = window.viewport_size();
-        let height = 16. + TAP * (1 + rows.len()) as f32;
+        let height = 16. + TAP * (usize::from(sent) + rows.len()) as f32;
         let floor = f32::from(view.height) - bottom - GUTTER;
         let at = self.picked_at;
         let left = (f32::from(at.x) - MENU_W / 2.).clamp(GUTTER, (f32::from(view.width) - MENU_W - GUTTER).max(GUTTER));
@@ -1598,7 +1689,7 @@ impl BeeperApp {
                 .bg(gpui_kit::black().opacity(0.35))
                 .occlude()
                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                    if event.click_count() >= 2 {
+                    if sent && event.click_count() >= 2 {
                         this.toggle_reaction(&id, LIKE, cx);
                     }
                     this.picked = None;
@@ -1616,7 +1707,7 @@ impl BeeperApp {
                         .bg(p.raised)
                         // A tap between the rows is not a tap outside the panel.
                         .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(reactions)
+                        .when(sent, |el| el.child(reactions))
                         .children(rows),
                 )
                 .into_any_element(),
@@ -1804,6 +1895,18 @@ fn chat_actions(room: &RoomSummary) -> [(&'static str, IconName, ChatAction); 5]
     ]
 }
 
+/// Names as a phrase, and whether it stands for more than one person: "Ann", "Ann and Bob",
+/// "Ann, Bob and 3 others".
+fn people(names: &[&str]) -> (String, bool) {
+    match names {
+        [] => (String::new(), false),
+        [one] => ((*one).to_owned(), *one == "You"),
+        [one, two] => (format!("{one} and {two}"), true),
+        [one, two, three] => (format!("{one}, {two} and {three}"), true),
+        [one, two, rest @ ..] => (format!("{one}, {two} and {} others", rest.len()), true),
+    }
+}
+
 /// Where a link preview's picture is kept among the thumbnails.
 fn link_key(message: &str) -> String {
     format!("{message}#link")
@@ -1935,10 +2038,6 @@ fn file_size(bytes: u64) -> String {
     }
 }
 
-fn day(ts_ms: u64) -> Option<chrono::NaiveDate> {
-    local(ts_ms).map(|t| t.date_naive())
-}
-
 /// Separator between days: Today, Yesterday, the weekday within a week, else the date.
 fn day_label(ts_ms: u64) -> String {
     let Some(t) = local(ts_ms) else { return String::new() };
@@ -2004,49 +2103,6 @@ fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperA
             }
         })
         .detach();
-    }
-}
-
-/// Applies an edit, reaction or deletion to its loaded target and returns the row to redraw;
-/// `None` when the target is not loaded.
-fn apply(msgs: &mut [Msg], item: &Item) -> Option<usize> {
-    let find = |msgs: &[Msg], id: &str| msgs.iter().rposition(|m| m.id == id);
-    match item {
-        Item::Edit { target, body, mentions } => {
-            let ix = find(msgs, target)?;
-            (msgs[ix].body, msgs[ix].mentions, msgs[ix].edited) = (body.clone(), mentions.clone(), true);
-            Some(ix)
-        }
-        Item::Reaction { target, reaction } => {
-            let ix = find(msgs, target)?;
-            if !msgs[ix].reactions.iter().any(|r| r.id == reaction.id) {
-                msgs[ix].reactions.push(reaction.clone());
-            }
-            Some(ix)
-        }
-        Item::Poll { target, from, ts, update } => {
-            let ix = find(msgs, target)?;
-            let by_creator = msgs[ix].from == *from;
-            if let Some(poll) = &mut msgs[ix].poll {
-                poll.update(from.as_str(), *ts, update, by_creator);
-            }
-            Some(ix)
-        }
-        Item::Redact { target } => {
-            if let Some(ix) = find(msgs, target) {
-                let m = &mut msgs[ix];
-                (m.body, m.deleted, m.reply_to) = (DELETED.to_owned(), true, None);
-                // Ranges into the old body.
-                m.mentions.clear();
-                m.reactions.clear();
-                (m.poll, m.place) = (None, None);
-                return Some(ix);
-            }
-            let ix = msgs.iter().rposition(|m| m.reactions.iter().any(|r| &r.id == target))?;
-            msgs[ix].reactions.retain(|r| &r.id != target);
-            Some(ix)
-        }
-        Item::Msg(_) => None,
     }
 }
 

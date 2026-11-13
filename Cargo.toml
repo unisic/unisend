@@ -25,6 +25,9 @@ image = { version = "0.25", default-features = false }
 mime_guess = "2"
 qrcode = { version = "0.14", default-features = false }
 matrix-sdk = { version = "=0.19.1", default-features = false, features = ["e2e-encryption", "automatic-room-key-forwarding", "sqlite", "bundled-sqlite", "rustls-aws-lc-rs"] }
+# The SDK's own conversation model: local echo and send queue, read receipts, reactions, edits,
+# polls and membership changes as ready-made timeline items. Same release as matrix-sdk.
+matrix-sdk-ui = { version = "=0.19.1", default-features = false, features = ["rustls-aws-lc-rs"] }
 # Only for `secret_storage::DecodeError`, which matrix-sdk does not re-export. Already in the tree.
 matrix-sdk-crypto = { version = "=0.19.1", default-features = false }
 # gpui-kit re-exports gpui (gpui-pre 0.3.6) and, on desktop, its platform layer.

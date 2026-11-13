@@ -4,7 +4,10 @@
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -43,16 +46,14 @@ use matrix_sdk::{
         events::{
             AnySyncMessageLikeEvent, AnySyncTimelineEvent, Mentions, StateEventType, SyncMessageLikeEvent,
             receipt::ReceiptThread,
-            AnyMessageLikeEventContent,
-            reaction::ReactionEventContent,
-            relation::Annotation,
             room::{
                 EncryptedFile, MediaSource,
                 message::{
-                    AddMentions, MessageType, Relation, RoomMessageEventContent,
+                    AddMentions, MessageType, Relation, RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
                     sanitize::remove_plain_reply_fallback,
                 },
             },
+            sticker::StickerEventContent,
         },
         media::Method,
         serde::{JsonObject, Raw},
@@ -68,7 +69,7 @@ use crate::beeper;
 use crate::bridges::{self, Flow, Network, Step};
 
 const CHANNEL_CAP: usize = 64;
-const PAGE: u32 = 40;
+const PAGE: u16 = 40;
 const MIN_ITEMS: usize = 15;
 const MAX_PAGES_PER_REQUEST: usize = 5;
 const SYNC_TIMELINE_LIMIT: u32 = 10;
@@ -96,7 +97,11 @@ pub enum Cmd {
     SubmitCode(String),
     Recover(String),
     Open(OwnedRoomId),
+    /// The conversation left the screen.
+    Close,
     LoadOlder,
+    /// The user is, or stopped, writing in the chat.
+    Typing(OwnedRoomId, bool),
     Chat(OwnedRoomId, ChatAction),
     Avatars(Vec<OwnedRoomId>),
     /// The picture of a person in a chat, as that chat shows them.
@@ -126,8 +131,10 @@ pub enum Cmd {
     React { room: OwnedRoomId, target: String, key: String },
     /// Sets the user's vote on a poll to `answers`; empty withdraws it.
     Vote { room: OwnedRoomId, target: String, unstable: bool, answers: Vec<String> },
-    /// Redacts a message or a reaction.
+    /// Deletes a message for everyone; one that has not left yet is not sent.
     Delete { room: OwnedRoomId, target: String },
+    /// Sends again a message that failed to leave.
+    Retry { room: OwnedRoomId, target: String },
 }
 
 pub enum Ev {
@@ -141,9 +148,12 @@ pub enum Ev {
     NeedRecovery(bool),
     Rooms(Vec<RoomSummary>),
     RoomGone(OwnedRoomId),
-    /// History page for `room`, oldest first. `reset` replaces the timeline.
-    History { room: OwnedRoomId, items: Vec<Item>, reset: bool, more: bool },
-    Live { room: OwnedRoomId, items: Vec<Item> },
+    /// Changes to the rows of the open conversation, in order.
+    Timeline { room: OwnedRoomId, diffs: Vec<Diff> },
+    /// A request for older messages is done; `more` says whether there are older ones still.
+    Paged { room: OwnedRoomId, more: bool },
+    /// Who is writing in the open conversation right now.
+    Typing { room: OwnedRoomId, names: Vec<String> },
     /// Thumbnail bytes as served (PNG, JPEG, ...).
     Avatar(OwnedRoomId, Vec<u8>),
     Face(OwnedUserId, Vec<u8>),
@@ -223,7 +233,9 @@ impl RoomSummary {
 
 #[derive(Clone)]
 pub struct Msg {
+    /// The event's ID; a message still on its way out has its transaction ID instead.
     pub id: String,
+    pub kind: Kind,
     pub sender: String,
     pub from: OwnedUserId,
     pub body: String,
@@ -232,8 +244,8 @@ pub struct Msg {
     pub ts: u64,
     /// `com.beeper.hs.order`; 0 on other homeservers.
     pub order: i64,
-    /// Event ID this message replies to.
-    pub reply_to: Option<String>,
+    /// The message this one replies to.
+    pub reply: Option<Quote>,
     pub deleted: bool,
     pub edited: bool,
     /// Attachment; `body` is then its caption, possibly empty.
@@ -248,8 +260,79 @@ pub struct Msg {
     pub mentioned: bool,
     /// Preview of a link in the message, when the sender's client or bridge attached one.
     pub link: Option<Link>,
-    /// Filled by the UI from `Item::Reaction`.
+    /// One per emoji, in the order they were first used.
     pub reactions: Vec<Reaction>,
+    /// Where a message of the user's is on its way to the others.
+    pub delivery: Delivery,
+    /// The other people whose read receipt stands on this row: they have read this far.
+    pub seen: Vec<OwnedUserId>,
+}
+
+/// What a row of a conversation is.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Kind {
+    Message,
+    /// A line about the chat itself, in `body`: someone left, the name changed.
+    Notice,
+    /// `sender` joined. Joins that follow one another are told on one line.
+    Joined,
+    /// The day the rows under it belong to.
+    Day,
+    /// The rows under it are new since the user last read the chat.
+    Unread,
+    /// A bridge's word on what the network did with the user's message `target`.
+    Status { target: String, delivery: Delivery },
+    /// Takes a place in the list and shows nothing.
+    Hidden,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Delivery {
+    /// Not confirmed yet: by the homeserver, or by the bridge to the network.
+    Sending,
+    Sent,
+    /// The network handed it to the people in the chat.
+    Delivered,
+    /// With the reason, when one was given.
+    Failed(String),
+}
+
+/// The message a reply answers, as far as it is known.
+#[derive(Clone)]
+pub struct Quote {
+    pub id: String,
+    /// Empty when the message could not be loaded.
+    pub sender: String,
+    pub text: String,
+}
+
+impl Msg {
+    /// A row with nothing on it yet.
+    fn bare(id: String, kind: Kind, from: OwnedUserId) -> Self {
+        Self {
+            id,
+            kind,
+            sender: String::new(),
+            from,
+            body: String::new(),
+            own: false,
+            ts: 0,
+            order: 0,
+            reply: None,
+            deleted: false,
+            edited: false,
+            media: None,
+            poll: None,
+            place: None,
+            notify: false,
+            mentions: Vec::new(),
+            mentioned: false,
+            link: None,
+            reactions: Vec::new(),
+            delivery: Delivery::Sent,
+            seen: Vec::new(),
+        }
+    }
 }
 
 /// A link's preview as it came with the message (`com.beeper.linkpreviews`, MSC4095). Nothing is
@@ -312,22 +395,67 @@ pub struct Media {
 
 #[derive(Clone)]
 pub struct Reaction {
-    /// The reaction event, which is what removing it redacts.
-    pub id: String,
     pub key: String,
+    /// How many people gave it.
+    pub count: usize,
     pub own: bool,
 }
 
-// Nearly every item is a message, so boxing it would add an allocation to the common case.
-#[allow(clippy::large_enum_variant)]
-pub enum Item {
-    Msg(Msg),
-    Edit { target: String, body: String, mentions: Vec<std::ops::Range<usize>> },
-    Reaction { target: String, reaction: Reaction },
-    /// A vote on a poll, or its end, by `from` at `ts`.
-    Poll { target: String, from: OwnedUserId, ts: u64, update: Update },
-    /// A message or a reaction was deleted.
-    Redact { target: String },
+/// One change to the rows of the open conversation, as the SDK's timeline reports it.
+pub type Diff = matrix_sdk_ui::eyeball_im::VectorDiff<Msg>;
+
+/// Applies a change to `rows`. Returns the rows it replaced and how many stand there now, for a
+/// list that mirrors them; `None` when all of them changed.
+pub fn apply(rows: &mut Vec<Msg>, diff: Diff) -> Option<(std::ops::Range<usize>, usize)> {
+    let len = rows.len();
+    Some(match diff {
+        Diff::Append { values } => {
+            rows.extend(values);
+            (len..len, rows.len() - len)
+        }
+        Diff::PushBack { value } => {
+            rows.push(value);
+            (len..len, 1)
+        }
+        Diff::PushFront { value } => {
+            rows.insert(0, value);
+            (0..0, 1)
+        }
+        Diff::Insert { index, value } if index <= len => {
+            rows.insert(index, value);
+            (index..index, 1)
+        }
+        Diff::Set { index, value } if index < len => {
+            rows[index] = value;
+            (index..index + 1, 1)
+        }
+        Diff::Remove { index } if index < len => {
+            rows.remove(index);
+            (index..index + 1, 0)
+        }
+        Diff::PopBack if len > 0 => {
+            rows.pop();
+            (len - 1..len, 0)
+        }
+        Diff::PopFront if len > 0 => {
+            rows.remove(0);
+            (0..1, 0)
+        }
+        Diff::Truncate { length } if length <= len => {
+            rows.truncate(length);
+            (length..len, 0)
+        }
+        Diff::Reset { values } => {
+            *rows = values.into_iter().collect();
+            return None;
+        }
+        Diff::Clear => {
+            rows.clear();
+            return None;
+        }
+        // An index past the end: the two sides disagree, which a full redraw at least shows.
+        _ => return None,
+    })
 }
 
 /// The command channel, for what happens outside the UI: a reply typed into a notification.
@@ -391,13 +519,14 @@ struct State {
     ev: mpsc::Sender<Ev>,
     client: Option<Client>,
     login_request: Option<String>,
-    /// Room whose history is open and its pagination token.
-    open: Option<(OwnedRoomId, Option<String>)>,
+    /// The conversation on screen.
+    open: Option<timeline::Open>,
     rooms: Rooms,
     fetches: Arc<tokio::sync::Semaphore>,
     /// Push rules, kept current by the SDK. One instance: each registers an event handler.
     notif: Option<NotificationSettings>,
-    incognito: bool,
+    /// Read by the tasks that follow an open conversation.
+    incognito: Arc<AtomicBool>,
     /// Sync and recovery watchers, stopped on sign-out.
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -421,7 +550,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     let _ = std::fs::remove_dir_all(media_dir(&dir));
     let mut st = State { dir, homeserver, http, ev, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
-        incognito: true, tasks: Vec::new() };
+        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new() };
     match st.restore().await {
         Ok(true) => {}
         Ok(false) => st.emit(Ev::NeedLogin).await,
@@ -485,6 +614,10 @@ impl State {
     }
 
     async fn go_live(&mut self, client: Client) {
+        // The conversations' store of events; it has to see every sync from the first one on.
+        if let Err(e) = client.event_cache().subscribe() {
+            log::warn!("event cache: {e}");
+        }
         let notif = client.notification_settings().await;
         self.tasks = vec![
             tokio::spawn(watch_recovery(client.clone(), self.ev.clone())),
@@ -551,6 +684,9 @@ impl State {
                         e => anyhow::Error::new(e).context("Recovery code was not accepted"),
                     });
                 }
+                if let Some(open) = &self.open {
+                    timeline::unlock(&open.timeline).await;
+                }
                 let incomplete = recovery.state() == RecoveryState::Incomplete;
                 self.emit(Ev::NeedRecovery(incomplete)).await;
                 if incomplete {
@@ -559,16 +695,29 @@ impl State {
                 }
             }
             Cmd::Open(room_id) => {
-                self.open = Some((room_id.clone(), None));
+                // The old conversation stops being followed before the new one starts.
+                self.open = None;
                 crate::clear_notification(room_id.as_str());
-                let newest = self.page(room_id.clone(), true).await?;
-                if let Err(e) = mark_read(&self.room(&room_id)?, newest, self.incognito).await {
-                    log::warn!("mark {room_id} read: {e:#}");
+                let room = self.room(&room_id)?;
+                let open = timeline::open(&room, &self.ev, self.incognito.clone()).await?;
+                self.older(&open, true);
+                self.open = Some(open);
+            }
+            Cmd::Close => self.open = None,
+            Cmd::LoadOlder => {
+                if let Some(open) = &self.open {
+                    self.older(open, false);
                 }
             }
-            Cmd::LoadOlder => {
-                if let Some((room_id, Some(_))) = &self.open {
-                    self.page(room_id.clone(), false).await?;
+            Cmd::Typing(room_id, on) => {
+                // Not telling who reads includes not telling who is about to answer.
+                if !self.incognito.load(Ordering::Relaxed) {
+                    let room = self.room(&room_id)?;
+                    tokio::spawn(async move {
+                        if let Err(e) = room.typing_notice(on).await {
+                            log::debug!("typing notice: {e}");
+                        }
+                    });
                 }
             }
             Cmd::Chat(room_id, action) => {
@@ -579,7 +728,7 @@ impl State {
                     ChatAction::Unread(true) => room.set_unread_flag(true).await?,
                     ChatAction::Unread(false) => {
                         let resp = room.messages(MessagesOptions::backward()).await?;
-                        mark_read(&room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito).await?;
+                        mark_read(&room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito.load(Ordering::Relaxed)).await?;
                     }
                     ChatAction::Mute(on) => {
                         let notif = self.notif.as_ref().context("Not signed in")?;
@@ -604,7 +753,7 @@ impl State {
                         room.set_account_data_raw(DONE.into(), Raw::new(&done)?.cast_unchecked()).await?;
                         // Without a server order the rule compares timestamps, which never archive an unread chat.
                         if order.is_none() || mark_read_on_archive(self.client()?).await {
-                            mark_read(&room, newest.and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito).await?;
+                            mark_read(&room, newest.and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito.load(Ordering::Relaxed)).await?;
                         }
                     }
                 }
@@ -704,7 +853,7 @@ impl State {
                     let _ = ev.send(Ev::Attached).await;
                 });
             }
-            Cmd::Incognito(on) => self.incognito = on,
+            Cmd::Incognito(on) => self.incognito.store(on, Ordering::Relaxed),
             Cmd::Networks => {
                 let (api, ev) = (self.api()?, self.ev.clone());
                 tokio::spawn(async move { panel(&ev, api.networks().await.map(Ev::Networks)).await });
@@ -765,42 +914,63 @@ impl State {
                 }
             }
             Cmd::Send { room, body, reply_to, edit } => {
-                let room = self.room(&room)?;
-                let text = RoomMessageEventContent::text_plain(body);
-                let content: AnyMessageLikeEventContent = match (edit, reply_to) {
-                    (Some(id), _) => {
-                        room.make_edit_event(&EventId::parse(id)?, EditedContent::RoomMessage(text.into())).await?
-                    }
-                    (None, Some(id)) => {
-                        let reply = Reply {
-                            event_id: EventId::parse(id)?,
-                            enforce_thread: EnforceThread::MaybeThreaded,
-                            add_mentions: AddMentions::Yes,
-                        };
-                        room.make_reply_event(text.into(), reply).await?.into()
-                    }
-                    (None, None) => text.into(),
-                };
-                let ev = self.ev.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = room.send(content).await {
-                        let _ = ev.send(Ev::Error(format!("Message not sent: {e}"))).await;
-                    }
-                });
+                let text = RoomMessageEventContentWithoutRelation::text_plain(body);
+                match self.open.as_ref().filter(|open| open.room == room) {
+                    // The timeline shows the message at once and keeps trying to send it.
+                    Some(open) => match (edit, reply_to) {
+                        (Some(id), _) => open.timeline.edit(&timeline::item_id(&id)?, EditedContent::RoomMessage(text)).await?,
+                        (None, Some(id)) => drop(open.timeline.send_reply(text, EventId::parse(id)?).await?),
+                        (None, None) => drop(open.timeline.send(RoomMessageEventContent::from(text).into()).await?),
+                    },
+                    // A reply typed into a notification, for a chat that is not on screen.
+                    None => drop(self.room(&room)?.send_queue().send(RoomMessageEventContent::from(text).into()).await?),
+                }
             }
             Cmd::React { room, target, key } => {
-                let content = ReactionEventContent::new(Annotation::new(EventId::parse(target)?, key));
-                self.room(&room)?.send(content).await?;
+                let open = self.open.as_ref().filter(|open| open.room == room).context("That chat is not open")?;
+                open.timeline.toggle_reaction(&timeline::item_id(&target)?, &key).await?;
+            }
+            Cmd::Delete { room, target } => {
+                let open = self.open.as_ref().filter(|open| open.room == room).context("That chat is not open")?;
+                open.timeline.redact(&timeline::item_id(&target)?, None).await?;
+            }
+            Cmd::Retry { room, target } => {
+                let open = self.open.as_ref().filter(|open| open.room == room).context("That chat is not open")?;
+                // A failed send stops the chat's queue; trying again starts it.
+                open.timeline.room().send_queue().set_enabled(true);
+                timeline::retry(&open.timeline, &target).await?;
             }
             Cmd::Vote { room, target, unstable, answers } => {
                 let (kind, content) = polls::response(unstable, &target, answers);
                 self.room(&room)?.send_raw(kind, content).await?;
             }
-            Cmd::Delete { room, target } => {
-                self.room(&room)?.redact(&EventId::parse(target)?, None, None).await?;
-            }
         }
         Ok(())
+    }
+
+    /// Asks for older messages in the background; the rows arrive as changes to the timeline. The
+    /// first time, also until there is something to read: a page may hold nothing that is shown.
+    fn older(&self, open: &timeline::Open, first: bool) {
+        let (timeline, room, ev, incognito) = (open.timeline.clone(), open.room.clone(), self.ev.clone(), self.incognito.clone());
+        tokio::spawn(async move {
+            let mut more = true;
+            for _ in 0..if first { MAX_PAGES_PER_REQUEST } else { 1 } {
+                match timeline.paginate_backwards(PAGE).await {
+                    Ok(start) => more = !start,
+                    Err(e) => {
+                        let _ = ev.send(Ev::Error(format!("Could not load messages: {e}"))).await;
+                        break;
+                    }
+                }
+                if !more || timeline.items().await.iter().filter(|item| item.as_event().is_some()).count() >= MIN_ITEMS {
+                    break;
+                }
+            }
+            let _ = ev.send(Ev::Paged { room, more }).await;
+            if first && let Err(e) = mark_read(timeline.room(), timeline.latest_event_id().await, incognito.load(Ordering::Relaxed)).await {
+                log::warn!("mark read: {e:#}");
+            }
+        });
     }
 
     /// Access to Beeper's account API and the bridges behind the homeserver.
@@ -819,39 +989,11 @@ impl State {
     fn room(&self, id: &OwnedRoomId) -> Result<Room> {
         self.client()?.get_room(id).ok_or_else(|| anyhow!("Unknown room {id}"))
     }
-
-    /// Emits the next older page; returns the newest message's ID.
-    async fn page(&mut self, room_id: OwnedRoomId, reset: bool) -> Result<Option<OwnedEventId>> {
-        let room = self.room(&room_id)?;
-        let mut token = self.open.as_ref().and_then(|(_, t)| t.clone());
-        let mut items = Vec::new();
-        // Pages of only state events would leave the view blank with nothing to scroll.
-        for _ in 0..MAX_PAGES_PER_REQUEST {
-            let resp = messages(&room, token.as_deref(), PAGE).await?;
-            let mut chunk = resp.chunk;
-            chunk.reverse();
-            let mut older = to_items(&room, &chunk).await;
-            older.append(&mut items);
-            items = older;
-            token = resp.end;
-            if token.is_none() || items.len() >= MIN_ITEMS {
-                break;
-            }
-        }
-        let more = token.is_some();
-        self.open = Some((room_id.clone(), token));
-        let newest = items.iter().rev().find_map(|i| match i {
-            Item::Msg(m) => EventId::parse(&m.id).ok(),
-            _ => None,
-        });
-        self.emit(Ev::History { room: room_id, items, reset, more }).await;
-        Ok(newest)
-    }
 }
 
 /// One backward `/messages` page. Undecryptable events get their keys from the server-side backup
 /// (a no-op until recovery has imported the backup key), then the page is fetched again.
-async fn messages(room: &Room, from: Option<&str>, limit: u32) -> Result<Messages> {
+async fn messages(room: &Room, from: Option<&str>, limit: u16) -> Result<Messages> {
     let opts = || {
         let mut o = MessagesOptions::backward().from(from);
         o.limit = UInt::from(limit);
@@ -881,13 +1023,13 @@ async fn messages(room: &Room, from: Option<&str>, limit: u32) -> Result<Message
 }
 
 /// List preview: the newest message on one line, prefixed with its sender outside one-to-one chats.
-fn preview(items: &[Item], dm: bool) -> Option<String> {
-    let text = items.iter().rev().find_map(|i| match i {
-        Item::Msg(m) if m.own => Some(format!("You: {}", m.summary())),
-        Item::Msg(m) if dm => Some(m.summary()),
-        Item::Msg(m) => Some(format!("{}: {}", m.sender, m.summary())),
-        _ => None,
-    })?;
+fn preview(msgs: &[Msg], dm: bool) -> Option<String> {
+    let m = msgs.last()?;
+    let text = match m {
+        m if m.own => format!("You: {}", m.summary()),
+        m if dm => m.summary(),
+        m => format!("{}: {}", m.sender, m.summary()),
+    };
     Some(text.replace('\n', " "))
 }
 
@@ -997,17 +1139,13 @@ const ICON_WAIT: Duration = Duration::from_secs(3);
 /// The messages these new items call for a notification of, oldest first: those from someone else
 /// that the account's push rules ask to be notified of (they cover mutes and mentions-only chats).
 /// Old messages do not count: a bridge bringing in history sends them through sync too.
-fn notes(items: &[Item], now_ms: i64) -> Vec<Note> {
+fn notes(msgs: &[Msg], now_ms: i64) -> Vec<Note> {
     let recent = |m: &Msg| now_ms - (m.ts as i64) < NOTIFY_WINDOW.as_millis() as i64;
-    let mut found: Vec<Note> = items
+    let mut found: Vec<Note> = msgs
         .iter()
         .rev()
-        .filter_map(|i| match i {
-            Item::Msg(m) if m.notify && !m.own && recent(m) => {
-                Some(Note { sender: m.sender.clone(), text: m.summary(), ts: m.ts, mention: m.mentioned })
-            }
-            _ => None,
-        })
+        .filter(|m| m.notify && !m.own && recent(m))
+        .map(|m| Note { sender: m.sender.clone(), text: m.summary(), ts: m.ts, mention: m.mentioned })
         .take(MAX_NOTES)
         .collect();
     found.reverse();
@@ -1016,7 +1154,7 @@ fn notes(items: &[Item], now_ms: i64) -> Vec<Note> {
 
 /// Notifies while the window is not in front; clears the chat's notification once it has been
 /// read somewhere. Only Android has notifications.
-fn announce(client: &Client, dir: &Path, summary: &RoomSummary, prev: Option<&RoomSummary>, items: &[Item]) {
+fn announce(client: &Client, dir: &Path, summary: &RoomSummary, prev: Option<&RoomSummary>, msgs: &[Msg]) {
     if !cfg!(target_os = "android") {
         return;
     }
@@ -1027,7 +1165,7 @@ fn announce(client: &Client, dir: &Path, summary: &RoomSummary, prev: Option<&Ro
     if crate::FOREGROUND.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    let notes = notes(items, now_ms());
+    let notes = notes(msgs, now_ms());
     if notes.is_empty() {
         return;
     }
@@ -1055,16 +1193,10 @@ async fn notification_icon(client: &Client, dir: &Path, room: &RoomId) -> Option
 }
 
 /// Unread messages that mention the user, counted here because a server cannot see into
-/// encrypted messages. The last `unread` messages from others are the unread ones; `items` are the
-/// newest, oldest first, and `before` is the count from earlier items.
-fn unread_mentions(before: u64, unread: u64, items: &[Item]) -> u64 {
-    let theirs: Vec<&Msg> = items
-        .iter()
-        .filter_map(|i| match i {
-            Item::Msg(m) if !m.own => Some(m),
-            _ => None,
-        })
-        .collect();
+/// encrypted messages. The last `unread` messages from others are the unread ones; `msgs` are the
+/// newest, oldest first, and `before` is the count from earlier ones.
+fn unread_mentions(before: u64, unread: u64, msgs: &[Msg]) -> u64 {
+    let theirs: Vec<&Msg> = msgs.iter().filter(|m| !m.own).collect();
     let fresh = theirs.iter().rev().take(usize::try_from(unread).unwrap_or(usize::MAX)).filter(|m| m.mentioned).count() as u64;
     // When the unread ones reach back past these items, what was counted before still stands.
     let earlier = if (theirs.len() as u64) < unread { before } else { 0 };
@@ -1192,12 +1324,8 @@ async fn last_message(room: &Room) -> Result<Option<(String, u64)>> {
         let resp = messages(room, from.as_deref(), PAGE).await?;
         let mut chunk = resp.chunk;
         chunk.reverse();
-        let items = to_items(room, &chunk).await;
-        let sent = items.iter().rev().find_map(|i| match i {
-            Item::Msg(m) => Some(m.ts),
-            _ => None,
-        });
-        if let (Some(text), Some(sent)) = (preview(&items, dm), sent) {
+        let msgs = to_msgs(room, &chunk).await;
+        if let (Some(text), Some(sent)) = (preview(&msgs, dm), msgs.last().map(|m| m.ts)) {
             return Ok(Some((text, sent)));
         }
         from = resp.end;
@@ -1382,8 +1510,12 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 continue;
             }
         };
-        if std::mem::take(&mut failed) >= OFFLINE_AFTER && ev.send(Ev::Online(true)).await.is_err() {
-            return;
+        if std::mem::take(&mut failed) >= OFFLINE_AFTER {
+            // A message that failed while offline stopped its chat's queue.
+            client.send_queue().set_enabled(true).await;
+            if ev.send(Ev::Online(true)).await.is_err() {
+                return;
+            }
         }
         let mut changed = Vec::new();
         for (id, update) in &resp.rooms.joined {
@@ -1391,16 +1523,12 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
             if room.is_space() {
                 continue;
             }
-            let items = to_items(&room, &update.timeline.events).await;
+            let msgs = to_msgs(&room, &update.timeline.events).await;
             let prev = rooms.lock().unwrap().get(id).cloned();
             // A chat's time is its last message's. A room a bridge has just created has only state
             // events, which say nothing about when the chat was last used: it stays at 0, sorts
             // last, and is queued for a look at its history.
-            let last_message = items.iter().filter_map(|i| match i {
-                Item::Msg(m) => Some(m.ts),
-                _ => None,
-            });
-            let last_message = last_message.max();
+            let last_message = msgs.iter().map(|m| m.ts).max();
             let dated = last_message.is_some() || prev.as_ref().is_some_and(|p| p.dated);
             if !dated {
                 let _ = to_probe.try_send(id.clone());
@@ -1408,14 +1536,11 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
             let newest = last_message.max(prev.as_ref().map(|p| p.ts));
             let peer = other_person(&room).await;
             let dm = peer.is_some();
-            let order = items.iter().filter_map(|i| match i {
-                Item::Msg(m) if !m.own => Some(m.order),
-                _ => None,
-            });
+            let order = msgs.iter().filter(|m| !m.own).map(|m| m.order);
             let seen = RoomSummary {
                 id: id.clone(),
                 name: String::new(),
-                preview: preview(&items, dm).or_else(|| prev.as_ref().and_then(|p| p.preview.clone())),
+                preview: preview(&msgs, dm).or_else(|| prev.as_ref().and_then(|p| p.preview.clone())),
                 ts: newest.unwrap_or(0),
                 network: prev.as_ref().and_then(|p| p.network.clone()),
                 order: order.max().max(prev.as_ref().map(|p| p.order)).unwrap_or(0),
@@ -1430,13 +1555,10 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
                 dated,
             };
             let mut summary = summarize(&room, &notif, peer, seen).await;
-            summary.mentions = unread_mentions(summary.mentions, summary.unread, &items);
-            announce(&client, &dir, &summary, prev.as_ref(), &items);
+            summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);
+            announce(&client, &dir, &summary, prev.as_ref(), &msgs);
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
             changed.push(summary);
-            if !items.is_empty() && ev.send(Ev::Live { room: id.clone(), items }).await.is_err() {
-                return;
-            }
         }
         let mut gone = false;
         for id in resp.rooms.left.keys() {
@@ -1486,117 +1608,58 @@ pub(crate) fn plain(error: &dyn std::fmt::Display) -> String {
 pub(crate) const UTD: &str = "Unable to decrypt this message yet";
 pub(crate) const DELETED: &str = "Message deleted";
 
-/// Converts timeline events (oldest first) into displayable items.
-async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
+/// The messages among timeline events, oldest first, as the chat list and notifications need
+/// them: what each says, by whom and when. Edits, reactions and deletions belong to the open
+/// conversation, which the SDK's timeline keeps.
+async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> Vec<Msg> {
     let own = room.own_user_id().to_owned();
     let mut names: HashMap<OwnedUserId, String> = HashMap::new();
     let mut out = Vec::new();
     for event in events {
         let Some(id) = event.event_id().map(|e| e.to_string()) else { continue };
         let Some(sender) = event.sender() else { continue };
-        let (mut reply_to, mut deleted, mut media) = (None, false, None);
-        let (mut mentions, mut mentioned) = (Vec::new(), false);
-        let (mut link, mut poll, mut place) = (None, None, None);
+        let mut m = Msg::bare(id, Kind::Message, sender.clone());
         // A deleted event in an encrypted room is an empty `m.room.encrypted`: nothing says whether
         // it was a message or a reaction, so it gets no placeholder.
-        let body = if event.kind.is_utd() {
+        if event.kind.is_utd() {
             if is_redacted(event) {
                 continue;
             }
-            UTD.to_owned()
-        } else if let Some(found) = poll_event(event) {
-            match found {
-                polls::Event::Start(p) => {
-                    let question = p.question.clone();
-                    poll = Some(p);
-                    question
-                }
-                polls::Event::Update { target, update } => {
-                    let ts = event.timestamp().map_or(0, |t| u64::from(t.0));
-                    out.push(Item::Poll { target, from: sender.to_owned(), ts, update });
-                    continue;
-                }
-            }
+            m.body = UTD.to_owned();
+        } else if let Some(poll) = poll_start(event) {
+            m.poll = Some(poll);
         } else {
             match event.raw().deserialize() {
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
-                    SyncMessageLikeEvent::Original(m),
-                ))) => match m.content.relates_to {
-                    Some(Relation::Replacement(r)) => {
-                        let body = r.new_content.msgtype.body().to_owned();
-                        let (mentions, _) = marks(&body, &r.new_content.msgtype, r.new_content.mentions.as_ref(), &own);
-                        out.push(Item::Edit { target: r.event_id.to_string(), body, mentions });
-                        continue;
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Original(e)))) => {
+                    let reply = match e.content.relates_to {
+                        Some(Relation::Replacement(_)) => continue,
+                        Some(Relation::Reply(_)) => true,
+                        _ => false,
+                    };
+                    let (media, text) = content(&e.content.msgtype);
+                    m.media = media;
+                    if let MessageType::Location(l) = &e.content.msgtype {
+                        m.place = Place::parse(&l.geo_uri, &l.body);
                     }
-                    relation => {
-                        if let Some(Relation::Reply(reply)) = relation {
-                            reply_to = Some(reply.in_reply_to.event_id.to_string());
-                        }
-                        let (found, text) = content(&m.content.msgtype);
-                        media = found;
-                        if let MessageType::Location(l) = &m.content.msgtype {
-                            place = Place::parse(&l.geo_uri, &l.body);
-                        }
-                        // Older clients and bridges prepend the quoted message to the body.
-                        let text = if reply_to.is_some() { remove_plain_reply_fallback(&text).to_owned() } else { text };
-                        // The card shows the place's description.
-                        let text = if place.is_some() { String::new() } else { text };
-                        (mentions, mentioned) = marks(&text, &m.content.msgtype, m.content.mentions.as_ref(), &own);
-                        link = event.raw().get_field::<serde_json::Value>("content").ok().flatten().as_ref().and_then(link_preview);
-                        text
-                    }
-                },
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
-                    SyncMessageLikeEvent::Redacted(_),
-                ))) => {
-                    deleted = true;
-                    DELETED.to_owned()
+                    // Older clients and bridges prepend the quoted message to the body.
+                    let text = if reply { remove_plain_reply_fallback(&text).to_owned() } else { text };
+                    // The place's description is told with the place.
+                    m.body = if m.place.is_some() { String::new() } else { text };
+                    (m.mentions, m.mentioned) = marks(&m.body, &e.content.msgtype, e.content.mentions.as_ref(), &own);
                 }
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Reaction(
-                    SyncMessageLikeEvent::Original(r),
-                ))) => {
-                    let Annotation { event_id, key, .. } = r.content.relates_to;
-                    let reaction = Reaction { id, key, own: sender == own };
-                    out.push(Item::Reaction { target: event_id.to_string(), reaction });
-                    continue;
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Redacted(_)))) => {
+                    (m.body, m.deleted) = (DELETED.to_owned(), true);
                 }
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(_))) => {
-                    // The target moved from the event to its content in room version 11.
-                    #[derive(Deserialize)]
-                    struct Redacts {
-                        redacts: Option<String>,
-                    }
-                    let raw = event.raw();
-                    let top = raw.get_field::<String>("redacts").ok().flatten();
-                    let inner = || raw.get_field::<Redacts>("content").ok().flatten().and_then(|c| c.redacts);
-                    if let Some(target) = top.or_else(inner) {
-                        out.push(Item::Redact { target });
-                    }
-                    continue;
-                }
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Sticker(
-                    SyncMessageLikeEvent::Original(s),
-                ))) => {
-                    let info = s.content.info;
-                    media = Some(Media {
-                        kind: MediaKind::Sticker,
-                        name: s.content.body,
-                        size: info.size.map(Into::into),
-                        mime: info.mimetype,
-                        dims: dims(info.width, info.height),
-                        duration: None,
-                        source: s.content.source.into(),
-                        thumb: info.thumbnail_source,
-                    });
-                    String::new()
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Sticker(SyncMessageLikeEvent::Original(s)))) => {
+                    m.media = Some(sticker(&s.content));
                 }
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(_))) if !is_redacted(event) => {
-                    UTD.into()
+                    m.body = UTD.into();
                 }
                 _ => continue,
             }
-        };
-        let name = match names.get(&sender) {
+        }
+        m.sender = match names.get(&sender) {
             Some(n) => n.clone(),
             None => {
                 let n = display_name(room, &sender).await;
@@ -1604,38 +1667,35 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
                 n
             }
         };
-        let ts = event.timestamp().map_or(0, |t| u64::from(t.0));
-        let order = hs_order(event).unwrap_or(0);
-        let own = sender == own;
-        out.push(Item::Msg(Msg {
-            id,
-            sender: name,
-            own,
-            from: sender,
-            body,
-            ts,
-            order,
-            reply_to,
-            deleted,
-            edited: false,
-            media,
-            poll,
-            place,
-            notify: event.push_actions().is_some_and(|actions| actions.iter().any(|a| a.should_notify())),
-            mentions,
-            mentioned: mentioned && !own,
-            link,
-            reactions: Vec::new(),
-        }));
+        m.ts = event.timestamp().map_or(0, |t| u64::from(t.0));
+        m.order = hs_order(event).unwrap_or(0);
+        m.own = sender == own;
+        m.mentioned &= !m.own;
+        m.notify = event.push_actions().is_some_and(|actions| actions.iter().any(|a| a.should_notify()));
+        out.push(m);
     }
     out
 }
 
-/// A poll start, vote or end, whichever flavour of event type.
-fn poll_event(event: &TimelineEvent) -> Option<polls::Event> {
-    let kind = event.raw().get_field::<String>("type").ok().flatten().filter(|k| polls::is_poll(k))?;
+fn sticker(content: &StickerEventContent) -> Media {
+    let info = &content.info;
+    Media {
+        kind: MediaKind::Sticker,
+        name: content.body.clone(),
+        size: info.size.map(Into::into),
+        mime: info.mimetype.clone(),
+        dims: dims(info.width, info.height),
+        duration: None,
+        source: content.source.clone().into(),
+        thumb: info.thumbnail_source.clone(),
+    }
+}
+
+/// A poll's start, whichever flavour of event type.
+fn poll_start(event: &TimelineEvent) -> Option<Poll> {
+    let kind = event.raw().get_field::<String>("type").ok().flatten().filter(|k| polls::is_start(k))?;
     let content = event.raw().get_field::<serde_json::Value>("content").ok().flatten()?;
-    polls::read(&kind, &content)
+    Poll::parse(&content, kind.starts_with("org."))
 }
 
 /// Longest title or description kept from a preview: it is someone else's text.
@@ -1956,7 +2016,9 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
 }
 
 mod polls;
-pub use polls::{Place, Poll, Update};
+pub use polls::{Place, Poll};
+
+mod timeline;
 
 #[cfg(test)]
 mod tests;

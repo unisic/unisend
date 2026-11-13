@@ -37,7 +37,7 @@ is not started.
 | Avatars, network label, last message, time | done | `m.room.avatar`, `m.bridge`; in a group, each sender's picture from their member event |
 | Network icons (per-network glyph) | todo | text label for now |
 | Labels with schedules, snooze, reminders | todo | `com.beeper.label.*`, `com.beeper.chats.snoozed`, `com.beeper.chats.reminder` |
-| Message requests, invitations | todo | `com.beeper.message_request`, invites |
+| Message requests, invitations | todo | a request is an ordinary chat whose `m.bridge` state has `channel."com.beeper.message_request": true` (read from Beeper Desktop), so it is in the list already, unlabelled; accepting goes through Beeper's SDK and is not known. Matrix invitations are not shown |
 | Merged chats | todo | `com.beeper.union` |
 | Drafts synced between devices | todo | `com.beeper.draft` |
 | Multi-select, archive all read | todo | local |
@@ -49,21 +49,21 @@ is not started.
 | Feature | Status | Protocol |
 |---|---|---|
 | Text messages, history paging, live updates | done | `m.room.message` |
-| Edits applied, "Edited" mark | part | `m.replace`; no edit history |
+| Edits applied, "Edited" mark | part | `m.replace`, applied by the SDK's timeline; no edit history |
 | Sender grouping, timestamps | done | local |
-| Day separators | done | local |
-| Unread divider | todo | `m.fully_read` |
-| Replies (quote shown) | part | `m.in_reply_to`; no jump to the quoted message |
+| Day separators | done | the timeline's own |
+| Unread divider | done | "New" above what arrived since the chat was last read (`m.fully_read`) |
+| Replies (quote shown) | done | `m.in_reply_to`; a quoted message that is not loaded is fetched; a touch goes to it when it is loaded |
 | Reactions (show, add, remove) | part | `m.reaction`; six quick emoji in the message's panel, a double tap for the heart; no picker, no custom emoji |
-| Deleted messages | part | `m.room.redaction`; in encrypted rooms a deleted message disappears after reload (it cannot be told from a deleted reaction) |
+| Deleted messages | done | `m.room.redaction`; stays a "Message deleted" row |
 | Images, stickers | done | inline thumbnail (800px at most), full-screen view (2048px); plain and encrypted |
 | Video, audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. No inline player |
 | Stickers, GIFs, custom emoji | todo | `m.sticker`, `fi.mau.gif`, `m.image_pack` |
 | Link previews | part | shows the preview that came with a message (`com.beeper.linkpreviews`); links are underlined and open in the browser. Does not make a preview for a link that has none, and attaches none to messages sent from here |
 | Formatted text, mentions, code blocks | part | mentions are drawn in the accent, a message that mentions the user is marked, and the chat list shows an `@` (from the HTML links and `m.mentions`; counted locally, a server cannot see into encrypted rooms). Bold, italics, links and code blocks: todo |
-| Send state (sending, sent, delivered, seen, failed) | todo | `com.beeper.message_send_status`, receipts |
-| Read receipts of others, typing | todo | `m.receipt`, `m.typing` |
-| Polls, locations, contacts | part | polls (stable and `org.matrix.msc3381` types) are shown with votes and can be voted on; locations show a card with coordinates that opens in maps. Votes are counted from the response events that are loaded (history is paged back from the newest event, so every response newer than a loaded poll is loaded too); a poll cannot be created or ended from here; a redacted vote is not taken back. Contacts: todo |
+| Send state (sending, sent, delivered, seen, failed) | done | a message shows at once and is sent from a queue that survives being offline and restarts; a failed one can be sent again or dropped. Under the newest own message: Sending, Sent, Delivered (`com.beeper.message_send_status` with `delivered_to_users`), Seen (`m.receipt`), or the failure with the bridge's reason |
+| Read receipts of others, typing | part | "Seen" in a one-to-one chat, "Seen by ..." in a group; who is typing in the open chat, and the user's own typing is sent unless incognito is on (Beeper keeps sending it and asks separately). No per-message receipts, no typing in the chat list |
+| Polls, locations, contacts | part | polls of the `org.matrix.msc3381` types (what bridges send) are shown with their votes, counted by the SDK, and can be voted on; the stable `m.poll.*` types only reach the chat list's preview. Locations show a card with coordinates that opens in maps (Android: the maps app; elsewhere OpenStreetMap). Neither can be created; contact cards are not handled |
 | Threads | todo | `m.thread` |
 | Disappearing messages | todo | `com.beeper.disappearing_timer` |
 | Search in chat, media gallery, bookmarks | todo | `com.beeper.bookmark`, `com.beeper.gallery` |
@@ -118,24 +118,23 @@ Verified in the source: typing, read receipts of others and membership changes a
 | Locations | yes | to Signal only | from Messenger only | no | shown with coordinates, opens in maps; not sent |
 | Contact cards | from WhatsApp | from Signal | no | no | not checked |
 | Disappearing messages | no | yes | no | no | timer not shown |
-| Typing, read receipts of others | yes | yes | yes | yes | not shown |
+| Typing, read receipts of others | yes | yes | yes | yes | shown in the open chat |
 | GIFs, stickers received | not listed | yes | yes | yes | stickers shown; no picker |
 | Story, reel and profile shares | no | no | yes | stories | not checked how they arrive |
-| Group changes (title, avatar, members) | yes | yes | yes | yes | not shown |
+| Group changes (title, avatar, members) | yes | yes | yes | yes | shown as lines; a bridge's bookkeeping memberships are hidden as Beeper hides them |
 | Group admin from Matrix | invite, leave, kick | all but join | invite, kick, rename | rename | none |
 | History of an old chat | yes | no | unencrypted only | yes | only what the bridge sent |
 
 The last row matters for Messenger: the meta bridge's roadmap lists reading the chat backup of
 encrypted Messenger chats as not done, which is why their history does not come over.
-Message state (sent, delivered, failed) and message requests are not in the bridge roadmaps; they
-are from Beeper's own feature list and not checked against these bridges.
+Message state and message requests are not in the bridge roadmaps. How Beeper's own app reads
+them was taken from its desktop bundle, and the state events were checked against the account:
+190 of them among the newest 100 events of 24 chats, all `SUCCESS`, 73 with `delivered_to_users`.
 
 ## Next, by what a daily user of these networks would notice
 
-1. Typing and read receipts of others, and message state (sent, delivered, failed): the live feel
-   of a chat, and whether a message left. M.
-2. Message requests and invitations: a first message from someone new on Messenger or Instagram
-   may not show up at all. M.
+1. Message requests labelled and accepted, Matrix invitations. M.
+2. Typing in the chat list, per-message read state. S.
 3. Rich text: bold, italics, links, code (every network). M.
 4. Inline playback for voice notes, audio and video, and recording voice notes. M each.
 5. Creating and ending polls, sending a location. S each.
