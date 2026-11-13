@@ -20,6 +20,9 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Both already in the tree (GPUI, matrix-sdk); decoders come from GPUI's feature set.
+image = { version = "0.25", default-features = false }
+mime_guess = "2"
 matrix-sdk = { version = "=0.19.1", default-features = false, features = ["e2e-encryption", "automatic-room-key-forwarding", "sqlite", "bundled-sqlite", "rustls-aws-lc-rs"] }
 # Only for `secret_storage::DecodeError`, which matrix-sdk does not re-export. Already in the tree.
 matrix-sdk-crypto = { version = "=0.19.1", default-features = false }
@@ -31,7 +34,9 @@ env_logger = "0.11"
 dirs = "6"
 
 [target.'cfg(target_os = "android")'.dependencies]
-gpui-mobile = { git = "https://github.com/itsbalamurali/gpui-mobile", rev = "5fd54f4554263ae06753e90472c7f2e2ff5d7495", default-features = false, features = ["clipboard"] }
+gpui-mobile = { git = "https://github.com/itsbalamurali/gpui-mobile", rev = "5fd54f4554263ae06753e90472c7f2e2ff5d7495", default-features = false, features = ["clipboard", "file_selector"] }
+# Same version as gpui-mobile: calls into this app's own Java helper.
+jni = "0.22"
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
 webpki-root-certs = "1"

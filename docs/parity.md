@@ -56,7 +56,8 @@ is not started.
 | Replies (quote shown) | part | `m.in_reply_to`; no jump to the quoted message |
 | Reactions (show, add, remove) | part | `m.reaction`; six quick emoji, no picker, no custom emoji |
 | Deleted messages | part | `m.room.redaction`; in encrypted rooms a deleted message disappears after reload (it cannot be told from a deleted reaction) |
-| Images, video, audio, files, voice notes | part | shown as a text label; no media |
+| Images, stickers | done | inline thumbnail (800px at most), full-screen view (2048px); plain and encrypted |
+| Video, audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. No inline player |
 | Stickers, GIFs, custom emoji | todo | `m.sticker`, `fi.mau.gif`, `m.image_pack` |
 | Link previews | todo | `com.beeper.linkpreviews` |
 | Formatted text, mentions, code blocks | todo | `org.matrix.custom.html`, `m.mentions` |
@@ -76,7 +77,7 @@ is not started.
 | Send text | done | `m.room.message` |
 | Reply, edit, delete, copy | done | relations, redaction |
 | Forward | todo | new event in the target chat |
-| Attachments, paste image, drag and drop, camera | todo | media upload, encrypted files |
+| Attachments | part | one file from the picker, any type, 100 MB at most; no paste, drag and drop, camera, caption or thumbnail upload |
 | Voice notes | todo | `org.matrix.msc3245.voice` |
 | Emoji / GIF / sticker pickers | todo | local, `fi.mau.gif` |
 | Formatting shortcuts, mentions autocomplete | todo | local |
@@ -93,7 +94,8 @@ is not started.
 | Incognito mode (no read receipts, no typing) | part | read receipts are always private for now |
 | Command bar, hotkeys | todo | local |
 | Tray icon, launch at login, deep links | todo | local |
-| Media viewer, PDF preview, storage manager | todo | local |
+| Media viewer | part | pictures only; no zoom, no gallery |
+| PDF preview, storage manager | todo | local |
 | Feedback, help hub, subscription banners | todo | Beeper services |
 | Emoji rendering | done | bundled bitmap Noto Color Emoji (GPUI cannot draw COLRv1) |
 | Windows, macOS builds | todo | GPUI targets, not built or tested |

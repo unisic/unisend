@@ -53,6 +53,18 @@ async fn wait_for<T>(rx: &mut mpsc::Receiver<Ev>, what: &str, mut pick: impl FnM
     }
 }
 
+/// A landscape test picture, written next to the fixture's other files.
+fn root_photo(dir: &Path) -> PathBuf {
+    let path = dir.join("lake.jpg");
+    image::RgbImage::from_fn(1600, 1000, |x, y| {
+        let sky = y < 520;
+        image::Rgb(if sky { [90 + (y / 6) as u8, 150 + (y / 10) as u8, 235] } else { [30, 90 + ((x + y) % 60) as u8, 120] })
+    })
+    .save(&path)
+    .unwrap();
+    path
+}
+
 async fn next_live(rx: &mut mpsc::Receiver<Ev>, room_id: &OwnedRoomId) -> Vec<Item> {
     wait_for(rx, "live items", |e| match e {
         Ev::Live { room, items } if room == *room_id => Some(items),
@@ -278,6 +290,48 @@ async fn login_sync_decrypt_send_recover() {
             }
         }
     }
+    // Media: a picture sent to an encrypted room comes back with its shape, a thumbnail and a
+    // viewing copy no larger than their limits, and downloads byte for byte.
+    let picture = root.join("holiday photo.png");
+    image::RgbImage::from_fn(2400, 1200, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 90])).save(&picture).unwrap();
+    alice2.handle(Cmd::Attach { room: room.clone(), path: picture.clone(), reply_to: None }).await.unwrap();
+    let (photo_id, media) = loop {
+        let found = next_live(&mut alice2_rx, &room_id).await.into_iter().find_map(|i| match i {
+            Item::Msg(m) => m.media.clone().map(|media| (m.id, media)),
+            _ => None,
+        });
+        if let Some(found) = found {
+            break found;
+        }
+    };
+    assert_eq!((media.kind, media.dims, media.name.as_str()), (MediaKind::Image, Some((2400, 1200)), "holiday photo.png"));
+    let longest = |bytes: &[u8]| {
+        let image = image::load_from_memory(bytes).unwrap();
+        image.width().max(image.height())
+    };
+    alice2.handle(Cmd::Thumbs(vec![(photo_id.clone(), media.clone())])).await.unwrap();
+    let thumb = wait_for(&mut alice2_rx, "thumbnail", |e| match e {
+        Ev::Thumb(id, bytes) if id == photo_id => Some(bytes),
+        _ => None,
+    })
+    .await;
+    assert_eq!(longest(&thumb), THUMB_PX);
+    alice2.handle(Cmd::View(photo_id.clone(), media.clone())).await.unwrap();
+    let full = wait_for(&mut alice2_rx, "viewing copy", |e| match e {
+        Ev::Viewed(id, bytes) if id == photo_id => Some(bytes),
+        _ => None,
+    })
+    .await;
+    assert_eq!(longest(&full), VIEW_PX);
+    alice2.handle(Cmd::Fetch(photo_id.clone(), media)).await.unwrap();
+    let saved = wait_for(&mut alice2_rx, "downloaded file", |e| match e {
+        Ev::Fetched(id, path) if id == photo_id => path,
+        _ => None,
+    })
+    .await;
+    assert!(saved.starts_with(root.join("alice2/media")) && saved.ends_with("holiday photo.png"), "{saved:?}");
+    assert_eq!(std::fs::read(&saved).unwrap(), std::fs::read(&picture).unwrap());
+
     // After a reload the deleted reply and reaction are gone, not "unable to decrypt".
     alice2.handle(Cmd::Open(room.clone())).await.unwrap();
     let items = wait_for(&mut alice2_rx, "history after deletions", |e| match e {
@@ -377,6 +431,15 @@ async fn gui_fixture() {
     say(&bob_bridged, "Call me when you land").await;
     say(&bob_bridged, "And take a jacket, it is cold here").await;
 
+    // Media, plain and encrypted: a photo, a document, and a photo with a caption.
+    let photo = root_photo(&out);
+    for (room, path) in [(&bob_bridged, &photo), (&bob_group, &photo), (&carol_group, &out.join("avatar.png"))] {
+        attach(room, path, None).await.unwrap();
+    }
+    let notes = out.join("packing list.txt");
+    std::fs::write(&notes, "tent, stove, map\n").unwrap();
+    attach(&carol_group, &notes, None).await.unwrap();
+
     // A bridged one-to-one chat as Beeper has them: no name, the other person and a bridge bot
     // that the room lists as a service member. Also: letters outside the basic fonts, two lines.
     let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
@@ -436,4 +499,12 @@ fn archive_rule_matches_beeper() {
     assert!(!is_done(&done(Some(20_000), None), &room(100, 0, 0, false), now));
     // Pinned chats stay in the inbox.
     assert!(!is_done(&done(Some(500), Some(7)), &room(100, 7, 0, true), now));
+}
+
+#[test]
+fn file_names_stay_in_their_directory() {
+    assert_eq!(safe_name("../../etc/passwd"), "_.._etc_passwd");
+    assert_eq!(safe_name("holiday photo.png"), "holiday photo.png");
+    assert_eq!(safe_name(".."), "file");
+    assert_eq!(safe_name("$abc:beeper.com"), "_abc_beeper.com");
 }

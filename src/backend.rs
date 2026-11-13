@@ -21,6 +21,7 @@ use matrix_sdk::{
         secret_storage::SecretStorageError,
     },
     notification_settings::{NotificationSettings, RoomNotificationMode},
+    attachment::{AttachmentConfig, AttachmentInfo, BaseImageInfo},
     media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings},
     reqwest,
     room::{
@@ -71,6 +72,13 @@ const MAX_PAGES_PER_REQUEST: usize = 5;
 const SYNC_TIMELINE_LIMIT: u32 = 10;
 /// Avatar and preview fetches in flight at once.
 const ROW_FETCHES: usize = 4;
+/// Longest side of an inline thumbnail and of the full-screen view, in pixels. Everything shown is
+/// re-encoded to at most this, so a decoded image costs at most 2.6 MB and 16 MB.
+const THUMB_PX: u32 = 800;
+const VIEW_PX: u32 = 2048;
+/// Larger files are not fetched to make a thumbnail, and not sent.
+const MAX_THUMB_SOURCE: u64 = 16 * 1024 * 1024;
+const MAX_UPLOAD: u64 = 100 * 1024 * 1024;
 /// Backup key downloads per history page.
 const MAX_KEY_FETCHES: usize = 8;
 
@@ -82,6 +90,13 @@ pub enum Cmd {
     LoadOlder,
     Chat(OwnedRoomId, ChatAction),
     Avatars(Vec<OwnedRoomId>),
+    /// Inline thumbnails for these messages (event ID, media).
+    Thumbs(Vec<(String, Media)>),
+    /// The image at viewing size.
+    View(String, Media),
+    /// Download to the media cache so the system can open it.
+    Fetch(String, Media),
+    Attach { room: OwnedRoomId, path: PathBuf, reply_to: Option<String> },
     /// Re-read the latest message of rooms whose preview is missing or undecryptable.
     Previews(Vec<OwnedRoomId>),
     /// `reply_to` and `edit` are event IDs; an edit replaces that message's text.
@@ -104,6 +119,14 @@ pub enum Ev {
     Live { room: OwnedRoomId, items: Vec<Item> },
     /// Thumbnail bytes as served (PNG, JPEG, ...).
     Avatar(OwnedRoomId, Vec<u8>),
+    /// JPEG or PNG, at most `THUMB_PX` on its longest side.
+    Thumb(String, Vec<u8>),
+    /// JPEG or PNG, at most `VIEW_PX`.
+    Viewed(String, Vec<u8>),
+    /// The file is in the media cache, or could not be fetched.
+    Fetched(String, Option<PathBuf>),
+    /// An attachment finished uploading, or failed.
+    Attached,
     Error(String),
 }
 
@@ -172,8 +195,49 @@ pub struct Msg {
     pub reply_to: Option<String>,
     pub deleted: bool,
     pub edited: bool,
+    /// Attachment; `body` is then its caption, possibly empty.
+    pub media: Option<Media>,
     /// Filled by the UI from `Item::Reaction`.
     pub reactions: Vec<Reaction>,
+}
+
+impl Msg {
+    /// One-line description for previews and quotes: Beeper's label for media, plus the caption.
+    pub fn summary(&self) -> String {
+        let Some(media) = &self.media else { return self.body.clone() };
+        let label = match media.kind {
+            MediaKind::Image => "📷 Photo",
+            MediaKind::Sticker => "🖼 Sticker",
+            MediaKind::Video => "🎬 Video",
+            MediaKind::Voice => "🎤 Voice Note",
+            MediaKind::Audio => "🎵 Audio",
+            MediaKind::File => return format!("📎 {}", media.name),
+        };
+        if self.body.is_empty() { label.to_owned() } else { format!("{label}: {}", self.body) }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MediaKind {
+    Image,
+    Sticker,
+    Video,
+    Audio,
+    Voice,
+    File,
+}
+
+#[derive(Clone)]
+pub struct Media {
+    pub kind: MediaKind,
+    pub name: String,
+    pub size: Option<u64>,
+    pub mime: Option<String>,
+    /// Pixel size, so the placeholder has the image's shape before it loads.
+    pub dims: Option<(u32, u32)>,
+    pub duration: Option<Duration>,
+    source: MediaSource,
+    thumb: Option<MediaSource>,
 }
 
 #[derive(Clone)]
@@ -254,6 +318,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         .ok()
         .filter(|_| cfg!(debug_assertions))
         .unwrap_or_else(|| beeper::HOMESERVER_URL.to_owned());
+    let _ = std::fs::remove_dir_all(media_dir(&dir));
     let mut st = State { dir, homeserver, http, ev, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None };
     match st.restore().await {
@@ -453,6 +518,71 @@ impl State {
                     });
                 }
             }
+            Cmd::Thumbs(wanted) => {
+                for (id, media) in wanted {
+                    let client = self.client()?.clone();
+                    let (ev, permits) = (self.ev.clone(), self.fetches.clone());
+                    tokio::spawn(async move {
+                        let Ok(_permit) = permits.acquire().await else { return };
+                        match thumbnail(&client, &media).await {
+                            Ok(Some(bytes)) => {
+                                let _ = ev.send(Ev::Thumb(id, bytes)).await;
+                            }
+                            Ok(None) => {}
+                            Err(e) => log::debug!("thumbnail {id}: {e:#}"),
+                        }
+                    });
+                }
+            }
+            Cmd::View(id, media) => {
+                let client = self.client()?.clone();
+                let ev = self.ev.clone();
+                tokio::spawn(async move {
+                    let bytes = async {
+                        let request = MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File };
+                        let bytes = client.media().get_media_content(&request, true).await?;
+                        tokio::task::spawn_blocking(move || shrink(&bytes, VIEW_PX)).await?
+                    };
+                    let _ = match bytes.await {
+                        Ok(bytes) => ev.send(Ev::Viewed(id, bytes)).await,
+                        Err(e) => ev.send(Ev::Error(format!("Could not load the image: {e:#}"))).await,
+                    };
+                });
+            }
+            Cmd::Fetch(id, media) => {
+                let client = self.client()?.clone();
+                let (ev, dir) = (self.ev.clone(), media_dir(&self.dir));
+                tokio::spawn(async move {
+                    let saved = async {
+                        let request = MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File };
+                        let bytes = client.media().get_media_content(&request, false).await?;
+                        // One directory per event keeps the file's own name without collisions.
+                        let folder = dir.join(safe_name(&id));
+                        std::fs::create_dir_all(&folder)?;
+                        let path = folder.join(safe_name(&media.name));
+                        write_private(&path, &bytes)?;
+                        anyhow::Ok(path)
+                    };
+                    let path = match saved.await {
+                        Ok(path) => Some(path),
+                        Err(e) => {
+                            let _ = ev.send(Ev::Error(format!("Could not download {}: {e:#}", media.name))).await;
+                            None
+                        }
+                    };
+                    let _ = ev.send(Ev::Fetched(id, path)).await;
+                });
+            }
+            Cmd::Attach { room, path, reply_to } => {
+                let room = self.room(&room)?;
+                let ev = self.ev.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = attach(&room, &path, reply_to).await {
+                        let _ = ev.send(Ev::Error(format!("Attachment not sent: {e:#}"))).await;
+                    }
+                    let _ = ev.send(Ev::Attached).await;
+                });
+            }
             Cmd::Previews(ids) => {
                 for room_id in ids {
                     let room = self.room(&room_id)?;
@@ -581,9 +711,9 @@ async fn messages(room: &Room, from: Option<&str>, limit: u32) -> Result<Message
 /// List preview: the newest message on one line, prefixed with its sender outside one-to-one chats.
 fn preview(items: &[Item], dm: bool) -> Option<String> {
     let text = items.iter().rev().find_map(|i| match i {
-        Item::Msg(m) if m.own => Some(format!("You: {}", m.body)),
-        Item::Msg(m) if dm => Some(m.body.clone()),
-        Item::Msg(m) => Some(format!("{}: {}", m.sender, m.body)),
+        Item::Msg(m) if m.own => Some(format!("You: {}", m.summary())),
+        Item::Msg(m) if dm => Some(m.summary()),
+        Item::Msg(m) => Some(format!("{}: {}", m.sender, m.summary())),
         _ => None,
     })?;
     Some(text.replace('\n', " "))
@@ -598,6 +728,83 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
     }
     std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Files downloaded to be opened by other apps. Emptied at startup, so it holds one session's worth.
+fn media_dir(dir: &Path) -> PathBuf {
+    dir.join("media")
+}
+
+/// A file name with nothing that could leave its directory.
+fn safe_name(name: &str) -> String {
+    let clean: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') { c } else { '_' }).collect();
+    let clean = clean.trim_matches(['.', ' ']);
+    if clean.is_empty() { "file".to_owned() } else { clean.chars().take(120).collect() }
+}
+
+/// Re-encodes an image to fit `max` pixels on its longest side: JPEG, or PNG when it has alpha.
+fn shrink(bytes: &[u8], max: u32) -> Result<Vec<u8>> {
+    let image = image::load_from_memory(bytes)?;
+    let image = if image.width().max(image.height()) > max { image.thumbnail(max, max) } else { image };
+    let mut out = std::io::Cursor::new(Vec::new());
+    if image.color().has_alpha() {
+        image.write_to(&mut out, image::ImageFormat::Png)?;
+    } else {
+        image.to_rgb8().write_to(&mut out, image::ImageFormat::Jpeg)?;
+    }
+    Ok(out.into_inner())
+}
+
+/// An inline thumbnail: the sender's own thumbnail when there is one, else the server's for a
+/// plain image, else the image itself. `None` when there is nothing reasonable to fetch.
+async fn thumbnail(client: &Client, media: &Media) -> Result<Option<Vec<u8>>> {
+    let pictured = matches!(media.kind, MediaKind::Image | MediaKind::Sticker);
+    let request = match (&media.thumb, &media.source) {
+        (Some(thumb), _) => MediaRequestParameters { source: thumb.clone(), format: MediaFormat::File },
+        (None, MediaSource::Plain(_)) if pictured => MediaRequestParameters {
+            source: media.source.clone(),
+            format: MediaFormat::Thumbnail(MediaThumbnailSettings::new(THUMB_PX.into(), THUMB_PX.into())),
+        },
+        (None, _) if pictured && media.size.is_none_or(|s| s <= MAX_THUMB_SOURCE) => {
+            MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File }
+        }
+        _ => return Ok(None),
+    };
+    let bytes = client.media().get_media_content(&request, true).await?;
+    Ok(Some(tokio::task::spawn_blocking(move || shrink(&bytes, THUMB_PX)).await??))
+}
+
+/// Uploads a file as the message type its content calls for.
+async fn attach(room: &Room, path: &Path, reply_to: Option<String>) -> Result<()> {
+    let size = tokio::fs::metadata(path).await?.len();
+    if size > MAX_UPLOAD {
+        return Err(anyhow!("the file is larger than {} MB", MAX_UPLOAD / 1024 / 1024));
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".to_owned());
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    let data = tokio::fs::read(path).await?;
+    let mut config = AttachmentConfig::new();
+    if mime.type_() == mime_guess::mime::IMAGE {
+        // Bridges and other clients lay the bubble out from these.
+        if let Ok((width, height)) = image::ImageReader::new(std::io::Cursor::new(&data)).with_guessed_format()?.into_dimensions() {
+            config = config.info(AttachmentInfo::Image(BaseImageInfo {
+                width: Some(width.into()),
+                height: Some(height.into()),
+                size: UInt::new(size),
+                ..Default::default()
+            }));
+        }
+    }
+    if let Some(id) = reply_to {
+        let reply = Reply {
+            event_id: EventId::parse(id)?,
+            enforce_thread: EnforceThread::MaybeThreaded,
+            add_mentions: AddMentions::Yes,
+        };
+        config = config.reply(Some(reply));
+    }
+    room.send_attachment(name, &mime, data, config).await?;
     Ok(())
 }
 
@@ -846,7 +1053,7 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
     for event in events {
         let Some(id) = event.event_id().map(|e| e.to_string()) else { continue };
         let Some(sender) = event.sender() else { continue };
-        let (mut reply_to, mut deleted) = (None, false);
+        let (mut reply_to, mut deleted, mut media) = (None, false, None);
         // A deleted event in an encrypted room is an empty `m.room.encrypted`: nothing says whether
         // it was a message or a reaction, so it gets no placeholder.
         let body = if event.kind.is_utd() {
@@ -864,12 +1071,15 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
                         out.push(Item::Edit { target: r.event_id.to_string(), body });
                         continue;
                     }
-                    Some(Relation::Reply(reply)) => {
-                        reply_to = Some(reply.in_reply_to.event_id.to_string());
+                    relation => {
+                        if let Some(Relation::Reply(reply)) = relation {
+                            reply_to = Some(reply.in_reply_to.event_id.to_string());
+                        }
+                        let (found, text) = content(&m.content.msgtype);
+                        media = found;
                         // Older clients and bridges prepend the quoted message to the body.
-                        remove_plain_reply_fallback(&describe(&m.content.msgtype)).to_owned()
+                        if reply_to.is_some() { remove_plain_reply_fallback(&text).to_owned() } else { text }
                     }
-                    _ => describe(&m.content.msgtype),
                 },
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
                     SyncMessageLikeEvent::Redacted(_),
@@ -899,7 +1109,22 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
                     }
                     continue;
                 }
-                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Sticker(_))) => "🖼 Sticker".into(),
+                Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Sticker(
+                    SyncMessageLikeEvent::Original(s),
+                ))) => {
+                    let info = s.content.info;
+                    media = Some(Media {
+                        kind: MediaKind::Sticker,
+                        name: s.content.body,
+                        size: info.size.map(Into::into),
+                        mime: info.mimetype,
+                        dims: dims(info.width, info.height),
+                        duration: None,
+                        source: s.content.source.into(),
+                        thumb: info.thumbnail_source,
+                    });
+                    String::new()
+                }
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(_))) if !is_redacted(event) => {
                     UTD.into()
                 }
@@ -928,6 +1153,7 @@ async fn to_items(room: &Room, events: &[TimelineEvent]) -> Vec<Item> {
             reply_to,
             deleted,
             edited: false,
+            media,
             reactions: Vec::new(),
         }));
     }
@@ -995,21 +1221,77 @@ async fn avatar(client: &Client, room_id: &RoomId) -> Result<Option<Vec<u8>>> {
     Ok(Some(client.media().get_media_content(&request, true).await?))
 }
 
-/// Text for a message; media gets Beeper's label and its caption, not its file name.
-fn describe(msgtype: &MessageType) -> String {
-    let (label, caption) = match msgtype {
-        MessageType::Image(c) => ("📷 Photo", c.caption()),
-        MessageType::Video(c) => ("🎬 Video", c.caption()),
-        MessageType::Audio(c) if c.voice.is_some() => ("🎤 Voice Note", c.caption()),
-        MessageType::Audio(c) => ("🎵 Audio", c.caption()),
-        MessageType::File(c) => return format!("📎 {}", c.filename()),
-        MessageType::Location(_) => ("📍 Location", None),
-        _ => return msgtype.body().to_owned(),
+fn dims(width: Option<UInt>, height: Option<UInt>) -> Option<(u32, u32)> {
+    Some((u64::from(width?).try_into().ok()?, u64::from(height?).try_into().ok()?))
+}
+
+/// A message's attachment and text. For media the text is the caption: the body is only a
+/// caption when a separate file name says so, otherwise it is the file name.
+fn content(msgtype: &MessageType) -> (Option<Media>, String) {
+    let media = match msgtype {
+        MessageType::Image(c) => {
+            let info = c.info.as_deref();
+            Media {
+                kind: MediaKind::Image,
+                name: c.filename().to_owned(),
+                size: info.and_then(|i| i.size).map(Into::into),
+                mime: info.and_then(|i| i.mimetype.clone()),
+                dims: info.and_then(|i| dims(i.width, i.height)),
+                duration: None,
+                source: c.source.clone(),
+                thumb: info.and_then(|i| i.thumbnail_source.clone()),
+            }
+        }
+        MessageType::Video(c) => {
+            let info = c.info.as_deref();
+            Media {
+                kind: MediaKind::Video,
+                name: c.filename().to_owned(),
+                size: info.and_then(|i| i.size).map(Into::into),
+                mime: info.and_then(|i| i.mimetype.clone()),
+                dims: info.and_then(|i| dims(i.width, i.height)),
+                duration: info.and_then(|i| i.duration),
+                source: c.source.clone(),
+                thumb: info.and_then(|i| i.thumbnail_source.clone()),
+            }
+        }
+        MessageType::Audio(c) => {
+            let info = c.info.as_deref();
+            Media {
+                kind: if c.voice.is_some() { MediaKind::Voice } else { MediaKind::Audio },
+                name: c.filename().to_owned(),
+                size: info.and_then(|i| i.size).map(Into::into),
+                mime: info.and_then(|i| i.mimetype.clone()),
+                dims: None,
+                duration: info.and_then(|i| i.duration),
+                source: c.source.clone(),
+                thumb: None,
+            }
+        }
+        MessageType::File(c) => {
+            let info = c.info.as_deref();
+            Media {
+                kind: MediaKind::File,
+                name: c.filename().to_owned(),
+                size: info.and_then(|i| i.size).map(Into::into),
+                mime: info.and_then(|i| i.mimetype.clone()),
+                dims: None,
+                duration: None,
+                source: c.source.clone(),
+                thumb: info.and_then(|i| i.thumbnail_source.clone()),
+            }
+        }
+        MessageType::Location(_) => return (None, "📍 Location".to_owned()),
+        other => return (None, other.body().to_owned()),
     };
-    match caption {
-        Some(caption) => format!("{label}: {caption}"),
-        None => label.to_owned(),
-    }
+    let caption = match msgtype {
+        MessageType::Image(c) => c.caption(),
+        MessageType::Video(c) => c.caption(),
+        MessageType::Audio(c) => c.caption(),
+        MessageType::File(c) => c.caption(),
+        _ => None,
+    };
+    (Some(media), caption.unwrap_or_default().to_owned())
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ gpui_kit::assets::icon_assets!(
         Mail,
         MailOpen,
         MessageCircle,
+        Paperclip,
         Pencil,
         Pin,
         PinOff,
@@ -224,6 +225,92 @@ pub(crate) fn copy(cx: &mut gpui_kit::App, text: String) {
     }
     #[cfg(not(target_os = "android"))]
     cx.write_to_clipboard(ClipboardItem::new_string(text));
+}
+
+/// Hands a downloaded file to whatever the system opens it with.
+pub(crate) fn open_file(cx: &mut gpui_kit::App, path: &std::path::Path, mime: Option<&str>) {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = mime;
+        cx.open_with_system(path);
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = cx;
+        match android_files::view(&path.to_string_lossy(), mime.unwrap_or("*/*")) {
+            Ok(true) => {}
+            Ok(false) => log::warn!("no app opens {}", path.display()),
+            Err(e) => log::warn!("open {}: {e}", path.display()),
+        }
+    }
+}
+
+/// Lets the user choose a file to send. `None` when cancelled or unreadable.
+pub(crate) fn pick_file(cx: &mut gpui_kit::App) -> gpui_kit::Task<Option<PathBuf>> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let options = PathPromptOptions { files: true, directories: false, multiple: false, prompt: None };
+        let picked = cx.prompt_for_paths(options);
+        cx.background_spawn(async move { picked.await.ok()?.ok()??.into_iter().next() })
+    }
+    // The picker blocks its caller until the user is done, so it runs off the UI thread.
+    #[cfg(target_os = "android")]
+    cx.background_spawn(async {
+        let picked = gpui_mobile::packages::file_selector::open_file(&Default::default());
+        let uri = picked.map_err(|e| log::warn!("file picker: {e}")).ok()??.path;
+        let copied = android_files::copy_to_cache(&uri);
+        copied.map_err(|e| log::warn!("picked file: {e}")).ok()?.map(PathBuf::from)
+    })
+}
+
+/// Calls into `dev.gpui.beeper.Files`, this app's Java helper.
+#[cfg(target_os = "android")]
+mod android_files {
+    use gpui_mobile::android::jni as helpers;
+    use jni::objects::JValue;
+
+    const CLASS: &str = "dev.gpui.beeper.Files";
+
+    pub fn view(path: &str, mime: &str) -> Result<bool, String> {
+        helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, CLASS)?;
+            let path = env.new_string(path).map_err(|e| e.to_string())?;
+            let mime = env.new_string(mime).map_err(|e| e.to_string())?;
+            env.call_static_method(
+                &class,
+                jni::jni_str!("view"),
+                jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)Z"),
+                &[JValue::Object(&activity), JValue::Object(&path), JValue::Object(&mime)],
+            )
+            .and_then(|v| v.z())
+            .map_err(|e| {
+                env.exception_clear();
+                e.to_string()
+            })
+        })
+    }
+
+    pub fn copy_to_cache(uri: &str) -> Result<Option<String>, String> {
+        helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, CLASS)?;
+            let uri = env.new_string(uri).map_err(|e| e.to_string())?;
+            let path = env
+                .call_static_method(
+                    &class,
+                    jni::jni_str!("copyToCache"),
+                    jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;)Ljava/lang/String;"),
+                    &[JValue::Object(&activity), JValue::Object(&uri)],
+                )
+                .and_then(|v| v.l())
+                .map_err(|e| {
+                    env.exception_clear();
+                    e.to_string()
+                })?;
+            Ok((!path.is_null()).then(|| helpers::get_string(env, &path)))
+        })
+    }
 }
 
 pub(crate) fn hide_keyboard() {

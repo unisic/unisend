@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Attachments downloaded to be opened by other apps; see media_dir in src/backend.rs. -->
+    <files-path name="media" path="beeper/media/" />
+</paths>

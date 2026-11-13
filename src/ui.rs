@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use chrono::{Datelike as _, Local, TimeZone as _};
@@ -18,7 +18,7 @@ use matrix_sdk::ruma::OwnedRoomId;
 use tokio::sync::mpsc;
 
 use crate::Keyboard;
-use crate::backend::{ChatAction, Cmd, DELETED, Ev, Item, Msg, RoomSummary, UTD};
+use crate::backend::{ChatAction, Cmd, DELETED, Ev, Item, Media, MediaKind, Msg, RoomSummary, UTD};
 
 const NARROW: f32 = 720.;
 // Chat list metrics, measured from Beeper Android 4.64 at 3x density.
@@ -28,6 +28,8 @@ const GUTTER: f32 = 24.;
 const BAR_H: f32 = 48.;
 /// Edits, reactions and deletions kept until the message they target is paged in.
 const MAX_PENDING: usize = 512;
+/// Inline thumbnails kept decoded; each is at most 2.6 MB of pixels.
+const MAX_THUMBS: usize = 60;
 const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
 /// What the composer's next send does.
@@ -82,6 +84,16 @@ pub struct BeeperApp {
     open: Option<OwnedRoomId>,
     msgs: Vec<Msg>,
     pending: Vec<Item>,
+    /// Inline thumbnails by event ID, oldest first in `thumb_order`.
+    thumbs: HashMap<String, Arc<Image>>,
+    thumb_order: VecDeque<String>,
+    /// Messages whose thumbnail was requested.
+    asked: HashSet<String>,
+    /// Image shown full-screen; the picture arrives after the overlay opens.
+    viewer: Option<(String, Option<Arc<Image>>)>,
+    /// Attachments being downloaded to open.
+    fetching: HashSet<String>,
+    uploads: usize,
     /// Message whose actions are showing.
     picked: Option<String>,
     compose: Compose,
@@ -169,6 +181,12 @@ impl BeeperApp {
             open: None,
             msgs: Vec::new(),
             pending: Vec::new(),
+            thumbs: HashMap::new(),
+            thumb_order: VecDeque::new(),
+            asked: HashSet::new(),
+            viewer: None,
+            fetching: HashSet::new(),
+            uploads: 0,
             picked: None,
             compose: Compose::New,
             more: false,
@@ -223,6 +241,36 @@ impl BeeperApp {
                     self.avatars.insert(id, Some(Arc::new(Image::from_bytes(format, bytes))));
                 }
             }
+            Ev::Thumb(id, bytes) => {
+                // Late answers for a chat that was closed meanwhile are dropped.
+                if let (true, Some(format)) = (self.asked.contains(&id), image_format(&bytes)) {
+                    self.thumbs.insert(id.clone(), Arc::new(Image::from_bytes(format, bytes)));
+                    self.thumb_order.push_back(id);
+                    while self.thumb_order.len() > MAX_THUMBS {
+                        let Some(old) = self.thumb_order.pop_front() else { break };
+                        // Forgetting the request lets it load again when scrolled back to.
+                        self.asked.remove(&old);
+                        if let Some(image) = self.thumbs.remove(&old) {
+                            image.remove_asset(cx);
+                        }
+                    }
+                }
+            }
+            Ev::Viewed(id, bytes) => {
+                if let (Some((open, slot)), Some(format)) = (&mut self.viewer, image_format(&bytes)) {
+                    if *open == id {
+                        *slot = Some(Arc::new(Image::from_bytes(format, bytes)));
+                    }
+                }
+            }
+            Ev::Fetched(id, path) => {
+                self.fetching.remove(&id);
+                if let Some(path) = path {
+                    let mime = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()?.mime.clone());
+                    crate::open_file(cx, &path, mime.as_deref());
+                }
+            }
+            Ev::Attached => self.uploads = self.uploads.saturating_sub(1),
             Ev::Rooms(changed) => {
                 let mut by_id: HashMap<_, _> = self.rooms.drain(..).map(|r| (r.id.clone(), r)).collect();
                 by_id.extend(changed.into_iter().map(|r| (r.id.clone(), r)));
@@ -234,7 +282,7 @@ impl BeeperApp {
                 self.rooms.retain(|r| r.id != id);
                 self.refilter(cx);
                 if self.open.as_ref() == Some(&id) {
-                    self.close_room();
+                    self.close_room(cx);
                 }
             }
             Ev::History { room, items, reset, more } => {
@@ -454,6 +502,163 @@ impl BeeperApp {
         cx.notify();
     }
 
+    fn close_viewer(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, Some(image))) = self.viewer.take() {
+            image.remove_asset(cx);
+        }
+        cx.notify();
+    }
+
+    /// Requests the thumbnail of a message that is being drawn. Like `fetch_rows`, leaves half
+    /// the command channel to user actions.
+    fn want_thumb(&mut self, ix: usize) {
+        let m = &self.msgs[ix];
+        let Some(media) = &m.media else { return };
+        let pictured = matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video);
+        if !pictured || self.asked.contains(&m.id) || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
+            return;
+        }
+        if self.cmd.try_send(Cmd::Thumbs(vec![(m.id.clone(), media.clone())])).is_ok() {
+            self.asked.insert(m.id.clone());
+        }
+    }
+
+    /// A tap on an attachment: pictures open full-screen, everything else in the system's app.
+    fn open_media(&mut self, id: String, media: Media, cx: &mut Context<Self>) {
+        if matches!(media.kind, MediaKind::Image | MediaKind::Sticker) {
+            if self.send(Cmd::View(id.clone(), media), cx) {
+                self.viewer = Some((id, None));
+            }
+        } else if !self.fetching.contains(&id) && self.send(Cmd::Fetch(id.clone(), media), cx) {
+            self.fetching.insert(id);
+        }
+    }
+
+    fn attach(&mut self, cx: &mut Context<Self>) {
+        let picked = crate::pick_file(cx);
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                let Some(room) = this.open.clone() else { return };
+                let reply_to = match std::mem::replace(&mut this.compose, Compose::New) {
+                    Compose::Reply(id) => Some(id),
+                    _ => None,
+                };
+                if this.send(Cmd::Attach { room, path, reply_to }, cx) {
+                    this.uploads += 1;
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn render_media(&self, m: &Msg, media: &Media, cx: &mut Context<Self>) -> AnyElement {
+        let (id, owned) = (m.id.clone(), media.clone());
+        let open = cx.listener(move |this, _: &ClickEvent, _, cx| {
+            // The bubble's own tap selects the message.
+            cx.stop_propagation();
+            this.open_media(id.clone(), owned.clone(), cx);
+        });
+        let raised = cx.theme().list_active;
+        let pictured = matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video);
+        if pictured && (media.kind != MediaKind::Video || media.dims.is_some()) {
+            // The picture's own shape, within what a bubble may take.
+            let (max_w, max_h) = if media.kind == MediaKind::Sticker { (140., 140.) } else { (260., 320.) };
+            let (w, h) = media.dims.map_or((max_w, max_w * 0.75), |(w, h)| (w.max(1) as f32, h.max(1) as f32));
+            let scale = (max_w / w).min(max_h / h).min(1.);
+            let thumb = self.thumbs.get(&m.id).cloned();
+            let video = media.kind == MediaKind::Video;
+            return div()
+                .id(SharedString::from(format!("{}-media", m.id)))
+                .relative()
+                .w(px((w * scale).max(80.)))
+                .h(px((h * scale).max(60.)))
+                .rounded(px(14.))
+                .overflow_hidden()
+                .bg(raised)
+                .cursor_pointer()
+                .on_click(open)
+                .map(|el| match thumb {
+                    Some(image) => el.child(img(image).size_full().rounded(px(14.)).object_fit(ObjectFit::Cover)),
+                    None => el.child(
+                        div().size_full().flex().items_center().justify_center().opacity(0.5).child(
+                            Icon::new(if video { IconName::Video } else { IconName::Image }).size_6(),
+                        ),
+                    ),
+                })
+                .when(video, |el| {
+                    el.child(
+                        div().absolute().inset_0().flex().items_center().justify_center().child(
+                            div()
+                                .size(px(44.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(gpui_kit::black().opacity(0.55))
+                                .text_color(gpui_kit::white())
+                                .child(Icon::new(IconName::Play).size_5()),
+                        ),
+                    )
+                    .children(media.duration.map(|d| {
+                        div()
+                            .absolute()
+                            .left_2()
+                            .bottom_2()
+                            .px_1p5()
+                            .rounded_full()
+                            .bg(gpui_kit::black().opacity(0.55))
+                            .text_color(gpui_kit::white())
+                            .text_size(px(11.))
+                            .child(length(d))
+                    }))
+                })
+                .into_any_element();
+        }
+        let icon = match media.kind {
+            MediaKind::Voice => IconName::Mic,
+            MediaKind::Audio => IconName::Music,
+            MediaKind::Video => IconName::Video,
+            _ => IconName::File,
+        };
+        let detail = if self.fetching.contains(&m.id) {
+            "Downloading…".to_owned()
+        } else {
+            match (media.duration, media.size) {
+                (Some(d), _) => length(d),
+                (None, Some(size)) => file_size(size),
+                (None, None) => String::new(),
+            }
+        };
+        h_flex()
+            .id(SharedString::from(format!("{}-media", m.id)))
+            .gap_2()
+            .max_w(px(260.))
+            .cursor_pointer()
+            .on_click(open)
+            .child(
+                div()
+                    .size(px(40.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(raised)
+                    .child(Icon::new(icon).size_5()),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .child(div().truncate().text_size(px(15.)).child(match media.kind {
+                        MediaKind::Voice => "Voice Note".to_owned(),
+                        _ => media.name.clone(),
+                    }))
+                    .child(div().text_size(px(12.)).opacity(0.7).child(detail)),
+            )
+            .into_any_element()
+    }
+
     /// Adds the reaction, or removes it when it is already ours.
     fn toggle_reaction(&mut self, target: &str, key: &str, cx: &mut Context<Self>) {
         let Some(room) = self.open.clone() else { return };
@@ -470,15 +675,22 @@ impl BeeperApp {
         if self.open.as_ref() == Some(&id) {
             return;
         }
-        self.close_room();
+        self.close_room(cx);
         self.open = Some(id.clone());
         self.loading = self.send(Cmd::Open(id), cx);
     }
 
-    fn close_room(&mut self) {
+    fn close_room(&mut self, cx: &mut Context<Self>) {
         self.open = None;
         self.msgs.clear();
         self.pending.clear();
+        self.asked.clear();
+        self.thumb_order.clear();
+        for (_, image) in self.thumbs.drain() {
+            image.remove_asset(cx);
+        }
+        self.close_viewer(cx);
+        self.fetching.clear();
         self.picked = None;
         self.compose = Compose::New;
         self.timeline.reset(0);
@@ -754,14 +966,16 @@ impl BeeperApp {
         let timeline = list(
             self.timeline.clone(),
             cx.processor(move |this, ix: usize, _, cx| {
+                this.want_thumb(ix);
                 let m = &this.msgs[ix];
+                let attachment = m.media.as_ref().filter(|_| !m.deleted).map(|media| this.render_media(m, media, cx));
                 let prev = ix.checked_sub(1).map(|p| &this.msgs[p]);
                 let new_day = prev.is_none_or(|p| day(p.ts) != day(m.ts));
                 let first = new_day || prev.is_none_or(|p| p.from != m.from);
                 let faded = m.deleted || m.body == UTD;
                 let picked = this.picked.as_deref() == Some(m.id.as_str());
                 let quote = m.reply_to.as_ref().map(|id| match this.msgs.iter().rfind(|x| &x.id == id) {
-                    Some(q) => (q.sender.clone(), q.body.clone()),
+                    Some(q) => (q.sender.clone(), q.summary()),
                     None => (String::new(), "Message unavailable".to_owned()),
                 });
                 let id = m.id.clone();
@@ -800,13 +1014,16 @@ impl BeeperApp {
                             .when(!who.is_empty(), |el| el.child(div().font_weight(FontWeight::SEMIBOLD).child(who)))
                             .child(div().line_clamp(2).child(text))
                     }))
-                    .child(
-                        div()
-                            .text_size(px(16.))
-                            .line_height(px(22.))
-                            .when(faded, |el| el.italic().opacity(0.7))
-                            .child(m.body.clone()),
-                    )
+                    .children(attachment.map(|a| div().py_1().child(a)))
+                    .when(!m.body.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_size(px(16.))
+                                .line_height(px(22.))
+                                .when(faded, |el| el.italic().opacity(0.7))
+                                .child(m.body.clone()),
+                        )
+                    })
                     .child(
                         h_flex()
                             .justify_end()
@@ -882,7 +1099,7 @@ impl BeeperApp {
                         el.child(
                             Button::new("back").ghost().icon(IconName::ArrowLeft).tooltip("Back").on_click(cx.listener(
                                 |this, _, _, cx| {
-                                    this.close_room();
+                                    this.close_room(cx);
                                     cx.notify();
                                 },
                             )),
@@ -918,11 +1135,28 @@ impl BeeperApp {
             )
             .children(self.render_message_actions(cx))
             .children(self.render_compose_strip(cx))
+            .when(self.uploads > 0, |el| {
+                el.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Sending attachment…"),
+                )
+            })
             .child(
                 h_flex()
                     .gap_2()
                     .px_3()
                     .py_2()
+                    .child(
+                        Button::new("attach")
+                            .ghost()
+                            .icon(IconName::Paperclip)
+                            .tooltip("Attach a file")
+                            .on_click(cx.listener(|this, _, _, cx| this.attach(cx))),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -1006,7 +1240,7 @@ impl BeeperApp {
             Compose::Reply(id) => ("Replying to:", id),
             Compose::Edit(id) => ("Edit message", id),
         };
-        let quoted = self.msgs.iter().find(|m| &m.id == id).map(|m| format!("{}: {}", m.sender, m.body)).unwrap_or_default();
+        let quoted = self.msgs.iter().find(|m| &m.id == id).map(|m| format!("{}: {}", m.sender, m.summary())).unwrap_or_default();
         Some(
             h_flex()
                 .gap_2()
@@ -1107,6 +1341,20 @@ fn count_pill(n: u64, muted: bool, cx: &App) -> Div {
 
 fn local(ts_ms: u64) -> Option<chrono::DateTime<Local>> {
     Local.timestamp_millis_opt(i64::try_from(ts_ms).ok()?).single()
+}
+
+/// "1:05" or "1:02:03".
+fn length(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
+}
+
+fn file_size(bytes: u64) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} B"),
+        1024..1_048_576 => format!("{:.0} KB", bytes as f64 / 1024.),
+        _ => format!("{:.1} MB", bytes as f64 / 1_048_576.),
+    }
 }
 
 fn day(ts_ms: u64) -> Option<chrono::NaiveDate> {
@@ -1238,7 +1486,30 @@ impl Render for BeeperApp {
                         }))
                         .into_any_element()
                 };
-                root.child(self.render_banners(cx)).child(div().flex_1().min_h_0().child(body)).into_any_element()
+                let viewer = self.viewer.as_ref().map(|(id, full)| {
+                    // The thumbnail stands in until the full picture arrives.
+                    let shown = full.clone().or_else(|| self.thumbs.get(id).cloned());
+                    div()
+                        .id("viewer")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui_kit::black().opacity(0.94))
+                        .text_color(gpui_kit::white())
+                        .on_click(cx.listener(|this, _, _, cx| this.close_viewer(cx)))
+                        .map(|el| match shown {
+                            Some(image) => el.child(img(image).size_full().object_fit(ObjectFit::Contain)),
+                            None => el.child("Loading…"),
+                        })
+                        .child(div().absolute().top(px(top + 12.)).right_3().child(Icon::new(IconName::X).size_6()))
+                });
+                root.relative()
+                    .child(self.render_banners(cx))
+                    .child(div().flex_1().min_h_0().child(body))
+                    .children(viewer)
+                    .into_any_element()
             }
         }
     }
