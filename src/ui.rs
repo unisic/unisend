@@ -1163,9 +1163,11 @@ impl BeeperApp {
 
     fn render_chat(&mut self, narrow: bool, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
-        // The oldest row is on screen: the messages do not fill it, or the user has scrolled up to
+        // The top of the messages is on screen: they do not fill it, or the user has scrolled up to
         // them. A list too short to scroll reports no scrolling, so this is not left to its handler.
-        if self.timeline.bounds_for_item(0).is_some() {
+        // Told by the offset, not by the oldest row: rows that draw nothing take no height, and the
+        // list then puts its top at the first row that does.
+        if self.timeline.scroll_px_offset_for_scrollbar().y >= px(0.) {
             self.load_older(cx);
         }
         let room = self.open.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id));
