@@ -136,6 +136,7 @@ pub struct BeeperApp {
     focus: FocusHandle,
     dir: PathBuf,
     settings: crate::Settings,
+    emoji: panels::EmojiChoice,
     user: Option<OwnedUserId>,
     /// The account is Beeper's, so it has chat networks.
     beeper: bool,
@@ -287,6 +288,7 @@ impl BeeperApp {
             offline: false,
             focus: cx.focus_handle(),
             dir,
+            emoji: Default::default(),
             settings,
             user: None,
             beeper: true,
@@ -2042,6 +2044,10 @@ impl Render for BeeperApp {
             .pt(px(top))
             .pb(px(bottom))
             .font_family(crate::FACE)
+            .when_some(crate::emoji::fallbacks(), |mut el, emoji| {
+                el.text_style().font_fallbacks = Some(emoji);
+                el
+            })
             .bg(p.ground)
             .text_color(p.text);
         match self.screen {

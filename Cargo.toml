@@ -30,6 +30,10 @@ matrix-sdk = { version = "=0.19.1", default-features = false, features = ["e2e-e
 matrix-sdk-ui = { version = "=0.19.1", default-features = false, features = ["rustls-aws-lc-rs"] }
 # Only for `secret_storage::DecodeError`, which matrix-sdk does not re-export. Already in the tree.
 matrix-sdk-crypto = { version = "=0.19.1", default-features = false }
+# All already in the tree (cosmic-text): reading and mapping a user's own emoji font.
+fontdb = { version = "0.23", default-features = false }
+memmap2 = "0.9"
+ttf-parser = { version = "0.25", default-features = false }
 # gpui-kit re-exports gpui (gpui-pre 0.3.6) and, on desktop, its platform layer.
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "13c716b687b47f96a677aaf46c8fa341fa7208da", default-features = false, features = ["component", "assets"] }
 

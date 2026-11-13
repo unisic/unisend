@@ -7,6 +7,7 @@
 mod backend;
 mod beeper;
 mod bridges;
+mod emoji;
 mod ui;
 
 use std::path::PathBuf;
@@ -71,10 +72,14 @@ impl AssetSource for Assets {
 fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::init(cx);
     ui::motion::follow_system(cx);
+    let mut settings = Settings::load(&dir);
+    #[cfg_attr(target_os = "android", expect(unused_variables))]
+    let own = emoji::apply(&mut settings, &dir, cx);
     #[cfg(not(target_os = "android"))]
-    bundled_emoji(cx);
+    if !own {
+        bundled_emoji(cx);
+    }
     fonts(cx);
-    let settings = Settings::load(&dir);
     cx.set_global(settings.theme);
     cx.set_global(settings.chat_colour);
     sync_theme(None, cx);
@@ -214,7 +219,7 @@ fn ink_on(fill: u32) -> u32 {
 }
 
 /// What the settings page changes, kept in `settings.json` in the data directory.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Settings {
     #[serde(default)]
     pub theme: ThemeChoice,
@@ -224,6 +229,9 @@ pub(crate) struct Settings {
     /// Own bubbles' colour, kept on this device like the rest.
     #[serde(default)]
     pub chat_colour: ChatColour,
+    /// Family name of the user's own emoji font, kept as `emoji::FILE`; `None` for the system's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji_font: Option<String>,
 }
 
 impl Settings {
@@ -237,7 +245,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true, chat_colour: ChatColour::default() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None })
     }
 
     fn parse(raw: &[u8]) -> Option<Self> {
@@ -953,5 +961,20 @@ mod tests {
         assert_eq!((old.theme, old.incognito, old.chat_colour), (super::ThemeChoice::Light, false, super::ChatColour::Default));
         let new = super::Settings::parse(br#"{"chat_colour":"Teal"}"#).unwrap();
         assert_eq!(new.chat_colour, super::ChatColour::Teal);
+    }
+
+    #[test]
+    fn emoji_font_choice_round_trips() {
+        let dir = std::env::temp_dir().join(format!("beeper-gpui-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut settings = super::Settings::load(&dir);
+        assert_eq!(settings.emoji_font, None);
+        settings.emoji_font = Some("Test Squares Emoji".into());
+        settings.save(&dir);
+        assert_eq!(super::Settings::load(&dir), settings);
+        settings.emoji_font = None;
+        settings.save(&dir);
+        assert!(!std::fs::read_to_string(dir.join("settings.json")).unwrap().contains("emoji_font"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
