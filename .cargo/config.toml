@@ -1,0 +1,3 @@
+# Static CRT: a stock Windows has no VCRUNTIME140.dll unless the VC++ redistributable is installed.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

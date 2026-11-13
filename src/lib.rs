@@ -291,7 +291,8 @@ pub fn run_desktop() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,beeper_gpui=info")).init();
     let dir = std::env::var_os("BEEPER_GPUI_DATA_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::data_dir().map(|d| d.join("beeper-gpui")))
+        // Local, not roaming, on Windows: the store is large and belongs to one device.
+        .or_else(|| dirs::data_local_dir().map(|d| d.join("beeper-gpui")))
         .expect("no data directory");
     private_dir(&dir).expect("create data directory");
     gpui_kit::application().with_assets(Assets).run(move |cx| {
