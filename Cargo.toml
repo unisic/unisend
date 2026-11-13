@@ -53,4 +53,6 @@ strip = true
 [dev-dependencies]
 base64 = "0.22"
 hmac = "0.12"
+# Synapse's shared-secret registration signs with HMAC-SHA1.
+sha1 = "0.10"
 sha2 = "0.10"

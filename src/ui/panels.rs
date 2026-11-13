@@ -23,7 +23,7 @@ pub(super) enum Panel {
 
 impl BeeperApp {
     pub(super) fn open_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
-        if panel == Panel::Networks {
+        if panel == Panel::Networks && self.beeper {
             self.working = self.send(Cmd::Networks, cx);
         }
         self.panel = Some(panel);
@@ -263,7 +263,7 @@ impl BeeperApp {
             )))
             .child(
                 section("Account", cx).child(
-                    card(cx).child(row("Beeper", &user, cx)).child(
+                    card(cx).child(row(if self.beeper { "Beeper" } else { "Matrix" }, &user, cx)).child(
                         h_flex()
                             .id("sign-out")
                             .min_h(px(ROW_H))
@@ -284,6 +284,14 @@ impl BeeperApp {
 
     fn render_networks(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
+        if !self.beeper {
+            return div()
+                .text_size(px(14.))
+                .line_height(px(20.))
+                .text_color(p.muted)
+                .child("Networks are a Beeper feature. Chats from WhatsApp, Signal and the rest come through Beeper's bridges, and this account is on another Matrix server.")
+                .into_any_element();
+        }
         let note = |text: &'static str| div().text_size(px(14.)).text_color(p.faint).child(text);
         let list = match &self.networks {
             None => note(if self.working { "Loading..." } else { "Could not load the networks." }).into_any_element(),
@@ -323,6 +331,7 @@ impl BeeperApp {
                 this.open_panel(Panel::Add, cx);
             }))))
             .child(list)
+            .into_any_element()
     }
 
     fn render_add(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

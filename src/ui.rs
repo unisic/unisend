@@ -19,6 +19,7 @@ mod cards;
 mod menu;
 mod panels;
 mod rich;
+mod signin;
 
 use std::path::PathBuf;
 
@@ -112,6 +113,8 @@ enum Screen {
     Starting,
     Email,
     Code,
+    /// Another Matrix homeserver, with a password.
+    Matrix,
     Main,
 }
 
@@ -122,6 +125,7 @@ pub struct BeeperApp {
     error: Option<SharedString>,
     email: Entity<InputState>,
     code: Entity<InputState>,
+    matrix: signin::Form,
     recovery: Entity<InputState>,
     composer: Entity<InputState>,
     need_recovery: bool,
@@ -132,6 +136,8 @@ pub struct BeeperApp {
     dir: PathBuf,
     settings: crate::Settings,
     user: Option<OwnedUserId>,
+    /// The account is Beeper's, so it has chat networks.
+    beeper: bool,
     /// Settings page shown in place of the chat.
     panel: Option<Panel>,
     /// `None` until loaded.
@@ -227,6 +233,7 @@ impl BeeperApp {
             }));
         }
 
+        let matrix = signin::Form::new(window, cx, &mut subs);
         subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {
@@ -270,6 +277,7 @@ impl BeeperApp {
             error: None,
             email,
             code,
+            matrix,
             recovery,
             composer,
             need_recovery: false,
@@ -278,6 +286,7 @@ impl BeeperApp {
             dir,
             settings,
             user: None,
+            beeper: true,
             panel: None,
             networks: None,
             flows: None,
@@ -346,7 +355,8 @@ impl BeeperApp {
                 self.error = None;
             }
             ev @ (Ev::Networks(_) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
-            Ev::Ready(user) => {
+            Ev::Ready { user, beeper } => {
+                self.beeper = beeper;
                 crate::background(true);
                 // The app may have been started by a tap on a notification.
                 self.open_from_notification(cx);
@@ -884,6 +894,15 @@ impl BeeperApp {
                         el.child(Button::new("login-back").ghost().label("Use a different email").on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.screen = Screen::Email;
+                                this.error = None;
+                                cx.notify();
+                            }),
+                        ))
+                    })
+                    .when(!on_code, |el| {
+                        el.child(Button::new("login-matrix").ghost().label("Use another Matrix server").on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.screen = Screen::Matrix;
                                 this.error = None;
                                 cx.notify();
                             }),
@@ -1685,7 +1704,7 @@ impl BeeperApp {
                     card()
                         .bg(p.warning_bg)
                         .child(div().text_color(p.warning).child(
-                            "Encrypted messages are locked on this device. Copy your Beeper recovery code \
+                            "Encrypted messages are locked on this device. Copy your recovery code \
                              from a device where you are signed in, then paste it here.",
                         ))
                         .child(div().w_full().child(Input::new(&self.recovery)))
@@ -2023,6 +2042,7 @@ impl Render for BeeperApp {
                 .child(div().text_size(px(14.)).text_color(p.faint).child("Connecting..."))
                 .into_any_element(),
             Screen::Email | Screen::Code => root.child(self.render_login(cx)).into_any_element(),
+            Screen::Matrix => root.child(self.render_matrix_login(cx)).into_any_element(),
             Screen::Main => {
                 let narrow = window.viewport_size().width < px(NARROW);
                 let panel = self.panel.map(|panel| self.render_panel(panel, narrow, window, cx));

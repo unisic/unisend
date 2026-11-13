@@ -56,6 +56,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
     let st = State {
         dir,
         homeserver: hs.to_owned(),
+        beeper: true,
         http: http_client().unwrap(),
         ev,
         client: None,
@@ -115,7 +116,7 @@ async fn login_sync_decrypt_send_recover() {
     // Alice goes through the production login path.
     let (mut alice, mut alice_rx) = state(root.join("alice"), &hs);
     alice.login_jwt(jwt(&secret, &alice_name)).await.unwrap();
-    wait_for(&mut alice_rx, "Ready", |e| matches!(e, Ev::Ready(_)).then_some(())).await;
+    wait_for(&mut alice_rx, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
     assert!(root.join("alice/session.json").exists());
 
     // Bob is a plain matrix-sdk client.
@@ -600,6 +601,112 @@ async fn gui_fixture() {
     std::fs::write(out.join("session.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
     std::fs::write(out.join("recovery-key"), &key).unwrap();
     let _ = std::fs::remove_dir_all(&store);
+}
+
+/// A user with a password, made through Synapse's shared-secret registration
+/// (`registration_shared_secret` in homeserver.yaml), the one way this test server lets one in.
+async fn register_with_password(hs: &str, secret: &str, name: &str, password: &str) {
+    let http = http_client().unwrap();
+    let url = format!("{hs}/_synapse/admin/v1/register");
+    let nonce: serde_json::Value = serde_json::from_slice(&http.get(&url).send().await.unwrap().bytes().await.unwrap()).unwrap();
+    let nonce = nonce["nonce"].as_str().unwrap();
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(format!("{nonce}\0{name}\0{password}\0notadmin").as_bytes());
+    let mac: String = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    let body = serde_json::json!({ "nonce": nonce, "username": name, "password": password, "admin": false, "mac": mac });
+    let resp = http.post(&url).body(body.to_string()).send().await.unwrap();
+    assert!(resp.status().is_success(), "registration: {}", resp.text().await.unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local Synapse; also MATRIX_TEST_REGISTRATION_SECRET, see register_with_password"]
+async fn password_login_restore_sign_out() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_REGISTRATION_SECRET").expect("MATRIX_TEST_REGISTRATION_SECRET");
+    let tag = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-password-{tag}"));
+    let (name, password) = (format!("carol{tag}"), format!("pw-{tag}-not-for-production"));
+    register_with_password(&hs, &secret, &name, &password).await;
+    let login = |password: &str| Cmd::PasswordLogin { server: hs.clone(), user: name.clone(), password: password.to_owned() };
+
+    // The state starts out pointed at Beeper, as the app does.
+    let (mut st, mut rx) = state(root.clone(), beeper::HOMESERVER_URL);
+    let wrong = st.handle(login("not the password")).await.unwrap_err().to_string();
+    assert_eq!(wrong, "Wrong user name or password.");
+    let insecure = st.handle(Cmd::PasswordLogin { server: "http://example.org".into(), user: name.clone(), password: password.clone() });
+    assert_eq!(insecure.await.unwrap_err().to_string(), "This address is not encrypted. Use https.");
+    let nowhere = st.handle(Cmd::PasswordLogin { server: "nowhere.invalid".into(), user: name.clone(), password: password.clone() });
+    assert_eq!(nowhere.await.unwrap_err().to_string(), "No Matrix server found at nowhere.invalid.");
+
+    st.handle(login(&password)).await.unwrap();
+    let beeper = wait_for(&mut rx, "Ready", |e| match e {
+        Ev::Ready { beeper, .. } => Some(beeper),
+        _ => None,
+    })
+    .await;
+    assert!(!beeper);
+    let saved = std::fs::read_to_string(root.join("session.json")).unwrap();
+    assert!(!saved.contains(&password));
+    let saved: SavedSession = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved.homeserver.as_deref().map(|h| h.trim_end_matches('/')), Some(hs.trim_end_matches('/')));
+    // The token of another homeserver never goes to Beeper's account API.
+    assert!(st.api().is_err());
+    assert_eq!(st.handle(Cmd::Networks).await.unwrap_err().to_string(), "Networks are a Beeper feature");
+
+    // A restart finds the account on its own server.
+    for task in st.tasks.drain(..) {
+        task.abort();
+    }
+    drop((st, rx));
+    let (mut st, mut rx) = state(root.clone(), beeper::HOMESERVER_URL);
+    assert!(st.restore().await.unwrap());
+    let user = wait_for(&mut rx, "Ready after restart", |e| match e {
+        Ev::Ready { user, beeper: false } => Some(user),
+        _ => None,
+    })
+    .await;
+    assert_eq!(user.localpart(), name);
+    assert_eq!(st.homeserver.trim_end_matches('/'), hs.trim_end_matches('/'));
+    st.client().unwrap().whoami().await.unwrap();
+
+    st.handle(Cmd::SignOut).await.unwrap();
+    wait_for(&mut rx, "NeedLogin", |e| matches!(e, Ev::NeedLogin).then_some(())).await;
+    assert!(!root.join("session.json").exists());
+    assert!(st.beeper);
+    assert_eq!(st.homeserver, beeper_homeserver());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn servers_are_read_from_what_was_typed() {
+    assert_eq!(server_from_input("matrix.org"), Ok("matrix.org".into()));
+    assert_eq!(server_from_input("  matrix.org \n"), Ok("matrix.org".into()));
+    assert_eq!(server_from_input("https://x.y"), Ok("https://x.y".into()));
+    assert_eq!(server_from_input("HTTPS://X.Y/"), Ok("HTTPS://X.Y/".into()));
+    assert_eq!(server_from_input("@a:b.c"), Ok("b.c".into()));
+    assert_eq!(server_from_input(" @alice:example.org:8448 "), Ok("example.org:8448".into()));
+    assert_eq!(server_from_input("http://127.0.0.1:8008"), Ok("http://127.0.0.1:8008".into()));
+    assert_eq!(server_from_input("http://localhost:8008/"), Ok("http://localhost:8008/".into()));
+    assert_eq!(server_from_input("http://[::1]:8008"), Ok("http://[::1]:8008".into()));
+    assert_eq!(server_from_input("localhost:8008"), Ok("http://localhost:8008".into()));
+    assert_eq!(server_from_input("@a:127.0.0.1:8008"), Ok("http://127.0.0.1:8008".into()));
+    for refused in ["http://matrix.org", "http://127.0.0.1.evil.org", "http://localhost.evil.org:80", "http://evil.org/localhost"] {
+        assert_eq!(server_from_input(refused), Err("This address is not encrypted. Use https."), "{refused}");
+    }
+    for empty in ["", "   ", "@alice", "@alice:", "https://"] {
+        assert!(server_from_input(empty).is_err(), "{empty:?}");
+    }
+    assert!(server_from_input("matrix .org").is_err());
+    assert!(server_from_input("ftp://matrix.org").is_err());
+}
+
+#[test]
+fn sessions_without_a_homeserver_are_beeper() {
+    let old = r#"{"session":{"user_id":"@a:beeper.com","device_id":"D","access_token":"t"}}"#;
+    let saved: SavedSession = serde_json::from_str(old).unwrap();
+    assert_eq!(saved.homeserver, None);
+    let again = serde_json::to_value(&saved).unwrap();
+    assert!(again.get("homeserver").is_none());
 }
 
 #[test]

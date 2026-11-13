@@ -14,6 +14,7 @@ is not started.
 | Feature | Status | Protocol |
 |---|---|---|
 | Email-code login | done | `api.beeper.com/user/login*`, then `org.matrix.login.jwt` |
+| Other Matrix homeservers (not in Beeper) | part | `.well-known/matrix/client` discovery, `GET /login`, `m.login.password`; https only (http for localhost). Not yet: SSO, OIDC (MSC3861), registration. Networks show a note: bridges and the account API are Beeper's |
 | Encrypted history via recovery code | done | secret storage, key backup v1 |
 | Device verification by another device (QR, emoji) | todo | `m.key.verification.*` |
 | Chat networks: list, sign in, sign out | part | cloud bridges only: `api.beeper.com/whoami`, `POST /bridge/{name}/start`, then the bridge's mautrix provisioning API (`/v3/whoami`, `login/flows`, `login/start`, `login/step`, `logout`) proxied at `matrix.beeper.com/_matrix/client/unstable/com.beeper.bridge/{name}/`. Steps: form fields, QR or code, browser cookies (in-app browser on Android, paste on desktop). Not yet: cookie sources other than cookies, re-login of a broken account, Beeper's browser-session import |
