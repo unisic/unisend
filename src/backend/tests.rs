@@ -217,7 +217,7 @@ async fn login_sync_decrypt_send_recover() {
     let stale = alice2.rooms.lock().unwrap().get_mut(&room_id).map(|r| (r.dm, r.unread) = (false, 99));
     assert!(stale.is_some());
     let notif = alice2.notif.clone().unwrap();
-    let fixed = refresh_cached(alice2.client().unwrap(), &notif, &alice2.rooms, &alice2.ev).await;
+    let fixed = refresh_cached(alice2.client().unwrap(), &notif, &alice2.rooms).await;
     let fixed = fixed.iter().find(|s| s.id == room_id).unwrap();
     assert!(fixed.dm && fixed.unread == 0, "dm {} unread {}", fixed.dm, fixed.unread);
 
@@ -361,8 +361,9 @@ async fn login_sync_decrypt_send_recover() {
     let gone = matrix_sdk::ruma::room_id!("!left-long-ago:localhost").to_owned();
     let ghost = RoomSummary { id: gone.clone(), ..alice2.rooms.lock().unwrap()[&quiet_id].clone() };
     alice2.rooms.lock().unwrap().insert(gone.clone(), ghost);
-    refresh_cached(alice2.client().unwrap(), &notif, &alice2.rooms, &alice2.ev).await;
+    drop_left(alice2.client().unwrap(), &alice2.rooms, &alice2.ev).await;
     assert!(!alice2.rooms.lock().unwrap().contains_key(&gone));
+    assert!(alice2.rooms.lock().unwrap().contains_key(&quiet_id) && alice2.rooms.lock().unwrap().contains_key(&room_id));
     wait_for(&mut alice2_rx, "RoomGone for the left chat", |e| matches!(e, Ev::RoomGone(id) if id == gone).then_some(())).await;
 
     quiet.send(RoomMessageEventContent::text_plain("first!")).await.unwrap();

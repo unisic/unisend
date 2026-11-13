@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow};
 use futures_util::StreamExt as _;
 use matrix_sdk::{
-    Client, Room, RoomMemberships, RoomState,
+    Client, Room, RoomMemberships,
     authentication::matrix::MatrixSession,
     config::{SyncSettings, SyncToken},
     deserialized_responses::{RawAnySyncOrStrippedState, TimelineEvent, TimelineEventKind},
@@ -34,6 +34,7 @@ use matrix_sdk::{
         api::{
             client::{
                 filter::{FilterDefinition, RoomFilter},
+                membership::joined_rooms,
                 profile::AvatarUrl,
                 receipt::create_receipt,
             },
@@ -1115,19 +1116,28 @@ async fn summarize(
     s
 }
 
+/// Removes cached chats the account is no longer in. The sync filter does not ask for left rooms
+/// (a first sync would then carry every chat ever left), so a chat left on another device stays
+/// "joined" here; the server's own list settles it with one request. Skipped when offline.
+async fn drop_left(client: &Client, rooms: &Rooms, ev: &mpsc::Sender<Ev>) {
+    let joined: std::collections::HashSet<OwnedRoomId> = match client.send(joined_rooms::v3::Request::new()).await {
+        Ok(response) => response.joined_rooms.into_iter().collect(),
+        Err(e) => return log::debug!("joined rooms: {e}"),
+    };
+    let left: Vec<OwnedRoomId> = rooms.lock().unwrap().keys().filter(|id| !joined.contains(*id)).cloned().collect();
+    for id in left {
+        rooms.lock().unwrap().remove(&id);
+        let _ = ev.send(Ev::RoomGone(id)).await;
+    }
+}
+
 /// Rooms without new events never pass through the sync loop, so their cached summaries miss
 /// fields added since and changes made on other devices. Store reads only.
-async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &Rooms, ev: &mpsc::Sender<Ev>) -> Vec<RoomSummary> {
+async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &Rooms) -> Vec<RoomSummary> {
     let cached: Vec<RoomSummary> = rooms.lock().unwrap().values().cloned().collect();
     let mut out = Vec::with_capacity(cached.len());
     for seen in cached {
-        // A room left while the app was not running: sync only reports leaves since its token.
-        let room = client.get_room(&seen.id).filter(|room| room.state() == RoomState::Joined);
-        let Some(room) = room else {
-            rooms.lock().unwrap().remove(&seen.id);
-            let _ = ev.send(Ev::RoomGone(seen.id)).await;
-            continue;
-        };
+        let Some(room) = client.get_room(&seen.id) else { continue };
         let fresh = summarize(&room, notif, other_person(&room).await, seen).await;
         if let Some(r) = rooms.lock().unwrap().get_mut(&fresh.id) {
             // A preview refresh may have updated the entry meanwhile.
@@ -1144,7 +1154,8 @@ async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &R
 }
 
 async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, rooms: Rooms, ev: mpsc::Sender<Ev>) {
-    let cached = refresh_cached(&client, &notif, &rooms, &ev).await;
+    drop_left(&client, &rooms, &ev).await;
+    let cached = refresh_cached(&client, &notif, &rooms).await;
     // Chats whose last message is not known are looked up in the background. A full queue drops
     // the rest; they stay unprobed and are queued again at the next start.
     let (to_probe, queue) = mpsc::channel(PROBE_QUEUE);
@@ -1249,7 +1260,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
         // Mutes are push rules: one global event changes any number of rooms.
         let rules_changed = resp.account_data.iter().any(|e| e.get_field::<String>("type").ok().flatten().as_deref() == Some("m.push_rules"));
         if rules_changed {
-            changed = refresh_cached(&client, &notif, &rooms, &ev).await;
+            changed = refresh_cached(&client, &notif, &rooms).await;
         }
         if !changed.is_empty() && ev.send(Ev::Rooms(changed)).await.is_err() {
             return;
