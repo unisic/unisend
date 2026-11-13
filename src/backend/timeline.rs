@@ -33,7 +33,7 @@ use matrix_sdk_ui::timeline::{
 use tokio::sync::{broadcast, mpsc};
 
 use super::{
-    AbortOnDrop, DELETED, Delivery, Ev, Kind, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, Reaction, UTD, content, display_name, link_preview, mark_read,
+    AbortOnDrop, DELETED, Delivery, Ev, Kind, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, UTD, content, display_name, link_preview, mark_read,
     format, marks, network, other_person, plain, sticker,
 };
 
@@ -397,17 +397,20 @@ fn fill(m: &mut Msg, kind: &MsgLikeKind, own: &UserId) {
 }
 
 fn quote(reply: &InReplyToDetails, own: &UserId) -> Quote {
-    let (sender, text) = match &reply.event {
+    let id = reply.event_id.to_string();
+    match &reply.event {
         TimelineDetails::Ready(quoted) => {
-            let mut m = Msg::bare(String::new(), Kind::Message, quoted.sender.clone());
+            let mut m = Msg::bare(id, Kind::Message, quoted.sender.clone());
+            m.own = quoted.sender == own;
+            m.sender = name(&quoted.sender_profile, &quoted.sender);
             if let TimelineItemContent::MsgLike(like) = &quoted.content {
                 fill(&mut m, &like.kind, own);
             }
-            (name(&quoted.sender_profile, &quoted.sender), m.summary())
+            m.quote()
         }
-        _ => (String::new(), "Message unavailable".to_owned()),
-    };
-    Quote { id: reply.event_id.to_string(), sender, text }
+        TimelineDetails::Pending => Quote::unknown(id, QuoteState::Loading),
+        TimelineDetails::Unavailable | TimelineDetails::Error(_) => Quote::unknown(id, QuoteState::Missing),
+    }
 }
 
 fn poll(state: &PollState) -> Poll {

@@ -842,6 +842,25 @@ fn errors_lose_their_urls_and_retries_slow_down() {
 }
 
 #[test]
+fn a_quote_says_what_its_message_holds() {
+    let from = OwnedUserId::try_from("@bob:localhost").unwrap();
+    let mut m = Msg::bare("$a".to_owned(), Kind::Message, from);
+    (m.sender, m.body, m.own) = ("Bob".to_owned(), "Who drives?".to_owned(), true);
+    let q = m.quote();
+    assert_eq!((q.id.as_str(), q.state, q.sender.as_str(), q.own, q.text.as_str()), ("$a", QuoteState::Ready, "Bob", true, "Who drives?"));
+    assert!(!q.deleted && !q.poll && !q.place && q.media.is_none());
+    m.place = Place::parse("geo:52.52008,13.40495", "Cabin");
+    assert!(m.place.is_some());
+    let q = m.quote();
+    assert!(q.place);
+    assert_eq!(q.text, "Cabin");
+    (m.body, m.deleted, m.place) = (DELETED.to_owned(), true, None);
+    assert!(m.quote().deleted);
+    let unknown = Quote::unknown("$b".to_owned(), QuoteState::Loading);
+    assert_eq!((unknown.state, unknown.sender.as_str()), (QuoteState::Loading, ""));
+}
+
+#[test]
 fn link_previews_are_read_from_the_message() {
     let content = serde_json::json!({
         "body": "look https://www.example.org/a?b=1",
