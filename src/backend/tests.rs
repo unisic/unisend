@@ -76,6 +76,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         incognito: Arc::new(AtomicBool::new(true)),
         tasks: Vec::new(),
         verify: verify::Verifier::default(),
+        info: None,
     };
     (st, Seat { rx, rows: Vec::new() })
 }
@@ -1450,4 +1451,86 @@ async fn a_disappearing_timer_is_read_set_and_told() {
     let gone = seat.rows.iter().find(|m| m.body == "gone tomorrow").unwrap();
     assert_eq!(gone.disappear, DAY);
     assert!(!seat.rows.iter().any(|m| m.kind != Kind::Hidden && m.body.starts_with("Set the disappearing")), "the bridge's notice repeats the line");
+}
+
+/// The info screen's backend: details with members and roles, then the history's media, files
+/// and links, ending with `done`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn info_lists_members_and_what_the_history_holds() {
+    use matrix_sdk::ruma::{
+        OwnedMxcUri,
+        events::room::message::{FileMessageEventContent, ImageMessageEventContent},
+    };
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-info-{tag}"));
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+
+    // A third person makes it a group, which lists its members.
+    let carol = Client::builder().homeserver_url(&hs).sqlite_store(root.join("carol"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("carol{tag}")).into());
+    carol.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+    req.invite = vec![alice.client().unwrap().user_id().unwrap().to_owned(), carol.user_id().unwrap().to_owned()];
+    req.name = Some("Info test".into());
+    req.topic = Some("What this chat is about".into());
+    let room = bob.create_room(req).await.unwrap();
+    let room_id = room.room_id().to_owned();
+    carol.join_room_by_id(&room_id).await.unwrap();
+    let mxc = OwnedMxcUri::from("mxc://localhost/notreal");
+    room.send(RoomMessageEventContent::text_plain("read https://example.org/a please")).await.unwrap();
+    room.send(RoomMessageEventContent::new(MessageType::File(FileMessageEventContent::plain("notes.pdf".into(), mxc.clone())))).await.unwrap();
+    room.send(RoomMessageEventContent::new(MessageType::Image(ImageMessageEventContent::plain("cat.jpg".into(), mxc)))).await.unwrap();
+    for i in 0..30 {
+        room.send(RoomMessageEventContent::text_plain(format!("filler {i}"))).await.unwrap();
+    }
+    alice.client().unwrap().join_room_by_id(&room_id).await.unwrap();
+    wait_for(&mut seat, "the chat in the list", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id).then_some(()),
+        _ => None,
+    })
+    .await;
+
+    alice.handle(Cmd::Info(room_id.clone())).await.unwrap();
+    let details = wait_for(&mut seat, "details with members", |e| match e {
+        Ev::Info(id, d) if id == room_id && d.members_loaded => Some(d),
+        _ => None,
+    })
+    .await;
+    assert_eq!(details.topic.as_deref(), Some("What this chat is about"));
+    assert_eq!(details.encrypted, Some(false));
+    assert!(details.peer.is_none());
+    let bob_id = bob.user_id().unwrap().to_owned();
+    let bob_row = details.members.iter().find(|m| m.id == bob_id).expect("bob listed");
+    assert!(matches!(bob_row.role, Role::Creator | Role::Admin), "bob created the room");
+    assert_eq!(details.members.len(), 3);
+    assert_eq!(details.members[0].id, bob_id, "the room's admin is listed first");
+
+    let mut found = Vec::new();
+    loop {
+        let (items, done) = wait_for(&mut seat, "history items", |e| match e {
+            Ev::InfoItems { room, items, done, .. } if room == room_id => Some((items, done)),
+            _ => None,
+        })
+        .await;
+        found.extend(items);
+        if done {
+            break;
+        }
+    }
+    let kinds: Vec<(Option<MediaKind>, String)> = found.iter().map(|m| (m.media.as_ref().map(|m| m.kind), m.body.clone())).collect();
+    assert_eq!(found.len(), 3, "{kinds:?}");
+    // Newest first, as the history is read.
+    assert_eq!(found[0].media.as_ref().map(|m| m.kind), Some(MediaKind::Image));
+    assert_eq!(found[1].media.as_ref().map(|m| m.name.as_str()), Some("notes.pdf"));
+    assert!(found[2].body.contains("https://example.org/a"));
 }

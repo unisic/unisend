@@ -179,6 +179,10 @@ pub enum Cmd {
     SignOutDevice { device: String, proof: verify::Proof },
     /// Sets the chat's disappearing message timer, in ms; 0 turns it off.
     SetDisappear { room: OwnedRoomId, ms: u64 },
+    /// Details, members and history of a chat for its info screen; replaces an earlier one.
+    Info(OwnedRoomId),
+    /// The info screen closed: stop reading history for it.
+    InfoClose,
 }
 
 pub enum Ev {
@@ -238,6 +242,10 @@ pub enum Ev {
     SignOutStep(Result<Option<verify::Auth>, String>),
     /// The open chat's disappearing messages, when it opens and whenever its timer changes.
     Disappear { room: OwnedRoomId, setting: Disappearing },
+    /// A chat's details for its info screen; sent again as more is known.
+    Info(OwnedRoomId, Box<info::Details>),
+    /// Messages with media, files or links, newest first; `scanned` counts the events read so far.
+    InfoItems { room: OwnedRoomId, items: Vec<Msg>, scanned: usize, done: bool },
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -410,7 +418,7 @@ impl Quote {
 
 impl Msg {
     /// A row with nothing on it yet.
-    fn bare(id: String, kind: Kind, from: OwnedUserId) -> Self {
+    pub(crate) fn bare(id: String, kind: Kind, from: OwnedUserId) -> Self {
         Self {
             id,
             kind,
@@ -661,6 +669,8 @@ struct State {
     /// Sync and recovery watchers, stopped on sign-out.
     tasks: Vec<tokio::task::JoinHandle<()>>,
     verify: verify::Verifier,
+    /// Gathers what the info screen shows.
+    info: Option<AbortOnDrop>,
 }
 
 /// Room summaries, shared by the sync loop and preview refreshes. Never held across an await.
@@ -677,7 +687,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     let _ = std::fs::remove_dir_all(media_dir(&dir));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
-        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default() };
+        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None };
     match st.restore().await {
         Ok(true) => {}
         Ok(false) => st.emit(Ev::NeedLogin).await,
@@ -1159,7 +1169,7 @@ impl State {
                     }
                 }
                 self.notif = None;
-                self.open = None;
+                (self.open, self.info) = (None, None);
                 self.rooms.lock().unwrap().clear();
                 let _ = std::fs::remove_file(self.session_path());
                 let _ = std::fs::remove_file(rooms_path(&self.dir));
@@ -1343,6 +1353,11 @@ impl State {
                 setting.ms = ms;
                 self.emit(Ev::Disappear { room: room.room_id().to_owned(), setting }).await;
             }
+            Cmd::Info(room_id) => {
+                let room = self.room(&room_id)?;
+                self.info = Some(AbortOnDrop(tokio::spawn(info::run(room, self.ev.clone()))));
+            }
+            Cmd::InfoClose => self.info = None,
         }
         Ok(())
     }
@@ -2522,6 +2537,7 @@ mod gifs;
 pub(crate) use gifs::{Found as GifPage, Gif, enabled as gifs_enabled};
 pub(crate) mod caption;
 pub(crate) mod forward;
+mod info;
 mod polls;
 mod rich;
 pub use rich::{Block, Rich, Run};
@@ -2529,6 +2545,9 @@ pub use location::support as location_support;
 pub use polls::{Place, Poll};
 pub(crate) mod pollnew;
 pub use pollnew::NewPoll;
+pub use info::{Details, MAX_MEMBERS, MAX_SCAN, Role};
+#[cfg(test)]
+pub use info::Member;
 
 mod timeline;
 mod video;
