@@ -47,6 +47,12 @@
             android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <!-- Transparent helper Activity that starts the system camera and returns its result. No CAMERA permission is declared: see CameraCapture. -->
+        <activity
+            android:name="dev.gpui.beeper.CameraCapture"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <service
             android:name="dev.gpui.beeper.SyncService"
             android:exported="false"
