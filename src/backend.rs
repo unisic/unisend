@@ -141,6 +141,8 @@ pub enum Cmd {
     Retry { room: OwnedRoomId, target: String },
     /// Sends the user's position as an `m.location` message.
     SendLocation { room: OwnedRoomId, lat: f64, lon: f64, accuracy: Option<f64>, reply_to: Option<String> },
+    /// Downloads the original file for the viewer's Save or Share; answered by `Exported`.
+    Export(String, Media, Export),
 }
 
 pub enum Ev {
@@ -177,6 +179,8 @@ pub enum Ev {
     /// A request made for the settings pages failed; `Error` carries the reason.
     PanelFailed,
     Error(String),
+    /// The original file is in the media cache (or could not be fetched), for what the user asked.
+    Exported(String, Option<PathBuf>, Export),
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -1140,6 +1144,10 @@ impl State {
                     },
                     None => drop(self.room(&room)?.send_queue().send(RoomMessageEventContent::from(place).into()).await?),
                 }
+            }
+            Cmd::Export(id, media, what) => {
+                let (client, ev, dir) = (self.client()?.clone(), self.ev.clone(), media_dir(&self.dir));
+                tokio::spawn(export::run(client, ev, dir, id, media, what));
             }
         }
         Ok(())
@@ -2286,6 +2294,9 @@ pub use location::support as location_support;
 pub use polls::{Place, Poll};
 
 mod timeline;
+
+mod export;
+pub use export::Export;
 
 #[cfg(test)]
 mod tests;

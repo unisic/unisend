@@ -1220,6 +1220,7 @@ pub struct Window {
     window_profiler: profiler::WindowProfiler,
     last_input_modality: InputModality,
     touch_gestures: TouchGestureRecognizer,
+    pinch_tracker: crate::pinch_tracker::PinchTracker,
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
     long_press_capture: Option<EntityId>,
@@ -2077,6 +2078,7 @@ impl Window {
                     .gestures()
                     .map_or_else(GestureTuning::default, |gestures| gestures.tuning()),
             ),
+            pinch_tracker: Default::default(),
             touch_prediction_enabled: true,
             long_press_timer: None,
             long_press_capture: None,
@@ -5633,6 +5635,10 @@ impl Window {
         let mut event = event.clone();
         if !self.touch_prediction_enabled {
             event.predicted_position = None;
+        }
+        if let Some(pinch) = self.pinch_tracker.handle_event(&event) {
+            cx.propagate_event = true;
+            self.dispatch_mouse_event(&pinch, cx);
         }
         let recognized_gestures = self.touch_gestures.handle_event(&event);
         if event.phase == crate::TouchPhase::Started

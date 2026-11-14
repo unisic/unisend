@@ -105,6 +105,7 @@ enum Act {
     Edit,
     Copy(String),
     Delete,
+    Save,
 }
 
 impl Act {
@@ -117,6 +118,7 @@ impl Act {
             Act::Edit => ("act-edit", IconName::Pencil, "Edit"),
             Act::Copy(_) => ("act-copy", IconName::Copy, "Copy text"),
             Act::Delete => ("act-delete", IconName::Trash, "Delete"),
+            Act::Save => ("act-save", IconName::Download, "Save to gallery"),
         }
     }
 }
@@ -132,12 +134,14 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
     let editable = m.own && sent && m.media.is_none() && m.poll.is_none() && m.place.is_none() && !m.deleted;
     let link = m.link.as_ref().map(|link| link.url.clone()).or_else(|| urls(&m.body).into_iter().next().map(|r| m.body[r].to_owned()));
     let mut out = Vec::new();
+    let saveable = crate::can_save() && sent && m.media.as_ref().is_some_and(|media| matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
     if kind == MenuKind::Touch {
         out.extend(sent.then_some(Act::Reply));
         out.extend(editable.then_some(Act::Edit));
         out.extend((!sent && failed).then_some(Act::Retry));
         out.extend(link.map(Act::Link));
         out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
+        out.extend(saveable.then_some(Act::Save));
         out.extend(m.own.then_some(Act::Delete));
     } else {
         if extra && sent {
@@ -146,6 +150,7 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
         out.extend(link.map(Act::Link));
         out.extend(editable.then_some(Act::Edit));
         out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
+        out.extend(saveable.then_some(Act::Save));
         out.extend(m.own.then_some(Act::Delete));
         out.extend((!sent && failed).then_some(Act::Retry));
     }
@@ -558,6 +563,7 @@ impl BeeperApp {
             }
             Act::Link(url) => crate::open_link(cx, &url),
             Act::Copy(body) => crate::copy(cx, body),
+            Act::Save => self.export_message(id, crate::backend::Export::Save, cx),
         }
         self.close_menu(cx);
     }
