@@ -340,6 +340,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Set up on your account. This device does not hold the keys.", "Skonfigurowane na koncie. To urządzenie nie ma kluczy."),
     ("Set up. This device holds the keys, so it can verify your other devices.", "Skonfigurowane. To urządzenie ma klucze, więc może weryfikować Twoje inne urządzenia."),
     ("Settings", "Ustawienia"),
+    ("Share", "Udostępnij"),
     ("Share location", "Udostępnij lokalizację"),
     ("Show all {more}", "Pokaż wszystkich ({more})"),
     ("Showing only the photos you allowed.", "Widać tylko zdjęcia, do których dano dostęp."),

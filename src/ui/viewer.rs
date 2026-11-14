@@ -1,7 +1,11 @@
 //! The full-screen picture: pinch, double-tap or ctrl+wheel to zoom, drag to pan, and Save and
 //! Share. GPUI cannot scale an element, so a zoomed picture is laid out larger than the screen
 //! inside an `overflow: hidden` box and moved by an offset that is kept inside the picture's edges.
+//!
+//! A fitted picture follows a finger: sideways to the chat's previous or next picture, up or down
+//! to close. A tap shows or hides the bars with the sender and the actions.
 
+use std::collections::VecDeque;
 use std::io::Cursor;
 
 use super::*;
@@ -20,6 +24,17 @@ const ZOOM_MS: u64 = 220;
 const NOTE_MS: u64 = 3000;
 /// One wheel notch with ctrl held zooms by about this much per pixel of delta.
 const WHEEL_ZOOM: f32 = 0.005;
+/// Black between two pictures side by side while one slides in.
+const PAGE_GAP: f32 = 24.;
+/// A release faster than this (px/s) toward a neighbour turns to it, however short the pull.
+const TURN_SPEED: f32 = 500.;
+/// Past this share of the screen's height a pull up or down closes the picture.
+const DISMISS_SHARE: f32 = 0.15;
+const DISMISS_SPEED: f32 = 800.;
+/// Past the last picture a pull moves the picture this share of the finger's travel.
+const EDGE_GIVE: f32 = 0.3;
+/// The bars' height: a row of buttons with room for a label under each icon.
+const ACTIONS_H: f32 = 64.;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct View {
@@ -76,6 +91,75 @@ pub(super) struct Zoom {
     working: Option<Export>,
     note: Option<(SharedString, u64)>,
     epoch: u64,
+    /// A finger moving the fitted picture.
+    pull: Option<Pull>,
+    /// Where the springs drew the picture last frame, so a finger can catch it mid-flight.
+    at: (f32, f32),
+    /// A sideways offset drawn for one frame without travel: where the picture just turned to sits.
+    pin: Option<f32>,
+    /// Where a picture flung away keeps moving while it fades.
+    fall: f32,
+    /// The bars are hidden.
+    bare: bool,
+    /// The pictures beside the one on screen, loaded or on their way: at most one each side.
+    near: Vec<(String, Option<Arc<Image>>)>,
+    /// The oldest loaded picture older history was last asked for from.
+    older_from: Option<String>,
+    /// Counts openings, so springs and fades start afresh with each picture opened.
+    serial: u64,
+}
+
+/// A finger on a fitted picture. The axis is the first one it moved along; GPUI locks a touch pan
+/// to it anyway.
+struct Pull {
+    across: Option<bool>,
+    offset: f32,
+    samples: VecDeque<(Instant, f32)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Turn {
+    Stay,
+    Older,
+    Newer,
+}
+
+/// Where a sideways pull lets go: `offset` is the drawn one, positive when the finger moved right,
+/// which brings the older picture in from the left.
+fn settle(offset: f32, speed: f32, width: f32, older: bool, newer: bool) -> Turn {
+    let far = offset.abs() > width * 0.5;
+    let flung = speed.abs() > TURN_SPEED && speed.signum() == offset.signum();
+    if !(far || flung) || offset == 0. {
+        Turn::Stay
+    } else if offset > 0. && older {
+        Turn::Older
+    } else if offset < 0. && newer {
+        Turn::Newer
+    } else {
+        Turn::Stay
+    }
+}
+
+/// Whether a pull up or down lets go far or fast enough to close the picture.
+fn dismisses(offset: f32, speed: f32, height: f32) -> bool {
+    offset.abs() > height * DISMISS_SHARE || (speed.abs() > DISMISS_SPEED && speed.signum() == offset.signum())
+}
+
+/// How far the picture follows a sideways pull: 1:1 toward a neighbour, with resistance past the end.
+fn give(offset: f32, older: bool, newer: bool) -> f32 {
+    let open = if offset > 0. { older } else { newer };
+    if open { offset } else { offset * EDGE_GIVE }
+}
+
+/// The pictures of a chat that can be browsed, oldest first: images and stickers not deleted.
+fn pictures<'a>(msgs: impl IntoIterator<Item = (&'a str, Option<MediaKind>, bool)>) -> Vec<&'a str> {
+    msgs.into_iter().filter(|(_, kind, gone)| !gone && matches!(kind, Some(MediaKind::Image | MediaKind::Sticker))).map(|(id, ..)| id).collect()
+}
+
+/// The pictures beside `id` in `set`: (older, newer). The only ones kept loaded besides it.
+fn beside<'a>(set: &[&'a str], id: &str) -> (Option<&'a str>, Option<&'a str>) {
+    let Some(ix) = set.iter().position(|s| *s == id) else { return (None, None) };
+    (ix.checked_sub(1).map(|i| set[i]), set.get(ix + 1).copied())
 }
 
 impl Zoom {
@@ -153,8 +237,177 @@ fn dimensions(image: &Image) -> Option<(f32, f32)> {
 }
 
 impl BeeperApp {
-    pub(super) fn open_zoom(&mut self) {
-        self.zoom = Zoom::default();
+    pub(super) fn open_zoom(&mut self, cx: &mut Context<Self>) {
+        self.drop_near(cx);
+        self.zoom = Zoom { serial: self.zoom.serial + 1, ..Zoom::default() };
+        self.fill_near(cx);
+    }
+
+    /// The full picture for the one on screen or a neighbour; an answer for neither is dropped.
+    pub(super) fn viewed(&mut self, id: String, bytes: Vec<u8>) {
+        let Some(format) = image_format(&bytes) else { return };
+        let slot = match &mut self.viewer {
+            Some((open, slot)) if *open == id => slot,
+            _ => match self.zoom.near.iter_mut().find(|(near, _)| *near == id) {
+                Some((_, slot)) => slot,
+                None => return,
+            },
+        };
+        if slot.is_none() {
+            *slot = Some(Arc::new(Image::from_bytes(format, bytes)));
+        }
+    }
+
+    pub(super) fn drop_near(&mut self, cx: &mut Context<Self>) {
+        for (_, image) in self.zoom.near.drain(..) {
+            if let Some(image) = image {
+                image.remove_asset(cx);
+            }
+        }
+    }
+
+    /// The pictures before and after the one on screen, among those of the open chat.
+    fn neighbours(&self) -> (Option<String>, Option<String>) {
+        let Some((id, _)) = &self.viewer else { return (None, None) };
+        let set = pictures(self.msgs.iter().filter(|m| !self.is_hidden(&m.id)).map(|m| (m.id.as_str(), m.media.as_ref().map(|media| media.kind), m.deleted)));
+        let (older, newer) = beside(&set, id);
+        (older.map(str::to_owned), newer.map(str::to_owned))
+    }
+
+    /// Keeps the neighbours' full pictures, frees any other, and asks for the missing ones.
+    fn fill_near(&mut self, cx: &mut Context<Self>) {
+        let (older, newer) = self.neighbours();
+        let wanted = [older, newer];
+        let mut kept = Vec::with_capacity(2);
+        for (id, image) in std::mem::take(&mut self.zoom.near) {
+            if wanted.iter().flatten().any(|w| *w == id) {
+                kept.push((id, image));
+            } else if let Some(image) = image {
+                image.remove_asset(cx);
+            }
+        }
+        for id in wanted.into_iter().flatten() {
+            let Some(ix) = self.msgs.iter().position(|m| m.id == id) else { continue };
+            if kept.iter().any(|(k, _)| *k == id) {
+                continue;
+            }
+            if !self.thumbs.contains_key(&id) {
+                self.want_thumb(ix);
+            }
+            // Ahead of the finger, so only with half the command channel left to user actions.
+            let Some(media) = self.msgs[ix].media.clone() else { continue };
+            if self.cmd.capacity() >= self.cmd.max_capacity() / 2 && self.cmd.try_send(Cmd::View(id.clone(), media)).is_ok() {
+                kept.push((id, None));
+            }
+        }
+        self.zoom.near = kept;
+    }
+
+    /// Shows the next newer or older picture of the chat. At the oldest loaded one, asks once for
+    /// older history, whose pictures then join the row.
+    fn turn(&mut self, newer: bool, cx: &mut Context<Self>) -> bool {
+        let (before, after) = self.neighbours();
+        let Some(to) = (if newer { after } else { before }) else {
+            self.reached_oldest(cx);
+            return false;
+        };
+        let Some(was) = self.viewer.take() else { return false };
+        let had = self.zoom.near.iter().position(|(id, _)| *id == to).map(|ix| self.zoom.near.remove(ix).1);
+        self.zoom.near.push(was);
+        self.viewer = Some((to.clone(), had.clone().flatten()));
+        if had.is_none()
+            && let Some(media) = self.msgs.iter().find(|m| m.id == to).and_then(|m| m.media.clone())
+        {
+            self.send(Cmd::View(to, media), cx);
+        }
+        (self.zoom.view, self.zoom.glide, self.zoom.dims, self.zoom.tap) = (None, None, None, None);
+        self.fill_near(cx);
+        self.reached_oldest(cx);
+        cx.notify();
+        true
+    }
+
+    fn reached_oldest(&mut self, cx: &mut Context<Self>) {
+        let Some((id, _)) = &self.viewer else { return };
+        if self.neighbours().0.is_none() && self.zoom.older_from.as_ref() != Some(id) {
+            self.zoom.older_from = Some(id.clone());
+            self.load_older(cx);
+        }
+    }
+
+    /// Left and Right page through the chat's pictures; nothing animates on a key.
+    pub(super) fn viewer_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        if self.viewer.is_none() || self.zoom.zoomed_in() || !matches!(key, "left" | "right") {
+            return false;
+        }
+        if self.turn(key == "right", cx) {
+            self.zoom.pin = Some(0.);
+        }
+        true
+    }
+
+    /// Reply or Forward from the viewer: closes it, then does what the message's menu does.
+    fn viewer_act(&mut self, act: menu::Act, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, _)) = self.viewer.clone() else { return };
+        self.close_viewer(cx);
+        self.act(&id, act, window, cx);
+    }
+
+    /// Follows a finger on a fitted picture; on release it turns, closes or springs back.
+    fn viewer_pull(&mut self, phase: TouchPhase, dx: f32, dy: f32, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        match phase {
+            TouchPhase::Started => {
+                self.zoom.pull = Some(Pull { across: None, offset: 0., samples: VecDeque::new() });
+                self.zoom.tap = None;
+                self.pull_by(dx, dy, now);
+            }
+            TouchPhase::Moved => self.pull_by(dx, dy, now),
+            TouchPhase::Ended => {
+                let Some(mut pull) = self.zoom.pull.take() else { return };
+                // A finger that rested before lifting has no speed left.
+                pull.samples.push_back((now, pull.offset));
+                let speed = super::gallery::speed(&pull.samples);
+                let (older, newer) = self.neighbours();
+                let (width, height) = self.zoom.screen;
+                match pull.across {
+                    Some(true) => {
+                        let drawn = give(pull.offset, older.is_some(), newer.is_some());
+                        let turn = settle(drawn, speed, width, older.is_some(), newer.is_some());
+                        if turn != Turn::Stay && self.turn(turn == Turn::Newer, cx) {
+                            let page = width + PAGE_GAP;
+                            self.zoom.pin = Some(if turn == Turn::Newer { drawn + page } else { drawn - page });
+                        } else if pull.offset > 0. && older.is_none() {
+                            self.reached_oldest(cx);
+                        }
+                    }
+                    Some(false) if dismisses(pull.offset, speed, height) => {
+                        self.zoom.fall = pull.offset + pull.offset.signum() * height * 0.25;
+                        self.close_viewer(cx);
+                    }
+                    _ => {}
+                }
+            }
+            TouchPhase::Cancelled => self.zoom.pull = None,
+        }
+        cx.notify();
+    }
+
+    fn pull_by(&mut self, dx: f32, dy: f32, now: Instant) {
+        let at = self.zoom.at;
+        let Some(pull) = &mut self.zoom.pull else { return };
+        if pull.across.is_none() && (dx != 0. || dy != 0.) {
+            let across = dx.abs() > dy.abs();
+            pull.across = Some(across);
+            // Caught mid-flight: the finger takes the picture from where it is drawn.
+            pull.offset = if across { at.0 } else { at.1 };
+        }
+        let Some(across) = pull.across else { return };
+        pull.offset += if across { dx } else { dy };
+        pull.samples.push_back((now, pull.offset));
+        if pull.samples.len() > 6 {
+            pull.samples.pop_front();
+        }
     }
 
     fn note(&mut self, text: impl Into<SharedString>, lasts: bool, cx: &mut Context<Self>) {
@@ -240,13 +493,15 @@ impl BeeperApp {
             cx.notify();
             return;
         }
-        // A tap on a fitted picture closes it, unless a second tap follows.
+        // A single tap shows or hides the bars, once no second tap has made it a double-tap.
         let stamp = self.zoom.tap.map(|(t, _)| t);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(DOUBLE_TAP).await;
             let _ = this.update(cx, |this, cx| {
-                if this.zoom.tap.map(|(t, _)| t) == stamp && !this.zoom.zoomed_in() {
-                    this.close_viewer(cx);
+                if this.viewer.is_some() && this.zoom.tap.map(|(t, _)| t) == stamp {
+                    this.zoom.tap = None;
+                    this.zoom.bare = !this.zoom.bare;
+                    cx.notify();
                 }
             });
         })
@@ -262,6 +517,9 @@ impl BeeperApp {
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         if e.modifiers.control || e.modifiers.platform {
             self.zoom.zoom_by(e.position, (dy * WHEEL_ZOOM).exp(), reduce);
+        } else if self.zoom.pull.is_some() || (e.touch_phase == TouchPhase::Started && !self.zoom.zoomed_in()) {
+            // A wheel and the glide after a fling have no start, so neither turns nor closes.
+            return self.viewer_pull(e.touch_phase, dx, dy, cx);
         } else if self.zoom.zoomed_in() {
             self.zoom.pan(dx, dy, reduce);
         } else {
@@ -275,6 +533,7 @@ impl BeeperApp {
         match e.phase {
             TouchPhase::Started => {
                 self.zoom.pinching = true;
+                self.zoom.pull = None;
                 self.zoom.grab(reduce);
             }
             TouchPhase::Moved => {
@@ -322,10 +581,15 @@ impl BeeperApp {
             return None;
         }
         let p = Palette::of(cx);
-        let (top, _) = crate::insets();
+        let (top, bottom) = crate::insets();
         let (id, full) = self.viewer.as_ref().or(self.viewer_last.as_ref())?;
+        let id = id.clone();
         // The thumbnail stands in until the full picture arrives.
-        let picture = full.clone().or_else(|| self.thumbs.get(id).cloned());
+        let picture = full.clone().or_else(|| self.thumbs.get(&id).cloned());
+        if live && !self.focus.is_focused(window) {
+            // Left and Right reach the app, not the text field under the picture.
+            window.focus(&self.focus, cx);
+        }
 
         let size = window.viewport_size();
         let screen = (f32::from(size.width), f32::from(size.height));
@@ -344,40 +608,159 @@ impl BeeperApp {
         }
         let (w, h) = (screen.0 * view.scale, screen.1 * view.scale);
 
-        let button = |id: &'static str, icon: IconName, busy: bool| {
-            div()
+        let (older, newer) = if live { self.neighbours() } else { (None, None) };
+        // History paged in while the picture is open brings a neighbour that is not asked for yet.
+        if [&older, &newer].into_iter().flatten().any(|n| self.zoom.near.iter().all(|(k, _)| k != n)) {
+            self.fill_near(cx);
+        }
+        // The finger's pull, 1:1; after it, a spring back to rest, to the picture turned to, or on
+        // past the edge while a flung picture fades.
+        let pull = if live { self.zoom.pull.as_ref().and_then(|pull| pull.across.map(|across| (across, pull.offset))) } else { None };
+        let across = pull.filter(|(across, _)| *across).map(|(_, offset)| give(offset, older.is_some(), newer.is_some()));
+        let down = pull.filter(|(across, _)| !across).map(|(_, offset)| offset);
+        let serial = SharedString::from(format!("viewer-{}", self.zoom.serial));
+        let x = match self.zoom.pin.take() {
+            Some(pin) => {
+                window.request_animation_frame();
+                spring((serial.clone(), "x"), pin, motion::RELEASE.with_travel(false), window, cx)
+            }
+            None => spring((serial.clone(), "x"), across.unwrap_or(0.), motion::RELEASE.with_travel(across.is_none()), window, cx),
+        };
+        let y = spring((serial.clone(), "y"), if live { down.unwrap_or(0.) } else { self.zoom.fall }, motion::RELEASE.with_travel(down.is_none()), window, cx);
+        self.zoom.at = (x, y);
+        let fade = (y.abs() / (screen.1 * 0.4)).min(1.);
+        let bars = transition((serial.clone(), "bars"), if self.zoom.bare { 0. } else { 1. }, if self.zoom.bare { motion::exit() } else { motion::enter() }, window, cx);
+        let chrome = bars * (1. - (fade * 3.).min(1.));
+        let interactive = live && !self.zoom.bare;
+
+        let page = screen.0 + PAGE_GAP;
+        let side = |near: &Option<String>, shift: f32| -> Option<AnyElement> {
+            let near = near.as_ref()?;
+            let image = self.zoom.near.iter().find(|(k, _)| k == near).and_then(|(_, image)| image.clone()).or_else(|| self.thumbs.get(near).cloned())?;
+            Some(img(image).absolute().left(px(x + shift)).top_0().w(px(screen.0)).h(px(screen.1)).object_fit(ObjectFit::Contain).into_any_element())
+        };
+        let sides: Vec<AnyElement> = if x.abs() > 0.5 { [side(&older, -page), side(&newer, page)].into_iter().flatten().collect() } else { Vec::new() };
+
+        let m = self.msgs.iter().find(|m| m.id == id);
+        let who = m.map(|m| if m.own { t!("You").to_owned() } else { m.sender.clone() });
+        let when = m.map(|m| format!("{}, {}", day_label(m.ts), clock(m.ts)));
+        let caption = m.map(|m| m.body.trim()).filter(|body| !body.is_empty()).map(str::to_owned);
+        let replies = m.is_some_and(|m| m.id.starts_with('$') && !m.deleted);
+        let forwards = m.is_some_and(forward::forwardable);
+
+        let shade = gpui_kit::white().opacity(0.12);
+        let scrim = gpui_kit::black().opacity(0.55);
+        let working = self.zoom.working.is_some();
+        let action = |id: &'static str, icon: IconName, label: &'static str, busy: bool| {
+            v_flex()
                 .id(id)
-                .size(px(TAP))
-                .flex()
+                .min_w(px(TAP + 20.))
+                .h(px(ACTIONS_H))
                 .items_center()
                 .justify_center()
-                .rounded_full()
+                .gap(px(4.))
+                .rounded(px(12.))
                 .cursor_pointer()
                 .opacity(if busy { 0.5 } else { 1. })
-                .hover(|s| s.bg(gpui_kit::white().opacity(0.12)))
+                .when(!gpui_kit::is_mobile(), |el| el.hover(|s| s.bg(shade)))
+                .active(|s| s.bg(shade))
                 .child(Icon::new(icon).size_6())
+                .child(div().text_size(fs(12.)).child(label))
         };
-        let working = self.zoom.working;
-        let bar = h_flex()
+        let top_bar = h_flex()
             .absolute()
-            .top(px(top + 4.))
-            .right(px(GUTTER - 6.))
-            .when(live && crate::can_share(), |el| {
-                el.child(button("viewer-share", IconName::Share2, working.is_some()).on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.export_viewed(Export::Share, cx);
-                })))
+            .top_0()
+            .left_0()
+            .right_0()
+            .pt(px(top + 4.))
+            .pb(px(4.))
+            .px(px(GUTTER - 6.))
+            .gap(px(6.))
+            .bg(scrim)
+            .opacity(chrome)
+            .child(
+                div()
+                    .id("viewer-close")
+                    .size(px(TAP))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .when(!gpui_kit::is_mobile(), |el| el.hover(|s| s.bg(shade)))
+                    .active(|s| s.bg(shade))
+                    .child(Icon::new(IconName::ArrowLeft).size_6())
+                    .when(interactive, |el| {
+                        el.on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.close_viewer(cx);
+                        }))
+                    }),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .children(who.map(|who| div().truncate().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(who)))
+                    .children(when.map(|when| div().truncate().text_size(fs(13.)).text_color(gpui_kit::white().opacity(0.7)).child(when))),
+            );
+        let actions = h_flex()
+            .justify_around()
+            .px(px(GUTTER / 2.))
+            .when(replies, |el| {
+                el.child(action("viewer-reply", IconName::Reply, t!("Reply"), false).when(interactive, |el| {
+                    el.on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.viewer_act(menu::Act::Reply, window, cx);
+                    }))
+                }))
             })
-            .when(live && crate::can_save(), |el| {
-                el.child(button("viewer-save", IconName::Download, working.is_some()).on_click(cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.export_viewed(Export::Save, cx);
-                })))
+            .when(forwards, |el| {
+                el.child(action("viewer-forward", IconName::Forward, t!("Forward"), false).when(interactive, |el| {
+                    el.on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.viewer_act(menu::Act::Forward, window, cx);
+                    }))
+                }))
             })
-            .child(button("viewer-close", IconName::X, false).on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                this.close_viewer(cx);
-            })));
+            .when(crate::can_save(), |el| {
+                el.child(action("viewer-save", IconName::Download, t!("Save"), working).when(interactive, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.export_viewed(Export::Save, cx);
+                    }))
+                }))
+            })
+            .when(crate::can_share(), |el| {
+                el.child(action("viewer-share", IconName::Share2, t!("Share"), working).when(interactive, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.export_viewed(Export::Share, cx);
+                    }))
+                }))
+            });
+        let bottom_bar = v_flex()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .gap(px(12.))
+            .children(self.zoom.note.as_ref().map(|(text, _)| {
+                div().flex().justify_center().px(px(GUTTER)).child(
+                    div().max_w(px(screen.0 - 2. * GUTTER)).px(px(GAP)).py(px(10.)).rounded(px(RADIUS)).bg(p.raised).text_color(p.text).text_size(fs(14.)).child(text.clone()),
+                )
+            }))
+            .child(
+                v_flex()
+                    .pt(px(8.))
+                    .pb(px(bottom + 4.))
+                    .gap(px(4.))
+                    .bg(scrim)
+                    .opacity(chrome)
+                    .children(caption.map(|caption| div().px(px(GUTTER)).py(px(4.)).line_clamp(4).text_ellipsis().text_size(fs(15.)).line_height(fs(21.)).child(caption)))
+                    .child(actions),
+            );
 
         Some(
             div()
@@ -385,9 +768,9 @@ impl BeeperApp {
                 .absolute()
                 .inset_0()
                 .overflow_hidden()
-                .bg(gpui_kit::black())
                 .text_color(gpui_kit::white())
                 .opacity(shown.progress)
+                .child(div().absolute().inset_0().bg(gpui_kit::black()).opacity(1. - fade))
                 .when(live, |el| {
                     el.occlude()
                         .on_click(cx.listener(|this, e: &ClickEvent, window, cx| this.viewer_tap(e.position(), window, cx)))
@@ -400,25 +783,22 @@ impl BeeperApp {
                         .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| this.viewer_drag(e, cx)))
                         .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.zoom.mouse = None))
                 })
+                .children(sides)
                 .map(|el| match picture {
                     Some(image) => el.child(
                         img(image)
                             .absolute()
-                            .left(px((screen.0 - w) / 2. + view.off.0))
-                            .top(px((screen.1 - h) / 2. + view.off.1))
+                            .left(px((screen.0 - w) / 2. + view.off.0 + x))
+                            .top(px((screen.1 - h) / 2. + view.off.1 + y))
                             .w(px(w))
                             .h(px(h))
                             .object_fit(ObjectFit::Contain),
                     ),
-                    None if live => el.child(div().size_full().flex().items_center().justify_center().child(t!("Loading…"))),
+                    None if live => el.child(div().absolute().inset_0().flex().items_center().justify_center().child(t!("Loading…"))),
                     None => el,
                 })
-                .child(bar)
-                .children(self.zoom.note.as_ref().map(|(text, _)| {
-                    div().absolute().left_0().right_0().bottom(px(crate::insets().1 + 24.)).flex().justify_center().child(
-                        div().max_w(px(screen.0 - 2. * GUTTER)).px(px(GAP)).py(px(10.)).rounded(px(RADIUS)).bg(p.raised).text_color(p.text).text_size(fs(14.)).child(text.clone()),
-                    )
-                }))
+                .when(chrome > 0., |el| el.child(top_bar))
+                .child(bottom_bar)
                 .into_any_element(),
         )
     }
@@ -426,7 +806,8 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{FIT, MAX_SCALE, View, clamped, fitted, reach, zoomed_about};
+    use super::{EDGE_GIVE, FIT, MAX_SCALE, Turn, View, beside, clamped, dismisses, fitted, give, pictures, reach, settle, zoomed_about};
+    use crate::backend::MediaKind;
 
     const PHONE: (f32, f32) = (400., 900.);
 
@@ -462,5 +843,58 @@ mod tests {
         assert!(((at.0 - v.off.0) / v.scale - at.0).abs() < 1e-3);
         assert!(((at.1 - v.off.1) / v.scale - at.1).abs() < 1e-3);
         assert_eq!(zoomed_about(v, at, 1., PHONE, PHONE), FIT);
+    }
+
+    #[test]
+    fn only_images_and_stickers_still_there_are_browsed_in_order() {
+        let msgs = [
+            ("$a", Some(MediaKind::Image), false),
+            ("$b", None, false),
+            ("$c", Some(MediaKind::Video), false),
+            ("$d", Some(MediaKind::Sticker), false),
+            ("$e", Some(MediaKind::Image), true),
+            ("$f", Some(MediaKind::File), false),
+            ("$g", Some(MediaKind::Image), false),
+        ];
+        assert_eq!(pictures(msgs), ["$a", "$d", "$g"]);
+    }
+
+    #[test]
+    fn only_the_neighbours_on_each_side_are_kept() {
+        let set = ["$a", "$b", "$c", "$d"];
+        assert_eq!(beside(&set, "$b"), (Some("$a"), Some("$c")));
+        assert_eq!(beside(&set, "$a"), (None, Some("$b")));
+        assert_eq!(beside(&set, "$d"), (Some("$c"), None));
+        assert_eq!(beside(&set, "$x"), (None, None), "a picture not in the chat has no neighbours");
+        assert_eq!(beside(&["$a"], "$a"), (None, None));
+    }
+
+    #[test]
+    fn a_long_pull_or_a_flick_turns_a_short_slow_one_stays() {
+        let width = 400.;
+        assert_eq!(settle(-250., 0., width, true, true), Turn::Newer);
+        assert_eq!(settle(250., 0., width, true, true), Turn::Older);
+        assert_eq!(settle(-150., 0., width, true, true), Turn::Stay);
+        assert_eq!(settle(-40., -900., width, true, true), Turn::Newer, "a flick turns");
+        assert_eq!(settle(-40., 900., width, true, true), Turn::Stay, "a finger turning back cancels");
+        assert_eq!(settle(-300., -900., width, true, false), Turn::Stay, "nothing newer to turn to");
+        assert_eq!(settle(0., -900., width, true, true), Turn::Stay);
+    }
+
+    #[test]
+    fn past_the_last_picture_the_pull_meets_resistance() {
+        assert_eq!(give(100., true, false), 100.);
+        assert_eq!(give(-100., true, false), -100. * EDGE_GIVE);
+        assert_eq!(give(100., false, true), 100. * EDGE_GIVE);
+    }
+
+    #[test]
+    fn a_far_or_fast_pull_up_or_down_closes() {
+        let height = 900.;
+        assert!(dismisses(200., 0., height));
+        assert!(dismisses(-200., 0., height));
+        assert!(!dismisses(60., 100., height), "a short slow pull springs back");
+        assert!(dismisses(40., 1200., height), "a flick closes");
+        assert!(!dismisses(40., -1200., height), "a flick back toward rest does not");
     }
 }
