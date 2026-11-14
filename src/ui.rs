@@ -576,13 +576,7 @@ impl BeeperApp {
                     }
                 }
             }
-            Ev::Viewed(id, bytes) => {
-                if let (Some((open, slot)), Some(format)) = (&mut self.viewer, image_format(&bytes))
-                    && *open == id
-                {
-                    *slot = Some(Arc::new(Image::from_bytes(format, bytes)));
-                }
-            }
+            Ev::Viewed(id, bytes) => self.viewed(id, bytes),
             Ev::Fetched(id, path) => {
                 self.fetching.remove(&id);
                 if let Some(path) = path.filter(|path| !self.voice_fetched(&id, path, cx)) {
@@ -897,6 +891,7 @@ impl BeeperApp {
         {
             image.remove_asset(cx);
         }
+        self.drop_near(cx);
         cx.notify();
     }
 
@@ -941,7 +936,7 @@ impl BeeperApp {
         if matches!(media.kind, MediaKind::Image | MediaKind::Sticker) {
             if self.send(Cmd::View(id.clone(), media), cx) {
                 self.viewer = Some((id, None));
-                self.open_zoom();
+                self.open_zoom(cx);
             }
         } else if !self.fetching.contains(&id) && self.send(Cmd::Fetch(id.clone(), media), cx) {
             self.fetching.insert(id);
@@ -2948,7 +2943,7 @@ impl Render for BeeperApp {
         let root = v_flex()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" && this.go_back(window, cx) {
+                if (event.keystroke.key == "escape" && this.go_back(window, cx)) || this.viewer_key(&event.keystroke.key, cx) {
                     cx.stop_propagation();
                 }
             }))

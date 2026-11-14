@@ -152,7 +152,7 @@ struct Drag {
 }
 
 /// Speed in px/s over the last 100 ms of a drag.
-fn speed(samples: &VecDeque<(Instant, f32)>) -> f32 {
+pub(super) fn speed(samples: &VecDeque<(Instant, f32)>) -> f32 {
     let Some(&(end, at)) = samples.back() else { return 0. };
     let Some(&(start, from)) = samples.iter().find(|(t, _)| end.duration_since(*t) <= Duration::from_millis(100)) else { return 0. };
     let dt = end.duration_since(start).as_secs_f32();

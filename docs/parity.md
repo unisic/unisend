@@ -104,7 +104,7 @@ is not started.
 | Interface language | part | English and Polish, following the system language (Android's locale; on desktop `LC_ALL`, `LC_MESSAGES`, `LANG`). No in-app switch. Glossary and how to add a string: `docs/i18n.md` |
 | Command bar, hotkeys | todo | local |
 | Tray icon, launch at login, deep links | todo | local |
-| Media viewer | part | pictures only; pinch, double-tap and ctrl+wheel zoom, pan, Save to gallery (Android 10+, desktop Pictures/Murmur), Share on Android; no paging between pictures |
+| Media viewer | part | pictures only; pinch, double-tap and ctrl+wheel zoom, pan; a sideways swipe or Left/Right pages through the chat's loaded pictures (reaching the oldest asks for older history once); a swipe up or down closes; a tap shows or hides a bar with sender and time, the caption, and Reply, Forward, Save to gallery (Android 10+, desktop Pictures/Murmur), Share (Android). No position count, no videos in the row |
 | PDF preview, storage manager | todo | local |
 | Feedback, help hub, subscription banners | todo | Beeper services |
 | Emoji rendering | part | bundled bitmap Noto Color Emoji (GPUI cannot draw COLRv1). On Linux, emoji that a system text font also holds (the heart U+2764 among them) draw as that font's outline: cosmic-text asks DejaVu Sans before the emoji font |

@@ -99,7 +99,7 @@ pub(super) struct Press {
 
 /// What a message's list offers.
 #[derive(Clone, PartialEq, Debug)]
-enum Act {
+pub(super) enum Act {
     Reply,
     React,
     Retry,
@@ -570,7 +570,7 @@ impl BeeperApp {
             })))
     }
 
-    fn act(&mut self, id: &str, act: Act, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn act(&mut self, id: &str, act: Act, window: &mut Window, cx: &mut Context<Self>) {
         match act {
             Act::Reply => self.start_compose(Compose::Reply(id.to_owned()), window, cx),
             Act::Edit => self.start_compose(Compose::Edit(id.to_owned()), window, cx),
