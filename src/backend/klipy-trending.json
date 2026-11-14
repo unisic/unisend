@@ -1,0 +1,290 @@
+{
+ "result": true,
+ "data": {
+  "data": [
+   {
+    "id": 1610213657446624,
+    "slug": "dog-doggy-45",
+    "title": "Dog Doggy",
+    "file": {
+     "hd": {
+      "gif": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/iejsMsgA4YrexEXmVz.gif",
+       "width": 250,
+       "height": 396,
+       "size": 586473
+      },
+      "webp": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/j5WW6LF2HkuLwLxvdnIp.webp",
+       "width": 250,
+       "height": 396,
+       "size": 80814
+      },
+      "jpg": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/g9hAABXrGbWTEmv.jpg",
+       "width": 250,
+       "height": 396,
+       "size": 12340
+      },
+      "mp4": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/vF6ddQ7QoMLcw7irB.mp4",
+       "width": 250,
+       "height": 396,
+       "size": 36362
+      },
+      "webm": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/AO7Mxy7B5ocorLAz763.webm",
+       "width": 250,
+       "height": 396,
+       "size": 35640
+      }
+     },
+     "md": {
+      "gif": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/60IS5TGtbIbl7quh.gif",
+       "width": 250,
+       "height": 396,
+       "size": 584380
+      },
+      "webp": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/Lpu0P5GT1oBheJNIem6t.webp",
+       "width": 250,
+       "height": 396,
+       "size": 129090
+      },
+      "jpg": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/4rnO9y06Zm136fTGBY.jpg",
+       "width": 250,
+       "height": 396,
+       "size": 12350
+      },
+      "mp4": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/3l0TEcRi4Kw8.mp4",
+       "width": 250,
+       "height": 396,
+       "size": 36362
+      },
+      "webm": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/stoc3dgJqDF58PaO4d9.webm",
+       "width": 250,
+       "height": 396,
+       "size": 35640
+      }
+     },
+     "sm": {
+      "gif": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/dG9vmQYzeHkeQ5Te.gif",
+       "width": 165,
+       "height": 262,
+       "size": 330420
+      },
+      "webp": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/FWdlu3hKVrt3xYf.webp",
+       "width": 165,
+       "height": 262,
+       "size": 73838
+      },
+      "jpg": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/Of9ybwoO6sfgxg.jpg",
+       "width": 165,
+       "height": 262,
+       "size": 7622
+      },
+      "mp4": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/xNywMGoTsnCq2CP.mp4",
+       "width": 204,
+       "height": 320,
+       "size": 24999
+      },
+      "webm": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/MCWr5YdBLR3SNAviKyq.webm",
+       "width": 204,
+       "height": 320,
+       "size": 25806
+      }
+     },
+     "xs": {
+      "gif": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/lBDp59W9EN7C8.gif",
+       "width": 57,
+       "height": 90,
+       "size": 53932
+      },
+      "webp": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/yZzT9uwZnOAne.webp",
+       "width": 57,
+       "height": 90,
+       "size": 19540
+      },
+      "jpg": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/3zqs1at6pUVYtCAPBck.jpg",
+       "width": 57,
+       "height": 90,
+       "size": 2409
+      },
+      "mp4": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/VjJ7xZuU1aSS2.mp4",
+       "width": 96,
+       "height": 150,
+       "size": 9788
+      },
+      "webm": {
+       "url": "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/a1/fa/GiA6il8t5iIxlgFR.webm",
+       "width": 96,
+       "height": 150,
+       "size": 10286
+      }
+     }
+    },
+    "tags": [],
+    "type": "gif",
+    "blur_preview": "data:image/jpeg;base64,iVBORw0KGgoAAAANS"
+   },
+   {
+    "id": 3385904196313190,
+    "slug": "good-morning-17328",
+    "title": "Good Morning Coffee with Roses",
+    "file": {
+     "hd": {
+      "gif": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/ZPM5oKEw.gif",
+       "width": 312,
+       "height": 498,
+       "size": 599673
+      },
+      "webp": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/TLWA5o7s.webp",
+       "width": 312,
+       "height": 498,
+       "size": 73324
+      },
+      "jpg": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/Yr1HDNcv.jpg",
+       "width": 312,
+       "height": 498,
+       "size": 17138
+      },
+      "mp4": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/zpYfuoY3.mp4",
+       "width": 312,
+       "height": 498,
+       "size": 37839
+      },
+      "webm": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/Zosp5naiXYJS453xm2.webm",
+       "width": 312,
+       "height": 498,
+       "size": 35136
+      }
+     },
+     "md": {
+      "gif": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/FHFv2CZe.gif",
+       "width": 312,
+       "height": 498,
+       "size": 620078
+      },
+      "webp": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/hoFujsjd.webp",
+       "width": 312,
+       "height": 498,
+       "size": 135448
+      },
+      "jpg": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/kSHiY15K.jpg",
+       "width": 312,
+       "height": 498,
+       "size": 17969
+      },
+      "mp4": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/lgRsqGYb.mp4",
+       "width": 312,
+       "height": 498,
+       "size": 37839
+      },
+      "webm": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/o5Ly8wR65qFOVCGh8.webm",
+       "width": 312,
+       "height": 498,
+       "size": 35136
+      }
+     },
+     "sm": {
+      "gif": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/3zqp94FO.gif",
+       "width": 220,
+       "height": 352,
+       "size": 349926
+      },
+      "webp": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/MOm3cMaM.webp",
+       "width": 220,
+       "height": 352,
+       "size": 78652
+      },
+      "jpg": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/impft1hH.jpg",
+       "width": 220,
+       "height": 352,
+       "size": 10908
+      },
+      "mp4": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/Wu5GLaZ9.mp4",
+       "width": 202,
+       "height": 320,
+       "size": 17948
+      },
+      "webm": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/c9wVnYRJEQy3.webm",
+       "width": 202,
+       "height": 320,
+       "size": 30606
+      }
+     },
+     "xs": {
+      "gif": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/i4hWRiEW.gif",
+       "width": 57,
+       "height": 90,
+       "size": 28257
+      },
+      "webp": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/T9VR71BA.webp",
+       "width": 57,
+       "height": 90,
+       "size": 14068
+      },
+      "jpg": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/jxhUN8zF.jpg",
+       "width": 57,
+       "height": 90,
+       "size": 2356
+      },
+      "mp4": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/08rsdvPv.mp4",
+       "width": 94,
+       "height": 150,
+       "size": 6162
+      },
+      "webm": {
+       "url": "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/8c/ae/Q90mJ0AQs8G8hz.webm",
+       "width": 94,
+       "height": 150,
+       "size": 11090
+      }
+     }
+    },
+    "tags": [],
+    "type": "gif",
+    "blur_preview": "data:image/jpeg;base64,/9j//gAQTGF2YzU5L"
+   }
+  ],
+  "current_page": 1,
+  "per_page": 2,
+  "has_next": true,
+  "meta": {
+   "item_min_width": 80,
+   "ad_max_resize_percent": 10
+  }
+ }
+}

@@ -85,7 +85,7 @@ is not started.
 | Forward | todo | new event in the target chat |
 | Attachments | part | one file from the picker, any type, 100 MB at most; Photo and Video tiles in the attach sheet start the system camera (Android); no paste, drag and drop, caption or thumbnail upload |
 | Voice notes | todo | `org.matrix.msc3245.voice` |
-| Emoji / GIF / sticker pickers | part | emoji done: button in the composer swaps the keyboard for a panel (categories, search by name and shortcode, 32 recents, skin tone), also the sheet behind the reaction bar's +; GIF and sticker pickers todo |
+| Emoji / GIF / sticker pickers | part | emoji done: button in the composer swaps the keyboard for a panel (categories, search by name and shortcode, 32 recents, skin tone), also the sheet behind the reaction bar's +; GIFs from KLIPY (needs `KLIPY_API_KEY` at build time, else hidden): trending, debounced search, static previews, tap to send as `m.video` MP4 with `fi.mau.gif` (a GIF file `m.image` in Messenger and Instagram chats), no categories; sticker picker todo |
 | Formatting shortcuts, mentions autocomplete | todo | local |
 | Send later, undo send | todo | `com.beeper.is_scheduled`, local delay |
 | AI rewrite, translate, transcription | todo | Beeper AI endpoints |
@@ -126,7 +126,7 @@ Verified in the source: typing, read receipts of others and membership changes a
 | Contact cards | from WhatsApp | from Signal | no | no | not checked |
 | Disappearing messages | no | yes | no | no | timer not shown |
 | Typing, read receipts of others | yes | yes | yes | yes | shown in the open chat |
-| GIFs, stickers received | not listed | yes | yes | yes | stickers shown; no picker |
+| GIFs, stickers received | not listed | yes | yes | yes | stickers shown; GIFs sent from the KLIPY picker: WhatsApp `GifPlayback` and Signal's GIF flag from `fi.mau.gif`, Meta gets the GIF file (not checked on a bridge) |
 | Story, reel and profile shares | no | no | yes | stories | not checked how they arrive |
 | Group changes (title, avatar, members) | yes | yes | yes | yes | shown as lines; a bridge's bookkeeping memberships are hidden as Beeper hides them |
 | Group admin from Matrix | invite, leave, kick | all but join | invite, kick, rename | rename | none |
