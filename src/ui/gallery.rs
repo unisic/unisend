@@ -512,6 +512,7 @@ impl BeeperApp {
                     .child(div().min_w_0().truncate().text_size(px(14.)).text_color(p.faint).child(title))
                     .child(
                         h_flex()
+                            .flex_none()
                             .gap(px(4.))
                             .child(
                         h_flex()
@@ -552,6 +553,7 @@ impl BeeperApp {
                                         }),
                                 )
                             })
+                            .children(super::contacts::sheet_entry(live, cx))
                             .child(
                         h_flex()
                             .id("gallery-files")

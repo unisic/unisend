@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <!-- Only asked for when the system's contact picker does not give read access to the chosen contact. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
 
     <!-- Sharing where the user is, only when they ask; no background location. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
@@ -84,6 +86,13 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode"
             android:exported="false"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
+
+        <!-- Chooses a contact to send; see ContactPick. -->
+        <activity
+            android:name="dev.gpui.beeper.ContactPick"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|uiMode"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- Lets other apps open a downloaded attachment, one grant per file. -->
         <provider

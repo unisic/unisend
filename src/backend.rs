@@ -145,6 +145,8 @@ pub enum Cmd {
     SendPoll { room: OwnedRoomId, question: String, answers: Vec<String>, multiple: bool },
     /// Ends the user's own poll.
     EndPoll { room: OwnedRoomId, target: String },
+    /// Reads the contact card in a `.vcf` attachment.
+    Contact(String, Media),
 }
 
 pub enum Ev {
@@ -181,6 +183,8 @@ pub enum Ev {
     /// A request made for the settings pages failed; `Error` carries the reason.
     PanelFailed,
     Error(String),
+    /// The cards of a contact file; empty when it could not be read.
+    Contact(String, Vec<crate::vcard::Card>),
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -1155,6 +1159,18 @@ impl State {
                 let (kind, content) = pollnew::end(&target);
                 self.room(&room)?.send_raw(kind, content).await?;
             }
+            Cmd::Contact(id, media) => {
+                let client = self.client()?.clone();
+                let (ev, permits) = (self.ev.clone(), self.fetches.clone());
+                tokio::spawn(async move {
+                    let Ok(_permit) = permits.acquire().await else { return };
+                    let cards = contact::load(&client, &media).await.unwrap_or_else(|e| {
+                        log::debug!("contact {id}: {e:#}");
+                        Vec::new()
+                    });
+                    let _ = ev.send(Ev::Contact(id, cards)).await;
+                });
+            }
         }
         Ok(())
     }
@@ -1310,7 +1326,11 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>) -> Result<()
         return Err(anyhow!("the file is larger than {} MB", MAX_UPLOAD / 1024 / 1024));
     }
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".to_owned());
-    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    let mut mime = mime_guess::from_path(path).first_or_octet_stream();
+    // The registered type; the guess is the older `text/x-vcard`, which bridges pass on as it is.
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("vcf")) {
+        mime = "text/vcard".parse()?;
+    }
     let data = tokio::fs::read(path).await?;
     let mut config = AttachmentConfig::new();
     if mime.type_() == mime_guess::mime::IMAGE {
@@ -2299,6 +2319,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
 }
 
 mod location;
+mod contact;
 mod polls;
 mod rich;
 pub use rich::{Block, Rich, Run};
