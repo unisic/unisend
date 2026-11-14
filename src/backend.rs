@@ -83,7 +83,7 @@ const THUMB_PX: u32 = 800;
 const VIEW_PX: u32 = 2048;
 /// Larger files are not fetched to make a thumbnail, and not sent.
 const MAX_THUMB_SOURCE: u64 = 16 * 1024 * 1024;
-const MAX_UPLOAD: u64 = 100 * 1024 * 1024;
+pub(crate) const MAX_UPLOAD: u64 = 100 * 1024 * 1024;
 /// A message older than this when it arrives is history, not news.
 const NOTIFY_WINDOW: Duration = Duration::from_secs(300);
 /// History pages read back looking for a chat's last message.
