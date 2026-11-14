@@ -53,7 +53,9 @@ is not started.
 | Edits applied, "Edited" mark | part | `m.replace`, applied by the SDK's timeline; no edit history |
 | Sender grouping, timestamps | done | local |
 | Day separators | done | the timeline's own |
-| Unread divider | done | "New" above what arrived since the chat was last read (`m.fully_read`) |
+| Unread divider | done | "New messages" above what arrived since the chat was last read (`m.fully_read`, else the read receipt: matrix-sdk-ui `controller/mod.rs`); opening scrolls to it |
+| Local drafts | done | per chat, kept in `drafts.json` (200 chats, 4 KB each), restored on open, "Draft:" in the chat list; not synced |
+| Jump to newest | done | button once scrolled over a screen up, counts messages from others that arrived meanwhile |
 | Replies (quote shown) | done | `m.in_reply_to`; a quoted message that is not loaded is fetched; a touch goes to it when it is loaded |
 | Reactions (show, add, remove) | part | `m.reaction`; Signal's six in a bar over the held message (touch) or from the react button beside it (pointer), a double tap for the heart (short pop at the finger, light tick on Android), the user's own reaction marked and taken back with a second touch. No full emoji picker, no custom emoji |
 | Deleted messages | done | `m.room.redaction`; stays a "Message deleted" row |

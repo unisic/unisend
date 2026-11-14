@@ -22,6 +22,7 @@ mod cards;
 mod gallery;
 mod heart;
 mod menu;
+mod navigate;
 pub(crate) mod motion;
 mod panels;
 mod rich;
@@ -245,6 +246,8 @@ pub struct BeeperApp {
     more: bool,
     loading: bool,
     timeline: ListState,
+    drafts: navigate::Drafts,
+    place: navigate::Place,
     rooms_scroll: UniformListScrollHandle,
     /// Room avatars; `None` while loading or when the room has none. One entry per room at most.
     avatars: HashMap<OwnedRoomId, Option<Arc<Image>>>,
@@ -289,7 +292,7 @@ impl BeeperApp {
         let matrix = signin::Form::new(window, cx, &mut subs);
         subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
-            if matches!(ev, InputEvent::Change) {
+            if matches!(ev, InputEvent::Change) && this.composer_changed(cx) {
                 this.typed(cx);
             }
         }));
@@ -302,6 +305,9 @@ impl BeeperApp {
         subs.push(cx.observe_window_activation(window, |this, window, cx| {
             let active = window.is_window_active();
             crate::FOREGROUND.store(active, std::sync::atomic::Ordering::Relaxed);
+            if !active {
+                this.drafts.save();
+            }
             if active {
                 // The animation setting may have changed while the app was away.
                 motion::follow_system(cx);
@@ -315,6 +321,11 @@ impl BeeperApp {
             if ev.visible_range.start == 0 {
                 let _ = weak.update(cx, |this, cx| this.load_older(cx));
             }
+            // Deferred: the list is borrowed while it calls this handler.
+            let again = weak.clone();
+            cx.defer(move |cx| {
+                let _ = again.update(cx, |this, cx| this.scrolled(cx));
+            });
         });
 
         let events = cx.spawn(async move |this, cx| {
@@ -325,6 +336,7 @@ impl BeeperApp {
             }
         });
 
+        let drafts = navigate::Drafts::load(&dir);
         Self {
             cmd,
             screen: Screen::Starting,
@@ -396,6 +408,8 @@ impl BeeperApp {
             loading: false,
             timeline,
             rooms_scroll: UniformListScrollHandle::new(),
+            drafts,
+            place: navigate::Place::default(),
             avatars: HashMap::new(),
             peeked: HashSet::new(),
             _subs: subs,
@@ -539,11 +553,13 @@ impl BeeperApp {
                 let appended = ends.iter().map(|(_, new, _)| new).sum();
                 let open_for = self.opened_at.map_or(Duration::ZERO, |at| at.elapsed());
                 let now = Instant::now();
-                for (len_before, _, ids) in ends {
+                for (len_before, new, ids) in ends {
                     if arrived(len_before, appended, open_for) {
                         self.arrivals.extend(ids.into_iter().map(|id| (id, now)));
                     }
+                    self.count_missed(len_before, new);
                 }
+                self.seek_unread();
                 self.arrivals.retain(|(_, at)| now.duration_since(*at) < Duration::from_secs(1));
                 while self.arrivals.len() > 2 * MAX_ARRIVALS {
                     self.arrivals.pop_front();
@@ -554,6 +570,7 @@ impl BeeperApp {
                     return;
                 }
                 (self.loading, self.more) = (false, more);
+                self.place.seek_unread = false;
                 if let Some((id, pages)) = self.seek.take() {
                     if self.msgs.iter().any(|m| m.id == id) {
                         self.reveal(&id, cx);
@@ -681,6 +698,7 @@ impl BeeperApp {
         };
         if self.send(Cmd::Send { room, body, reply_to, edit }, cx) {
             self.compose = Compose::New;
+            self.jump_to_newest(cx);
             self.composer.update(cx, |c, cx| c.set_value("", window, cx));
         }
     }
@@ -965,6 +983,7 @@ impl BeeperApp {
         self.panel = None;
         self.open = Some(id.clone());
         self.opened_at = Some(Instant::now());
+        self.show_draft(Some(&id));
         self.loading = self.send(Cmd::Open(id), cx);
     }
 
@@ -995,6 +1014,8 @@ impl BeeperApp {
         (self.menu, self.press, self.chat_sheet) = (None, None, None);
         self.compose = Compose::New;
         self.timeline.reset(0);
+        self.drafts.save();
+        self.show_draft(None);
         self.more = false;
         self.loading = false;
     }
@@ -1297,7 +1318,14 @@ impl BeeperApp {
                                                     .text_size(px(14.))
                                                     .line_height(px(20.))
                                                     .text_color(if unread { p.text } else { p.muted })
-                                                    .child(crate::emoji::styled(preview.unwrap_or("Message").to_owned(), Vec::new())),
+                                                    .child(match this.drafts.get(&room.id) {
+                                                        Some(draft) => h_flex()
+                                                            .gap(px(4.))
+                                                            .child(div().flex_none().text_color(p.faint).child("Draft:"))
+                                                            .child(div().flex_1().min_w_0().truncate().child(crate::emoji::styled(draft.replace('\n', " "), Vec::new())))
+                                                            .into_any_element(),
+                                                        None => crate::emoji::styled(preview.unwrap_or("Message").to_owned(), Vec::new()).into_any_element(),
+                                                    }),
                                             )
                                             .when(room.pinned, |el| el.child(mark(IconName::Pin)))
                                             .when(room.muted, |el| el.child(mark(IconName::BellOff)))
@@ -1746,6 +1774,7 @@ impl BeeperApp {
                     .min_h_0()
                     .child(timeline)
                     .child(self.press_tracker(cx))
+                    .children(self.jump_button(cx))
                     .when(self.loading && self.msgs.is_empty(), |el| {
                         el.child(
                             div()
@@ -1890,7 +1919,7 @@ impl BeeperApp {
         let m = &self.msgs[ix];
         let (text, ink) = match &m.kind {
             Kind::Day => (day_label(m.ts), p.faint),
-            Kind::Unread => ("New".to_owned(), p.accent_ink),
+            Kind::Unread => ("New messages".to_owned(), p.accent_ink),
             Kind::Notice => (m.body.clone(), p.faint),
             // Joins that follow one another are told once, by the last of them.
             Kind::Joined if self.msgs.get(ix + 1).is_none_or(|next| next.kind != Kind::Joined) => {
@@ -1901,6 +1930,10 @@ impl BeeperApp {
             }
             _ => return div().into_any_element(),
         };
+        if m.kind == Kind::Unread {
+            let rule = || div().h(px(1.)).flex_1().bg(p.rule);
+            return h_flex().w_full().px(px(GUTTER)).pt(px(GAP)).gap(px(8.)).items_center().text_size(px(12.)).text_color(ink).child(rule()).child(text).child(rule()).into_any_element();
+        }
         div().w_full().px(px(GUTTER)).pt(px(GAP)).flex().justify_center().text_size(px(12.)).text_color(ink).child(text).into_any_element()
     }
 
@@ -2711,6 +2744,7 @@ impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         let (top, bottom) = crate::insets();
+        self.apply_draft(window, cx);
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
         }
