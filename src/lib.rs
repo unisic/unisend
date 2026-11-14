@@ -75,7 +75,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     let mut settings = Settings::load(&dir);
     let own = emoji::apply(&mut settings, &dir, cx);
     if !own {
-        emoji::use_bundled(cx);
+        emoji::use_bundled(&dir, cx);
     }
     fonts(cx);
     cx.set_global(settings.theme);

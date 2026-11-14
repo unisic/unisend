@@ -46,16 +46,22 @@ pub(crate) fn apply(settings: &mut Settings, dir: &Path, cx: &mut gpui_kit::App)
     take_family(bytes, cx)
 }
 
-/// Adds the bundled copy (already named and given an 'm', see `assets/fonts/README`) and makes it
+/// Adds the device's own colour emoji font on Android when GPUI can draw it (see `system`), else
+/// the bundled copy (already named and given an 'm', see `assets/fonts/README`) and makes it
 /// the emoji family, for systems whose own emoji font is COLRv1, which GPUI cannot draw (Fedora,
-/// Android 13+). Where Android's own face is CBDT, gpui-mobile has loaded it and it stays.
+/// Android 13+). Where Android's NotoColorEmoji is CBDT, gpui-mobile has loaded it and it stays.
 /// Elsewhere the system draws its own emoji (Apple's on macOS and iOS), which must stay first.
-pub(crate) fn use_bundled(cx: &mut gpui_kit::App) {
+pub(crate) fn use_bundled(dir: &Path, cx: &mut gpui_kit::App) {
     if !SUPPORTED {
         return;
     }
+    // Android's font directory; elsewhere it does not exist and nothing is found.
+    if let Some(bytes) = system(Path::new("/system/fonts"), dir) {
+        take_family(bytes, cx);
+        return;
+    }
     #[cfg(target_os = "android")]
-    if has_cbdt(Path::new("/system/fonts/NotoColorEmoji.ttf")) {
+    if has_bitmaps(Path::new("/system/fonts/NotoColorEmoji.ttf")) {
         return;
     }
     take_family(include_bytes!("../assets/fonts/NotoColorEmoji.ttf"), cx);
@@ -75,12 +81,60 @@ fn take_family(bytes: &'static [u8], cx: &mut gpui_kit::App) -> bool {
     true
 }
 
-#[cfg(target_os = "android")]
-fn has_cbdt(path: &Path) -> bool {
+const SYSTEM_PREFIX: &str = "emoji-system-v1-";
+
+/// Whether the font's table directory has bitmap colour glyphs GPUI can draw (CBDT with CBLC, or
+/// sbix). Reads only the directory, as the fonts are tens of MB.
+fn has_bitmaps(path: &Path) -> bool {
     let Ok(mut file) = File::open(path) else { return false };
     let Ok(head) = read_at(&mut file, 0, 12) else { return false };
     let count = usize::from(be16(&head, 4).unwrap_or(0));
-    read_at(&mut file, 12, 16 * count).is_ok_and(|records| records.chunks(16).any(|r| r.starts_with(b"CBDT")))
+    let Ok(records) = read_at(&mut file, 12, 16 * count) else { return false };
+    let has = |tag: &[u8]| records.chunks(16).any(|r| r.starts_with(tag));
+    has(b"sbix") || (has(b"CBDT") && has(b"CBLC"))
+}
+
+/// The device's colour emoji fonts in `fonts`, best first: Samsung's, then any other `*Emoji*`
+/// font with bitmaps. NotoColorEmoji is left to gpui-mobile, flag-only subsets are not emoji fonts.
+fn candidates(fonts: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir(fonts)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.contains("Emoji") && !name.contains("Flags") && name != "NotoColorEmoji.ttf" && (name.ends_with(".ttf") || name.ends_with(".otf"))
+        })
+        .collect();
+    found.sort_by_key(|p| (p.file_name().is_none_or(|n| n != "SamsungColorEmoji.ttf"), p.clone()));
+    found.into_iter().filter(|p| has_bitmaps(p)).collect()
+}
+
+/// The device's own emoji font, prepared once into `dir` (not the user's slot) and mapped. The copy
+/// is named after the source's size and modification time, so it is redone only when the system
+/// font changes; written under a part name and renamed in, and the only one kept. The first start
+/// pays for copying the source (about 20 MB on Samsung); later ones only map it.
+fn system(fonts: &Path, dir: &Path) -> Option<&'static [u8]> {
+    let src = candidates(fonts).into_iter().next()?;
+    let meta = fs::metadata(&src).ok()?;
+    let age = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    let kept = dir.join(format!("{SYSTEM_PREFIX}{}-{}.{}", meta.len(), age.as_secs(), age.subsec_nanos()));
+    if !kept.exists() {
+        let part = dir.join(format!("{SYSTEM_PREFIX}part"));
+        let made = fs::copy(&src, &part).map_err(|e| e.to_string()).and_then(|_| prepare(&part)).and_then(|_| fs::rename(&part, &kept).map_err(|e| e.to_string()));
+        if let Err(e) = made {
+            log::warn!("emoji font: system copy of {} failed: {e}", src.display());
+            let _ = fs::remove_file(&part);
+            return None;
+        }
+    }
+    for old in fs::read_dir(dir).into_iter().flatten().flatten() {
+        if old.path() != kept && old.file_name().to_str().is_some_and(|n| n.starts_with(SYSTEM_PREFIX)) {
+            let _ = fs::remove_file(old.path());
+        }
+    }
+    load_file(&kept)
 }
 
 static CHAIN: OnceLock<gpui_kit::FontFallbacks> = OnceLock::new();
@@ -97,7 +151,11 @@ pub(crate) fn fallbacks() -> Option<gpui_kit::FontFallbacks> {
 
 /// The kept font, mapped for the life of the process: only the pages of glyphs drawn are read.
 fn load(dir: &Path) -> Option<&'static [u8]> {
-    let map = map(&path(dir))?;
+    load_file(&path(dir))
+}
+
+fn load_file(path: &Path) -> Option<&'static [u8]> {
+    let map = map(path)?;
     if !usable(&map) {
         return None;
     }
@@ -461,6 +519,57 @@ mod tests {
         assert_eq!(glyph('m'), glyph(' '));
         assert!(['a', '1', '\u{1F600}', '\u{2764}', '\u{1F1F5}'].into_iter().all(|c| glyph(c).is_some_and(|g| g > 3)));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn stamped(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir).unwrap().flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| n.starts_with(SYSTEM_PREFIX)).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn prepares_the_device_font_once_and_again_when_it_changes() {
+        let (fonts, data) = (dir("sys-fonts"), dir("sys-data"));
+        let sbix = Path::new(FIXTURES).join("emoji-sbix.ttf");
+        let inter = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/Inter-Regular.ttf");
+        fs::copy(&inter, fonts.join("RobotoEmoji.ttf")).unwrap();
+        fs::copy(&inter, fonts.join("NotoColorEmojiFlags.ttf")).unwrap();
+        assert!(system(&fonts, &data).is_none() && stamped(&data).is_empty());
+        let sam = fonts.join("SamsungColorEmoji.ttf");
+        fs::copy(&sbix, &sam).unwrap();
+        assert_eq!(candidates(&fonts), std::slice::from_ref(&sam));
+        assert!(system(&fonts, &data).is_some());
+        let first = stamped(&data);
+        assert_eq!(first.len(), 1);
+        assert!(usable(&map(&data.join(&first[0])).unwrap()));
+        assert!(system(&fonts, &data).is_some());
+        assert_eq!(stamped(&data), first);
+        fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoColorEmoji.ttf"), &sam).unwrap();
+        assert!(system(&fonts, &data).is_some());
+        let second = stamped(&data);
+        assert!(second.len() == 1 && second != first);
+        assert!(!data.join(format!("{SYSTEM_PREFIX}part")).exists());
+        fs::remove_dir_all(fonts).unwrap();
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    fn prepares_the_real_samsung_font_when_present() {
+        let src = Path::new("/tmp/samsung-emoji/SamsungColorEmoji.ttf");
+        if !src.exists() {
+            return;
+        }
+        let (fonts, data) = (dir("sam-fonts"), dir("sam-data"));
+        fs::copy(src, fonts.join("SamsungColorEmoji.ttf")).unwrap();
+        let t = std::time::Instant::now();
+        assert!(system(&fonts, &data).is_some());
+        let first = t.elapsed();
+        let t = std::time::Instant::now();
+        assert!(system(&fonts, &data).is_some());
+        eprintln!("samsung first start {first:?}, later start {:?}", t.elapsed());
+        assert_eq!(stamped(&data).len(), 1);
+        fs::remove_dir_all(fonts).unwrap();
+        fs::remove_dir_all(data).unwrap();
     }
 
     #[test]
