@@ -12,10 +12,12 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** File hand-offs between this app and others. All methods are called from Rust over JNI. */
 public final class Files {
     private static final long STALE_MS = 60 * 60 * 1000;
+    private static final AtomicInteger PICKS = new AtomicInteger();
 
     private Files() {}
 
@@ -73,7 +75,8 @@ public final class Files {
                 }
             }
         }
-        File dir = new File(root, Long.toString(now));
+        // Several picks may be copied within one millisecond.
+        File dir = new File(root, now + "-" + PICKS.getAndIncrement());
         if (!dir.mkdirs()) {
             return null;
         }
