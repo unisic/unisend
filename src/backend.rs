@@ -50,7 +50,7 @@ use matrix_sdk::{
             room::{
                 EncryptedFile, MediaSource,
                 message::{
-                    AddMentions, MessageFormat, MessageType, Relation, RoomMessageEventContent,
+                    AddMentions, MessageFormat, MessageType, Relation, RoomMessageEventContent, TextMessageEventContent,
                     sanitize::remove_plain_reply_fallback,
                 },
             },
@@ -160,6 +160,8 @@ pub enum Cmd {
     SendGif { room: OwnedRoomId, gif: gifs::Gif, query: String, reply_to: Option<String> },
     /// The people in a chat, for the mention list.
     Members(OwnedRoomId),
+    /// A photo or video from the preview: with its caption, and as the original when `hd`.
+    AttachMedia { room: OwnedRoomId, path: PathBuf, reply_to: Option<String>, caption: String, hd: bool },
 }
 
 pub enum Ev {
@@ -1061,13 +1063,18 @@ impl State {
                     let _ = ev.send(Ev::Fetched(id, path)).await;
                 });
             }
-            Cmd::Attach { room, path, reply_to } => {
+            cmd @ (Cmd::Attach { .. } | Cmd::AttachMedia { .. }) => {
+                let (room, path, reply_to, caption, hd) = match cmd {
+                    Cmd::Attach { room, path, reply_to } => (room, path, reply_to, String::new(), true),
+                    Cmd::AttachMedia { room, path, reply_to, caption, hd } => (room, path, reply_to, caption, hd),
+                    _ => unreachable!("matched above"),
+                };
                 // `Attached` follows every attachment, sent or not: the next one waits for it.
                 let room = self.room(&room);
                 let ev = self.ev.clone();
                 tokio::spawn(async move {
                     let sent = match room {
-                        Ok(room) => attach(&room, &path, reply_to).await,
+                        Ok(room) => attach(&room, &path, reply_to, &caption, hd).await,
                         Err(e) => Err(e),
                     };
                     if let Err(e) = sent {
@@ -1380,30 +1387,48 @@ async fn thumbnail(client: &Client, media: &Media) -> Result<Option<Vec<u8>>> {
     Ok(Some(tokio::task::spawn_blocking(move || shrink(&bytes, THUMB_PX)).await??))
 }
 
-/// Uploads a file as the message type its content calls for.
-async fn attach(room: &Room, path: &Path, reply_to: Option<String>) -> Result<()> {
+/// Uploads a file as the message type its content calls for. A picture goes out scaled down and
+/// without metadata unless `hd`; `caption` becomes the message's body (MSC2530).
+async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &str, hd: bool) -> Result<()> {
     let size = tokio::fs::metadata(path).await?.len();
     if size > MAX_UPLOAD {
         return Err(anyhow!("the file is larger than {} MB", MAX_UPLOAD / 1024 / 1024));
     }
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".to_owned());
+    let mut name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".to_owned());
     let mut mime = mime_guess::from_path(path).first_or_octet_stream();
     // The registered type; the guess is the older `text/x-vcard`, which bridges pass on as it is.
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("vcf")) {
         mime = "text/vcard".parse()?;
     }
-    let data = tokio::fs::read(path).await?;
+    let pictured = mime.type_() == mime_guess::mime::IMAGE;
+    let mut dims = None;
+    let data = if pictured && !hd && caption::recodable(&mime) {
+        let source = path.to_owned();
+        let sent = tokio::task::spawn_blocking(move || caption::downscale(&source)).await??;
+        (name, mime, dims) = (sent.name, sent.mime, Some((sent.width, sent.height)));
+        sent.bytes
+    } else {
+        tokio::fs::read(path).await?
+    };
     let mut config = AttachmentConfig::new();
-    if mime.type_() == mime_guess::mime::IMAGE {
+    if pictured {
         // Bridges and other clients lay the bubble out from these.
-        if let Ok((width, height)) = image::ImageReader::new(std::io::Cursor::new(&data)).with_guessed_format()?.into_dimensions() {
+        let known = match dims {
+            Some(dims) => Some(dims),
+            None => image::ImageReader::new(std::io::Cursor::new(&data)).with_guessed_format()?.into_dimensions().ok(),
+        };
+        if let Some((width, height)) = known {
             config = config.info(AttachmentInfo::Image(BaseImageInfo {
                 width: Some(width.into()),
                 height: Some(height.into()),
-                size: UInt::new(size),
+                size: UInt::new(data.len() as u64),
                 ..Default::default()
             }));
         }
+    }
+    let caption = caption.trim();
+    if !caption.is_empty() {
+        config = config.caption(Some(TextMessageEventContent::plain(caption)));
     }
     if let Some(id) = reply_to {
         let reply = Reply {
@@ -2384,6 +2409,7 @@ mod location;
 mod contact;
 mod gifs;
 pub(crate) use gifs::{Found as GifPage, Gif, enabled as gifs_enabled};
+pub(crate) mod caption;
 mod polls;
 mod rich;
 pub use rich::{Block, Rich, Run};

@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 
 pub(crate) mod appearance;
 mod camera;
+mod caption;
 mod cards;
 mod emojipick;
 mod contacts;
@@ -215,6 +216,7 @@ pub struct BeeperApp {
     /// Attachments being downloaded to open.
     fetching: HashSet<String>,
     uploads: usize,
+    preview: caption::Preview,
     /// The message whose reactions and actions are showing.
     menu: Option<menu::MessageMenu>,
     /// A mouse button held on a message, on its way to being a long press.
@@ -422,6 +424,7 @@ impl BeeperApp {
             viewer: None,
             fetching: HashSet::new(),
             uploads: 0,
+            preview: caption::Preview::new(window, cx),
             menu: None,
             press: None,
             swipe: None,
@@ -797,6 +800,8 @@ impl BeeperApp {
         } else if self.viewer.is_some() {
             self.close_viewer(cx);
         } else if self.close_confirm(cx) {
+        } else if self.preview.open() {
+            self.close_preview(true, window, cx);
         } else if self.menu_open() {
             self.close_menu(cx);
         } else if self.location.open {
@@ -2916,6 +2921,7 @@ impl Render for BeeperApp {
                 let location = self.render_location(window, cx);
                 let poll_form = self.render_poll_form(window, cx);
                 let gifs = self.render_gifs(window, cx);
+                let preview = self.render_preview(window, cx);
                 root.relative()
                     .child(self.render_banners(window, cx))
                     .child(div().flex_1().min_h_0().child(body))
@@ -2924,6 +2930,7 @@ impl Render for BeeperApp {
                     .children(location)
                     .children(poll_form)
                     .children(gifs)
+                    .children(preview)
                     .children(viewer)
                     .children(heart)
                     .children(self.render_confirm(window, cx))
