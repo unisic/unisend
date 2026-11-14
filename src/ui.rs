@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 mod camera;
 mod cards;
+mod contacts;
 mod gallery;
 mod heart;
 mod menu;
@@ -231,6 +232,8 @@ pub struct BeeperApp {
     /// Attachments waiting for the one uploading now, so a batch keeps its order.
     attach_queue: VecDeque<Cmd>,
     attaching: bool,
+    /// Received contact cards.
+    contacts: contacts::State,
     /// The chat whose sheet is still falling after it closed.
     sheet_last: Option<OwnedRoomId>,
     /// The phone's last move between the chat list and a chat: when, and whether it went in.
@@ -385,6 +388,7 @@ impl BeeperApp {
             gallery: gallery::Gallery::default(),
             attach_queue: VecDeque::new(),
             attaching: false,
+            contacts: contacts::State::default(),
             sheet_last: None,
             nav: None,
             viewer_last: None,
@@ -575,6 +579,7 @@ impl BeeperApp {
                 self.busy = false;
                 self.loading = false;
             }
+            Ev::Contact(id, cards) => self.contacts.keep(id, cards),
         }
         cx.notify();
     }
@@ -813,6 +818,9 @@ impl BeeperApp {
     /// `room` is the width a bubble has for its content.
     /// `radius` is a picture's corner, concentric with the bubble around it.
     fn render_media(&self, m: &Msg, media: &Media, room: f32, radius: f32, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(card) = self.contact_card(m, media, room, cx) {
+            return card;
+        }
         let (id, owned) = (m.id.clone(), media.clone());
         let open = cx.listener(move |this, _: &ClickEvent, _, cx| {
             // Not a tap on the bubble as well.
@@ -1418,6 +1426,7 @@ impl BeeperApp {
             self.timeline.clone(),
             cx.processor(move |this, ix: usize, window, cx| {
                 this.want_thumb(ix);
+                this.want_card(ix);
                 let flash = this.flash_level(ix, window, cx);
                 let reaction_since = this.reaction_since(ix);
                 let m = &this.msgs[ix];

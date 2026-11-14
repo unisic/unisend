@@ -512,6 +512,10 @@ impl BeeperApp {
                     .child(div().min_w_0().truncate().text_size(px(14.)).text_color(p.faint).child(title))
                     .child(
                         h_flex()
+                            .flex_none()
+                            .children(super::contacts::sheet_entry(live, cx))
+                            .child(
+                        h_flex()
                             .id("gallery-files")
                             .h(px(TAP))
                             .px(px(12.))
@@ -530,6 +534,7 @@ impl BeeperApp {
                                     this.attach_file(cx);
                                 }))
                             }),
+                            ),
                     ),
             );
 

@@ -9,6 +9,7 @@ mod beeper;
 mod bridges;
 mod emoji;
 mod ui;
+mod vcard;
 
 use std::path::PathBuf;
 

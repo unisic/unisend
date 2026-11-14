@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <!-- Only asked for when the system's contact picker does not give read access to the chosen contact. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
 
     <uses-feature android:name="android.hardware.vulkan.version" android:required="false" android:version="0x00401000" />
     <uses-feature android:glEsVersion="0x00030000" android:required="true" />
@@ -70,6 +72,13 @@
             android:exported="false"
             android:windowSoftInputMode="adjustResize"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+
+        <!-- Chooses a contact to send; see ContactPick. -->
+        <activity
+            android:name="dev.gpui.beeper.ContactPick"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|uiMode"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- Lets other apps open a downloaded attachment, one grant per file. -->
         <provider
