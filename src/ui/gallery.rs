@@ -24,7 +24,7 @@ const AHEAD_ROWS: usize = 2;
 const DISMISS_SPEED: f32 = 800.;
 const GRID_GAP: f32 = 2.;
 /// Attachments waiting their turn to upload, all batches together.
-const MAX_QUEUED: usize = 30;
+pub(super) const MAX_QUEUED: usize = 30;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Item {
@@ -408,6 +408,11 @@ impl BeeperApp {
 
     /// Attachments upload one at a time, so a batch arrives in the order it was chosen.
     pub(super) fn queue_attach(&mut self, room: OwnedRoomId, paths: Vec<PathBuf>, mut reply_to: Option<String>, cx: &mut Context<Self>) {
+        // Photos and videos wait for the preview; its Send queues them.
+        let paths = self.preview_media(&room, paths, &mut reply_to, cx);
+        if paths.is_empty() {
+            return;
+        }
         if self.attach_queue.len() + paths.len() > MAX_QUEUED {
             self.uploads = self.uploads.saturating_sub(paths.len());
             self.error = Some("Too many attachments waiting, try again when these are sent".into());

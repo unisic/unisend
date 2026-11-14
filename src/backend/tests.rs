@@ -368,6 +368,12 @@ async fn login_sync_decrypt_send_recover() {
     .await;
     assert!(saved.starts_with(root.join("alice2/media")) && saved.ends_with("holiday photo.png"), "{saved:?}");
     assert_eq!(std::fs::read(&saved).unwrap(), std::fs::read(&picture).unwrap());
+    // The same picture from the preview, without HD and with a caption: at most 2048 px, as JPEG,
+    // and the caption is the body while the file name moves to `filename` (MSC2530).
+    alice2.handle(Cmd::AttachMedia { room: room.clone(), path: picture.clone(), reply_to: None, caption: "sunset".into(), hd: false }).await.unwrap();
+    until(&mut alice2_rx, "the captioned picture", |rows| rows.iter().any(|m| m.body == "sunset" && m.media.is_some())).await;
+    let shrunk = alice2_rx.rows.iter().find(|m| m.body == "sunset").and_then(|m| m.media.clone()).unwrap();
+    assert_eq!((shrunk.dims, shrunk.name.as_str()), (Some((2048, 1024)), "holiday photo.jpg"));
 
     // A chat with no messages, as a bridge creates them before it brings the history in: it has
     // no time, so it sorts last, and it is marked as looked at. Its first message dates it.
@@ -586,11 +592,11 @@ async fn gui_fixture() {
     // Media, plain and encrypted: a photo, a document, and a photo with a caption.
     let photo = root_photo(&out);
     for (room, path) in [(&bob_bridged, &photo), (&bob_group, &photo), (&carol_group, &out.join("avatar.png"))] {
-        attach(room, path, None).await.unwrap();
+        attach(room, path, None, "", true).await.unwrap();
     }
     let notes = out.join("packing list.txt");
     std::fs::write(&notes, "tent, stove, map\n").unwrap();
-    attach(&carol_group, &notes, None).await.unwrap();
+    attach(&carol_group, &notes, None, "", true).await.unwrap();
 
     // A bridged one-to-one chat as Beeper has them: no name, the other person and a bridge bot
     // that the room lists as a service member. Also: letters outside the basic fonts, two lines.

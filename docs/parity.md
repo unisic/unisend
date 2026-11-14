@@ -82,7 +82,7 @@ is not started.
 | Send text | done | `m.room.message` |
 | Reply, edit, delete, copy | done | relations, redaction |
 | Forward | todo | new event in the target chat |
-| Attachments | part | one file from the picker, any type, 100 MB at most; Photo and Video tiles in the attach sheet start the system camera (Android); no paste, drag and drop, caption or thumbnail upload |
+| Attachments | part | files from the picker, any type, 100 MB at most; Photo and Video tiles in the attach sheet start the system camera (Android); photos and videos first open a preview (large items with paging, a caption per item as an MSC2530 body, remove, HD switch, Send). HD off scales pictures to 2048 px, JPEG q85, EXIF applied then dropped; HD on sends the original. Videos and GIFs always go as they are. No paste, drag and drop or thumbnail upload |
 | Voice notes | todo | `org.matrix.msc3245.voice` |
 | Emoji / GIF / sticker pickers | part | emoji done: button in the composer swaps the keyboard for a panel (categories, search by name and shortcode, 32 recents, skin tone), also the sheet behind the reaction bar's +; GIF and sticker pickers todo |
 | Formatting shortcuts, mentions autocomplete | todo | local |
