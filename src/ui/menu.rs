@@ -107,6 +107,10 @@ enum Act {
     Delete,
     EndPoll,
     Save,
+    Forward,
+    Select,
+    DeleteForMe,
+    DeleteForEveryone,
 }
 
 impl Act {
@@ -121,6 +125,10 @@ impl Act {
             Act::Delete => ("act-delete", IconName::Trash, "Delete"),
             Act::EndPoll => ("act-end-poll", IconName::Check, "End poll"),
             Act::Save => ("act-save", IconName::Download, "Save to gallery"),
+            Act::Forward => ("act-forward", IconName::Forward, "Forward"),
+            Act::Select => ("act-select", IconName::ListChecks, "Select"),
+            Act::DeleteForMe => ("act-delete-me", IconName::EyeOff, "Delete for me"),
+            Act::DeleteForEveryone => ("act-delete-all", IconName::Trash, "Delete for everyone"),
         }
     }
 }
@@ -146,7 +154,9 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
         out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
         out.extend(ends.then_some(Act::EndPoll));
         out.extend(saveable.then_some(Act::Save));
-        out.extend(m.own.then_some(Act::Delete));
+        out.extend(more_acts(m));
+        // One that never left is only dropped; one that did is deleted for everyone or hidden here.
+        out.extend((m.own && !sent).then_some(Act::Delete));
     } else {
         if extra && sent {
             out.extend([Act::Reply, Act::React]);
@@ -156,9 +166,22 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
         out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
         out.extend(ends.then_some(Act::EndPoll));
         out.extend(saveable.then_some(Act::Save));
-        out.extend(m.own.then_some(Act::Delete));
+        out.extend(more_acts(m));
+        out.extend((m.own && !sent).then_some(Act::Delete));
         out.extend((!sent && failed).then_some(Act::Retry));
     }
+    out
+}
+
+/// Forward, Select and the two deletions, for a message that reached the server.
+fn more_acts(m: &Msg) -> Vec<Act> {
+    if !m.id.starts_with('$') {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    out.extend(super::forward::forwardable(m).then_some(Act::Forward));
+    out.extend([Act::Select, Act::DeleteForMe]);
+    out.extend(m.own.then_some(Act::DeleteForEveryone));
     out
 }
 
@@ -579,6 +602,14 @@ impl BeeperApp {
             Act::Link(url) => crate::open_link(cx, &url),
             Act::Copy(body) => crate::copy(cx, body),
             Act::Save => self.export_message(id, crate::backend::Export::Save, cx),
+            Act::Forward => self.forward_start(vec![id.to_owned()], window, cx),
+            Act::Select => self.select_start(id, cx),
+            Act::DeleteForMe => self.hide_for_me(vec![id.to_owned()], cx),
+            Act::DeleteForEveryone => {
+                if let Some(room) = self.open.clone() {
+                    self.send(Cmd::Delete { room, target: id.to_owned() }, cx);
+                }
+            }
         }
         self.close_menu(cx);
     }
@@ -588,7 +619,7 @@ impl BeeperApp {
         acts.into_iter()
             .map(|act| {
                 let (name, icon, label) = act.look();
-                let ink = if act == Act::Delete { p.negative } else { p.text };
+                let ink = if matches!(act, Act::Delete | Act::DeleteForEveryone) { p.negative } else { p.text };
                 let id = id.to_owned();
                 h_flex()
                     .id(name)

@@ -1306,3 +1306,64 @@ async fn members_are_listed_and_a_picked_one_is_mentioned() {
     let named: Vec<&str> = seen.to_me.iter().map(|r| &seen.body[r.clone()]).collect();
     assert_eq!(named[0], "Bob Builder");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn a_forward_reuses_the_file_and_drops_the_reply() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-forward-{tag}"));
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let client = alice.client().unwrap().clone();
+    let new_room = |encrypted: bool| {
+        let client = client.clone();
+        async move {
+            let room = client.create_room(matrix_sdk::ruma::api::client::room::create_room::v3::Request::new()).await.unwrap();
+            if encrypted {
+                room.enable_encryption().await.unwrap();
+            }
+            room.room_id().to_owned()
+        }
+    };
+    let (source, plain, secret_room) = (new_room(true).await, new_room(false).await, new_room(true).await);
+
+    // In an encrypted chat: a picture, a reply to it, and an edit of the reply.
+    alice.handle(Cmd::Open(source.clone())).await.unwrap();
+    let picture = root.join("cat.png");
+    image::RgbImage::from_fn(640, 480, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 40])).save(&picture).unwrap();
+    alice.handle(Cmd::Attach { room: source.clone(), path: picture, reply_to: None }).await.unwrap();
+    until(&mut seat, "the picture", |rows| rows.iter().any(|m| m.media.is_some() && m.id.starts_with('$'))).await;
+    let (photo_id, photo) = seat.rows.iter().find_map(|m| m.media.clone().map(|media| (m.id.clone(), media))).unwrap();
+    assert!(matches!(photo.source, MediaSource::Encrypted(_)));
+    alice.handle(Cmd::Send { room: source.clone(), body: "look".into(), reply_to: Some(photo_id.clone()), edit: None, mentions: Vec::new() }).await.unwrap();
+    until(&mut seat, "the reply", |rows| rows.iter().any(|m| m.body == "look" && m.id.starts_with('$'))).await;
+    let reply_id = seat.rows.iter().find(|m| m.body == "look").unwrap().id.clone();
+    alice.handle(Cmd::Send { room: source.clone(), body: "look at this".into(), reply_to: None, edit: Some(reply_id.clone()), mentions: Vec::new() }).await.unwrap();
+    until(&mut seat, "the edit", |rows| rows.iter().any(|m| m.id == reply_id && m.body == "look at this")).await;
+
+    alice.handle(Cmd::Forward { room: source.clone(), targets: vec![photo_id.clone(), reply_id.clone()], to: vec![plain.clone(), secret_room.clone()] }).await.unwrap();
+    wait_for(&mut seat, "the forward", |e| matches!(e, Ev::Forwarded(2)).then_some(())).await;
+
+    for target in [plain, secret_room] {
+        alice.handle(Cmd::Open(target.clone())).await.unwrap();
+        seat.rows.clear();
+        let landed = |rows: &[Msg]| rows.iter().any(|m| m.media.is_some() && m.id.starts_with('$')) && rows.iter().any(|m| m.body == "look at this" && m.id.starts_with('$'));
+        until(&mut seat, "the forwarded messages", landed).await;
+        let copy = seat.rows.iter().find(|m| m.media.is_some()).unwrap();
+        // The same file, key included: nothing was uploaded again.
+        assert_eq!(serde_json::to_value(&copy.media.as_ref().unwrap().source).unwrap(), serde_json::to_value(&photo.source).unwrap());
+        let text = seat.rows.iter().find(|m| m.body == "look at this").unwrap();
+        assert!(text.reply.is_none() && !text.edited, "{target}: the reply and the edit stay behind");
+        let (copy_id, media) = (copy.id.clone(), copy.media.clone().unwrap());
+        alice.handle(Cmd::Thumbs(vec![(copy_id.clone(), media)])).await.unwrap();
+        let thumb = wait_for(&mut seat, "thumbnail of the copy", |e| match e {
+            Ev::Thumb(id, bytes) if id == copy_id => Some(bytes),
+            _ => None,
+        })
+        .await;
+        assert!(image::load_from_memory(&thumb).is_ok(), "{target}: the copy decrypts");
+    }
+}
