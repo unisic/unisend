@@ -75,7 +75,8 @@ fn has_cbdt(path: &Path) -> bool {
 
 static CHAIN: OnceLock<gpui_kit::FontFallbacks> = OnceLock::new();
 
-/// For the root text style, once the user's own font is in: it then draws every grapheme whose
+/// For the root text style, once an emoji face with an 'm' is in (the user's or the bundled
+/// one): it then draws every grapheme whose
 /// first character the app's face lacks, before cosmic-text's fallback list, whose text fonts
 /// come first (on Linux U+263A U+FE0F is otherwise a white glyph from Noto Sans Symbols). GPUI
 /// keeps a grapheme on the app's face when it has the first character: keycaps (ASCII) and, where
@@ -383,10 +384,10 @@ fn spans(text: &str) -> Vec<Range<usize>> {
     out
 }
 
-/// `text` with `marks` (sorted, apart) as `StyledText`, and, once the user's own emoji font is in,
-/// each emoji sequence of `spans` set in its family (requesting the family of the bundled or
-/// system face would drop that face, which lacks an 'm', so nothing is set without ours); marks are cut at their
-/// edges so a link or mention keeps its colour around them.
+/// `text` with `marks` (sorted, apart) as `StyledText`, and, once `CHAIN` is set, each emoji
+/// sequence of `spans` set in the emoji family. Without `CHAIN` the face by that name lacks an
+/// 'm' and requesting the family would drop it. Marks are cut at the sequences' edges so a link
+/// or mention keeps its colour around them.
 pub(crate) fn styled(text: impl Into<gpui_kit::SharedString>, marks: Vec<(Range<usize>, gpui_kit::HighlightStyle)>) -> gpui_kit::StyledText {
     let text = text.into();
     let found = if CHAIN.get().is_some() { spans(&text) } else { Vec::new() };
