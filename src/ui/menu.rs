@@ -7,6 +7,7 @@
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::i18n::t;
 
 /// The six reactions offered first, Signal's defaults in its order.
 pub(super) const QUICK_REACTIONS: [&str; 6] = ["❤️", "👍", "👎", "😂", "😮", "😢"];
@@ -117,19 +118,19 @@ enum Act {
 impl Act {
     fn look(&self) -> (&'static str, IconName, &'static str) {
         match self {
-            Act::Reply => ("act-reply", IconName::Reply, "Reply"),
-            Act::React => ("act-react", IconName::Heart, "React"),
-            Act::Retry => ("act-retry", IconName::RotateCw, "Try again"),
-            Act::Link(_) => ("act-link", IconName::ExternalLink, "Open link"),
-            Act::Edit => ("act-edit", IconName::Pencil, "Edit"),
-            Act::Copy(_) => ("act-copy", IconName::Copy, "Copy text"),
-            Act::Delete => ("act-delete", IconName::Trash, "Delete"),
-            Act::EndPoll => ("act-end-poll", IconName::Check, "End poll"),
-            Act::Save => ("act-save", IconName::Download, "Save to gallery"),
-            Act::Forward => ("act-forward", IconName::Forward, "Forward"),
-            Act::Select => ("act-select", IconName::ListChecks, "Select"),
-            Act::DeleteForMe => ("act-delete-me", IconName::EyeOff, "Delete for me"),
-            Act::DeleteForEveryone => ("act-delete-all", IconName::Trash, "Delete for everyone"),
+            Act::Reply => ("act-reply", IconName::Reply, t!("Reply")),
+            Act::React => ("act-react", IconName::Heart, t!("React")),
+            Act::Retry => ("act-retry", IconName::RotateCw, t!("Try again")),
+            Act::Link(_) => ("act-link", IconName::ExternalLink, t!("Open link")),
+            Act::Edit => ("act-edit", IconName::Pencil, t!("Edit")),
+            Act::Copy(_) => ("act-copy", IconName::Copy, t!("Copy text")),
+            Act::Delete => ("act-delete", IconName::Trash, t!("Delete")),
+            Act::EndPoll => ("act-end-poll", IconName::Check, t!("End poll")),
+            Act::Save => ("act-save", IconName::Download, t!("Save to gallery")),
+            Act::Forward => ("act-forward", IconName::Forward, t!("Forward")),
+            Act::Select => ("act-select", IconName::ListChecks, t!("Select")),
+            Act::DeleteForMe => ("act-delete-me", IconName::EyeOff, t!("Delete for me")),
+            Act::DeleteForEveryone => ("act-delete-all", IconName::Trash, t!("Delete for everyone")),
         }
     }
 }

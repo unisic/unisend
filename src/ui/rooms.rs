@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::backend::rooms::{Answer, Ask, Caps, Person, Target};
+use crate::i18n::t;
 
 /// Rows the New chat screen draws at once; a longer contact list is narrowed by typing.
 // shortcut: a capped list instead of a virtual one; use `uniform_list` if people miss contacts.
@@ -83,11 +84,11 @@ impl NewChat {
 
     fn placeholder(&self) -> &'static str {
         match (&self.target, &self.caps) {
-            (Target::Matrix, _) => "Name or Matrix ID",
-            (_, Some(c)) if c.phone && c.username => "Name, phone number or username",
-            (_, Some(c)) if c.phone => "Name or phone number",
-            (_, Some(c)) if c.username => "Name or username",
-            _ => "Name",
+            (Target::Matrix, _) => t!("Name or Matrix ID"),
+            (_, Some(c)) if c.phone && c.username => t!("Name, phone number or username"),
+            (_, Some(c)) if c.phone => t!("Name or phone number"),
+            (_, Some(c)) if c.username => t!("Name or username"),
+            _ => t!("Name"),
         }
     }
 }
@@ -106,28 +107,28 @@ fn looks_like_identifier(q: &str, target: &Target, caps: &Caps) -> bool {
 
 /// What the leave dialog says and its button, in whole sentences.
 fn wording(c: &Confirm) -> (String, String, &'static str) {
-    let network = c.network.as_deref().unwrap_or("the network");
+    let network = c.network.as_deref().unwrap_or(t!("the network"));
     match (c.network.is_some(), c.delete == Some(true), c.dm) {
         (true, true, true) => (
-            format!("Delete {}?", c.name),
-            format!("The chat is deleted from Murmur and from your {network} account. The other person keeps their copy."),
-            "Delete",
+            t!("Delete {name}?", name = c.name),
+            t!("The chat is deleted from Murmur and from your {network} account. The other person keeps their copy.", network = network),
+            t!("Delete"),
         ),
         (true, true, false) => (
-            format!("Delete {}?", c.name),
-            format!("You leave the group on {network}, and the chat is deleted from Murmur and from your account. The other members keep their copy."),
-            "Delete",
+            t!("Delete {name}?", name = c.name),
+            t!("You leave the group on {network}, and the chat is deleted from Murmur and from your account. The other members keep their copy.", network = network),
+            t!("Delete"),
         ),
         (true, false, _) => (
-            format!("Leave {}?", c.name),
-            format!("The chat is removed from Murmur only. The {network} bridge cannot delete it there, and new messages may bring it back."),
-            "Leave",
+            t!("Leave {name}?", name = c.name),
+            t!("The chat is removed from Murmur only. The {network} bridge cannot delete it there, and new messages may bring it back.", network = network),
+            t!("Leave"),
         ),
-        (false, _, true) => (format!("Leave {}?", c.name), "The chat is removed from your list. The other person keeps the conversation.".to_owned(), "Leave"),
+        (false, _, true) => (t!("Leave {name}?", name = c.name), t!("The chat is removed from your list. The other person keeps the conversation.").to_owned(), t!("Leave")),
         (false, _, false) => (
-            format!("Leave {}?", c.name),
-            "The chat is removed from your list. To come back you need a new invitation.".to_owned(),
-            "Leave",
+            t!("Leave {name}?", name = c.name),
+            t!("The chat is removed from your list. To come back you need a new invitation.").to_owned(),
+            t!("Leave"),
         ),
     }
 }
@@ -138,9 +139,9 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let bridged = self.rooms.iter().any(|r| r.id == room && r.network.is_some());
         let row = if bridged {
-            sheet_row("chat-delete", IconName::Trash, "Delete chat", p.negative, cx)
+            sheet_row("chat-delete", IconName::Trash, t!("Delete chat"), p.negative, cx)
         } else {
-            sheet_row("chat-leave", IconName::LogOut, "Leave chat", p.negative, cx)
+            sheet_row("chat-leave", IconName::LogOut, t!("Leave chat"), p.negative, cx)
         };
         if !live {
             return row;
@@ -223,7 +224,7 @@ impl BeeperApp {
                     .pt(px(6.))
                     .gap(px(8.))
                     .justify_end()
-                    .child(button("leave-cancel", "Cancel", p.lifted, p.text).on_click(cx.listener(|this, _, _, cx| {
+                    .child(button("leave-cancel", t!("Cancel"), p.lifted, p.text).on_click(cx.listener(|this, _, _, cx| {
                         this.close_confirm(cx);
                     })))
                     .child(button("leave-confirm", act, p.negative, gpui_kit::white()).on_click(cx.listener(|this, _, _, cx| this.leave(cx)))),
@@ -262,8 +263,8 @@ impl BeeperApp {
     }
 
     pub(super) fn open_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Name or Matrix ID"));
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Group name"));
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Name or Matrix ID")));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Group name")));
         let subs = vec![
             cx.subscribe_in(&query, window, |this, _, ev: &InputEvent, _, cx| match ev {
                 InputEvent::Change => this.query_changed(cx),
@@ -371,7 +372,7 @@ impl BeeperApp {
             match new.picked.iter().position(|p| p.id == person.id) {
                 Some(ix) => drop(new.picked.remove(ix)),
                 None if new.picked.len() < MAX_PICKED => new.picked.push(person),
-                None => new.error = Some(format!("A new group can have up to {MAX_PICKED} people")),
+                None => new.error = Some(t!("A new group can have up to {max} people", max = MAX_PICKED)),
             }
             cx.notify();
             return;
@@ -569,7 +570,7 @@ impl BeeperApp {
         let mut rows: Vec<AnyElement> = Vec::new();
         if !new.group && group_caps.is_some() && query.is_empty() {
             rows.push(
-                row("new-group".into(), "New group".into(), String::new(), icon_disc(IconName::Users), None)
+                row("new-group".into(), t!("New group").into(), String::new(), icon_disc(IconName::Users), None)
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(new) = this.people.new.as_mut() {
                             (new.group, new.error) = (true, None);
@@ -580,7 +581,7 @@ impl BeeperApp {
             );
         }
         if let Some(who) = identifier {
-            let title = if new.group { format!("Add {who}") } else { format!("Chat with {who}") };
+            let title = if new.group { t!("Add {who}", who = who) } else { t!("Chat with {who}", who = who) };
             rows.push(
                 row("identifier".into(), title, String::new(), icon_disc(if new.group { IconName::Plus } else { IconName::MessageCircle }), None)
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_identifier(who.clone(), cx)))
@@ -600,11 +601,11 @@ impl BeeperApp {
         let status = if let Some(error) = &new.error {
             Some(note(error.clone(), p.negative))
         } else if new.busy {
-            Some(note(if new.group { "Creating the group…".to_owned() } else { "Starting the chat…".to_owned() }, p.faint))
+            Some(note(if new.group { t!("Creating the group…").to_owned() } else { t!("Starting the chat…").to_owned() }, p.faint))
         } else if loading {
-            Some(note("Looking…".to_owned(), p.faint))
+            Some(note(t!("Looking…").to_owned(), p.faint))
         } else if new.rows.is_empty() && !query.is_empty() && rows.is_empty() {
-            Some(note("No one found. Try a full phone number, username or ID.".to_owned(), p.faint))
+            Some(note(t!("No one found. Try a full phone number, username or ID.").to_owned(), p.faint))
         } else {
             None
         };
@@ -612,9 +613,9 @@ impl BeeperApp {
             let group = group_caps.clone().unwrap_or_default();
             let ready = ready_to_create(new, &group, cx);
             let need = if group.min_people > new.picked.len() {
-                format!("Choose at least {} more", group.min_people - new.picked.len())
+                t!("Choose at least {n} more", n = group.min_people - new.picked.len())
             } else {
-                format!("{} chosen", new.picked.len())
+                t!("{n} chosen", n = new.picked.len())
             };
             h_flex()
                 .flex_none()
@@ -627,13 +628,13 @@ impl BeeperApp {
                         .primary()
                         .h(px(TAP))
                         .px(px(GUTTER + 4.))
-                        .label("Create group")
+                        .label(t!("Create group"))
                         .loading(new.busy)
                         .disabled(!ready || new.busy)
                         .on_click(cx.listener(|this, _, _, cx| this.create_group(cx))),
                 )
         });
-        let title = if new.group { "New group" } else { "New chat" };
+        let title = if new.group { t!("New group") } else { t!("New chat") };
         v_flex()
             .size_full()
             .child(

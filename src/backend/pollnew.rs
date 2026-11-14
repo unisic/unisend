@@ -9,6 +9,7 @@
 //! `max_selections` at or above the answer count means any number).
 
 use serde_json::{Value, json};
+use crate::i18n::t;
 
 pub const MIN_ANSWERS: usize = 2;
 /// MSC3381's cap on answers.
@@ -33,24 +34,24 @@ impl NewPoll {
     pub fn check(question: &str, answers: &[String], multiple: bool) -> Result<Self, &'static str> {
         let question = question.trim();
         if question.is_empty() {
-            return Err("Write a question.");
+            return Err(t!("Write a question."));
         }
         if units(question) > TEXT_MAX {
-            return Err("The question is too long, 140 characters at most.");
+            return Err(t!("The question is too long, 140 characters at most."));
         }
         let answers: Vec<String> = answers.iter().map(|a| a.trim().to_owned()).filter(|a| !a.is_empty()).collect();
         if answers.len() < MIN_ANSWERS {
-            return Err("Give at least two options.");
+            return Err(t!("Give at least two options."));
         }
         if answers.len() > MAX_ANSWERS {
-            return Err("A poll has 20 options at most.");
+            return Err(t!("A poll has 20 options at most."));
         }
         if answers.iter().any(|a| units(a) > TEXT_MAX) {
-            return Err("An option is too long, 140 characters at most.");
+            return Err(t!("An option is too long, 140 characters at most."));
         }
         let lower: Vec<String> = answers.iter().map(|a| a.to_lowercase()).collect();
         if lower.iter().enumerate().any(|(n, a)| lower[..n].contains(a)) {
-            return Err("Options must differ from each other.");
+            return Err(t!("Options must differ from each other."));
         }
         Ok(Self { question: question.to_owned(), answers, multiple })
     }

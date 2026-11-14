@@ -8,6 +8,7 @@ use std::ops::Range;
 
 use super::camera::TILES;
 use super::*;
+use crate::i18n::t;
 
 /// Items asked of the store at a time.
 const PAGE: usize = 120;
@@ -234,11 +235,11 @@ impl Attach {
 
     fn label(self) -> &'static str {
         match self {
-            Attach::File => "File",
+            Attach::File => t!("File"),
             Attach::Gif => "GIF",
-            Attach::Location => "Location",
-            Attach::Contact => "Contact",
-            Attach::Poll => "Poll",
+            Attach::Location => t!("Location"),
+            Attach::Contact => t!("Contact"),
+            Attach::Poll => t!("Poll"),
         }
     }
 
@@ -348,7 +349,7 @@ impl BeeperApp {
                 if live { row.on_click(cx.listener(move |this, _, window, cx| this.attach_action(action, window, cx))) } else { row }
             })
             .collect();
-        Some(self.sheet("Attach".to_owned(), rows, shown.progress, live, cx))
+        Some(self.sheet(t!("Attach").to_owned(), rows, shown.progress, live, cx))
     }
 
     pub(super) fn open_gallery(&mut self, cx: &mut Context<Self>) {
@@ -545,7 +546,7 @@ impl BeeperApp {
                 let lost = wanted - paths.len();
                 if lost > 0 {
                     this.uploads = this.uploads.saturating_sub(lost);
-                    this.error = Some(format!("{lost} of {wanted} could not be read").into());
+                    this.error = Some(t!("{lost} of {wanted} could not be read", lost = lost, wanted = wanted).into());
                 }
                 this.queue_attach(room, paths, reply_to, cx);
             });
@@ -562,7 +563,7 @@ impl BeeperApp {
         }
         if self.attach_queue.len() + paths.len() > MAX_QUEUED {
             self.uploads = self.uploads.saturating_sub(paths.len());
-            self.error = Some("Too many attachments waiting, try again when these are sent".into());
+            self.error = Some(t!("Too many attachments waiting, try again when these are sent").into());
             return cx.notify();
         }
         for path in paths {
@@ -646,9 +647,9 @@ impl BeeperApp {
         let g = &self.gallery;
         let count = g.selection.0.len();
         let title: SharedString = match count {
-            0 => "Photos and videos".into(),
-            MAX_SELECTED => format!("{MAX_SELECTED} selected, the most at once").into(),
-            n => format!("{n} selected").into(),
+            0 => t!("Photos and videos").into(),
+            MAX_SELECTED => t!("{n} selected, the most at once", n = MAX_SELECTED).into(),
+            n => t!("{n} selected", n = n).into(),
         };
         let head = v_flex()
             .id("gallery-head")
@@ -663,8 +664,8 @@ impl BeeperApp {
             );
 
         let notice = match g.access {
-            Some(Access::None) => Some(("Allow access to choose photos here, or send them as files.", "Allow")),
-            Some(Access::Partial) => Some(("Showing only the photos you allowed.", "Choose more")),
+            Some(Access::None) => Some((t!("Allow access to choose photos here, or send them as files."), t!("Allow"))),
+            Some(Access::Partial) => Some((t!("Showing only the photos you allowed."), t!("Choose more"))),
             _ => None,
         };
         let notice = notice.map(|(text, action)| {
@@ -705,7 +706,7 @@ impl BeeperApp {
                         .justify_center()
                         .text_size(fs(14.))
                         .text_color(p.faint)
-                        .when(empty, |el| el.child("No photos or videos")),
+                        .when(empty, |el| el.child(t!("No photos or videos"))),
                 )
                 .into_any_element()
         } else {
@@ -763,7 +764,7 @@ impl BeeperApp {
                     .font_weight(FontWeight::MEDIUM)
                     .cursor_pointer()
                     .active(|el| el.bg(p.muted))
-                    .child(div().font_features(tabular()).child(format!("Send {count}")))
+                    .child(div().font_features(tabular()).child(t!("Send {count}", count = count)))
                     .child(Icon::new(IconName::ArrowUp).size_5())
                     .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.send_chosen(cx)))),
             )

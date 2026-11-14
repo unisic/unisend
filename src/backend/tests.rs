@@ -169,7 +169,7 @@ async fn login_sync_decrypt_send_recover() {
         rows.iter().any(|m| m.id == sent.response.event_id.as_str() && m.body == "hello from bob (edited)" && m.edited && !m.own && !m.sender.is_empty())
     })
     .await;
-    assert!(!bodies(&alice_rx.rows).iter().any(|b| b == UTD), "{:?}", bodies(&alice_rx.rows));
+    assert!(!bodies(&alice_rx.rows).iter().any(|b| b == utd()), "{:?}", bodies(&alice_rx.rows));
     assert!(alice_rx.rows.iter().any(|m| m.kind == Kind::Day), "a day row heads the messages");
 
     // Send path: the message shows at once, becomes an event, and Bob receives it decrypted.
@@ -224,7 +224,7 @@ async fn login_sync_decrypt_send_recover() {
 
     // Before recovery the history is locked.
     alice2.handle(Cmd::Open(room_id.clone())).await.unwrap();
-    until(&mut alice2_rx, "locked history", |rows| bodies(rows).iter().any(|b| b == UTD)).await;
+    until(&mut alice2_rx, "locked history", |rows| bodies(rows).iter().any(|b| b == utd())).await;
 
     let other = matrix_sdk_crypto::secret_storage::SecretStorageKey::new().to_base58();
     let wrong = alice2.handle(Cmd::Recover(other)).await.unwrap_err().to_string();
@@ -240,13 +240,13 @@ async fn login_sync_decrypt_send_recover() {
     // With the keys' backup unlocked, the open conversation reads itself.
     until(&mut alice2_rx, "history on device 2", |rows| {
         let read = bodies(rows);
-        read.contains(&"hello from bob (edited)".to_owned()) && read.contains(&"hi bob".to_owned()) && !read.iter().any(|b| b == UTD)
+        read.contains(&"hello from bob (edited)".to_owned()) && read.contains(&"hi bob".to_owned()) && !read.iter().any(|b| b == utd())
     })
     .await;
 
     alice2.handle(Cmd::Previews(vec![room_id.clone()])).await.unwrap();
     let preview = wait_for(&mut alice2_rx, "refreshed preview", |e| match e {
-        Ev::Rooms(r) => r.into_iter().find(|s| s.id == room_id && s.preview.as_deref().is_some_and(|p| !p.ends_with(UTD))),
+        Ev::Rooms(r) => r.into_iter().find(|s| s.id == room_id && s.preview.as_deref().is_some_and(|p| !p.ends_with(utd()))),
         _ => None,
     })
     .await;
@@ -327,7 +327,7 @@ async fn login_sync_decrypt_send_recover() {
     until(&mut alice2_rx, "the reaction gone", |rows| !reacted(rows)).await;
     alice2.handle(Cmd::Delete { room: room.clone(), target: reply_id.clone() }).await.unwrap();
     until(&mut alice2_rx, "the deletion", |rows| rows.iter().any(|m| m.id == reply_id && m.deleted)).await;
-    preview_is(format!("You: {DELETED}")).await;
+    preview_is(format!("You: {}", deleted())).await;
     // A poll: it starts with its answers, then ends.
     let answers = vec!["Pizza".to_owned(), "Soup".to_owned()];
     alice2.handle(Cmd::SendPoll { room: room.clone(), question: "Lunch?".into(), answers, multiple: false }).await.unwrap();
@@ -429,7 +429,7 @@ async fn login_sync_decrypt_send_recover() {
     alice2.handle(Cmd::Open(room.clone())).await.unwrap();
     until(&mut alice2_rx, "the conversation again", |rows| rows.iter().any(|m| m.id == reply_id)).await;
     assert!(alice2_rx.rows.iter().any(|m| m.id == reply_id && m.deleted));
-    assert!(!bodies(&alice2_rx.rows).iter().any(|b| b == UTD), "{:?}", bodies(&alice2_rx.rows));
+    assert!(!bodies(&alice2_rx.rows).iter().any(|b| b == utd()), "{:?}", bodies(&alice2_rx.rows));
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -870,7 +870,7 @@ fn a_quote_says_what_its_message_holds() {
     let q = m.quote();
     assert!(q.place);
     assert_eq!(q.text, "Cabin");
-    (m.body, m.deleted, m.place) = (DELETED.to_owned(), true, None);
+    (m.body, m.deleted, m.place) = (deleted().to_owned(), true, None);
     assert!(m.quote().deleted);
     let unknown = Quote::unknown("$b".to_owned(), QuoteState::Loading);
     assert_eq!((unknown.state, unknown.sender.as_str()), (QuoteState::Loading, ""));

@@ -3,6 +3,7 @@
 use super::*;
 use crate::backend::NewPoll;
 use crate::backend::pollnew::{MAX_ANSWERS, MIN_ANSWERS};
+use crate::i18n::t;
 
 type Field = (Entity<InputState>, Subscription);
 
@@ -29,8 +30,8 @@ fn field(placeholder: &'static str, window: &mut Window, cx: &mut Context<Beeper
 impl BeeperApp {
     pub(super) fn open_poll_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_gallery(cx);
-        let question = field("Question", window, cx);
-        let options = vec![field("Option 1", window, cx), field("Option 2", window, cx)];
+        let question = field(t!("Question"), window, cx);
+        let options = vec![field(t!("Option 1"), window, cx), field(t!("Option 2"), window, cx)];
         let focus = question.0.read(cx).focus_handle(cx);
         self.poll_form = Form { open: true, fields: Some(Fields { question, options, multiple: false, error: None }) };
         window.focus(&focus, cx);
@@ -50,7 +51,7 @@ impl BeeperApp {
         if self.poll_form.fields.as_ref().is_none_or(|f| f.options.len() >= MAX_ANSWERS) {
             return;
         }
-        let new = field("Option", window, cx);
+        let new = field(t!("Option"), window, cx);
         let focus = new.0.read(cx).focus_handle(cx);
         if let Some(f) = self.poll_form.fields.as_mut() {
             f.options.push(new);
@@ -140,7 +141,7 @@ impl BeeperApp {
                 .cursor_pointer()
                 .active(|el| el.bg(p.raised))
                 .child(Icon::new(IconName::Plus).size_5())
-                .child("Add option")
+                .child(t!("Add option"))
                 .when(live, |el| el.on_click(cx.listener(|this, _, window, cx| this.add_poll_option(window, cx))))
         });
         let multiple = f.multiple;
@@ -151,7 +152,7 @@ impl BeeperApp {
             .mt(px(8.))
             .justify_between()
             .cursor_pointer()
-            .child(div().text_size(fs(16.)).child("Allow multiple answers"))
+            .child(div().text_size(fs(16.)).child(t!("Allow multiple answers")))
             .child(
                 div()
                     .w(px(44.))
@@ -183,7 +184,7 @@ impl BeeperApp {
             .font_weight(FontWeight::MEDIUM)
             .cursor_pointer()
             .active(|el| el.bg(p.muted))
-            .child("Send")
+            .child(t!("Send"))
             .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.send_poll(cx))));
         let head = h_flex()
             .flex_none()
@@ -196,7 +197,7 @@ impl BeeperApp {
                     this.close_poll_form(cx);
                 }))
             }))
-            .child(div().flex_1().min_w_0().text_size(fs(18.)).font_weight(FontWeight::SEMIBOLD).child("New poll"))
+            .child(div().flex_1().min_w_0().text_size(fs(18.)).font_weight(FontWeight::SEMIBOLD).child(t!("New poll")))
             .child(send);
         Some(
             v_flex()
@@ -218,9 +219,9 @@ impl BeeperApp {
                         .min_h_0()
                         .overflow_y_scroll()
                         .pb(px(24.))
-                        .child(label("Question"))
+                        .child(label(t!("Question")))
                         .child(div().px(px(GUTTER)).child(Input::new(&f.question.0).large()))
-                        .child(label("Options"))
+                        .child(label(t!("Options")))
                         .children(rows)
                         .children(add)
                         .child(toggle)

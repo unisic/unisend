@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use super::*;
+use crate::i18n::{t, tn};
 
 const ROW_H: f32 = 64.;
 const ROW_AVATAR: f32 = 40.;
@@ -40,8 +41,8 @@ pub(super) struct ShareIn {
 
 impl ShareIn {
     pub(super) fn new(window: &mut Window, cx: &mut Context<BeeperApp>, subs: &mut Vec<Subscription>) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search chats"));
-        let message = cx.new(|cx| InputState::new(window, cx).placeholder("Add a message"));
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search chats")));
+        let message = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Add a message")));
         subs.push(cx.subscribe_in(&query, window, |_, _, ev: &InputEvent, _, cx| match ev {
             InputEvent::Change => cx.notify(),
             other => keyboard_follows(other, Keyboard::Text, cx),
@@ -79,13 +80,18 @@ fn shortfall(over: usize, unreadable: usize) -> Option<String> {
     let (files, mb, each) = (crate::share::MAX_FILES, crate::share::MAX_BYTES >> 20, crate::backend::MAX_UPLOAD >> 20);
     let over = match over {
         0 => None,
-        1 => Some(format!("1 file was left out: one share takes at most {files} files and {mb} MB, each file at most {each} MB.")),
-        n => Some(format!("{n} files were left out: one share takes at most {files} files and {mb} MB, each file at most {each} MB.")),
+        n => Some(tn!(
+            n,
+            "{n} file was left out: one share takes at most {files} files and {mb} MB, each file at most {each} MB.",
+            "{n} files were left out: one share takes at most {files} files and {mb} MB, each file at most {each} MB.",
+            files = files,
+            mb = mb,
+            each = each
+        )),
     };
     let unreadable = match unreadable {
         0 => None,
-        1 => Some("1 file could not be read.".to_owned()),
-        n => Some(format!("{n} files could not be read.")),
+        n => Some(tn!(n, "{n} file could not be read.", "{n} files could not be read.")),
     };
     match (over, unreadable) {
         (Some(a), Some(b)) => Some(format!("{a} {b}")),
@@ -166,7 +172,7 @@ impl BeeperApp {
                     }
                     (s.files, s.copying, s.over, s.unreadable) = (sized, 0, copied.over, copied.unreadable);
                     if s.files.is_empty() && s.text.is_empty() {
-                        this.error = Some("Nothing shared could be read.".into());
+                        this.error = Some(t!("Nothing shared could be read.").into());
                         this.share.open = false;
                     }
                     cx.notify();
@@ -287,12 +293,12 @@ impl BeeperApp {
             .pr(px(GUTTER))
             .gap(px(4.))
             .child(round_button("share-close", IconName::X, cx).on_click(cx.listener(|this, _, _, cx| this.close_share(cx))))
-            .child(div().flex_1().min_w_0().child(screen_title("Send to")));
+            .child(div().flex_1().min_w_0().child(screen_title(t!("Send to"))));
 
         let status = if s.copying > 0 {
             Some(match s.copying {
-                1 => "Preparing the file…".to_owned(),
-                n => format!("Preparing {n} files…"),
+                1 => t!("Preparing the file…").to_owned(),
+                n => tn!(n, "Preparing {n} file…", "Preparing {n} files…"),
             })
         } else {
             shortfall(s.over, s.unreadable)
@@ -324,7 +330,7 @@ impl BeeperApp {
                 .rounded(px(RADIUS))
                 .bg(p.surface)
                 .child(div().text_size(fs(14.)).line_clamp(3).text_ellipsis().child(s.text.clone()))
-                .child(div().text_size(fs(12.)).text_color(p.faint).child("Goes into the message box of the chat you choose."))
+                .child(div().text_size(fs(12.)).text_color(p.faint).child(t!("Goes into the message box of the chat you choose.")))
         });
 
         let search = h_flex()
@@ -339,7 +345,7 @@ impl BeeperApp {
             .child(Icon::new(IconName::Search).size_4().flex_none().text_color(p.faint))
             .child(div().flex_1().min_w_0().child(Input::new(&s.query).appearance(false)));
 
-        let empty = if self.rooms.is_empty() { "Syncing chats…" } else { "No chat matches" };
+        let empty = if self.rooms.is_empty() { t!("Syncing chats…") } else { t!("No chat matches") };
         let list = uniform_list(
             "share-chats",
             s.rows.len(),

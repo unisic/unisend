@@ -33,9 +33,10 @@ use matrix_sdk_ui::timeline::{
 use tokio::sync::{broadcast, mpsc};
 
 use super::{
-    AbortOnDrop, DELETED, Delivery, Ev, Kind, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, UTD, content, display_name, link_preview, mark_read,
+    AbortOnDrop, deleted, utd, Delivery, Ev, Kind, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
     format, marks, network, other_person, plain, sticker, disappear,
 };
+use crate::i18n::t;
 
 /// Beeper's bridges say in events of this type what the network did with a message.
 const SEND_STATUS: &str = "com.beeper.message_send_status";
@@ -256,7 +257,7 @@ pub(super) async fn retry(timeline: &Timeline, id: &str) -> Result<()> {
         .filter_map(|item| item.as_event())
         .find(|event| event.transaction_id().is_some_and(|txn| txn.as_str() == id))
         .and_then(EventTimelineItem::local_echo_send_handle)
-        .context("That message is no longer waiting to be sent")?;
+        .context(t!("That message is no longer waiting to be sent"))?;
     Ok(handle.unwedge().await?)
 }
 
@@ -351,17 +352,17 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
         }
         TimelineItemContent::MembershipChange(change) => membership(&mut m, change, viewer),
         TimelineItemContent::OtherState(state) if state.content().event_type().to_string() == disappear::TIMER => {
-            let actor = (!viewer.service.contains(event.sender())).then_some(if m.own { "You" } else { m.sender.as_str() });
+            let actor = (!viewer.service.contains(event.sender())).then_some(if m.own { t!("You") } else { m.sender.as_str() });
             let prev = event.latest_json().and_then(|raw| raw.get_field::<serde_json::Value>("unsigned").ok().flatten());
             let prev = prev.as_ref().and_then(|unsigned| unsigned.get("prev_content"));
-            match json.as_ref().filter(|_| !flag("com.beeper.exclude_from_timeline")).and_then(|c| disappear::notice(c, prev, actor)) {
+            match json.as_ref().filter(|_| !flag("com.beeper.exclude_from_timeline")).and_then(|c| disappear::notice(c, prev, actor, m.own)) {
                 Some(line) => (m.kind, m.body) = (Kind::Notice, line),
                 None => m.kind = Kind::Hidden,
             }
         }
         TimelineItemContent::OtherState(state) => {
-            let actor = (!viewer.service.contains(event.sender())).then_some(if m.own { "You" } else { m.sender.as_str() });
-            match state_line(state.content(), actor) {
+            let actor = (!viewer.service.contains(event.sender())).then_some(if m.own { t!("You") } else { m.sender.as_str() });
+            match state_line(state.content(), actor, m.own) {
                 Some(line) => (m.kind, m.body) = (Kind::Notice, line),
                 None => m.kind = Kind::Hidden,
             }
@@ -422,8 +423,8 @@ fn fill(m: &mut Msg, kind: &MsgLikeKind, own: &UserId) {
         }
         MsgLikeKind::Sticker(sent) => m.media = Some(sticker(sent.content())),
         MsgLikeKind::Poll(state) => m.poll = Some(poll(state)),
-        MsgLikeKind::Redacted => (m.body, m.deleted) = (DELETED.to_owned(), true),
-        MsgLikeKind::UnableToDecrypt(_) => m.body = UTD.to_owned(),
+        MsgLikeKind::Redacted => (m.body, m.deleted) = (deleted().to_owned(), true),
+        MsgLikeKind::UnableToDecrypt(_) => m.body = utd().to_owned(),
         MsgLikeKind::Other(_) | MsgLikeKind::LiveLocation(_) => m.kind = Kind::Hidden,
     }
 }
@@ -453,12 +454,12 @@ fn poll(state: &PollState) -> Poll {
 
 fn membership(m: &mut Msg, change: &RoomMembershipChange, viewer: &Viewer) {
     let me = change.user_id() == viewer.own;
-    let subject = if me { "You".to_owned() } else { change.display_name().unwrap_or_else(|| change.user_id().localpart().to_owned()) };
+    let subject = if me { t!("You").to_owned() } else { change.display_name().unwrap_or_else(|| change.user_id().localpart().to_owned()) };
     // Something a bot did was done by someone on the other network, who is not named.
-    let actor = (!viewer.service.contains(&m.from) && m.from != change.user_id()).then_some(if m.own { "You" } else { m.sender.as_str() });
+    let actor = (!viewer.service.contains(&m.from) && m.from != change.user_id()).then_some(if m.own { t!("You") } else { m.sender.as_str() });
     match change.change() {
         Some(MembershipChange::Joined | MembershipChange::InvitationAccepted) => (m.kind, m.sender) = (Kind::Joined, subject),
-        Some(change) => match membership_line(change, actor, &subject, me) {
+        Some(change) => match membership_line(change, actor.map(|a| (a, m.own)), &subject, me) {
             Some(line) => (m.kind, m.body) = (Kind::Notice, line),
             None => m.kind = Kind::Hidden,
         },
@@ -467,33 +468,44 @@ fn membership(m: &mut Msg, change: &RoomMembershipChange, viewer: &Viewer) {
 }
 
 /// A change of someone's membership as a line; `None` for the ones that get no line. `actor` is
-/// whoever did it to `subject`, when that is someone else and known.
-fn membership_line(change: MembershipChange, actor: Option<&str>, subject: &str, me: bool) -> Option<String> {
-    let object = if me { "you" } else { subject };
+/// whoever did it to `subject`, when that is someone else and known, and whether that is the user.
+/// Each case is a whole sentence, so a translation can inflect it.
+fn membership_line(change: MembershipChange, actor: Option<(&str, bool)>, subject: &str, me: bool) -> Option<String> {
+    use MembershipChange::{Banned, Invited, Kicked, KickedAndBanned, Left};
     Some(match (change, actor) {
-        (MembershipChange::Left, _) => format!("{subject} left"),
-        (MembershipChange::Kicked | MembershipChange::KickedAndBanned | MembershipChange::Banned, Some(actor)) => format!("{actor} removed {object}"),
-        (MembershipChange::Kicked | MembershipChange::KickedAndBanned | MembershipChange::Banned, None) => {
-            format!("{subject} {} removed", if me { "were" } else { "was" })
-        }
-        (MembershipChange::Invited, Some(actor)) => format!("{actor} invited {object}"),
+        (Left, _) if me => t!("You left").to_owned(),
+        (Left, _) => t!("{subject} left", subject = subject),
+        (Kicked | KickedAndBanned | Banned, Some((_, true))) => t!("You removed {object}", object = subject),
+        (Kicked | KickedAndBanned | Banned, Some((actor, _))) if me => t!("{actor} removed you", actor = actor),
+        (Kicked | KickedAndBanned | Banned, Some((actor, _))) => t!("{actor} removed {object}", actor = actor, object = subject),
+        (Kicked | KickedAndBanned | Banned, None) if me => t!("You were removed").to_owned(),
+        (Kicked | KickedAndBanned | Banned, None) => t!("{subject} was removed", subject = subject),
+        (Invited, Some((_, true))) => t!("You invited {object}", object = subject),
+        (Invited, Some((actor, _))) if me => t!("{actor} invited you", actor = actor),
+        (Invited, Some((actor, _))) => t!("{actor} invited {object}", actor = actor, object = subject),
         _ => return None,
     })
 }
 
 /// A change to the chat itself as a line.
-fn state_line(change: &AnyOtherStateEventContentChange, actor: Option<&str>) -> Option<String> {
-    let (what, to) = match change {
-        AnyOtherStateEventContentChange::RoomName(StateEventContentChange::Original { content, .. }) if !content.name.is_empty() => {
-            ("name", format!(" to \u{201c}{}\u{201d}", clip(&content.name)))
+fn state_line(change: &AnyOtherStateEventContentChange, actor: Option<&str>, own: bool) -> Option<String> {
+    let actor = actor.unwrap_or_default();
+    Some(match (change, actor.is_empty(), own) {
+        (AnyOtherStateEventContentChange::RoomName(StateEventContentChange::Original { content, .. }), anyone, own) if !content.name.is_empty() => {
+            let name = clip(&content.name);
+            match (anyone, own) {
+                (true, _) => t!("The name was changed to “{name}”", name = name),
+                (false, true) => t!("You changed the name to “{name}”", name = name),
+                (false, false) => t!("{actor} changed the name to “{name}”", actor = actor, name = name),
+            }
         }
-        AnyOtherStateEventContentChange::RoomAvatar(_) => ("picture", String::new()),
-        AnyOtherStateEventContentChange::RoomTopic(_) => ("description", String::new()),
+        (AnyOtherStateEventContentChange::RoomAvatar(_), true, _) => t!("The picture was changed").to_owned(),
+        (AnyOtherStateEventContentChange::RoomAvatar(_), false, true) => t!("You changed the picture").to_owned(),
+        (AnyOtherStateEventContentChange::RoomAvatar(_), false, false) => t!("{actor} changed the picture", actor = actor),
+        (AnyOtherStateEventContentChange::RoomTopic(_), true, _) => t!("The description was changed").to_owned(),
+        (AnyOtherStateEventContentChange::RoomTopic(_), false, true) => t!("You changed the description").to_owned(),
+        (AnyOtherStateEventContentChange::RoomTopic(_), false, false) => t!("{actor} changed the description", actor = actor),
         _ => return None,
-    };
-    Some(match actor {
-        Some(actor) => format!("{actor} changed the {what}{to}"),
-        None => format!("The {what} was changed{to}"),
     })
 }
 
@@ -536,8 +548,9 @@ mod tests {
 
     #[test]
     fn membership_changes_read_as_sentences() {
-        let line = |change, actor, subject, me| membership_line(change, actor, subject, me);
+        let line = |change, actor: Option<&str>, subject, me| membership_line(change, actor.map(|a| (a, a == "You")), subject, me);
         assert_eq!(line(MembershipChange::Left, None, "Ann", false).as_deref(), Some("Ann left"));
+        assert_eq!(line(MembershipChange::Left, None, "You", true).as_deref(), Some("You left"));
         assert_eq!(line(MembershipChange::Kicked, Some("Bob"), "Ann", false).as_deref(), Some("Bob removed Ann"));
         assert_eq!(line(MembershipChange::Banned, Some("Bob"), "You", true).as_deref(), Some("Bob removed you"));
         assert_eq!(line(MembershipChange::Kicked, None, "You", true).as_deref(), Some("You were removed"));

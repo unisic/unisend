@@ -14,6 +14,8 @@ use matrix_sdk::reqwest::{Client, Method};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::i18n::t;
+
 /// Bridges Beeper hosts that log in through this API, with the names its apps show.
 pub const KNOWN: [(&str, &str); 12] = [
     ("whatsapp", "WhatsApp"),
@@ -177,9 +179,9 @@ impl Api {
     pub async fn flows(&self, bridge: &str) -> Result<Vec<Flow>> {
         if self.bridge(bridge, Method::GET, "login/flows", None, CALL_TIMEOUT).await.is_err() {
             let start = format!("{}/bridge/{bridge}/start", self.api);
-            self.send(Method::POST, start, Some(json!({})), CALL_TIMEOUT).await.with_context(|| format!("Beeper did not start {}", display_name(bridge)))?;
+            self.send(Method::POST, start, Some(json!({})), CALL_TIMEOUT).await.with_context(|| t!("Beeper did not start {network}", network = display_name(bridge)))?;
         }
-        let mut last = anyhow!("the bridge did not come up");
+        let mut last = anyhow!(t!("the bridge did not come up"));
         for _ in 0..START_ATTEMPTS {
             match self.bridge(bridge, Method::GET, "login/flows", None, CALL_TIMEOUT).await {
                 Ok(json) => return Ok(serde_json::from_value(json.get("flows").cloned().unwrap_or(json!([])))?),
@@ -202,7 +204,7 @@ impl Api {
             StepKind::Input(_) => ("user_input", json!(values), CALL_TIMEOUT),
             StepKind::Cookies(_) => ("cookies", json!(values), CALL_TIMEOUT),
             StepKind::Show { .. } => ("display_and_wait", json!({}), WAIT_TIMEOUT),
-            StepKind::Done => bail!("the login is already complete"),
+            StepKind::Done => bail!(t!("the login is already complete")),
         };
         let path = format!("login/step/{}/{}/{kind}", current.login_id, current.step_id);
         let json = self.bridge(&current.bridge, Method::POST, &path, Some(body), timeout).await?;
@@ -217,7 +219,7 @@ impl Api {
     /// The account's email address (`userInfo.email`, bridge-manager api/beeperapi/whoami.go).
     pub async fn email(&self) -> Result<String> {
         let whoami = self.send(Method::GET, format!("{}/whoami", self.api), None, CALL_TIMEOUT).await?;
-        whoami.pointer("/userInfo/email").and_then(Value::as_str).filter(|e| !e.is_empty()).map(str::to_owned).context("Beeper did not say which email address this account uses")
+        whoami.pointer("/userInfo/email").and_then(Value::as_str).filter(|e| !e.is_empty()).map(str::to_owned).context(t!("Beeper did not say which email address this account uses"))
     }
 }
 
@@ -272,7 +274,7 @@ fn step(bridge: &str, login_id: &str, json: &Value) -> Result<Step> {
         }
         Some("display_and_wait") => StepKind::Show { kind: text("/display_and_wait/type"), data: text("/display_and_wait/data") },
         Some("complete") => StepKind::Done,
-        other => bail!("this app does not know the login step {other:?}"),
+        other => bail!(t!("this app does not know the login step {step}", step = format!("{other:?}"))),
     };
     Ok(Step {
         bridge: bridge.to_owned(),

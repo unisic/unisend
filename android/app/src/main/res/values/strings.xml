@@ -1,4 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Murmur</string>
+    <string name="app_name" translatable="false">Murmur</string>
+    <string name="you">You</string>
+    <string name="chat">Chat</string>
+    <string name="reply">Reply</string>
+    <string name="mark_read">Mark as read</string>
+    <string name="reply_not_sent">Not sent. Open Murmur and try again.</string>
+    <string name="channel_direct">Direct messages</string>
+    <string name="channel_groups">Group chats</string>
+    <string name="channel_mentions">Mentions</string>
+    <string name="channel_connection">Background connection</string>
+    <string name="connected_for_new">Connected for new messages</string>
+    <plurals name="chats_with_new">
+        <item quantity="one">%d chat has new messages</item>
+        <item quantity="other">%d chats have new messages</item>
+    </plurals>
+    <string name="unlock_app">Unlock Murmur</string>
+    <string name="close">Close</string>
+    <string name="mute">Mute</string>
+    <string name="unmute">Unmute</string>
+    <string name="play">Play</string>
+    <string name="pause">Pause</string>
+    <string name="position">Position</string>
 </resources>

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::backend::forward::{MAX_CHATS, MAX_MESSAGES};
+use crate::i18n::{t, tn};
 
 /// Messages hidden on this device, per account; the oldest is forgotten past this.
 const MAX_HIDDEN: usize = 5000;
@@ -101,7 +102,7 @@ pub(super) struct Forward {
 
 impl Forward {
     pub fn new(window: &mut Window, cx: &mut Context<BeeperApp>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search chats"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search chats")));
         let sub = cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| match ev {
             InputEvent::Change => cx.notify(),
             other => keyboard_follows(other, Keyboard::Text, cx),
@@ -128,7 +129,7 @@ impl Forward {
 
 /// A message whose content can be sent again: on the server, readable, and not a poll.
 pub(super) fn forwardable(m: &Msg) -> bool {
-    selectable(m) && !m.deleted && m.poll.is_none() && m.body != UTD
+    selectable(m) && !m.deleted && m.poll.is_none() && m.body != crate::backend::utd()
 }
 
 fn selectable(m: &Msg) -> bool {
@@ -241,7 +242,7 @@ impl BeeperApp {
         self.fwd.hidden.save();
         // A hidden row and its neighbours change height: a run's corners and time move.
         self.timeline.remeasure();
-        let text = if ids.len() == 1 { "Message deleted for you".into() } else { format!("{} messages deleted for you", ids.len()).into() };
+        let text = tn!(ids.len(), "{n} message deleted for you", "{n} messages deleted for you").into();
         self.toast(text, Some(ids), cx);
     }
 
@@ -271,7 +272,7 @@ impl BeeperApp {
     }
 
     pub(super) fn forwarded(&mut self, chats: usize, cx: &mut Context<Self>) {
-        let text = if chats == 1 { "Forwarded to 1 chat".into() } else { format!("Forwarded to {chats} chats").into() };
+        let text = tn!(chats, "Forwarded to {n} chat", "Forwarded to {n} chats").into();
         self.toast(text, None, cx);
     }
 
@@ -296,8 +297,8 @@ impl BeeperApp {
         let can_forward = !picked.is_empty() && picked.iter().all(|m| forwardable(m));
         let for_everyone = !picked.is_empty() && picked.iter().all(|m| m.own && !m.deleted);
         let count = match picked.len() {
-            0 => "Select messages".to_owned(),
-            n => format!("{n} selected"),
+            0 => t!("Select messages").to_owned(),
+            n => t!("{n} selected", n = n),
         };
         let armed = self.fwd.armed && for_everyone;
         let (forward_ids, hide_ids) = (ids.clone(), ids.clone());
@@ -354,7 +355,7 @@ impl BeeperApp {
                         .text_size(fs(14.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
-                        .child("Delete for everyone")
+                        .child(t!("Delete for everyone"))
                         .on_click(cx.listener(move |this, _, _, cx| this.delete_for_everyone(ids.clone(), cx))),
                 )
             });
@@ -486,11 +487,11 @@ impl BeeperApp {
             .collect();
         let chosen = self.fwd.chosen.len();
         let title = match n {
-            1 => "Forward message".to_owned(),
-            n => format!("Forward {n} messages"),
+            1 => t!("Forward message").to_owned(),
+            n => tn!(n, "Forward {n} message", "Forward {n} messages"),
         };
-        let hint = format!("{chosen} of {MAX_CHATS} chats");
-        let send_label = if chosen == 1 { "Send to 1 chat".to_owned() } else { format!("Send to {chosen} chats") };
+        let hint = t!("{chosen} of {max} chats", chosen = chosen, max = MAX_CHATS);
+        let send_label = tn!(chosen, "Send to {n} chat", "Send to {n} chats");
         Some(
             div()
                 .id("forward-scrim")
@@ -616,7 +617,7 @@ impl BeeperApp {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .cursor_pointer()
                                     .active(|el| el.bg(p.surface))
-                                    .child("Undo")
+                                    .child(t!("Undo"))
                                     .on_click(cx.listener(|this, _, _, cx| this.undo_hide(cx))),
                             )
                         }),

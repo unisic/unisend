@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
 use super::{Ev, safe_name, write_private};
+use crate::i18n::t;
 
 const KEY: Option<&str> = option_env!("KLIPY_API_KEY");
 const API: &str = "https://api.klipy.com/api/v1";
@@ -148,7 +149,7 @@ pub(crate) fn parse(json: &[u8]) -> Result<Found> {
     let answer: Answer = serde_json::from_slice(json)?;
     let page = match answer {
         Answer { result: true, data: Some(page) } => page,
-        _ => bail!("KLIPY answered without results"),
+        _ => bail!(t!("KLIPY answered without results")),
     };
     let gifs = page
         .data

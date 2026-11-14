@@ -3,6 +3,7 @@
 use crate::backend::verify::{Auth, CrossSigning, Devices, NAME_MAX, Proof, Trust, Verify};
 
 use super::*;
+use crate::i18n::t;
 
 /// A device being signed out: what the server asks for next (`None` while that is found out).
 struct SignOut {
@@ -30,9 +31,9 @@ pub(super) struct Ui {
 
 impl Ui {
     pub(super) fn new(window: &mut Window, cx: &mut Context<BeeperApp>, subs: &mut Vec<Subscription>) -> Self {
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("Device name"));
-        let password = cx.new(|cx| InputState::new(window, cx).placeholder("Password").masked(true));
-        let code = cx.new(|cx| InputState::new(window, cx).placeholder("Code"));
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Device name")));
+        let password = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Password")).masked(true));
+        let code = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Code")));
         subs.push(cx.subscribe_in(&name, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { shift: false, .. } => this.save_name(window, cx),
             other => keyboard_follows(other, Keyboard::Text, cx),
@@ -124,7 +125,7 @@ impl BeeperApp {
     fn save_name(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let name = self.verify.name.read(cx).value().trim().to_string();
         if name.is_empty() || name.chars().count() > NAME_MAX {
-            self.verify.failed = Some(format!("A device name has 1 to {NAME_MAX} characters.").into());
+            self.verify.failed = Some(t!("A device name has 1 to {max} characters.", max = NAME_MAX).into());
             cx.notify();
             return;
         }
@@ -173,36 +174,36 @@ impl BeeperApp {
 
     pub(super) fn render_devices(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
-        let section = panels::section("Devices", cx);
+        let section = panels::section(t!("Devices"), cx);
         let Some(devices) = self.verify.devices.clone() else {
             let line = match (&self.verify.failed, self.verify.loading) {
                 (Some(e), _) => e.clone(),
-                (None, true) => "Loading your devices".into(),
+                (None, true) => t!("Loading your devices").into(),
                 (None, false) => SharedString::default(),
             };
-            return section.child(panels::card(cx).child(panels::row("Your devices", &line, cx).when(!self.verify.loading, |el| {
-                el.child(pill("devices-retry", "Try again", p.text, cx).on_click(cx.listener(|this, _, _, cx| this.load_devices(cx))))
+            return section.child(panels::card(cx).child(panels::row(t!("Your devices"), &line, cx).when(!self.verify.loading, |el| {
+                el.child(pill("devices-retry", t!("Try again"), p.text, cx).on_click(cx.listener(|this, _, _, cx| this.load_devices(cx))))
             })));
         };
         let this_status = if devices.this_verified {
-            "Verified. Your other devices trust this one."
+            t!("Verified. Your other devices trust this one.")
         } else {
-            "Not verified. Compare emoji with another device where you are signed in, or unlock with your recovery code."
+            t!("Not verified. Compare emoji with another device where you are signed in, or unlock with your recovery code.")
         };
         let keys = match devices.cross_signing {
-            CrossSigning::Here => "Set up. This device holds the keys, so it can verify your other devices.",
-            CrossSigning::Elsewhere => "Set up on your account. This device does not hold the keys.",
-            CrossSigning::Missing => "Not set up. Set it up in Beeper or Element, then verify this device here.",
+            CrossSigning::Here => t!("Set up. This device holds the keys, so it can verify your other devices."),
+            CrossSigning::Elsewhere => t!("Set up on your account. This device does not hold the keys."),
+            CrossSigning::Missing => t!("Not set up. Set it up in Beeper or Element, then verify this device here."),
         };
         let can_verify = !devices.this_verified && devices.cross_signing != CrossSigning::Missing;
         let rows = devices.list.iter().map(|d| self.device_row(d, cx)).collect::<Vec<_>>();
         section
             .child(
                 panels::card(cx)
-                    .child(panels::row("This device", this_status, cx).when(can_verify, |el| {
-                        el.child(pill("verify-start", "Verify", p.text, cx).on_click(cx.listener(|this, _, _, cx| this.start_verify(cx))))
+                    .child(panels::row(t!("This device"), this_status, cx).when(can_verify, |el| {
+                        el.child(pill("verify-start", t!("Verify"), p.text, cx).on_click(cx.listener(|this, _, _, cx| this.start_verify(cx))))
                     }))
-                    .child(panels::row("Cross-signing", keys, cx)),
+                    .child(panels::row(t!("Cross-signing"), keys, cx)),
             )
             .child(panels::card(cx).children(rows))
             .children(self.verify.failed.clone().map(|e| div().px(px(GAP)).text_size(fs(14.)).text_color(p.negative).child(e)))
@@ -211,12 +212,12 @@ impl BeeperApp {
     fn device_row(&self, d: &crate::backend::verify::Device, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         let trust = match d.trust {
-            Trust::Verified => "Verified",
-            Trust::Unverified => "Not verified",
-            Trust::NoKeys => "No encryption",
+            Trust::Verified => t!("Verified"),
+            Trust::Unverified => t!("Not verified"),
+            Trust::NoKeys => t!("No encryption"),
         };
         let detail = match (d.this, d.last_seen) {
-            (true, _) => format!("This device · {trust}"),
+            (true, _) => format!("{} · {trust}", t!("This device")),
             (false, Some(ts)) => format!("{} · {trust}", seen(ts)),
             (false, None) => trust.to_owned(),
         };
@@ -228,16 +229,16 @@ impl BeeperApp {
                 .child(
                     h_flex()
                         .gap(px(8.))
-                        .child(pill("rename-save", "Save", p.text, cx).on_click(cx.listener(|this, _, window, cx| this.save_name(window, cx))))
-                        .child(pill("rename-cancel", "Cancel", p.muted, cx).on_click(cx.listener(|this, _, window, cx| this.edit_name(false, window, cx)))),
+                        .child(pill("rename-save", t!("Save"), p.text, cx).on_click(cx.listener(|this, _, window, cx| this.save_name(window, cx))))
+                        .child(pill("rename-cancel", t!("Cancel"), p.muted, cx).on_click(cx.listener(|this, _, window, cx| this.edit_name(false, window, cx)))),
                 )
                 .into_any_element();
         }
         let id = d.id.clone();
         let action = if d.this {
-            pill("rename", "Rename", p.text, cx).on_click(cx.listener(|this, _, window, cx| this.edit_name(true, window, cx)))
+            pill("rename", t!("Rename"), p.text, cx).on_click(cx.listener(|this, _, window, cx| this.edit_name(true, window, cx)))
         } else {
-            pill(SharedString::from(format!("sign-out-{id}")), "Sign out", p.negative, cx)
+            pill(SharedString::from(format!("sign-out-{id}")), t!("Sign out"), p.negative, cx)
                 .on_click(cx.listener(move |this, _, _, cx| this.sign_out_device(id.clone(), Proof::Ask, cx)))
         };
         let out = self.verify.out.as_ref().filter(|o| o.device == d.id);
@@ -251,12 +252,12 @@ impl BeeperApp {
         let mut form = v_flex().pb(px(12.)).gap(px(8.));
         let device = out.device.clone();
         let (line, field, button): (String, bool, Option<(&'static str, Proof)>) = match &out.need {
-            None => ("Asking the server what it needs to sign the device out.".into(), false, None),
-            Some(Auth::Password) => ("Enter your password to sign this device out.".into(), true, None),
-            Some(Auth::Code { email }) => (format!("Beeper emails a code to {email} to confirm it is you."), false, Some(("Email me a code", Proof::SendCode))),
-            Some(Auth::CodeSent) => ("Enter the code from the email.".into(), true, None),
+            None => (t!("Asking the server what it needs to sign the device out.").into(), false, None),
+            Some(Auth::Password) => (t!("Enter your password to sign this device out.").into(), true, None),
+            Some(Auth::Code { email }) => (t!("Beeper emails a code to {email} to confirm it is you.", email = email), false, Some((t!("Email me a code"), Proof::SendCode))),
+            Some(Auth::CodeSent) => (t!("Enter the code from the email.").into(), true, None),
             Some(Auth::Unsupported) => {
-                ("This server asks for a kind of confirmation Murmur does not offer. Sign the device out from Beeper or Element.".into(), false, None)
+                (t!("This server asks for a kind of confirmation Murmur does not offer. Sign the device out from Beeper or Element.").into(), false, None)
             }
         };
         form = form.child(text(line));
@@ -271,7 +272,7 @@ impl BeeperApp {
                 Button::new("sign-out-confirm")
                     .primary()
                     .h(px(TAP))
-                    .label("Sign out")
+                    .label(t!("Sign out"))
                     .loading(out.busy)
                     .disabled(out.busy)
                     .on_click(cx.listener(|this, _, window, cx| this.send_secret(window, cx))),
@@ -287,7 +288,7 @@ impl BeeperApp {
                     .on_click(cx.listener(move |this, _, _, cx| this.sign_out_device(device.clone(), Proof::SendCode, cx))),
             );
         }
-        let close = if out.need == Some(Auth::Unsupported) { "Close" } else { "Cancel" };
+        let close = if out.need == Some(Auth::Unsupported) { t!("Close") } else { t!("Cancel") };
         buttons = buttons
             .child(Button::new("sign-out-cancel").ghost().h(px(TAP)).label(close).on_click(cx.listener(|this, _, window, cx| this.close_sign_out(window, cx))));
         form.child(buttons).children(out.error.clone().map(|e| div().text_size(fs(14.)).text_color(p.negative).child(e)))
@@ -314,30 +315,30 @@ impl BeeperApp {
         let (_, bottom) = crate::insets();
         let (title, body, primary, secondary): (&str, String, Option<Primary>, (&str, Option<Cmd>)) = match &state {
             Verify::Incoming { who } => (
-                "Verification request",
-                format!("{who} asks to verify. Accept only if you started this yourself."),
-                Some(("Accept", Cmd::VerifyAccept, Some(Verify::Waiting))),
-                ("Decline", Some(Cmd::VerifyCancel)),
+                t!("Verification request"),
+                t!("{who} asks to verify. Accept only if you started this yourself.", who = who),
+                Some((t!("Accept"), Cmd::VerifyAccept, Some(Verify::Waiting))),
+                (t!("Decline"), Some(Cmd::VerifyCancel)),
             ),
             Verify::Waiting => (
-                "Waiting for the other device",
-                "Open Beeper, Element or Murmur where you are signed in and accept the request there.".into(),
+                t!("Waiting for the other device"),
+                t!("Open Beeper, Element or Murmur where you are signed in and accept the request there.").into(),
                 None,
-                ("Cancel", Some(Cmd::VerifyCancel)),
+                (t!("Cancel"), Some(Cmd::VerifyCancel)),
             ),
             Verify::Emoji(_) => (
-                "Compare emoji",
-                "Check that the other device shows the same emoji in the same order.".into(),
-                Some(("They match", Cmd::VerifyMatch(true), Some(Verify::Confirmed))),
-                ("They don't match", Some(Cmd::VerifyMatch(false))),
+                t!("Compare emoji"),
+                t!("Check that the other device shows the same emoji in the same order.").into(),
+                Some((t!("They match"), Cmd::VerifyMatch(true), Some(Verify::Confirmed))),
+                (t!("They don't match"), Some(Cmd::VerifyMatch(false))),
             ),
             Verify::Confirmed => {
-                ("Waiting for the other device", "Confirm on the other device that the emoji match.".into(), None, ("Cancel", Some(Cmd::VerifyCancel)))
+                (t!("Waiting for the other device"), t!("Confirm on the other device that the emoji match.").into(), None, (t!("Cancel"), Some(Cmd::VerifyCancel)))
             }
             Verify::Done => {
-                ("Verified", "Both sides confirmed the same emoji. Messages this device could not read may now unlock.".into(), None, ("Done", None))
+                (t!("Verified"), t!("Both sides confirmed the same emoji. Messages this device could not read may now unlock.").into(), None, (t!("Done"), None))
             }
-            Verify::Failed(why) => ("Not verified", why.clone(), None, ("Close", None)),
+            Verify::Failed(why) => (t!("Not verified"), why.clone(), None, (t!("Close"), None)),
         };
         let settled = matches!(state, Verify::Done | Verify::Failed(_));
         let emoji = match &state {
@@ -372,7 +373,7 @@ impl BeeperApp {
                 match cmd.take() {
                     // Saying they do not match ends it on both sides; the sheet stays to say so.
                     Some(Cmd::VerifyMatch(false)) => {
-                        let ended = Verify::Failed("The emoji did not match, so nothing was verified.".into());
+                        let ended = Verify::Failed(t!("The emoji did not match, so nothing was verified.").into());
                         this.verify_act(Cmd::VerifyMatch(false), Some(ended), cx);
                     }
                     Some(cmd) => this.verify_act(cmd, None, cx),
@@ -441,9 +442,8 @@ fn seen(ts_ms: u64) -> String {
     };
     let today = Local::now().date_naive();
     match (today - t.date_naive()).num_days() {
-        ..=0 => "Active today".to_owned(),
-        1 => "Active yesterday".to_owned(),
-        _ if t.year() == today.year() => t.format("Active on %-d %B").to_string(),
-        _ => t.format("Active on %-d %B %Y").to_string(),
+        ..=0 => t!("Active today").to_owned(),
+        1 => t!("Active yesterday").to_owned(),
+        _ => t!("Active on {date}", date = crate::i18n::date(&t, t.year() != today.year())),
     }
 }

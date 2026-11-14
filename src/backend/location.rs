@@ -2,6 +2,7 @@
 
 use matrix_sdk::ruma::MilliSecondsSinceUnixEpoch;
 use matrix_sdk::ruma::events::room::message::{LocationMessageEventContent, MessageType, RoomMessageEventContentWithoutRelation};
+use crate::i18n::t;
 
 /// `geo:<lat>,<lon>` with the accuracy as RFC 5870's uncertainty parameter. Never an altitude: the
 /// Signal and WhatsApp bridges accept exactly two numbers before the `;`
@@ -36,11 +37,11 @@ pub struct Support {
 pub fn support(network: &str) -> Option<Support> {
     let n = network.to_ascii_lowercase();
     if n.contains("instagram") {
-        Some(Support { note: "Instagram cannot receive locations, so this one would not arrive.", block: true })
+        Some(Support { note: t!("Instagram cannot receive locations, so this one would not arrive."), block: true })
     } else if n.contains("messenger") {
-        Some(Support { note: "Messenger may not accept locations: in an encrypted chat it shows a plain shared-location card with no map, elsewhere it can fail.", block: false })
+        Some(Support { note: t!("Messenger may not accept locations: in an encrypted chat it shows a plain shared-location card with no map, elsewhere it can fail."), block: false })
     } else if n.contains("signal") {
-        Some(Support { note: "Signal has no location messages, so it receives a map link as text.", block: false })
+        Some(Support { note: t!("Signal has no location messages, so it receives a map link as text."), block: false })
     } else {
         None
     }

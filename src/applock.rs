@@ -11,9 +11,10 @@ use gpui_kit::component::{Icon, v_flex};
 use gpui_kit::*;
 
 use crate::Palette;
+use crate::i18n::{n_, t};
 
 /// How long the app may stay in the background before it locks again, in seconds.
-pub(crate) const TIMEOUTS: [(u32, &str); 4] = [(0, "Immediately"), (60, "1 minute"), (300, "5 minutes"), (1800, "30 minutes")];
+pub(crate) const TIMEOUTS: [(u32, &str); 4] = [(0, n_!("Immediately")), (60, n_!("1 minute")), (300, n_!("5 minutes")), (1800, n_!("30 minutes"))];
 
 pub(crate) const POLL: Duration = Duration::from_millis(250);
 
@@ -163,7 +164,7 @@ pub(crate) fn screen(cx: &App) -> Stateful<Div> {
         .bg(p.ground)
         .text_color(p.text)
         .child(Icon::new(IconName::Lock).size_8().text_color(p.muted))
-        .child(div().text_size(px(18.)).child("Murmur is locked"))
+        .child(div().text_size(px(18.)).child(t!("Murmur is locked")))
         .child(
             div()
                 .id("app-lock-unlock")
@@ -176,7 +177,7 @@ pub(crate) fn screen(cx: &App) -> Stateful<Div> {
                 .text_size(px(16.))
                 .cursor_pointer()
                 .on_click(|_, _, _| authenticate())
-                .child("Unlock"),
+                .child(t!("Unlock")),
         )
 }
 

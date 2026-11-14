@@ -3,6 +3,7 @@
 //! as the chosen photos. Desktop has no tiles.
 
 use super::*;
+use crate::i18n::t;
 
 /// Tiles before the first photo in the grid.
 pub(super) const TILES: usize = if cfg!(target_os = "android") { 2 } else { 0 };
@@ -49,7 +50,7 @@ impl BeeperApp {
             .cursor_pointer()
             .active(|el| el.bg(p.lifted))
             .child(Icon::new(if video { IconName::Video } else { IconName::Camera }).size_6())
-            .child(if video { "Video" } else { "Photo" })
+            .child(if video { t!("Video") } else { t!("Photo") })
             .when(live, |el| el.on_click(cx.listener(move |this, _, _, cx| this.capture(video, cx))))
     }
 }

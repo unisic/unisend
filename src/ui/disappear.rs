@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::backend::{Disappearing, disappear_label};
+use crate::i18n::t;
 
 #[derive(Default)]
 pub(super) struct Disappear {
@@ -70,7 +71,7 @@ impl BeeperApp {
             return None;
         }
         let p = Palette::of(cx);
-        let row = timer_row("disappear-entry", Some(IconName::Timer), "Disappearing messages", cx)
+        let row = timer_row("disappear-entry", Some(IconName::Timer), t!("Disappearing messages"), cx)
             .child(div().flex_1())
             .child(div().text_size(fs(14.)).text_color(p.faint).child(disappear_label(setting.ms)));
         if !live {
@@ -89,13 +90,13 @@ impl BeeperApp {
     /// cannot be changed from here, the timer and why.
     pub(super) fn disappear_sheet(&self, room: &OwnedRoomId, live: bool, cx: &mut Context<Self>) -> Option<(String, Vec<Stateful<Div>>)> {
         let setting = self.disappearing(room)?;
-        let title = "Disappearing messages".to_owned();
+        let title = t!("Disappearing messages").to_owned();
         if !setting.settable() {
             let network = self.rooms.iter().find(|r| &r.id == room).and_then(|r| r.network.clone());
             let why = match (&setting.choices, network) {
-                (Some(_), _) => "Only the chat's admins can change this.".to_owned(),
-                (None, Some(network)) => format!("This chat's bridge does not take this change from Murmur. Change it in {network}."),
-                (None, None) => "This chat does not take this change from Murmur.".to_owned(),
+                (Some(_), _) => t!("Only the chat's admins can change this.").to_owned(),
+                (None, Some(network)) => t!("This chat's bridge does not take this change from Murmur. Change it in {network}.", network = network),
+                (None, None) => t!("This chat does not take this change from Murmur.").to_owned(),
             };
             let p = Palette::of(cx);
             let current = timer_row("disappear-current", Some(IconName::Timer), disappear_label(setting.ms), cx).cursor_default();

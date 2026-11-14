@@ -219,12 +219,12 @@ public final class Player extends Activity {
         top.setOrientation(LinearLayout.HORIZONTAL);
         top.setGravity(Gravity.CENTER_VERTICAL);
         top.setBackground(scrim(GradientDrawable.Orientation.TOP_BOTTOM));
-        ImageButton close = button(R.drawable.player_close, "Close");
+        ImageButton close = button(R.drawable.player_close, getString(R.string.close));
         close.setOnClickListener(v -> finish());
         top.addView(close);
         View gap = new View(this);
         top.addView(gap, new LinearLayout.LayoutParams(0, 0, 1f));
-        mute = button(R.drawable.player_volume, "Mute");
+        mute = button(R.drawable.player_volume, getString(R.string.mute));
         mute.setOnClickListener(v -> {
             muted = !muted;
             volume();
@@ -239,7 +239,7 @@ public final class Player extends Activity {
         bottom.setOrientation(LinearLayout.HORIZONTAL);
         bottom.setGravity(Gravity.CENTER_VERTICAL);
         bottom.setBackground(scrim(GradientDrawable.Orientation.BOTTOM_TOP));
-        toggle = button(R.drawable.player_pause, "Pause");
+        toggle = button(R.drawable.player_pause, getString(R.string.pause));
         toggle.setOnClickListener(v -> {
             if (video.isPlaying()) {
                 video.pause();
@@ -259,7 +259,7 @@ public final class Player extends Activity {
         seek.setProgressTintList(ColorStateList.valueOf(Color.WHITE));
         seek.setProgressBackgroundTintList(ColorStateList.valueOf(Color.WHITE));
         seek.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
-        seek.setContentDescription("Position");
+        seek.setContentDescription(getString(R.string.position));
         seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
@@ -340,10 +340,10 @@ public final class Player extends Activity {
 
     private void update() {
         toggle.setImageResource(playing ? R.drawable.player_pause : R.drawable.player_play);
-        toggle.setContentDescription(playing ? "Pause" : "Play");
+        toggle.setContentDescription(getString(playing ? R.string.pause : R.string.play));
         video.setKeepScreenOn(playing);
         mute.setImageResource(muted ? R.drawable.player_muted : R.drawable.player_volume);
-        mute.setContentDescription(muted ? "Unmute" : "Mute");
+        mute.setContentDescription(getString(muted ? R.string.unmute : R.string.mute));
         handler.removeCallbacks(tick);
         if (shown) {
             tick();

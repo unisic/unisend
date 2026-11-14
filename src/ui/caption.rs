@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use super::gallery::{MAX_QUEUED, MAX_SELECTED};
 use super::*;
 use crate::backend::caption as prepare;
+use crate::i18n::t;
 
 /// A sideways pan this long (px) turns the page.
 const PAN_PAGE: f32 = 48.;
@@ -43,7 +44,7 @@ pub(super) struct Preview {
 
 impl Preview {
     pub fn new(window: &mut Window, cx: &mut Context<BeeperApp>) -> Self {
-        let field = cx.new(|cx| InputState::new(window, cx).placeholder("Add a caption"));
+        let field = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Add a caption")));
         let subs = vec![cx.subscribe_in(&field, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { shift: false, .. } => this.send_preview(window, cx),
             InputEvent::Change => {
@@ -111,12 +112,12 @@ impl BeeperApp {
         self.uploads = self.uploads.saturating_sub(media.len());
         let p = &mut self.preview;
         if p.open && p.room.as_ref() != Some(room) {
-            self.error = Some("Finish the photos waiting to be sent first".into());
+            self.error = Some(t!("Finish the photos waiting to be sent first").into());
             cx.notify();
             return rest;
         }
         if p.entries.len() + media.len() > MAX_SELECTED {
-            self.error = Some(format!("At most {MAX_SELECTED} photos and videos at once").into());
+            self.error = Some(t!("At most {max} photos and videos at once", max = MAX_SELECTED).into());
             cx.notify();
             return rest;
         }
@@ -260,7 +261,7 @@ impl BeeperApp {
         let p = &mut self.preview;
         let Some(room) = p.room.clone().filter(|_| p.open && !p.entries.is_empty()) else { return };
         if self.attach_queue.len() + p.entries.len() > MAX_QUEUED {
-            self.error = Some("Too many attachments waiting, try again when these are sent".into());
+            self.error = Some(t!("Too many attachments waiting, try again when these are sent").into());
             return cx.notify();
         }
         let (hd, mut reply_to) = (p.hd, p.reply_to.take());
@@ -296,7 +297,7 @@ impl BeeperApp {
             .px(px(GUTTER - 10.))
             .justify_between()
             .child(round_button("preview-close", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| this.close_preview(true, window, cx))))
-            .child(div().text_size(fs(14.)).text_color(p.muted).when(count > 1, |el| el.child(format!("{} of {count}", pv.cur + 1))))
+            .child(div().text_size(fs(14.)).text_color(p.muted).when(count > 1, |el| el.child(t!("{index} of {count}", index = pv.cur + 1, count = count))))
             .child(
                 h_flex().h(px(TAP)).min_w(px(TAP)).flex_none().items_center().justify_end().when(any_photo, |el| {
                     el.child(

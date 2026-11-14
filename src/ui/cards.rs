@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::backend::{Place, Poll};
+use crate::i18n::{t, tn};
 
 impl BeeperApp {
     /// A touch on an answer: votes for it, or takes the vote back.
@@ -57,9 +58,8 @@ pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p
     });
     let rows: Vec<_> = rows.collect();
     let total = match voters {
-        0 => "No votes".to_owned(),
-        1 => "1 vote".to_owned(),
-        n => format!("{n} votes"),
+        0 => t!("No votes").to_owned(),
+        n => tn!(n, "{n} vote", "{n} votes"),
     };
     v_flex()
         .w(px(width.min(BUBBLE_W)))
@@ -67,7 +67,7 @@ pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p
         .child(div().text_size(fs(16.)).line_height(fs(22.)).font_weight(FontWeight::SEMIBOLD).child(poll.question.clone()))
         .children(rows)
         .child(div().text_size(fs(12.)).text_color(p.faint).child(total))
-        .when(!open, |el| el.child(div().text_size(fs(12.)).text_color(p.faint).child("Poll ended")))
+        .when(!open, |el| el.child(div().text_size(fs(12.)).text_color(p.faint).child(t!("Poll ended"))))
         .into_any_element()
 }
 

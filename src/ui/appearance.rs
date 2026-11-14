@@ -10,6 +10,7 @@ pub(super) use gpui_kit::component::slider::SliderEvent;
 
 use super::panels::row;
 use super::*;
+use crate::i18n::t;
 
 /// How large text is drawn, as a share of the design's sizes. Applies to every `fs` call.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -59,11 +60,11 @@ impl Wallpaper {
 
     fn label(self) -> &'static str {
         match self {
-            Self::None => "Black",
-            Self::Graphite => "Graphite",
-            Self::Slate => "Slate",
-            Self::Carbon => "Carbon",
-            Self::Photo => "Photo",
+            Self::None => t!("Black"),
+            Self::Graphite => t!("Graphite"),
+            Self::Slate => t!("Slate"),
+            Self::Carbon => t!("Carbon"),
+            Self::Photo => t!("Photo"),
         }
     }
 
@@ -235,7 +236,7 @@ impl BeeperApp {
                     }
                     Some(Err(e)) => {
                         log::warn!("wallpaper: {e}");
-                        this.look.error = Some("That picture could not be used.".into());
+                        this.look.error = Some(t!("That picture could not be used.").into());
                     }
                     None => {}
                 }
@@ -289,8 +290,8 @@ impl BeeperApp {
                 v_flex()
                     .p(px(GAP))
                     .gap(px(8.))
-                    .child(bubble("This is how messages look.", false))
-                    .child(h_flex().justify_end().child(bubble("And your replies.", true)))
+                    .child(bubble(t!("This is how messages look."), false))
+                    .child(h_flex().justify_end().child(bubble(t!("And your replies."), true)))
                     .child(div().flex().justify_end().text_size(fs(12.)).text_color(faint).child("12:41")),
             );
         let swatch = |id: &'static str, on: bool, fill: Div, cx: &mut Context<Self>, set: Wallpaper| {
@@ -319,7 +320,7 @@ impl BeeperApp {
         }
         if let Some(photo) = self.look.photo.clone() {
             let fill = div().child(img(photo).size_full().object_fit(ObjectFit::Cover));
-            swatches = swatches.child(swatch("Photo", self.settings.wallpaper == Wallpaper::Photo, fill, cx, Wallpaper::Photo));
+            swatches = swatches.child(swatch(t!("Photo"), self.settings.wallpaper == Wallpaper::Photo, fill, cx, Wallpaper::Photo));
         }
         let choose = h_flex()
             .id("choose-photo")
@@ -329,16 +330,16 @@ impl BeeperApp {
             .bg(p.raised)
             .cursor_pointer()
             .on_click(cx.listener(|this, _, window, cx| this.choose_photo(window, cx)))
-            .child(if self.look.importing { "Working…" } else if self.look.photo.is_some() { "Change photo" } else { "Choose photo" });
+            .child(if self.look.importing { t!("Working…") } else if self.look.photo.is_some() { t!("Change photo") } else { t!("Choose photo") });
         let mut rows = vec![
-            row("Text size", "Messages and the rest of the app.", cx).into_any_element(),
+            row(t!("Text size"), t!("Messages and the rest of the app."), cx).into_any_element(),
             div().pb(px(8.)).child(sizes).into_any_element(),
             div().pb(px(8.)).child(preview).into_any_element(),
-            row("Chat wallpaper", "One for all chats, with the dark theme.", cx).child(choose).into_any_element(),
+            row(t!("Chat wallpaper"), t!("One for all chats, with the dark theme."), cx).child(choose).into_any_element(),
             swatches.into_any_element(),
         ];
         if self.settings.wallpaper == Wallpaper::Photo && self.look.photo.is_some() {
-            rows.push(row("Dim photo", "", cx).into_any_element());
+            rows.push(row(t!("Dim photo"), "", cx).into_any_element());
             rows.push(div().pb(px(12.)).px(px(4.)).child(Slider::new(&self.look.dim)).into_any_element());
         }
         if let Some(e) = &self.look.error {

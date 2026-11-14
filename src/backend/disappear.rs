@@ -11,6 +11,7 @@ use matrix_sdk::{
     ruma::events::StateEventType,
 };
 use serde_json::{Value, json};
+use crate::i18n::{t, tn};
 
 pub const TIMER: &str = "com.beeper.disappearing_timer";
 const FEATURES: &str = "com.beeper.room_features";
@@ -112,17 +113,22 @@ async fn state(room: &Room, kind: &str) -> Vec<Value> {
 /// A timer as words: "30 seconds", "1 hour", "4 weeks", "90 days".
 pub fn label(ms: u64) -> String {
     if ms == 0 {
-        return "Off".to_owned();
+        return t!("Off").to_owned();
     }
-    let units = [(WEEK, "week"), (DAY, "day"), (HOUR, "hour"), (MINUTE, "minute"), (SECOND, "second")];
-    let (unit, name) = units.into_iter().find(|(unit, _)| ms.is_multiple_of(*unit)).unwrap_or((SECOND, "second"));
+    let unit = [WEEK, DAY, HOUR, MINUTE].into_iter().find(|unit| ms.is_multiple_of(*unit)).unwrap_or(SECOND);
     let n = (ms / unit).max(1);
-    format!("{n} {name}{}", if n == 1 { "" } else { "s" })
+    match unit {
+        WEEK => tn!(n, "{n} week", "{n} weeks"),
+        DAY => tn!(n, "{n} day", "{n} days"),
+        HOUR => tn!(n, "{n} hour", "{n} hours"),
+        MINUTE => tn!(n, "{n} minute", "{n} minutes"),
+        _ => tn!(n, "{n} second", "{n} seconds"),
+    }
 }
 
 /// A change of the timer as a line of the timeline; `None` when nothing changed. `actor` is who
 /// changed it, when that is known and someone in the chat.
-pub fn notice(content: &Value, prev: Option<&Value>, actor: Option<&str>) -> Option<String> {
+pub fn notice(content: &Value, prev: Option<&Value>, actor: Option<&str>, own: bool) -> Option<String> {
     let (ms, _) = timer(content);
     let before = prev.map(timer).map(|(ms, _)| ms);
     // A bridge sets the timer on every chat it creates; only one that is on is news then.
@@ -130,10 +136,12 @@ pub fn notice(content: &Value, prev: Option<&Value>, actor: Option<&str>) -> Opt
         return None;
     }
     Some(match (ms, actor) {
-        (0, Some(actor)) => format!("{actor} turned off disappearing messages"),
-        (0, None) => "Disappearing messages were turned off".to_owned(),
-        (ms, Some(actor)) => format!("{actor} set disappearing messages to {}", label(ms)),
-        (ms, None) => format!("Disappearing messages were set to {}", label(ms)),
+        (0, Some(_)) if own => t!("You turned off disappearing messages").to_owned(),
+        (0, Some(actor)) => t!("{actor} turned off disappearing messages", actor = actor),
+        (0, None) => t!("Disappearing messages were turned off").to_owned(),
+        (ms, Some(_)) if own => t!("You set disappearing messages to {time}", time = label(ms)),
+        (ms, Some(actor)) => t!("{actor} set disappearing messages to {time}", actor = actor, time = label(ms)),
+        (ms, None) => t!("Disappearing messages were set to {time}", time = label(ms)),
     })
 }
 
@@ -196,11 +204,11 @@ mod tests {
     fn changes_read_as_sentences() {
         let on = json!({ "type": "after_read", "timer": WEEK });
         let off = json!({});
-        assert_eq!(notice(&on, Some(&off), Some("Ann")).as_deref(), Some("Ann set disappearing messages to 1 week"));
-        assert_eq!(notice(&off, Some(&on), None).as_deref(), Some("Disappearing messages were turned off"));
-        assert_eq!(notice(&on, None, None).as_deref(), Some("Disappearing messages were set to 1 week"));
-        assert_eq!(notice(&off, None, Some("Ann")), None, "first setting, off");
-        assert_eq!(notice(&on, Some(&on), Some("Ann")), None, "no change");
+        assert_eq!(notice(&on, Some(&off), Some("Ann"), false).as_deref(), Some("Ann set disappearing messages to 1 week"));
+        assert_eq!(notice(&off, Some(&on), None, false).as_deref(), Some("Disappearing messages were turned off"));
+        assert_eq!(notice(&on, None, None, false).as_deref(), Some("Disappearing messages were set to 1 week"));
+        assert_eq!(notice(&off, None, Some("Ann"), false), None, "first setting, off");
+        assert_eq!(notice(&on, Some(&on), Some("Ann"), false), None, "no change");
     }
 
     #[test]

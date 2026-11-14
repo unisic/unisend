@@ -16,6 +16,7 @@ use gpui_kit::base::{Presence, PresencePhase, Transition, spring, transition};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
+use crate::i18n::{n_, t, tn, tr};
 use tokio::sync::mpsc;
 
 pub(crate) mod appearance;
@@ -55,7 +56,7 @@ use panels::Panel;
 
 use crate::{Keyboard, Palette};
 use crate::bridges::{Flow, Network, Step};
-use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, Quote, QuoteState, RoomSummary, UTD};
+use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, Quote, QuoteState, RoomSummary};
 
 const NARROW: f32 = 720.;
 // Metrics; `docs/design.md` gives the reasons.
@@ -142,10 +143,10 @@ enum Tab {
 }
 
 const TABS: [(Tab, &str, IconName); 4] = [
-    (Tab::Chats, "Chats", IconName::MessageCircle),
-    (Tab::Archive, "Archive", IconName::Archive),
-    (Tab::Networks, "Networks", IconName::Waypoints),
-    (Tab::Settings, "Settings", IconName::Settings),
+    (Tab::Chats, n_!("Chats"), IconName::MessageCircle),
+    (Tab::Archive, n_!("Archive"), IconName::Archive),
+    (Tab::Networks, n_!("Networks"), IconName::Waypoints),
+    (Tab::Settings, n_!("Settings"), IconName::Settings),
 ];
 
 #[derive(PartialEq)]
@@ -313,13 +314,13 @@ impl BeeperApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let cookie_paste = cx.new(|cx| InputState::new(window, cx).placeholder("Paste cookies or a cURL command"));
-        let email = cx.new(|cx| InputState::new(window, cx).placeholder("you@example.com"));
+        let cookie_paste = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Paste cookies or a cURL command")));
+        let email = cx.new(|cx| InputState::new(window, cx).placeholder(t!("you@example.com")));
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("123456"));
-        let recovery = cx.new(|cx| InputState::new(window, cx).placeholder("Recovery code"));
-        let composer = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search chats"));
-        let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji"));
+        let recovery = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Recovery code")));
+        let composer = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Message")));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search chats")));
+        let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search emoji")));
         let emoji_pick = emojipick::Picker::new(emoji_search.clone(), &dir);
 
         let mut subs = Vec::new();
@@ -501,7 +502,7 @@ impl BeeperApp {
     fn send(&mut self, cmd: Cmd, cx: &mut Context<Self>) -> bool {
         let ok = self.cmd.try_send(cmd).is_ok();
         if !ok {
-            self.error = Some("Still working on the previous request, try again".into());
+            self.error = Some(t!("Still working on the previous request, try again").into());
         }
         cx.notify();
         ok
@@ -671,7 +672,7 @@ impl BeeperApp {
                         self.seek = Some((id, pages - 1));
                         self.load_older(cx);
                     } else if more && pages > 0 {
-                        self.error = Some("That message is further back than this app looks.".into());
+                        self.error = Some(t!("That message is further back than this app looks.").into());
                     } else if !more {
                         // The last page's rows can arrive after this; they are looked through then.
                         self.seek = Some((id, 0));
@@ -737,7 +738,7 @@ impl BeeperApp {
     fn paste_recovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match crate::paste(cx) {
             Some(text) => self.recovery.update(cx, |r, cx| r.set_value(text.trim(), window, cx)),
-            None => self.error = Some("The clipboard has no text".into()),
+            None => self.error = Some(t!("The clipboard has no text").into()),
         }
         cx.notify();
     }
@@ -772,7 +773,7 @@ impl BeeperApp {
         let previews: Vec<_> = rows
             .iter()
             .filter(|r| !self.peeked.contains(&r.id))
-            .filter(|r| r.preview.as_deref().is_none_or(|p| !self.need_recovery && p.ends_with(UTD)))
+            .filter(|r| r.preview.as_deref().is_none_or(|p| !self.need_recovery && p.ends_with(crate::backend::utd())))
             .map(|r| r.id.clone())
             .collect();
         if !avatars.is_empty() && self.cmd.try_send(Cmd::Avatars(avatars.clone())).is_ok() {
@@ -1061,7 +1062,7 @@ impl BeeperApp {
             _ => IconName::File,
         };
         let detail = if self.fetching.contains(&m.id) {
-            "Downloading…".to_owned()
+            t!("Downloading…").to_owned()
         } else {
             match (media.duration, media.size) {
                 (Some(d), _) => length(d),
@@ -1091,7 +1092,7 @@ impl BeeperApp {
                     .min_w_0()
                     // Two lines, so a long file name keeps its extension in sight more often.
                     .child(div().line_clamp(2).text_ellipsis().text_size(fs(15.)).line_height(fs(20.)).child(match media.kind {
-                        MediaKind::Voice => "Voice message".to_owned(),
+                        MediaKind::Voice => t!("Voice message").to_owned(),
                         _ => media.name.clone(),
                     }))
                     .when(!detail.is_empty(), |el| el.child(div().text_size(fs(12.)).font_features(tabular()).opacity(0.7).child(detail))),
@@ -1193,9 +1194,9 @@ impl BeeperApp {
     fn render_login(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let on_code = self.screen == Screen::Code;
         let (title, hint, input, label) = if on_code {
-            ("Check your email", "Enter the code Beeper sent you.", &self.code, "Sign in")
+            (t!("Check your email"), t!("Enter the code Beeper sent you."), &self.code, t!("Sign in"))
         } else {
-            ("Sign in to Beeper", "We will email you a sign-in code.", &self.email, "Send code")
+            (t!("Sign in to Beeper"), t!("We will email you a sign-in code."), &self.email, t!("Send code"))
         };
         let p = Palette::of(cx);
         v_flex()
@@ -1224,7 +1225,7 @@ impl BeeperApp {
                             })),
                     )
                     .when(on_code, |el| {
-                        el.child(Button::new("login-back").ghost().label("Use a different email").on_click(
+                        el.child(Button::new("login-back").ghost().label(t!("Use a different email")).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.screen = Screen::Email;
                                 this.error = None;
@@ -1233,7 +1234,7 @@ impl BeeperApp {
                         ))
                     })
                     .when(!on_code, |el| {
-                        el.child(Button::new("login-matrix").ghost().label("Use another Matrix server").on_click(
+                        el.child(Button::new("login-matrix").ghost().label(t!("Use another Matrix server")).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.screen = Screen::Matrix;
                                 this.error = None;
@@ -1320,7 +1321,7 @@ impl BeeperApp {
                     }
                 })
                 .child(Icon::new(icon).size_5())
-                .child(label)
+                .child(tr(label))
         });
         if narrow {
             h_flex().flex_none().h(px(NAV_H)).border_t_1().border_color(p.rule).children(items)
@@ -1431,7 +1432,7 @@ impl BeeperApp {
                         let unread = room.is_unread();
                         let mark = |icon: IconName| Icon::new(icon).size_3p5().flex_none().text_color(p.faint);
                         // Nothing readable to preview: an undecrypted message says no more than "Message".
-                        let preview = room.preview.as_deref().filter(|p| !p.ends_with(UTD));
+                        let preview = room.preview.as_deref().filter(|p| !p.ends_with(crate::backend::utd()));
                         let meta = match (room.network.as_deref().map(short_network), short_time(room.ts)) {
                             (Some(network), time) if time.is_empty() => network.to_owned(),
                             (Some(network), time) => format!("{network} · {time}"),
@@ -1490,10 +1491,10 @@ impl BeeperApp {
                                                     .child(match this.drafts.get(&room.id) {
                                                         Some(draft) => h_flex()
                                                             .gap(px(4.))
-                                                            .child(div().flex_none().text_color(p.faint).child("Draft:"))
+                                                            .child(div().flex_none().text_color(p.faint).child(t!("Draft:")))
                                                             .child(div().flex_1().min_w_0().truncate().child(crate::emoji::styled(draft.replace('\n', " "), Vec::new())))
                                                             .into_any_element(),
-                                                        None => crate::emoji::styled(preview.unwrap_or("Message").to_owned(), Vec::new()).into_any_element(),
+                                                        None => crate::emoji::styled(preview.unwrap_or(t!("Message")).to_owned(), Vec::new()).into_any_element(),
                                                     }),
                                             )
                                             .when(room.pinned, |el| el.child(mark(IconName::Pin)))
@@ -1525,16 +1526,16 @@ impl BeeperApp {
         let archive = self.view == View::Archive;
         let has_query = !self.search.read(cx).value().trim().is_empty();
         let empty = if self.rooms.is_empty() {
-            "Syncing chats…"
+            t!("Syncing chats…")
         } else if has_query {
-            "No chat or message matches"
+            t!("No chat or message matches")
         } else if self.only_unread {
-            "Nothing unread"
+            t!("Nothing unread")
         } else {
             match self.view {
-                View::Inbox => "No chats here yet",
-                View::Archive => "Nothing archived",
-                View::LowPriority => "Nothing in low priority",
+                View::Inbox => t!("No chats here yet"),
+                View::Archive => t!("Nothing archived"),
+                View::LowPriority => t!("Nothing in low priority"),
             }
         };
         let top = if self.searching {
@@ -1553,7 +1554,7 @@ impl BeeperApp {
         } else {
             h_flex()
                 .flex_1()
-                .child(div().flex_1().child(screen_title(if archive { "Archive" } else { "Chats" })))
+                .child(div().flex_1().child(screen_title(if archive { t!("Archive") } else { t!("Chats") })))
                 .child(round_button("new-chat", IconName::Plus, cx).on_click(cx.listener(|this, _, window, cx| this.open_new_chat(window, cx))))
                 .child(round_button("search", IconName::Search, cx).on_click(cx.listener(|this, _, window, cx| {
                     this.set_searching(true, window, cx);
@@ -1561,9 +1562,9 @@ impl BeeperApp {
         };
         let waiting = self.rooms.iter().filter(|r| !r.archived && !r.low_priority && r.is_unread()).count();
         let filters = [
-            ("All", View::Inbox, false, 0),
-            ("Unread", View::Inbox, true, waiting),
-            ("Low priority", View::LowPriority, false, 0),
+            (t!("All"), View::Inbox, false, 0),
+            (t!("Unread"), View::Inbox, true, waiting),
+            (t!("Low priority"), View::LowPriority, false, 0),
         ]
         .map(|(label, view, only_unread, count)| {
             let on = self.view == view && self.only_unread == only_unread;
@@ -1659,7 +1660,7 @@ impl BeeperApp {
                 let joined = |a: &Msg, b: &Msg| b.kind == a.kind && a.from == b.from && b.ts.saturating_sub(a.ts) < RUN_PAUSE_MS;
                 let first = prev.is_none_or(|p| !joined(p, m));
                 let last = next.is_none_or(|n| !joined(m, n));
-                let faded = m.deleted || m.body == UTD;
+                let faded = m.deleted || m.body == crate::backend::utd();
                 // Where a run's bubbles meet, their corners on the sender's side are tighter; a picture
                 // keeps its round corners.
                 let joins = !pictured;
@@ -1794,7 +1795,7 @@ impl BeeperApp {
                     .children(link_card)
                     .children(poll_card)
                     .children(place_card)
-                    .when(m.edited && !m.deleted, |el| el.child(div().px(px(text_x)).text_size(fs(12.)).text_color(inside.faint).child("Edited")));
+                    .when(m.edited && !m.deleted, |el| el.child(div().px(px(text_x)).text_size(fs(12.)).text_color(inside.faint).child(t!("Edited"))));
                 // Badges pinned over the bubble's lower edge, ringed in the ground's colour: standing
                 // free under it they read as small messages of their own.
                 let reactions = (!m.reactions.is_empty()).then(|| {
@@ -1991,7 +1992,7 @@ impl BeeperApp {
                                 .justify_center()
                                 .text_size(fs(14.))
                                 .text_color(self.on_wallpaper(p.faint, cx))
-                                .child("Loading messages…")
+                                .child(t!("Loading messages…"))
                                 // Said only when the wait is long enough to notice.
                                 .with_animations(
                                     "loading",
@@ -2004,7 +2005,7 @@ impl BeeperApp {
             .when(!self.typing.is_empty(), |el| {
                 let names: Vec<&str> = self.typing.iter().map(String::as_str).collect();
                 let (who, many) = people(&names);
-                let line = format!("{who} {} typing…", if many { "are" } else { "is" });
+                let line = if many { t!("{who} are typing…", who = who) } else { t!("{who} is typing…", who = who) };
                 let faint = p.faint;
                 // An activity indicator may loop; at 24 frames a second it costs little while it lasts.
                 let pulse = Animation::new(Duration::from_millis(1200)).repeat().with_max_fps(24.);
@@ -2034,7 +2035,7 @@ impl BeeperApp {
             .children(self.render_compose_strip(window, cx))
             .children(self.render_mentions(cx))
             .when(self.uploads > 0, |el| {
-                el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(fs(12.)).text_color(p.faint).child("Sending attachment…"))
+                el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(fs(12.)).text_color(p.faint).child(t!("Sending attachment…")))
             })
             .child(
                 h_flex()
@@ -2145,14 +2146,14 @@ impl BeeperApp {
         let m = &self.msgs[ix];
         let (text, ink) = match &m.kind {
             Kind::Day => (day_label(m.ts), self.on_wallpaper(p.faint, cx)),
-            Kind::Unread => ("New messages".to_owned(), p.accent_ink),
+            Kind::Unread => (t!("New messages").to_owned(), p.accent_ink),
             Kind::Notice => (m.body.clone(), self.on_wallpaper(p.faint, cx)),
             // Joins that follow one another are told once, by the last of them.
             Kind::Joined if self.msgs.get(ix + 1).is_none_or(|next| next.kind != Kind::Joined) => {
                 let mut names: Vec<&str> =
                     self.msgs[..=ix].iter().rev().take(MAX_JOINED).take_while(|m| m.kind == Kind::Joined).map(|m| m.sender.as_str()).collect();
                 names.reverse();
-                (format!("{} joined", people(&names).0), self.on_wallpaper(p.faint, cx))
+                (tn!(names.len(), "{who} joined", "{who} joined", who = people(&names).0), self.on_wallpaper(p.faint, cx))
             }
             _ => return div().into_any_element(),
         };
@@ -2178,7 +2179,7 @@ impl BeeperApp {
             }
         }
         if let Delivery::Failed(why) = &state {
-            return Some((if why.is_empty() { "Not sent".to_owned() } else { format!("Not sent: {why}") }, true));
+            return Some((if why.is_empty() { t!("Not sent").to_owned() } else { t!("Not sent: {why}", why = why) }, true));
         }
         if self.tail != Some(ix) {
             return None;
@@ -2192,20 +2193,20 @@ impl BeeperApp {
         }
         if !readers.is_empty() {
             if dm {
-                return Some(("Seen".to_owned(), false));
+                return Some((t!("Seen").to_owned(), false));
             }
             let named: Vec<&str> =
                 readers.iter().filter_map(|user| self.msgs.iter().rev().find(|m| m.from == **user && !m.sender.is_empty())).map(|m| m.sender.as_str()).collect();
             let who = if named.len() == readers.len() { people(&named).0 } else { readers.len().to_string() };
-            return Some((format!("Seen by {who}"), false));
+            return Some((t!("Seen by {who}", who = who), false));
         }
         let waited = (chrono::Utc::now().timestamp_millis() as u64).saturating_sub(m.ts) > BRIDGE_WAIT_MS;
         Some((
             match state {
-                Delivery::Sending if m.id.starts_with('$') && waited => "Sent",
-                Delivery::Sending => "Sending…",
-                Delivery::Delivered => "Delivered",
-                Delivery::Sent | Delivery::Failed(_) => "Sent",
+                Delivery::Sending if m.id.starts_with('$') && waited => t!("Sent"),
+                Delivery::Sending => t!("Sending…"),
+                Delivery::Delivered => t!("Delivered"),
+                Delivery::Sent | Delivery::Failed(_) => t!("Sent"),
             }
             .to_owned(),
             false,
@@ -2353,10 +2354,10 @@ impl BeeperApp {
             let found = self.msgs.iter().find(|m| &m.id == id);
             let quote = found.map_or_else(|| Quote::unknown(id.clone(), QuoteState::Missing), Msg::quote);
             let (icon, title) = match (&self.compose, found) {
-                (Compose::Edit(_), _) => (Some(IconName::Pencil), "Editing".into()),
-                (_, Some(m)) if m.own => (None, "Replying to yourself".into()),
-                (_, Some(m)) => (None, format!("Replying to {}", m.sender).into()),
-                _ => (None, "Replying".into()),
+                (Compose::Edit(_), _) => (Some(IconName::Pencil), t!("Editing").into()),
+                (_, Some(m)) if m.own => (None, t!("Replying to yourself").into()),
+                (_, Some(m)) => (None, t!("Replying to {who}", who = m.sender).into()),
+                _ => (None, t!("Replying").into()),
             };
             (icon, title, quote)
         });
@@ -2414,7 +2415,7 @@ impl BeeperApp {
                         .justify_center()
                         .text_size(fs(12.))
                         .text_color(p.faint)
-                        .child("Connection lost. Reconnecting…"),
+                        .child(t!("Connection lost. Reconnecting…")),
                 )
             })
             .when(self.need_recovery, |el| {
@@ -2422,8 +2423,7 @@ impl BeeperApp {
                     card()
                         .bg(p.warning_bg)
                         .child(div().text_color(p.warning).child(
-                            "Encrypted messages are locked on this device. Copy your recovery code \
-                             from a device where you are signed in, then paste it here.",
+                            t!("Encrypted messages are locked on this device. Copy your recovery code from a device where you are signed in, then paste it here."),
                         ))
                         .child(div().w_full().child(Input::new(&self.recovery)))
                         .child(
@@ -2434,7 +2434,7 @@ impl BeeperApp {
                                     Button::new("paste-recovery")
                                         .h(px(TAP))
                                         .px(px(GUTTER))
-                                        .label("Paste")
+                                        .label(t!("Paste"))
                                         .on_click(cx.listener(|this, _, window, cx| this.paste_recovery(window, cx))),
                                 )
                                 .child(
@@ -2442,7 +2442,7 @@ impl BeeperApp {
                                         .primary()
                                         .h(px(TAP))
                                         .px(px(GUTTER))
-                                        .label("Unlock")
+                                        .label(t!("Unlock"))
                                         .loading(self.busy)
                                         .disabled(self.busy)
                                         .on_click(cx.listener(|this, _, window, cx| this.recover(window, cx))),
@@ -2463,7 +2463,7 @@ impl BeeperApp {
                             this.error = None;
                             cx.notify();
                         }))
-                        .child("Dismiss"),
+                        .child(t!("Dismiss")),
                 ))
             }))
     }
@@ -2521,21 +2521,21 @@ fn avatar(name: &str, image: Option<&Option<Arc<Image>>>, size: f32, cx: &App) -
 fn chat_actions(room: &RoomSummary) -> [(&'static str, IconName, ChatAction); 5] {
     [
         if room.is_unread() {
-            ("Mark as read", IconName::MailOpen, ChatAction::Unread(false))
+            (t!("Mark as read"), IconName::MailOpen, ChatAction::Unread(false))
         } else {
-            ("Mark as unread", IconName::Mail, ChatAction::Unread(true))
+            (t!("Mark as unread"), IconName::Mail, ChatAction::Unread(true))
         },
-        if room.pinned { ("Unpin", IconName::PinOff, ChatAction::Pin(false)) } else { ("Pin", IconName::Pin, ChatAction::Pin(true)) },
-        if room.muted { ("Unmute", IconName::Bell, ChatAction::Mute(false)) } else { ("Mute", IconName::BellOff, ChatAction::Mute(true)) },
+        if room.pinned { (t!("Unpin"), IconName::PinOff, ChatAction::Pin(false)) } else { (t!("Pin"), IconName::Pin, ChatAction::Pin(true)) },
+        if room.muted { (t!("Unmute"), IconName::Bell, ChatAction::Mute(false)) } else { (t!("Mute"), IconName::BellOff, ChatAction::Mute(true)) },
         if room.archived {
-            ("Unarchive", IconName::ArchiveRestore, ChatAction::Archive(false))
+            (t!("Unarchive"), IconName::ArchiveRestore, ChatAction::Archive(false))
         } else {
-            ("Archive", IconName::Archive, ChatAction::Archive(true))
+            (t!("Archive|verb"), IconName::Archive, ChatAction::Archive(true))
         },
         if room.low_priority {
-            ("Move to chats", IconName::Inbox, ChatAction::LowPriority(false))
+            (t!("Move to chats"), IconName::Inbox, ChatAction::LowPriority(false))
         } else {
-            ("Move to low priority", IconName::ChevronsDown, ChatAction::LowPriority(true))
+            (t!("Move to low priority"), IconName::ChevronsDown, ChatAction::LowPriority(true))
         },
     ]
 }
@@ -2545,10 +2545,10 @@ fn chat_actions(room: &RoomSummary) -> [(&'static str, IconName, ChatAction); 5]
 fn people(names: &[&str]) -> (String, bool) {
     match names {
         [] => (String::new(), false),
-        [one] => ((*one).to_owned(), *one == "You"),
-        [one, two] => (format!("{one} and {two}"), true),
-        [one, two, three] => (format!("{one}, {two} and {three}"), true),
-        [one, two, rest @ ..] => (format!("{one}, {two} and {} others", rest.len()), true),
+        [one] => ((*one).to_owned(), *one == t!("You")),
+        [one, two] => (t!("{one} and {two}", one = one, two = two), true),
+        [one, two, three] => (t!("{one}, {two} and {three}", one = one, two = two, three = three), true),
+        [one, two, rest @ ..] => (tn!(rest.len(), "{one}, {two} and {n} other", "{one}, {two} and {n} others", one = one, two = two), true),
     }
 }
 
@@ -2629,7 +2629,7 @@ fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, ins
     let lines = if heading.is_some() { 1 } else { 2 };
     let top = match heading {
         Some((icon, title)) => Some((icon, title)),
-        None => (q.state == QuoteState::Ready).then(|| (None, if q.own { "You".into() } else { SharedString::from(q.sender.clone()) })),
+        None => (q.state == QuoteState::Ready).then(|| (None, if q.own { t!("You").into() } else { SharedString::from(q.sender.clone()) })),
     };
     let top = top.map(|(icon, title)| {
         h_flex()
@@ -2641,14 +2641,14 @@ fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, ins
     });
     let quiet = |text: &'static str| line(14., 19.).italic().text_color(inside.faint).child(text);
     let body = match q.state {
-        QuoteState::Loading => line(14., 19.).text_color(inside.faint).child("Loading…").into_any_element(),
+        QuoteState::Loading => line(14., 19.).text_color(inside.faint).child(t!("Loading…")).into_any_element(),
         QuoteState::Missing => h_flex()
             .gap(px(4.))
             .text_color(inside.faint)
             .child(Icon::new(IconName::Unlink).size_3p5().flex_none())
-            .child(quiet("Message unavailable"))
+            .child(quiet(t!("Message unavailable")))
             .into_any_element(),
-        QuoteState::Ready if q.deleted => quiet("Message deleted").into_any_element(),
+        QuoteState::Ready if q.deleted => quiet(t!("Message deleted")).into_any_element(),
         QuoteState::Ready => {
             let (icon, text) = quote_label(q);
             h_flex()
@@ -2709,18 +2709,18 @@ fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, ins
 fn quote_label(q: &Quote) -> (Option<IconName>, String) {
     let or = |label: &str| if q.text.is_empty() { label.to_owned() } else { q.text.clone() };
     if q.poll {
-        return (Some(IconName::ChartBar), format!("Poll: {}", q.text));
+        return (Some(IconName::ChartBar), t!("Poll: {text}", text = q.text));
     }
     if q.place {
-        return (Some(IconName::MapPin), or("Location"));
+        return (Some(IconName::MapPin), or(t!("Location")));
     }
     let Some(media) = &q.media else { return (None, q.text.clone()) };
     match media.kind {
-        MediaKind::Image => (Some(IconName::Image), or("Photo")),
-        MediaKind::Video => (Some(IconName::Video), or("Video")),
-        MediaKind::Sticker => (Some(IconName::Sticker), or("Sticker")),
-        MediaKind::Voice => (Some(IconName::Mic), media.duration.map_or_else(|| "Voice message".to_owned(), |d| format!("Voice message \u{b7} {}", length(d)))),
-        MediaKind::Audio => (Some(IconName::Music), or(&format!("Audio \u{b7} {}", media.name))),
+        MediaKind::Image => (Some(IconName::Image), or(t!("Photo"))),
+        MediaKind::Video => (Some(IconName::Video), or(t!("Video"))),
+        MediaKind::Sticker => (Some(IconName::Sticker), or(t!("Sticker"))),
+        MediaKind::Voice => (Some(IconName::Mic), media.duration.map_or_else(|| t!("Voice message").to_owned(), |d| format!("{} \u{b7} {}", t!("Voice message"), length(d)))),
+        MediaKind::Audio => (Some(IconName::Music), or(&format!("{} \u{b7} {}", t!("Audio"), media.name))),
         MediaKind::File => (Some(IconName::File), or(&media.name)),
     }
 }
@@ -2871,11 +2871,10 @@ fn day_label(ts_ms: u64) -> String {
     let Some(t) = local(ts_ms) else { return String::new() };
     let today = Local::now().date_naive();
     match (today - t.date_naive()).num_days() {
-        0 => "Today".to_owned(),
-        1 => "Yesterday".to_owned(),
-        2..=6 => t.format("%A").to_string(),
-        _ if t.year() == today.year() => t.format("%-d %B").to_string(),
-        _ => t.format("%-d %B %Y").to_string(),
+        0 => t!("Today").to_owned(),
+        1 => t!("Yesterday").to_owned(),
+        2..=6 => crate::i18n::weekday(&t),
+        _ => crate::i18n::date(&t, t.year() != today.year()),
     }
 }
 
@@ -2891,9 +2890,9 @@ fn short_time(ts_ms: u64) -> String {
     let days = (today - t.date_naive()).num_days();
     let format = match days {
         0 => "%H:%M",
-        1 => return "Yesterday".to_owned(),
-        2..=6 => "%a",
-        _ if t.year() == today.year() => "%-d %b",
+        1 => return t!("Yesterday").to_owned(),
+        2..=6 => return crate::i18n::weekday_short(&t),
+        _ if t.year() == today.year() => return crate::i18n::date_short(&t),
         _ => "%-d.%m.%Y",
     };
     t.format(format).to_string()
@@ -2967,7 +2966,7 @@ impl Render for BeeperApp {
             Screen::Starting => root
                 .items_center()
                 .justify_center()
-                .child(div().text_size(fs(14.)).text_color(p.faint).child("Connecting…"))
+                .child(div().text_size(fs(14.)).text_color(p.faint).child(t!("Connecting…")))
                 .into_any_element(),
             Screen::Email | Screen::Code => root.child(self.render_login(cx)).into_any_element(),
             Screen::Matrix => root.child(self.render_matrix_login(cx)).into_any_element(),
@@ -3023,7 +3022,8 @@ impl Render for BeeperApp {
                                     .justify_center()
                                     .text_size(fs(14.))
                                     .text_color(p.faint)
-                                    .child("Choose a chat")
+                                    .child(t!("Choose a chat"))
+
                                     .into_any_element()
                             }))
                             .when(self.info_open() && beside, |el| el.child(div().w(px(info::INFO_W)).flex_none().h_full().child(self.render_info(true, window, cx))))

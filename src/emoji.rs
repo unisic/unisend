@@ -16,6 +16,7 @@ use std::sync::{Arc, OnceLock};
 use fontdb::{Database, Language, Source};
 
 use crate::Settings;
+use crate::i18n::t;
 
 const FILE: &str = "emoji-font";
 const PART: &str = "emoji-font.part";
@@ -195,13 +196,13 @@ fn faces(source: Source) -> Vec<(String, String)> {
 /// Copies the font at `src` into `dir` in place of any earlier choice and returns its family
 /// name, or a sentence saying why it cannot be used.
 pub(crate) fn import(src: &Path, dir: &Path) -> Result<String, String> {
-    let size = fs::metadata(src).map_err(|_| "The file cannot be read.".to_owned())?.len();
+    let size = fs::metadata(src).map_err(|_| t!("The file cannot be read.").to_owned())?.len();
     if size > LIMIT {
-        return Err("The file is larger than 300 MB.".into());
+        return Err(t!("The file is larger than 300 MB.").into());
     }
     let part = dir.join(PART);
     let made = place(src, &part).and_then(|()| prepare(&part));
-    let kept = made.and_then(|family| fs::rename(&part, path(dir)).map(|()| family).map_err(|_| "The font cannot be saved.".to_owned()));
+    let kept = made.and_then(|family| fs::rename(&part, path(dir)).map(|()| family).map_err(|_| t!("The font cannot be saved.").to_owned()));
     if kept.is_err() {
         let _ = fs::remove_file(&part);
     }
@@ -223,15 +224,15 @@ fn place(src: &Path, part: &Path) -> Result<(), String> {
     if fs::rename(src, part).is_ok() {
         return Ok(());
     }
-    fs::copy(src, part).map(drop).map_err(|_| "The file cannot be read.".to_owned())
+    fs::copy(src, part).map(drop).map_err(|_| t!("The file cannot be read.").to_owned())
 }
 
 fn prepare(part: &Path) -> Result<String, String> {
-    let not_font = || "Not a font file.".to_owned();
+    let not_font = || t!("Not a font file.").to_owned();
     let family = map(part).map_or_else(Vec::new, |map| faces(Source::Binary(map))).into_iter().next().map(|(family, _)| family).ok_or_else(not_font)?;
     let mut file = OpenOptions::new().read(true).write(true).open(part).map_err(|_| not_font())?;
     rename(&mut file)?;
-    file.sync_all().map_err(|_| "The font cannot be saved.".to_owned())?;
+    file.sync_all().map_err(|_| t!("The font cannot be saved.").to_owned())?;
     if !map(part).is_some_and(|map| usable(&map)) {
         return Err(not_font());
     }
@@ -262,7 +263,7 @@ fn write_at(file: &mut File, at: u64, bytes: &[u8]) -> std::io::Result<()> {
 /// it can be a requested fallback family: new `name` and `cmap` tables are appended and the
 /// face's table directory pointed at them. A collection keeps its first face.
 fn rename(file: &mut File) -> Result<(), String> {
-    let not_font = || "Not a font file.".to_owned();
+    let not_font = || t!("Not a font file.").to_owned();
     let io = |_| not_font();
     let head = read_at(file, 0, 16).map_err(io)?;
     let collection = head.starts_with(b"ttcf");
@@ -280,14 +281,14 @@ fn rename(file: &mut File) -> Result<(), String> {
     };
     if table(b"sbix").is_none() && (table(b"CBDT").is_none() || table(b"CBLC").is_none()) && !colr_v0 {
         return Err(if table(b"COLR").is_some() {
-            "This font's colour format (COLRv1) cannot be drawn yet. Choose one with bitmap emoji.".into()
+            t!("This font's colour format (COLRv1) cannot be drawn yet. Choose one with bitmap emoji.").into()
         } else {
-            "Not a colour emoji font.".into()
+            t!("Not a colour emoji font.").into()
         });
     }
     let (names, cmap) = (table(b"name").ok_or_else(not_font)?, table(b"cmap").ok_or_else(not_font)?);
     let renamed = renamed(&read_table(names)?).ok_or_else(not_font)?;
-    let with_m = with_m(&read_table(cmap)?).ok_or_else(|| "Not a colour emoji font.".to_owned())?;
+    let with_m = with_m(&read_table(cmap)?).ok_or_else(|| t!("Not a colour emoji font.").to_owned())?;
     for (r, bytes) in [(names, renamed), (cmap, with_m)] {
         append_table(file, u64::from(face) + 12 + r as u64, bytes).map_err(io)?;
     }
