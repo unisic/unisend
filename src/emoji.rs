@@ -43,15 +43,7 @@ pub(crate) fn apply(settings: &mut Settings, dir: &Path, cx: &mut gpui_kit::App)
         let _ = fs::remove_file(path(dir));
         return false;
     };
-    // Requesting the family drops every face of it (none has an 'm'): the bundled or system
-    // emoji font goes, and ours is the only one by that name.
-    let _ = cx.text_system().resolve_font(&gpui_kit::font(FAMILY));
-    if let Err(e) = cx.text_system().add_fonts(vec![bytes.into()]) {
-        log::warn!("emoji font: {e}");
-        return false;
-    }
-    let _ = CHAIN.set(gpui_kit::FontFallbacks::from_fonts(vec![FAMILY.into()]));
-    true
+    take_family(bytes, cx)
 }
 
 /// Adds the bundled copy (already named and given an 'm', see `assets/fonts/README`) and makes it
@@ -66,15 +58,21 @@ pub(crate) fn use_bundled(cx: &mut gpui_kit::App) {
     if has_cbdt(Path::new("/system/fonts/NotoColorEmoji.ttf")) {
         return;
     }
-    let bundled: &'static [u8] = include_bytes!("../assets/fonts/NotoColorEmoji.ttf");
-    // shortcut: leans on GPUI dropping faces without a Latin 'm' when a family is requested, which
-    // removes the system's face before ours is added; replace once GPUI can draw COLRv1.
-    let _ = cx.text_system().resolve_font(&gpui_kit::font(FAMILY));
-    if let Err(e) = cx.text_system().add_fonts(vec![bundled.into()]) {
+    take_family(include_bytes!("../assets/fonts/NotoColorEmoji.ttf"), cx);
+}
+
+/// Makes `bytes`, a face named FAMILY with an 'm', the only face of that family and the fallback
+/// chain. Added first: requesting the family then drops the other faces of it (none has an 'm')
+/// and still finds ours, where requesting a family with no face left would panic in GPUI.
+/// shortcut: leans on that dropping, which removes the system's face; replace once GPUI can draw COLRv1.
+fn take_family(bytes: &'static [u8], cx: &mut gpui_kit::App) -> bool {
+    if let Err(e) = cx.text_system().add_fonts(vec![bytes.into()]) {
         log::warn!("emoji font: {e}");
-        return;
+        return false;
     }
+    let _ = cx.text_system().resolve_font(&gpui_kit::font(FAMILY));
     let _ = CHAIN.set(gpui_kit::FontFallbacks::from_fonts(vec![FAMILY.into()]));
+    true
 }
 
 #[cfg(target_os = "android")]
