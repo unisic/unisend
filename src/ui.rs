@@ -33,6 +33,7 @@ mod pollnew;
 mod rich;
 mod signin;
 mod video;
+mod rooms;
 
 use std::path::PathBuf;
 
@@ -270,6 +271,8 @@ pub struct BeeperApp {
     peeked: HashSet<OwnedRoomId>,
     _subs: Vec<Subscription>,
     _events: Task<()>,
+    /// Leaving chats and starting new ones.
+    people: rooms::People,
 }
 
 impl BeeperApp {
@@ -437,6 +440,7 @@ impl BeeperApp {
             peeked: HashSet::new(),
             _subs: subs,
             _events: events,
+            people: Default::default(),
         }
     }
 
@@ -621,6 +625,7 @@ impl BeeperApp {
                 self.loading = false;
             }
             Ev::Contact(id, cards) => self.contacts.keep(id, cards),
+            Ev::People(answer) => self.on_people(answer, cx),
         }
         cx.notify();
     }
@@ -752,6 +757,7 @@ impl BeeperApp {
         let narrow = window.viewport_size().width < px(NARROW);
         if self.viewer.is_some() {
             self.close_viewer(cx);
+        } else if self.close_confirm(cx) {
         } else if self.menu_open() {
             self.close_menu(cx);
         } else if self.location.open {
@@ -1129,6 +1135,7 @@ impl BeeperApp {
     fn tab(&self) -> Tab {
         match (self.panel, self.view) {
             (Some(Panel::Settings), _) => Tab::Settings,
+            (Some(Panel::NewChat), _) => Tab::Chats,
             (Some(_), _) => Tab::Networks,
             (None, View::Archive) => Tab::Archive,
             (None, _) => Tab::Chats,
@@ -1429,6 +1436,7 @@ impl BeeperApp {
             h_flex()
                 .flex_1()
                 .child(div().flex_1().child(screen_title(if archive { "Archive" } else { "Chats" })))
+                .child(round_button("new-chat", IconName::Plus, cx).on_click(cx.listener(|this, _, window, cx| this.open_new_chat(window, cx))))
                 .child(round_button("search", IconName::Search, cx).on_click(cx.listener(|this, _, window, cx| {
                     this.set_searching(true, window, cx);
                 })))
@@ -2142,7 +2150,7 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let room = self.sheet_last.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id))?;
         let (id, title) = (room.id.clone(), room.name.clone());
-        let rows = chat_actions(room)
+        let mut rows: Vec<_> = chat_actions(room)
             .into_iter()
             .map(|(label, icon, action)| {
                 let id = id.clone();
@@ -2157,6 +2165,7 @@ impl BeeperApp {
                 }))
             })
             .collect();
+        rows.push(self.leave_row(id, live, cx));
         Some(self.sheet(title, rows, shown.progress, live, cx))
     }
 
@@ -2841,7 +2850,7 @@ impl Render for BeeperApp {
                 let panel = self.panel.map(|panel| self.render_panel(panel, narrow, window, cx));
                 let body = if narrow {
                     // One thing at a time; the destinations stay in reach wherever they lead.
-                    let deep = self.open.is_some() || self.searching || matches!(self.panel, Some(Panel::Add | Panel::Login));
+                    let deep = self.open.is_some() || self.searching || matches!(self.panel, Some(Panel::Add | Panel::Login | Panel::NewChat));
                     // Android's shared-axis move: a chat comes in from the right, the list returns
                     // from the left, each 32 px with a fade. The screen it replaces is already gone.
                     let shift = self.nav.filter(|&(_, push)| panel.is_none() && push == self.open.is_some()).and_then(|(at, push)| {
@@ -2906,6 +2915,7 @@ impl Render for BeeperApp {
                     .children(poll_form)
                     .children(viewer)
                     .children(heart)
+                    .children(self.render_confirm(window, cx))
                     .into_any_element()
             }
         }

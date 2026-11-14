@@ -129,7 +129,7 @@ pub struct Api {
 }
 
 impl Api {
-    async fn send(&self, method: Method, url: String, body: Option<Value>, timeout: Duration) -> Result<Value> {
+    pub(crate) async fn send(&self, method: Method, url: String, body: Option<Value>, timeout: Duration) -> Result<Value> {
         let mut request = self.http.request(method, &url).bearer_auth(&self.token).timeout(timeout);
         if let Some(body) = body {
             request = request.header("Content-Type", "application/json").body(body.to_string());

@@ -1066,3 +1066,122 @@ async fn a_chat_opens_at_once_after_the_store_lost_its_events() {
     // The SDK waits up to 3 s for a sync to tell it where the chat's history starts.
     assert!(took < Duration::from_secs(2), "the messages took {took:?}");
 }
+
+/// Answers of the New chat screen and of leaving, as the UI sees them.
+async fn people_answer(seat: &mut Seat, what: &str, secs: u64) -> rooms::Answer {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Some(Ev::People(answer)) = seat.next(what, deadline).await {
+            return answer;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn chats_are_started_reused_grouped_left_and_deleted() {
+    use rooms::{Answer, Ask, Target};
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-rooms-{tag}"));
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    let bob_id = bob.user_id().unwrap().to_string();
+    let in_list = |id: OwnedRoomId| move |e: Ev| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == id).then_some(()),
+        _ => None,
+    };
+
+    // A direct chat by MXID, then the same one again.
+    alice.handle(Cmd::People(Ask::Start { target: Target::Matrix, who: bob_id.clone() })).await.unwrap();
+    let Answer::Ready(dm) = people_answer(&mut seat, "the DM", 30).await else { panic!("no DM") };
+    wait_for(&mut seat, "the DM in the list", in_list(dm.clone())).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while alice.client().unwrap().get_dm_room(bob.user_id().unwrap()).is_none() {
+        assert!(tokio::time::Instant::now() < deadline, "m.direct never synced");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // Synapse's directory lists only people who share a room with the searcher, once they joined.
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    bob.join_room_by_id(&dm).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        alice.handle(Cmd::People(Ask::Find { target: Target::Matrix, query: format!("bob{tag}") })).await.unwrap();
+        let Answer::People { people, .. } = people_answer(&mut seat, "directory", 30).await else { panic!("no search answer") };
+        if people.iter().any(|p| p.id == bob_id) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "bob not found: {people:?}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    alice.handle(Cmd::People(Ask::Start { target: Target::Matrix, who: bob_id.clone() })).await.unwrap();
+    let Answer::Ready(again) = people_answer(&mut seat, "the DM again", 30).await else { panic!("no DM") };
+    assert_eq!(again, dm, "the existing DM is reused");
+
+    // A group with a name and Bob invited.
+    alice.handle(Cmd::People(Ask::Group { target: Target::Matrix, kind: String::new(), name: "Rooms test".into(), people: vec![bob_id.clone()] })).await.unwrap();
+    let Answer::Ready(group) = people_answer(&mut seat, "the group", 30).await else { panic!("no group") };
+    wait_for(&mut seat, "the group in the list", in_list(group.clone())).await;
+    let room = alice.client().unwrap().get_room(&group).unwrap();
+    assert_eq!(room.name().as_deref(), Some("Rooms test"));
+    let invited = room.members(RoomMemberships::INVITE).await.unwrap();
+    assert!(invited.iter().any(|m| m.user_id() == bob.user_id().unwrap()));
+
+    // Leaving: gone from the list at once, left and forgotten on the server.
+    alice.handle(Cmd::People(Ask::LeaveOptions(group.clone()))).await.unwrap();
+    assert!(matches!(people_answer(&mut seat, "leave options", 10).await, Answer::LeaveOptions { delete: false, .. }));
+    alice.handle(Cmd::People(Ask::Leave { room: group.clone(), delete: false })).await.unwrap();
+    wait_for(&mut seat, "the group gone", |e| matches!(e, Ev::RoomGone(id) if id == group).then_some(())).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while rooms::leaving(&group) {
+        assert!(tokio::time::Instant::now() < deadline, "the leave never finished");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let joined = alice.client().unwrap().send(joined_rooms::v3::Request::new()).await.unwrap().joined_rooms;
+    assert!(!joined.contains(&group) && joined.contains(&dm));
+    assert!(!alice.rooms.lock().unwrap().contains_key(&group));
+
+    // A chat whose bridge says it deletes chats: the event goes out, the user leaves when no
+    // bridge deletes the room. Here the user sets the bridge's state event themselves.
+    let dm_room = alice.client().unwrap().get_room(&dm).unwrap();
+    dm_room.send_state_event_raw("com.beeper.room_features", "test", serde_json::json!({ "delete_chat": true })).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        alice.handle(Cmd::People(Ask::LeaveOptions(dm.clone()))).await.unwrap();
+        if matches!(people_answer(&mut seat, "leave options", 10).await, Answer::LeaveOptions { delete: true, .. }) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "room features never synced");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    alice.handle(Cmd::People(Ask::Leave { room: dm.clone(), delete: true })).await.unwrap();
+    wait_for(&mut seat, "the DM gone", |e| matches!(e, Ev::RoomGone(id) if id == dm).then_some(())).await;
+    assert!(rooms::leaving(&dm), "kept out of the list while the bridge has its time");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    while rooms::leaving(&dm) {
+        assert!(tokio::time::Instant::now() < deadline, "never left after the delete");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let joined = alice.client().unwrap().send(joined_rooms::v3::Request::new()).await.unwrap().joined_rooms;
+    assert!(!joined.contains(&dm));
+    // The delete event reached the room, where a bridge reads it; Bob sees it, decrypted when his
+    // device got the key.
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    let messages = bob.get_room(&dm).unwrap().messages(MessagesOptions::backward()).await.unwrap();
+    let types: Vec<String> = messages.chunk.iter().filter_map(|e| e.raw().get_field::<String>("type").ok().flatten()).collect();
+    eprintln!("event types Bob sees: {types:?}");
+    assert!(types.iter().any(|t| t == "com.beeper.delete_chat" || t == "m.room.encrypted"), "{types:?}");
+
+    // Bob leaves too, so the server keeps nothing of this test in anyone's list.
+    for id in [&dm, &group] {
+        if let Some(r) = bob.get_room(id) {
+            let _ = r.leave().await;
+        }
+    }
+}
