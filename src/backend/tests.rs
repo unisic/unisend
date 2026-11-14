@@ -20,7 +20,7 @@ fn tag() -> String {
     format!("{ms}x{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
-fn jwt(secret: &str, sub: &str) -> String {
+pub(super) fn jwt(secret: &str, sub: &str) -> String {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
     let payload = URL_SAFE_NO_PAD.encode(serde_json::json!({ "sub": sub }).to_string());
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();

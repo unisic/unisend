@@ -61,7 +61,7 @@ is not started.
 | Reactions (show, add, remove) | part | `m.reaction`; Signal's six in a bar over the held message (touch) or from the react button beside it (pointer), a double tap for the heart (short pop at the finger, light tick on Android), the user's own reaction marked and taken back with a second touch. The + at the end of the bar opens the emoji picker for any other emoji. No custom emoji |
 | Deleted messages | done | `m.room.redaction`; stays a "Message deleted" row |
 | Images, stickers | done | inline thumbnail (800px at most), full-screen view (2048px); plain and encrypted |
-| Audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. No inline player |
+| Audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. Voice notes and audio play inside the bubble on Android (waveform, seek, 1×/1.5×/2×, one at a time); desktop shows the waveform and opens the system's player |
 | Video | part | thumbnail with play mark and length, a spinner while it downloads; on Android a tap plays it in the app's own full-screen player (play and pause, seek, mute, closes with back or a drag down, turns to the video's shape, immersive); bridged GIFs (`info` `fi.mau.gif` / `fi.mau.loop`) repeat without sound. Desktop opens it in the system's app. Not inline in the timeline, no autoplay |
 | Stickers, GIFs, custom emoji | todo | `m.sticker`, `fi.mau.gif`, `m.image_pack` |
 | Link previews | part | shows the preview that came with a message (`com.beeper.linkpreviews`); links are underlined and open in the browser. Does not make a preview for a link that has none, and attaches none to messages sent from here |
@@ -84,7 +84,7 @@ is not started.
 | Reply, edit, delete, copy | done | relations, redaction |
 | Forward | todo | new event in the target chat |
 | Attachments | part | files from the picker, any type, 100 MB at most; Photo and Video tiles in the attach sheet start the system camera (Android); photos and videos first open a preview (large items with paging, a caption per item as an MSC2530 body, remove, HD switch, Send). HD off scales pictures to 2048 px, JPEG q85, EXIF applied then dropped; HD on sends the original. Videos and GIFs always go as they are. No paste, drag and drop or thumbnail upload |
-| Voice notes | todo | `org.matrix.msc3245.voice` |
+| Voice notes | part | Android: hold the microphone to record, slide left to cancel, up to lock; Ogg Opus (AAC in MP4 before Android 10), 15 minutes at most; `m.audio` with `org.matrix.msc3245.voice` and `org.matrix.msc1767.audio` (ms, 64 samples 0 to 1024). Not on desktop |
 | Emoji / GIF / sticker pickers | part | emoji done: button in the composer swaps the keyboard for a panel (categories, search by name and shortcode, 32 recents, skin tone), also the sheet behind the reaction bar's +; GIFs from KLIPY (needs `KLIPY_API_KEY` at build time, else hidden): trending, debounced search, static previews, tap to send as `m.video` MP4 with `fi.mau.gif` (a GIF file `m.image` in Messenger and Instagram chats), no categories; sticker picker todo |
 | Formatting shortcuts, mentions autocomplete | part | Sending: CommonMark (bold, italics, `~~strike~~`, inline code, code blocks, quotes, lists, headings, http/https/mailto links) goes out as `formatted_body` HTML with a line break as `<br>`, as Element sends it; plain text stays body-only; typed HTML stays text. `@` in the composer lists the chat's members (picture and name, those who wrote lately first, narrowed as you type; tap, or Up/Down/Enter/Tab); a pick is one unit in the composer and leaves as a pill plus `m.mentions`, which the WhatsApp, Signal and Meta bridges turn into native mentions. Not yet: `@room`, keeping pills when an edit starts, toolbar or shortcuts for formatting |
 | Send later, undo send | todo | `com.beeper.is_scheduled`, local delay |
@@ -121,7 +121,7 @@ Verified in the source: typing, read receipts of others and membership changes a
 |---|---|---|---|---|---|
 | Replies, reactions, deletes | yes | yes | yes | yes | done |
 | Edits, mentions | no | yes | yes | yes | done |
-| Images, video, files, voice notes | yes | yes | yes | yes | shown; no inline player |
+| Images, video, files, voice notes | yes | yes | yes | yes | shown; voice notes recorded and played on Android, video in the app's own player on Android; no inline video |
 | Polls and votes | yes | yes | groups | no | shown, vote, create, end |
 | Locations | yes | to Signal only | from Messenger only | no | shown with coordinates, opens in maps; sent from Android: WhatsApp gets a location, Signal a map link as text, Messenger may refuse, Instagram cannot (the sheet says so first) |
 | Contact cards | from WhatsApp | from Signal | no | no | not checked |
@@ -143,7 +143,7 @@ them was taken from its desktop bundle, and the state events were checked agains
 
 1. Message requests labelled and accepted, Matrix invitations. M.
 2. Typing in the chat list, per-message read state. S.
-3. Inline playback for voice notes, audio and video, and recording voice notes. M each.
+3. Inline video playback. M.
 4. Creating and ending polls, sending a location. S each.
 5. Mentions autocomplete; forward; paste and drag and drop attachments. S each.
 6. Disappearing-message timer shown. S.

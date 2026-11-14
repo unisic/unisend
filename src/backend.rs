@@ -162,6 +162,8 @@ pub enum Cmd {
     Members(OwnedRoomId),
     /// A photo or video from the preview: with its caption, and as the original when `hd`.
     AttachMedia { room: OwnedRoomId, path: PathBuf, reply_to: Option<String>, caption: String, hd: bool },
+    /// A recording to send as a voice message; `levels` are its loudness, 0 to 1, per tick.
+    Voice { room: OwnedRoomId, path: PathBuf, duration: Duration, levels: Vec<f32>, reply_to: Option<String> },
 }
 
 pub enum Ev {
@@ -487,6 +489,8 @@ pub struct Media {
     thumb: Option<MediaSource>,
     /// A video the sender's network plays as a GIF: on repeat, without sound.
     pub looped: bool,
+    /// A voice message's loudness as `voice::BARS` heights, 0 to 255; empty when it has none.
+    pub waveform: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -1237,6 +1241,21 @@ impl State {
                         Ok(list) => drop(ev.send(Ev::Members { room: room_id, list }).await),
                         Err(e) => log::warn!("members of {room_id}: {e:#}"),
                     }
+                });
+            }
+            Cmd::Voice { room, path, duration, levels, reply_to } => {
+                // Sent through the attachment queue: `Attached` follows it as well.
+                let room = self.room(&room);
+                let ev = self.ev.clone();
+                tokio::spawn(async move {
+                    let sent = match room {
+                        Ok(room) => voice::send(&room, &path, duration, levels, reply_to).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = sent {
+                        let _ = ev.send(Ev::Error(format!("Voice message not sent: {e:#}"))).await;
+                    }
+                    let _ = ev.send(Ev::Attached).await;
                 });
             }
         }
@@ -2044,6 +2063,7 @@ fn sticker(content: &StickerEventContent) -> Media {
         source: content.source.clone().into(),
         thumb: info.thumbnail_source.clone(),
         looped: false,
+        waveform: Vec::new(),
     }
 }
 
@@ -2098,6 +2118,7 @@ fn link_preview(content: &serde_json::Value) -> Option<Link> {
             source,
             thumb: None,
             looped: false,
+            waveform: Vec::new(),
         });
         Some(Link { url, title, description, site, image })
     })
@@ -2349,6 +2370,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
                 looped: false,
+                waveform: Vec::new(),
             }
         }
         MessageType::Video(c) => {
@@ -2363,6 +2385,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
                 looped: false,
+                waveform: Vec::new(),
             }
         }
         MessageType::Audio(c) => {
@@ -2373,10 +2396,12 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 size: info.and_then(|i| i.size).map(Into::into),
                 mime: info.and_then(|i| i.mimetype.clone()),
                 dims: None,
-                duration: info.and_then(|i| i.duration),
+                // Bridges may fill in only the MSC1767 block.
+                duration: info.and_then(|i| i.duration).or(c.audio.as_ref().map(|a| a.duration)),
                 source: c.source.clone(),
                 thumb: None,
                 looped: false,
+                waveform: c.audio.as_ref().map(|a| voice::bars(a.waveform.iter().map(|v| v.get().into()))).unwrap_or_default(),
             }
         }
         MessageType::File(c) => {
@@ -2391,6 +2416,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
                 looped: false,
+                waveform: Vec::new(),
             }
         }
         other => return (None, other.body().to_owned()),
@@ -2427,6 +2453,7 @@ mod export;
 pub use export::Export;
 
 mod mentions;
+pub(crate) mod voice;
 
 #[cfg(test)]
 mod tests;
