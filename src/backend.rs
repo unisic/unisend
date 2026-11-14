@@ -141,6 +141,10 @@ pub enum Cmd {
     Retry { room: OwnedRoomId, target: String },
     /// Sends the user's position as an `m.location` message.
     SendLocation { room: OwnedRoomId, lat: f64, lon: f64, accuracy: Option<f64>, reply_to: Option<String> },
+    /// Starts a poll; `answers` are checked again before they go out.
+    SendPoll { room: OwnedRoomId, question: String, answers: Vec<String>, multiple: bool },
+    /// Ends the user's own poll.
+    EndPoll { room: OwnedRoomId, target: String },
 }
 
 pub enum Ev {
@@ -1140,6 +1144,14 @@ impl State {
                     },
                     None => drop(self.room(&room)?.send_queue().send(RoomMessageEventContent::from(place).into()).await?),
                 }
+            }
+            Cmd::SendPoll { room, question, answers, multiple } => {
+                let (kind, content) = pollnew::NewPoll::check(&question, &answers, multiple).map_err(anyhow::Error::msg)?.event();
+                self.room(&room)?.send_raw(kind, content).await?;
+            }
+            Cmd::EndPoll { room, target } => {
+                let (kind, content) = pollnew::end(&target);
+                self.room(&room)?.send_raw(kind, content).await?;
             }
         }
         Ok(())
@@ -2284,6 +2296,8 @@ mod rich;
 pub use rich::{Block, Rich, Run};
 pub use location::support as location_support;
 pub use polls::{Place, Poll};
+pub(crate) mod pollnew;
+pub use pollnew::NewPoll;
 
 mod timeline;
 

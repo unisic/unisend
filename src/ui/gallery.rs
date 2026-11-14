@@ -513,6 +513,22 @@ impl BeeperApp {
                     .child(
                         h_flex()
                             .gap(px(4.))
+                            .child(
+                        h_flex()
+                            .id("gallery-poll")
+                            .h(px(TAP))
+                            .px(px(12.))
+                            .gap(px(8.))
+                            .flex_none()
+                            .rounded_full()
+                            .text_size(px(14.))
+                            .text_color(p.text)
+                            .cursor_pointer()
+                            .active(|el| el.bg(p.raised))
+                            .child(Icon::new(IconName::ChartBar).size_4())
+                            .child("Poll")
+                            .when(live, |el| el.on_click(cx.listener(|this, _, window, cx| this.open_poll_form(window, cx))))
+                            )
                             .when(super::location::enabled(), |el| {
                                 el.child(
                                     h_flex()

@@ -25,6 +25,7 @@ mod location;
 mod menu;
 pub(crate) mod motion;
 mod panels;
+mod pollnew;
 mod rich;
 mod signin;
 
@@ -230,6 +231,7 @@ pub struct BeeperApp {
     /// The attach sheet's photos and videos.
     gallery: gallery::Gallery,
     location: location::Locate,
+    poll_form: pollnew::Form,
     /// Attachments waiting for the one uploading now, so a batch keeps its order.
     attach_queue: VecDeque<Cmd>,
     attaching: bool,
@@ -386,6 +388,7 @@ impl BeeperApp {
             chat_sheet: None,
             gallery: gallery::Gallery::default(),
             location: location::Locate::default(),
+            poll_form: pollnew::Form::default(),
             attach_queue: VecDeque::new(),
             attaching: false,
             sheet_last: None,
@@ -714,6 +717,7 @@ impl BeeperApp {
             self.close_menu(cx);
         } else if self.location.open {
             self.close_location(cx);
+        } else if self.close_poll_form(cx) {
         } else if self.gallery.open {
             self.close_gallery(cx);
         } else if self.chat_sheet.take().is_some() {
@@ -2810,12 +2814,14 @@ impl Render for BeeperApp {
                 let gallery = self.render_gallery(window, cx);
                 let heart = self.render_heart(window, cx);
                 let location = self.render_location(window, cx);
+                let poll_form = self.render_poll_form(window, cx);
                 root.relative()
                     .child(self.render_banners(window, cx))
                     .child(div().flex_1().min_h_0().child(body))
                     .children(sheet)
                     .children(gallery)
                     .children(location)
+                    .children(poll_form)
                     .children(viewer)
                     .children(heart)
                     .into_any_element()

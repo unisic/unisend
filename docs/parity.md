@@ -64,7 +64,7 @@ is not started.
 | Formatted text, mentions, code blocks | part | `formatted_body` (HTML) drawn: bold, italics, strikethrough, underline, links with their own text, quotes, code blocks, lists; previews and notifications read its plain text. Mentions are drawn in the accent, a message that mentions the user is marked, and the chat list shows an `@` (counted locally, a server cannot see into encrypted rooms). Inline code is tinted, not monospace; spoilers are plain text; formatted captions under media are not read |
 | Send state (sending, sent, delivered, seen, failed) | done | a message shows at once and is sent from a queue that survives being offline and restarts; a failed one can be sent again or dropped. Under the newest own message: Sending, Sent, Delivered (`com.beeper.message_send_status` with `delivered_to_users`), Seen (`m.receipt`), or the failure with the bridge's reason |
 | Read receipts of others, typing | part | "Seen" in a one-to-one chat, "Seen by ..." in a group; who is typing in the open chat, and the user's own typing is sent unless incognito is on (Beeper keeps sending it and asks separately). No per-message receipts, no typing in the chat list |
-| Polls, locations, contacts | part | polls of the `org.matrix.msc3381` types (what bridges send) are shown with their votes, counted by the SDK, and can be voted on; the stable `m.poll.*` types only reach the chat list's preview. Locations show a card with coordinates that opens in maps (Android: the maps app; elsewhere OpenStreetMap). Sending the current location is built on Android (attach sheet, Location: one fix, preview card with accuracy, `m.location` with `geo_uri` and MSC3488 fields). Polls cannot be created; contact cards are not handled |
+| Polls, locations, contacts | part | polls of the `org.matrix.msc3381` types (what bridges send) are shown with their votes, counted by the SDK, and can be voted on; the stable `m.poll.*` types only reach the chat list's preview. A poll is made from the attach sheet's Poll entry (question, 2 to 20 options, one or several answers; 140 characters each, the Messenger limit) and the user's own open polls end from the message menu. Locations show a card with coordinates that opens in maps (Android: the maps app; elsewhere OpenStreetMap). Sending the current location is built on Android (attach sheet, Location: one fix, preview card with accuracy, `m.location` with `geo_uri` and MSC3488 fields). Polls cannot be created; contact cards are not handled |
 | Threads | todo | `m.thread` |
 | Disappearing messages | todo | `com.beeper.disappearing_timer` |
 | Search in chat, media gallery, bookmarks | todo | `com.beeper.bookmark`, `com.beeper.gallery` |
@@ -117,7 +117,7 @@ Verified in the source: typing, read receipts of others and membership changes a
 | Replies, reactions, deletes | yes | yes | yes | yes | done |
 | Edits, mentions | no | yes | yes | yes | done |
 | Images, video, files, voice notes | yes | yes | yes | yes | shown; no inline player |
-| Polls and votes | yes | yes | groups | no | shown, vote; not created |
+| Polls and votes | yes | yes | groups | no | shown, vote, create, end |
 | Locations | yes | to Signal only | from Messenger only | no | shown with coordinates, opens in maps; sent from Android: WhatsApp gets a location, Signal a map link as text, Messenger may refuse, Instagram cannot (the sheet says so first) |
 | Contact cards | from WhatsApp | from Signal | no | no | not checked |
 | Disappearing messages | no | yes | no | no | timer not shown |

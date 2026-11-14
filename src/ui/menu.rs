@@ -105,6 +105,7 @@ enum Act {
     Edit,
     Copy(String),
     Delete,
+    EndPoll,
 }
 
 impl Act {
@@ -117,6 +118,7 @@ impl Act {
             Act::Edit => ("act-edit", IconName::Pencil, "Edit"),
             Act::Copy(_) => ("act-copy", IconName::Copy, "Copy text"),
             Act::Delete => ("act-delete", IconName::Trash, "Delete"),
+            Act::EndPoll => ("act-end-poll", IconName::Check, "End poll"),
         }
     }
 }
@@ -131,6 +133,7 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
     // An edit sends text: a picture, poll or place edited this way would turn into text.
     let editable = m.own && sent && m.media.is_none() && m.poll.is_none() && m.place.is_none() && !m.deleted;
     let link = m.link.as_ref().map(|link| link.url.clone()).or_else(|| urls(&m.body).into_iter().next().map(|r| m.body[r].to_owned()));
+    let ends = m.own && sent && !m.deleted && m.poll.as_ref().is_some_and(|p| p.ended.is_none());
     let mut out = Vec::new();
     if kind == MenuKind::Touch {
         out.extend(sent.then_some(Act::Reply));
@@ -138,6 +141,7 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
         out.extend((!sent && failed).then_some(Act::Retry));
         out.extend(link.map(Act::Link));
         out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
+        out.extend(ends.then_some(Act::EndPoll));
         out.extend(m.own.then_some(Act::Delete));
     } else {
         if extra && sent {
@@ -146,6 +150,7 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
         out.extend(link.map(Act::Link));
         out.extend(editable.then_some(Act::Edit));
         out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
+        out.extend(ends.then_some(Act::EndPoll));
         out.extend(m.own.then_some(Act::Delete));
         out.extend((!sent && failed).then_some(Act::Retry));
     }
@@ -554,6 +559,11 @@ impl BeeperApp {
             Act::Delete => {
                 if let Some(room) = self.open.clone() {
                     self.send(Cmd::Delete { room, target: id.to_owned() }, cx);
+                }
+            }
+            Act::EndPoll => {
+                if let Some(room) = self.open.clone() {
+                    self.send(Cmd::EndPoll { room, target: id.to_owned() }, cx);
                 }
             }
             Act::Link(url) => crate::open_link(cx, &url),

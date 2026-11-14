@@ -326,6 +326,14 @@ async fn login_sync_decrypt_send_recover() {
     alice2.handle(Cmd::Delete { room: room.clone(), target: reply_id.clone() }).await.unwrap();
     until(&mut alice2_rx, "the deletion", |rows| rows.iter().any(|m| m.id == reply_id && m.deleted)).await;
     preview_is(format!("You: {DELETED}")).await;
+    // A poll: it starts with its answers, then ends.
+    let answers = vec!["Pizza".to_owned(), "Soup".to_owned()];
+    alice2.handle(Cmd::SendPoll { room: room.clone(), question: "Lunch?".into(), answers, multiple: false }).await.unwrap();
+    let open_poll = |m: &&Msg| m.own && m.poll.as_ref().is_some_and(|p| p.question == "Lunch?" && p.answers.len() == 2 && p.ended.is_none());
+    until(&mut alice2_rx, "the poll", |rows| rows.iter().any(|m| open_poll(&m))).await;
+    let poll_id = alice2_rx.rows.iter().find(open_poll).unwrap().id.clone();
+    alice2.handle(Cmd::EndPoll { room: room.clone(), target: poll_id.clone() }).await.unwrap();
+    until(&mut alice2_rx, "the poll ended", |rows| rows.iter().any(|m| m.id == poll_id && m.poll.as_ref().is_some_and(|p| p.ended.is_some()))).await;
     // Media: a picture sent to an encrypted room comes back with its shape, a thumbnail and a
     // viewing copy no larger than their limits, and downloads byte for byte.
     let picture = root.join("holiday photo.png");
