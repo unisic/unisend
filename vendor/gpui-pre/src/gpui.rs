@@ -25,6 +25,7 @@ mod platform_scheduler;
 pub(crate) use platform_scheduler::PlatformScheduler;
 mod geometry;
 mod gestures;
+// murmur patch: two-finger pinch on touch screens, see vendor/gpui-pre/PATCHES.md
 mod pinch_tracker;
 mod global;
 mod input;

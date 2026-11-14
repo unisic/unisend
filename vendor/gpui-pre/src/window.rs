@@ -1220,6 +1220,7 @@ pub struct Window {
     window_profiler: profiler::WindowProfiler,
     last_input_modality: InputModality,
     touch_gestures: TouchGestureRecognizer,
+    // murmur patch: two-finger pinch on touch screens, see vendor/gpui-pre/PATCHES.md
     pinch_tracker: crate::pinch_tracker::PinchTracker,
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
@@ -5636,6 +5637,7 @@ impl Window {
         if !self.touch_prediction_enabled {
             event.predicted_position = None;
         }
+        // murmur patch: two-finger pinch on touch screens, see vendor/gpui-pre/PATCHES.md
         if let Some(pinch) = self.pinch_tracker.handle_event(&event) {
             cx.propagate_event = true;
             self.dispatch_mouse_event(&pinch, cx);

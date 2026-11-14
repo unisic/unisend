@@ -1,3 +1,4 @@
+// murmur patch: new file, see vendor/gpui-pre/PATCHES.md
 //! Two fingers on the screen as a pinch. The touch recognizer ignores a second contact, so the
 //! window feeds every raw touch here as well and gets [`PinchEvent`]s back, the same events a
 //! trackpad pinch produces.

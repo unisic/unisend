@@ -12,6 +12,15 @@ Changes, all in `src/text_system/line_wrapper.rs` and marked `murmur patch`:
 - removed `[[example]]` and `[[test]]` sections and the examples, tests, docs and Cargo.lock
   files (not vendored); `autoexamples`/`autotests`/`autobenches` are already false
 
+Touch pinch: upstream's touch recognizer ignores a second contact, so a two-finger pinch on a
+touch screen never becomes a `PinchEvent` (only trackpads send one). Changes, marked `murmur patch`:
+
+- new `src/pinch_tracker.rs`: follows at most two contacts and turns their distance into
+  `PinchEvent`s (Started, Moved with the relative change, Ended/Cancelled)
+- `src/gpui.rs`: `mod pinch_tracker`
+- `src/window.rs`: a `pinch_tracker` field, and every raw touch is fed to it before the gesture
+  recognizer; a resulting pinch is dispatched like a trackpad pinch
+
 Re-apply on upgrade: copy the new crate into this directory, repeat the above
 (`grep -rn "murmur patch" vendor/gpui-pre`), bump the `gpui-pre =` pin consumers, or drop the
 vendor dir and the `[patch.crates-io]` entry once upstream cuts on grapheme boundaries.
