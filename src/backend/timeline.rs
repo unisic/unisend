@@ -127,7 +127,8 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
                 let quotes: Vec<OwnedEventId> =
                     batch.iter().flat_map(touched).filter_map(unknown_quote).filter(|id| asked.len() < MAX_QUOTES_FETCHED && asked.insert(id.clone())).collect();
                 let sessions: Vec<String> = batch.iter().flat_map(touched).filter_map(|item| locked(item)).filter(|s| !keyed.contains(s)).collect();
-                let diffs = batch.into_iter().map(|diff| diff.map(|item| row(&item, &viewer))).collect();
+                let diffs: Vec<_> = batch.into_iter().map(|diff| diff.map(|item| row(&item, &viewer))).collect();
+                super::search::rows(&id, &diffs).await;
                 if ev.send(Ev::Timeline { room: id.clone(), diffs }).await.is_err() {
                     break;
                 }

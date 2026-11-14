@@ -831,6 +831,7 @@ dependencies = [
  "memmap2",
  "mime_guess",
  "qrcode",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha1",
