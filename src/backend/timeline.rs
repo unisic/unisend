@@ -384,7 +384,7 @@ fn fill(m: &mut Msg, kind: &MsgLikeKind, own: &UserId) {
             // The place's description is told with the place.
             m.body = if m.place.is_some() { String::new() } else { text };
             format(m, message.msgtype());
-            (m.mentions, m.mentioned) = marks(&m.body, message.msgtype(), message.mentions(), own);
+            (m.mentions, m.mentioned, m.to_me) = marks(&m.body, message.msgtype(), message.mentions(), own);
             m.mentioned &= !m.own;
             m.edited = message.is_edited();
         }

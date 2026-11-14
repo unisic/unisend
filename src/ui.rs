@@ -22,6 +22,7 @@ mod cards;
 mod gallery;
 mod heart;
 mod location;
+mod mentions;
 mod menu;
 pub(crate) mod motion;
 mod panels;
@@ -230,6 +231,8 @@ pub struct BeeperApp {
     /// The attach sheet's photos and videos.
     gallery: gallery::Gallery,
     location: location::Locate,
+    /// The `@` list over the composer.
+    mention: mentions::Mentions,
     /// Attachments waiting for the one uploading now, so a batch keeps its order.
     attach_queue: VecDeque<Cmd>,
     attaching: bool,
@@ -293,6 +296,7 @@ impl BeeperApp {
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {
                 this.typed(cx);
+                this.mention_typed(cx);
             }
         }));
         subs.push(cx.subscribe_in(&search, window, |this, _, ev: &InputEvent, _, cx| match ev {
@@ -386,6 +390,7 @@ impl BeeperApp {
             chat_sheet: None,
             gallery: gallery::Gallery::default(),
             location: location::Locate::default(),
+            mention: mentions::Mentions::default(),
             attach_queue: VecDeque::new(),
             attaching: false,
             sheet_last: None,
@@ -580,6 +585,7 @@ impl BeeperApp {
                 self.busy = false;
                 self.loading = false;
             }
+            Ev::Members { room, list } => self.members_arrived(room, list, cx),
         }
         cx.notify();
     }
@@ -674,6 +680,11 @@ impl BeeperApp {
     }
 
     fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Enter picks from the list on a keyboard; on a phone the list is tapped and Send sends.
+        if self.mention.open() && !gpui_kit::is_mobile() {
+            self.pick_mention(self.mention.selected, window, cx);
+            return;
+        }
         let body = self.composer.read(cx).value().trim().to_string();
         let Some(room) = self.open.clone() else { return };
         if body.is_empty() {
@@ -684,7 +695,8 @@ impl BeeperApp {
             Compose::Reply(id) => (Some(id), None),
             Compose::Edit(id) => (None, Some(id)),
         };
-        if self.send(Cmd::Send { room, body, reply_to, edit }, cx) {
+        let mentions = self.picked_mentions(cx);
+        if self.send(Cmd::Send { room, body, reply_to, edit, mentions }, cx) {
             self.compose = Compose::New;
             self.composer.update(cx, |c, cx| c.set_value("", window, cx));
         }
@@ -716,6 +728,9 @@ impl BeeperApp {
             self.close_location(cx);
         } else if self.gallery.open {
             self.close_gallery(cx);
+        } else if self.mention.open() {
+            self.mention.close();
+            cx.notify();
         } else if self.chat_sheet.take().is_some() {
             cx.notify();
         } else if self.compose != Compose::New {
@@ -977,6 +992,7 @@ impl BeeperApp {
 
     fn close_room(&mut self, cx: &mut Context<Self>) {
         self.close_gallery(cx);
+        self.mention = mentions::Mentions::default();
         if let Some(room) = self.open.take() {
             if self.typing_sent.take().is_some() {
                 let _ = self.cmd.try_send(Cmd::Typing(room, false));
@@ -1509,7 +1525,9 @@ impl BeeperApp {
                 let inside = inside_of(m, p);
                 let ink = HighlightStyle { color: Some(inside.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
                 let underline = HighlightStyle { underline: Some(UnderlineStyle { thickness: px(1.), ..Default::default() }), ..Default::default() };
-                let mut marks: Vec<_> = m.mentions.iter().map(|r| (r.clone(), ink)).collect();
+                // The accent is for what addresses the user; a mention of someone else is only bold.
+                let bold = HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
+                let mut marks: Vec<_> = m.mentions.iter().map(|r| (r.clone(), if m.mentioned && m.to_me.contains(r) { ink } else { bold })).collect();
                 let apart = |u: &std::ops::Range<usize>| m.mentions.iter().all(|r| r.end <= u.start || u.end <= r.start);
                 marks.extend(urls(&m.body).into_iter().filter(apart).map(|r| (r, underline)));
                 marks.sort_by_key(|(r, _)| r.start);
@@ -1804,6 +1822,7 @@ impl BeeperApp {
                 )
             })
             .children(self.render_compose_strip(window, cx))
+            .children(self.render_mentions(cx))
             .when(self.uploads > 0, |el| {
                 el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(px(12.)).text_color(p.faint).child("Sending attachment…"))
             })
@@ -1826,7 +1845,8 @@ impl BeeperApp {
                             .items_center()
                             .rounded(px(TAP / 2.))
                             .bg(p.surface)
-                            .child(Input::new(&self.composer).appearance(false).large()),
+                            .map(|el| self.mention_keys(el, cx))
+                            .child(Input::new(&self.composer).appearance(false).large().token(|t, _, cx| mentions::token(t, cx))),
                     )
                     .child(
                         div()

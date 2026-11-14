@@ -823,6 +823,7 @@ dependencies = [
  "image",
  "jni",
  "log",
+ "markdown",
  "matrix-sdk",
  "matrix-sdk-crypto",
  "matrix-sdk-ui",
