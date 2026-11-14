@@ -38,6 +38,7 @@ pub(crate) mod motion;
 mod panels;
 mod pollnew;
 mod rich;
+mod search;
 mod signin;
 mod sharein;
 mod video;
@@ -236,7 +237,7 @@ pub struct BeeperApp {
     opened_at: Option<Instant>,
     /// The message a quote led to, tinted for a moment; the tint's clock starts when it is drawn.
     flash: Option<(String, Option<Instant>)>,
-    /// A quoted message being looked for among older ones, with the pages loaded for it.
+    /// A message being looked for among older ones, with how many more pages it may load.
     seek: Option<(String, u8)>,
     /// The user's reaction just given: message, emoji, and when its badge was first drawn.
     fresh_reaction: Option<(String, String, Option<Instant>)>,
@@ -268,6 +269,7 @@ pub struct BeeperApp {
     /// The picture still fading out after the viewer closed.
     viewer_last: Option<(String, Option<Arc<Image>>)>,
     zoom: viewer::Zoom,
+    find: search::Find,
     /// The reaction under the pointer in the picker.
     picker_hover: Option<usize>,
     emoji_pick: emojipick::Picker,
@@ -338,6 +340,7 @@ impl BeeperApp {
         let matrix = signin::Form::new(window, cx, &mut subs);
         let share = sharein::ShareIn::new(window, cx, &mut subs);
         let verify = verify::Ui::new(window, cx, &mut subs);
+        let find = search::Find::new(window, cx, &mut subs);
         subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) && this.composer_changed(cx) {
@@ -351,7 +354,10 @@ impl BeeperApp {
             other => keyboard_follows(other, Keyboard::Text, cx),
         }));
         subs.push(cx.subscribe_in(&search, window, |this, _, ev: &InputEvent, _, cx| match ev {
-            InputEvent::Change => this.refilter(cx),
+            InputEvent::Change => {
+                this.refilter(cx);
+                this.find_everywhere(cx);
+            }
             other => keyboard_follows(other, Keyboard::Text, cx),
         }));
 
@@ -466,6 +472,7 @@ impl BeeperApp {
             nav: None,
             viewer_last: None,
             zoom: viewer::Zoom::default(),
+            find,
             picker_hover: None,
             emoji_pick,
             emoji_open: None,
@@ -642,6 +649,10 @@ impl BeeperApp {
                     self.count_missed(len_before, new);
                 }
                 self.seek_unread();
+                if let Some((id, _)) = self.seek.as_ref().filter(|(id, _)| self.msgs.iter().any(|m| &m.id == id)) {
+                    let id = id.clone();
+                    self.reveal(&id, cx);
+                }
                 self.arrivals.retain(|(_, at)| now.duration_since(*at) < Duration::from_secs(1));
                 while self.arrivals.len() > 2 * MAX_ARRIVALS {
                     self.arrivals.pop_front();
@@ -656,9 +667,14 @@ impl BeeperApp {
                 if let Some((id, pages)) = self.seek.take() {
                     if self.msgs.iter().any(|m| m.id == id) {
                         self.reveal(&id, cx);
-                    } else if more && pages + 1 < SEEK_PAGES {
-                        self.seek = Some((id, pages + 1));
+                    } else if more && pages > 1 {
+                        self.seek = Some((id, pages - 1));
                         self.load_older(cx);
+                    } else if more && pages > 0 {
+                        self.error = Some("That message is further back than this app looks.".into());
+                    } else if !more {
+                        // The last page's rows can arrive after this; they are looked through then.
+                        self.seek = Some((id, 0));
                     }
                 }
             }
@@ -686,6 +702,7 @@ impl BeeperApp {
             Ev::Disappear { room, setting } => self.on_disappear(room, setting),
             Ev::Info(room, details) => self.info_details(room, *details, cx),
             Ev::InfoItems { room, items, scanned, done } => self.info_items(room, items, scanned, done, cx),
+            Ev::Found { room, query, hits } => self.found(room, query, hits, cx),
         }
         cx.notify();
     }
@@ -854,6 +871,8 @@ impl BeeperApp {
             self.start_compose(Compose::New, window, cx);
         } else if self.panel.is_some() {
             self.back(cx);
+        } else if self.find.open {
+            self.close_find(window, cx);
         } else if self.searching {
             self.set_searching(false, window, cx);
         } else if narrow && self.open.is_some() {
@@ -1151,6 +1170,7 @@ impl BeeperApp {
             }
         }
         (self.menu, self.press, self.chat_sheet) = (None, None, None);
+        self.find.close();
         self.compose = Compose::New;
         self.timeline.reset(0);
         self.drafts.save();
@@ -1390,11 +1410,15 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let list = uniform_list(
             "rooms",
-            self.shown.len(),
+            self.shown.len() + self.message_rows(),
             cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                this.fetch_rows(range.clone());
+                let chats = this.shown.len();
+                this.fetch_rows(range.start.min(chats)..range.end.min(chats));
                 range
                     .map(|ix| {
+                        if ix >= chats {
+                            return this.message_row(ix - chats, cx);
+                        }
                         let room = &this.rooms[this.shown[ix]];
                         let selected = this.open.as_ref() == Some(&room.id);
                         let held = this.row_press.as_ref().is_some_and(|(id, at)| id == &room.id && at.elapsed() >= ROW_PRESS_DELAY);
@@ -1498,7 +1522,7 @@ impl BeeperApp {
         let empty = if self.rooms.is_empty() {
             "Syncing chats…"
         } else if has_query {
-            "No chat matches"
+            "No chat or message matches"
         } else if self.only_unread {
             "Nothing unread"
         } else {
@@ -1561,7 +1585,7 @@ impl BeeperApp {
                 el.child(h_flex().flex_none().px(px(GUTTER)).pb(px(4.)).gap(px(4.)).children(filters))
             })
             .child(self.row_release(cx))
-            .child(div().flex_1().min_h_0().child(if self.shown.is_empty() {
+            .child(div().flex_1().min_h_0().child(if self.shown.is_empty() && self.message_rows() == 0 {
                 div().px(px(GUTTER)).py(px(GAP)).text_size(fs(14.)).text_color(p.faint).child(empty).into_any_element()
             } else {
                 list.into_any_element()
@@ -1902,8 +1926,10 @@ impl BeeperApp {
         v_flex()
             .size_full()
             .relative()
+            .children(self.find_bar(cx))
             .child(
                 header()
+                    .when(self.find.open, |el| el.hidden())
                     .when(narrow, |el| {
                         el.child(round_button("back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| {
                             this.nav = Some((std::time::Instant::now(), false));
@@ -1930,6 +1956,7 @@ impl BeeperApp {
                                     .children(self.header_subline(network, cx)),
                             ),
                     )
+                    .when(room.is_some(), |el| el.child(self.find_button(cx)))
                     .when(room.is_some(), |el| {
                         el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, _, _, cx| {
                             this.chat_sheet = this.open.clone();
@@ -1948,6 +1975,7 @@ impl BeeperApp {
                     .child(timeline)
                     .child(self.press_tracker(cx))
                     .children(self.jump_button(cx))
+                    .children(self.find_results(cx))
                     .when(self.loading && self.msgs.is_empty(), |el| {
                         el.child(
                             div()
@@ -2182,13 +2210,17 @@ impl BeeperApp {
     /// Scrolls to a message and tints it for a moment; one not loaded yet is looked for among
     /// older pages.
     fn reveal(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.reveal_within(id, SEEK_PAGES, cx);
+    }
+
+    fn reveal_within(&mut self, id: &str, pages: u8, cx: &mut Context<Self>) {
         if let Some(ix) = self.msgs.iter().position(|m| m.id == id) {
             self.seek = None;
             self.timeline.scroll_to_reveal_item(ix);
             self.flash = Some((id.to_owned(), None));
             cx.notify();
         } else if self.more {
-            self.seek = Some((id.to_owned(), 0));
+            self.seek = Some((id.to_owned(), pages));
             self.load_older(cx);
         }
     }

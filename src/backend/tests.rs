@@ -1534,3 +1534,71 @@ async fn info_lists_members_and_what_the_history_holds() {
     assert_eq!(found[1].media.as_ref().map(|m| m.name.as_str()), Some("notes.pdf"));
     assert!(found[2].body.contains("https://example.org/a"));
 }
+
+/// Asks until the answer passes `done`: the index takes what a sync brought a moment later.
+async fn search_until(st: &mut State, seat: &mut Seat, room: Option<&OwnedRoomId>, query: &str, done: impl Fn(&[Hit]) -> bool) -> Vec<Hit> {
+    for _ in 0..30 {
+        st.handle(Cmd::Search { room: room.cloned(), query: query.into() }).await.unwrap();
+        let hits = wait_for(seat, "search answer", |e| match e {
+            Ev::Found { query: q, hits, .. } if q == query => Some(hits),
+            _ => None,
+        })
+        .await;
+        if done(&hits) {
+            return hits;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("search for {query:?} never gave the expected answer");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn encrypted_messages_are_found_with_edits_and_deletions() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-test-{tag}"));
+    let (mut alice, mut alice_rx) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut alice_rx, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    let room = alice.client().unwrap().create_dm(bob.user_id().unwrap()).await.unwrap();
+    let room_id = room.room_id().to_owned();
+    assert!(room.latest_encryption_state().await.unwrap().is_encrypted());
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    bob.join_room_by_id(&room_id).await.unwrap();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    let bob_room = bob.get_room(&room_id).unwrap();
+    let pizza = bob_room.send(RoomMessageEventContent::text_plain("pineapple on pizza tonight?")).await.unwrap().response.event_id;
+    let walrus = bob_room.send(RoomMessageEventContent::text_plain("the walrus is late")).await.unwrap().response.event_id;
+
+    let hits = search_until(&mut alice, &mut alice_rx, None, "pinea", |h| h.iter().any(|h| h.id == pizza.as_str())).await;
+    let hit = hits.iter().find(|h| h.id == pizza.as_str()).unwrap();
+    assert_eq!((hit.room.clone(), hit.own), (room_id.clone(), false));
+    assert!(!hit.sender.is_empty() && hit.ts > 0, "{hit:?}");
+    assert_eq!(hit.marks.iter().map(|r| &hit.snippet[r.clone()]).collect::<Vec<_>>(), ["pineapple"]);
+    search_until(&mut alice, &mut alice_rx, Some(&room_id), "walrus", |h| h.len() == 1).await;
+
+    let edit = RoomMessageEventContent::text_plain("pineapple on toast tonight?").make_replacement(ReplacementMetadata::new(pizza.clone(), None));
+    bob_room.send(edit).await.unwrap();
+    bob_room.redact(&walrus, None, None).await.unwrap();
+    search_until(&mut alice, &mut alice_rx, Some(&room_id), "toast", |h| h.iter().any(|h| h.id == pizza.as_str())).await;
+    search_until(&mut alice, &mut alice_rx, None, "pizza", |h| h.is_empty()).await;
+    search_until(&mut alice, &mut alice_rx, None, "walrus", |h| h.is_empty()).await;
+
+    // Owner-only at rest, and gone with the account.
+    let index = root.join("alice").join("search.sqlite3");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(std::fs::metadata(&index).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    alice.handle(Cmd::SignOut).await.unwrap();
+    assert!(!index.exists());
+}

@@ -183,6 +183,8 @@ pub enum Cmd {
     Info(OwnedRoomId),
     /// The info screen closed: stop reading history for it.
     InfoClose,
+    /// Messages matching `query` in one room, or in every room; answered with `Found`.
+    Search { room: Option<OwnedRoomId>, query: String },
 }
 
 pub enum Ev {
@@ -246,6 +248,8 @@ pub enum Ev {
     Info(OwnedRoomId, Box<info::Details>),
     /// Messages with media, files or links, newest first; `scanned` counts the events read so far.
     InfoItems { room: OwnedRoomId, items: Vec<Msg>, scanned: usize, done: bool },
+    /// The answer to `Cmd::Search` for this room and query.
+    Found { room: Option<OwnedRoomId>, query: String, hits: Vec<Hit> },
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -831,6 +835,7 @@ impl State {
         ];
         self.notif = Some(notif);
         self.verify.listen(&client, &self.ev);
+        search::start(&self.dir, &client);
         let user = client.user_id().map(ToOwned::to_owned);
         self.client = Some(client);
         if let Some(user) = user {
@@ -844,6 +849,7 @@ impl State {
         if store.exists() {
             log::warn!("removing orphaned store at {}", store.display());
             std::fs::remove_dir_all(&store)?;
+            search::wipe(&self.dir);
         }
         Ok(())
     }
@@ -1175,6 +1181,7 @@ impl State {
                 let _ = std::fs::remove_file(rooms_path(&self.dir));
                 let _ = std::fs::remove_dir_all(self.dir.join("store"));
                 let _ = std::fs::remove_dir_all(media_dir(&self.dir));
+                search::wipe(&self.dir);
                 (self.homeserver, self.beeper) = (beeper_homeserver(), true);
                 self.emit(Ev::NeedLogin).await;
             }
@@ -1358,6 +1365,13 @@ impl State {
                 self.info = Some(AbortOnDrop(tokio::spawn(info::run(room, self.ev.clone()))));
             }
             Cmd::InfoClose => self.info = None,
+            Cmd::Search { room, query } => {
+                let (client, ev) = (self.client()?.clone(), self.ev.clone());
+                tokio::spawn(async move {
+                    let hits = search::search(&client, room.as_deref(), &query).await;
+                    let _ = ev.send(Ev::Found { room, query, hits }).await;
+                });
+            }
         }
         Ok(())
     }
@@ -1437,7 +1451,9 @@ async fn messages(room: &Room, from: Option<&str>, limit: u16) -> Result<Message
             }
         }
     }
-    Ok(if found { room.messages(opts()).await? } else { resp })
+    let resp = if found { room.messages(opts()).await? } else { resp };
+    search::page(room, &resp.chunk).await;
+    Ok(resp)
 }
 
 /// List preview: the newest message on one line, prefixed with its sender outside one-to-one chats.
@@ -2553,6 +2569,9 @@ mod timeline;
 mod video;
 mod disappear;
 pub use disappear::{Disappearing, label as disappear_label};
+mod search;
+pub use search::Hit;
+pub(crate) use search::{MAX_HITS, MIN_QUERY};
 
 pub(crate) mod rooms;
 
