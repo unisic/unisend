@@ -42,6 +42,7 @@ mod video;
 mod rooms;
 mod viewer;
 mod voice;
+mod verify;
 
 use std::path::PathBuf;
 
@@ -289,6 +290,8 @@ pub struct BeeperApp {
     share: sharein::ShareIn,
     /// Forwarding, selection mode and messages deleted on this device.
     fwd: forward::Forward,
+    /// Settings' devices and the verification sheet.
+    verify: verify::Ui,
     _subs: Vec<Subscription>,
     _events: Task<()>,
     /// Leaving chats and starting new ones.
@@ -330,6 +333,7 @@ impl BeeperApp {
 
         let matrix = signin::Form::new(window, cx, &mut subs);
         let share = sharein::ShareIn::new(window, cx, &mut subs);
+        let verify = verify::Ui::new(window, cx, &mut subs);
         subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) && this.composer_changed(cx) {
@@ -474,6 +478,7 @@ impl BeeperApp {
             peeked: HashSet::new(),
             share,
             fwd,
+            verify,
             _subs: subs,
             _events: events,
             people: Default::default(),
@@ -671,6 +676,7 @@ impl BeeperApp {
             Ev::GifSent => self.uploads = self.uploads.saturating_sub(1),
             Ev::Members { room, list } => self.members_arrived(room, list, cx),
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
+            ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_)) => self.on_verify_event(ev, cx),
         }
         cx.notify();
     }
@@ -806,6 +812,9 @@ impl BeeperApp {
     /// Returns whether there was anything to undo.
     fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let narrow = window.viewport_size().width < px(NARROW);
+        if self.verify_back(cx) {
+            return true;
+        }
         if self.share.open {
             self.close_share(cx);
         } else if self.viewer.is_some() {
@@ -2949,6 +2958,7 @@ impl Render for BeeperApp {
                 let poll_form = self.render_poll_form(window, cx);
                 let gifs = self.render_gifs(window, cx);
                 let preview = self.render_preview(window, cx);
+                let verify = self.render_verify_sheet(window, cx);
                 root.relative()
                     .child(self.render_banners(window, cx))
                     .child(div().flex_1().min_h_0().child(body))
@@ -2962,6 +2972,7 @@ impl Render for BeeperApp {
                     .children(viewer)
                     .children(heart)
                     .children(self.render_confirm(window, cx))
+                    .children(verify)
                     .into_any_element()
             }
         }

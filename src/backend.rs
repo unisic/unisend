@@ -166,6 +166,17 @@ pub enum Cmd {
     Voice { room: OwnedRoomId, path: PathBuf, duration: Duration, levels: Vec<f32>, reply_to: Option<String> },
     /// Sends these messages of the open chat (event IDs, oldest first) again in each chat of `to`.
     Forward { room: OwnedRoomId, targets: Vec<String>, to: Vec<OwnedRoomId> },
+    /// The account's devices and how far they are trusted.
+    Devices,
+    RenameDevice(String),
+    /// Asks the user's other devices to verify this one.
+    VerifyStart,
+    VerifyAccept,
+    /// The emoji match (true) or do not.
+    VerifyMatch(bool),
+    VerifyCancel,
+    /// One step of signing out another device.
+    SignOutDevice { device: String, proof: verify::Proof },
 }
 
 pub enum Ev {
@@ -217,6 +228,12 @@ pub enum Ev {
     Members { room: OwnedRoomId, list: Vec<(OwnedUserId, String)> },
     /// A forward was queued in this many chats.
     Forwarded(usize),
+    Devices(verify::Devices),
+    /// Loading or renaming the devices failed, with the reason.
+    DevicesFailed(String),
+    Verify(verify::Verify),
+    /// What signing out a device needs next; `Ok(None)` when it is signed out.
+    SignOutStep(Result<Option<verify::Auth>, String>),
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -635,6 +652,7 @@ struct State {
     incognito: Arc<AtomicBool>,
     /// Sync and recovery watchers, stopped on sign-out.
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    verify: verify::Verifier,
 }
 
 /// Room summaries, shared by the sync loop and preview refreshes. Never held across an await.
@@ -651,7 +669,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     let _ = std::fs::remove_dir_all(media_dir(&dir));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
-        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new() };
+        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default() };
     match st.restore().await {
         Ok(true) => {}
         Ok(false) => st.emit(Ev::NeedLogin).await,
@@ -794,6 +812,7 @@ impl State {
             tokio::spawn(sync_loop(client.clone(), notif.clone(), self.dir.clone(), self.rooms.clone(), self.ev.clone())),
         ];
         self.notif = Some(notif);
+        self.verify.listen(&client, &self.ev);
         let user = client.user_id().map(ToOwned::to_owned);
         self.client = Some(client);
         if let Some(user) = user {
@@ -1124,6 +1143,7 @@ impl State {
                 for task in self.tasks.drain(..) {
                     task.abort();
                 }
+                self.verify.stop();
                 if let Some(client) = self.client.take() {
                     // The device is gone locally either way; the server forgets it when it can.
                     if let Err(e) = client.matrix_auth().logout().await {
@@ -1178,6 +1198,44 @@ impl State {
                 // A failed send stops the chat's queue; trying again starts it.
                 open.timeline.room().send_queue().set_enabled(true);
                 timeline::retry(&open.timeline, &target).await?;
+            }
+            Cmd::Devices => {
+                let (client, ev) = (self.client()?.clone(), self.ev.clone());
+                tokio::spawn(async move {
+                    let _ = ev.send(match verify::devices(&client).await {
+                        Ok(list) => Ev::Devices(list),
+                        Err(e) => Ev::DevicesFailed(format!("{e:#}")),
+                    }).await;
+                });
+            }
+            Cmd::RenameDevice(name) => {
+                let client = self.client()?;
+                let done = match verify::rename(client, &name).await {
+                    Ok(()) => verify::devices(client).await.map(Ev::Devices),
+                    Err(e) => Err(e),
+                };
+                self.emit(done.unwrap_or_else(|e| Ev::DevicesFailed(format!("{e:#}")))).await;
+            }
+            Cmd::VerifyStart | Cmd::VerifyAccept | Cmd::VerifyMatch(_) | Cmd::VerifyCancel => {
+                let done = match cmd {
+                    Cmd::VerifyStart => self.verify.start(self.client()?, &self.ev).await,
+                    Cmd::VerifyAccept => self.verify.accept().await,
+                    Cmd::VerifyMatch(matched) => self.verify.answer(matched).await,
+                    _ => self.verify.cancel().await,
+                };
+                if let Err(e) = done {
+                    self.emit(Ev::Verify(verify::Verify::Failed(format!("{e:#}")))).await;
+                }
+            }
+            Cmd::SignOutDevice { device, proof } => {
+                let client = self.client()?.clone();
+                let api = self.api().ok();
+                let step = self.verify.sign_out(&client, api.as_ref(), device, proof).await.map_err(|e| format!("{e:#}"));
+                let gone = matches!(step, Ok(None));
+                self.emit(Ev::SignOutStep(step)).await;
+                if gone && let Ok(list) = verify::devices(&client).await {
+                    self.emit(Ev::Devices(list)).await;
+                }
             }
             Cmd::Vote { room, target, unstable, answers } => {
                 let (kind, content) = polls::response(unstable, &target, answers);
@@ -2465,6 +2523,7 @@ pub use export::Export;
 
 mod mentions;
 pub(crate) mod voice;
+pub mod verify;
 
 #[cfg(test)]
 mod tests;

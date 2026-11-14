@@ -75,6 +75,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         notif: None,
         incognito: Arc::new(AtomicBool::new(true)),
         tasks: Vec::new(),
+        verify: verify::Verifier::default(),
     };
     (st, Seat { rx, rows: Vec::new() })
 }
@@ -1367,3 +1368,5 @@ async fn a_forward_reuses_the_file_and_drops_the_reply() {
         assert!(image::load_from_memory(&thumb).is_ok(), "{target}: the copy decrypts");
     }
 }
+
+mod sessions;

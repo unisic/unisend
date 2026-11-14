@@ -27,6 +27,9 @@ impl BeeperApp {
         if panel == Panel::Networks && self.beeper {
             self.working = self.send(Cmd::Networks, cx);
         }
+        if panel == Panel::Settings {
+            self.load_devices(cx);
+        }
         self.panel = Some(panel);
         cx.notify();
     }
@@ -278,6 +281,7 @@ impl BeeperApp {
                 row("Incognito", "Others do not see that you have read their messages.", cx).child(incognito),
             )))
             .children(security)
+            .child(self.render_devices(cx))
             .child(
                 section("Account", cx).child(
                     card(cx).child(row(if self.beeper { "Beeper" } else { "Matrix" }, &user, cx)).child(
@@ -547,13 +551,13 @@ fn pretty(state: &str) -> String {
 }
 
 /// A titled group of settings.
-fn section(title: &str, cx: &App) -> Div {
+pub(super) fn section(title: &str, cx: &App) -> Div {
     let p = Palette::of(cx);
     v_flex().gap(px(8.)).child(div().px(px(GAP)).text_size(fs(12.)).text_color(p.faint).child(title.to_owned()))
 }
 
 /// The rows of one group, on one surface.
-fn card(cx: &App) -> Div {
+pub(super) fn card(cx: &App) -> Div {
     v_flex().px(px(GAP)).py(px(4.)).rounded(px(RADIUS)).bg(Palette::of(cx).surface)
 }
 
