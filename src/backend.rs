@@ -164,6 +164,8 @@ pub enum Cmd {
     AttachMedia { room: OwnedRoomId, path: PathBuf, reply_to: Option<String>, caption: String, hd: bool },
     /// A recording to send as a voice message; `levels` are its loudness, 0 to 1, per tick.
     Voice { room: OwnedRoomId, path: PathBuf, duration: Duration, levels: Vec<f32>, reply_to: Option<String> },
+    /// Sends these messages of the open chat (event IDs, oldest first) again in each chat of `to`.
+    Forward { room: OwnedRoomId, targets: Vec<String>, to: Vec<OwnedRoomId> },
 }
 
 pub enum Ev {
@@ -213,6 +215,8 @@ pub enum Ev {
     GifSent,
     /// Joined members of a chat other than the user, as (user, name), at most `MAX_MEMBERS`.
     Members { room: OwnedRoomId, list: Vec<(OwnedUserId, String)> },
+    /// A forward was queued in this many chats.
+    Forwarded(usize),
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -1257,6 +1261,12 @@ impl State {
                     }
                     let _ = ev.send(Ev::Attached).await;
                 });
+            }
+            Cmd::Forward { room, targets, to } => {
+                let open = self.open.as_ref().filter(|open| open.room == room).context("That chat is not open")?;
+                let rooms = to.iter().map(|id| self.room(id)).collect::<Result<Vec<_>>>()?;
+                let done = forward::forward(&open.timeline, &targets, &rooms).await?;
+                self.emit(Ev::Forwarded(done)).await;
             }
         }
         Ok(())
@@ -2436,6 +2446,7 @@ mod contact;
 mod gifs;
 pub(crate) use gifs::{Found as GifPage, Gif, enabled as gifs_enabled};
 pub(crate) mod caption;
+pub(crate) mod forward;
 mod polls;
 mod rich;
 pub use rich::{Block, Rich, Run};

@@ -41,7 +41,7 @@ is not started.
 | Message requests, invitations | todo | a request is an ordinary chat whose `m.bridge` state has `channel."com.beeper.message_request": true` (read from Beeper Desktop), so it is in the list already, unlabelled; accepting goes through Beeper's SDK and is not known. Matrix invitations are not shown |
 | Merged chats | todo | `com.beeper.union` |
 | Drafts synced between devices | todo | `com.beeper.draft` |
-| Multi-select, archive all read | todo | local |
+| Multi-select, archive all read | part | local: selection mode in a chat (copy with sender and time, forward, delete for me, delete for everyone when all are yours); archive all read is todo |
 | Swipe actions (Android) | todo | local |
 | New chat, new group, contacts | done | + in the chat list: Beeper/Matrix (user directory, a Matrix ID; an existing DM is reused) or a network login, then a contact, a search result or a typed phone number or username. bridgev2 provisioning `GET capabilities`, `GET contacts`, `POST search_users`, `GET resolve_identifier/{id}`, `POST create_dm/{id}`, `POST create_group/{type}` (name and members as the network's capabilities allow); Matrix `createRoom` (private, encrypted). Contact list capped at 5000, 200 rows drawn; no avatars in the list |
 | Leave or delete a chat | done | last row of the chat's sheet, after a dialog. Matrix: leave and forget. A bridged chat whose `com.beeper.room_features` says `delete_chat` gets `com.beeper.delete_chat` (the bridge leaves the group and deletes the chat on the user's account), then the user leaves once the bridge deleted the room or after 60 s. Other bridged chats are only left here: bridgev2 drops Matrix leaves unless `bridge_matrix_leave` |
@@ -82,7 +82,8 @@ is not started.
 |---|---|---|
 | Send text | done | `m.room.message` |
 | Reply, edit, delete, copy | done | relations, redaction |
-| Forward | todo | new event in the target chat |
+| Forward | done | the content sent again as a new event in up to 5 chats, relations and `m.mentions` dropped, the same `mxc://` file (and key) without a new upload, as Element's `ForwardDialog`; no forwarded marker (MSC2723 is open). Polls and view-once media are not forwarded |
+| Delete for me | done | local only: hidden on this device, per account, the last 5000 kept in `hidden-<user>.txt`; Undo for 5 s. Delete for everyone is the redaction |
 | Attachments | part | files from the picker, any type, 100 MB at most; Photo and Video tiles in the attach sheet start the system camera (Android); photos and videos first open a preview (large items with paging, a caption per item as an MSC2530 body, remove, HD switch, Send). HD off scales pictures to 2048 px, JPEG q85, EXIF applied then dropped; HD on sends the original. Videos and GIFs always go as they are. No paste, drag and drop or thumbnail upload |
 | Voice notes | part | Android: hold the microphone to record, slide left to cancel, up to lock; Ogg Opus (AAC in MP4 before Android 10), 15 minutes at most; `m.audio` with `org.matrix.msc3245.voice` and `org.matrix.msc1767.audio` (ms, 64 samples 0 to 1024). Not on desktop |
 | Emoji / GIF / sticker pickers | part | emoji done: button in the composer swaps the keyboard for a panel (categories, search by name and shortcode, 32 recents, skin tone), also the sheet behind the reaction bar's +; GIFs from KLIPY (needs `KLIPY_API_KEY` at build time, else hidden): trending, debounced search, static previews, tap to send as `m.video` MP4 with `fi.mau.gif` (a GIF file `m.image` in Messenger and Instagram chats), no categories; sticker picker todo |

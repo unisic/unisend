@@ -24,6 +24,7 @@ mod caption;
 mod cards;
 mod emojipick;
 mod contacts;
+mod forward;
 mod gallery;
 mod heart;
 mod location;
@@ -286,6 +287,8 @@ pub struct BeeperApp {
     peeked: HashSet<OwnedRoomId>,
     /// What another app shared in, and the "Send to" screen for it.
     share: sharein::ShareIn,
+    /// Forwarding, selection mode and messages deleted on this device.
+    fwd: forward::Forward,
     _subs: Vec<Subscription>,
     _events: Task<()>,
     /// Leaving chats and starting new ones.
@@ -380,6 +383,7 @@ impl BeeperApp {
                 }
             }
         });
+        let fwd = forward::Forward::new(window, cx);
 
         let drafts = navigate::Drafts::load(&dir);
         Self {
@@ -469,6 +473,7 @@ impl BeeperApp {
             avatars: HashMap::new(),
             peeked: HashSet::new(),
             share,
+            fwd,
             _subs: subs,
             _events: events,
             people: Default::default(),
@@ -505,6 +510,7 @@ impl BeeperApp {
                 crate::background(true);
                 // The app may have been started by a tap on a notification.
                 self.open_from_notification(cx);
+                self.load_hidden(&user);
                 self.user = Some(user);
                 self.send(Cmd::Incognito(self.settings.incognito), cx);
                 let l = &self.settings.lock;
@@ -664,6 +670,7 @@ impl BeeperApp {
             Ev::GifPreview(url, bytes) => self.on_gif_preview(url, bytes),
             Ev::GifSent => self.uploads = self.uploads.saturating_sub(1),
             Ev::Members { room, list } => self.members_arrived(room, list, cx),
+            Ev::Forwarded(chats) => self.forwarded(chats, cx),
         }
         cx.notify();
     }
@@ -812,7 +819,7 @@ impl BeeperApp {
             self.close_location(cx);
         } else if self.emoji_open.is_some() {
             self.close_emoji(cx);
-        } else if self.close_poll_form(cx) {
+        } else if self.close_poll_form(cx) || self.forward_back(cx) {
         } else if self.gallery.open {
             self.close_gallery(cx);
         } else if self.gifs_open() {
@@ -1554,10 +1561,13 @@ impl BeeperApp {
         let header_avatar = room.map(|r| avatar(&r.name, self.avatars.get(&r.id), 36., cx));
         let dm = room.is_some_and(|r| r.dm);
         // The newest message, when it is the user's: the one whose way to the others is told.
-        self.tail = self.msgs.iter().rposition(|m| m.kind == Kind::Message).filter(|&ix| self.msgs[ix].own);
+        self.tail = self.msgs.iter().rposition(|m| m.kind == Kind::Message && !self.is_hidden(&m.id)).filter(|&ix| self.msgs[ix].own);
         let timeline = list(
             self.timeline.clone(),
             cx.processor(move |this, ix: usize, window, cx| {
+                if this.is_hidden(&this.msgs[ix].id) {
+                    return div().into_any_element();
+                }
                 this.want_thumb(ix);
                 this.want_card(ix);
                 let flash = this.flash_level(ix, window, cx);
@@ -1591,7 +1601,7 @@ impl BeeperApp {
                 let framed_w = m.media.as_ref().filter(|_| pictured && !bare).map(|media| picture_size(media, room).0 + 2. * pad_x);
                 let attachment = m.media.as_ref().filter(|_| !m.deleted).map(|media| this.render_media(m, media, room, RADIUS - pad_x, cx));
                 // Rows that draw nothing do not come between two messages.
-                let drawn = |row: &&Msg| !matches!(row.kind, Kind::Hidden | Kind::Status { .. });
+                let drawn = |row: &&Msg| !matches!(row.kind, Kind::Hidden | Kind::Status { .. }) && !this.is_hidden(&row.id);
                 let prev = this.msgs[..ix].iter().rev().find(drawn);
                 let next = this.msgs[ix + 1..].iter().find(drawn);
                 // A run: one person's messages with no long pause, and no other row, between them.
@@ -1850,6 +1860,7 @@ impl BeeperApp {
                                 el.child(div().px(px(GAP)).pt(px(4.)).text_size(fs(12.)).font_features(tabular()).text_color(if failed { p.negative } else { this.on_wallpaper(p.faint, cx) }).child(text))
                             }),
                     )
+                    .children(this.selection_mark(m, cx))
                     .into_any_element()
             }),
         )
@@ -1857,6 +1868,7 @@ impl BeeperApp {
 
         v_flex()
             .size_full()
+            .relative()
             .child(
                 header()
                     .when(narrow, |el| {
@@ -1883,6 +1895,7 @@ impl BeeperApp {
                         })))
                     }),
             )
+            .children(self.selection_bar(window, cx))
             .child(
                 div()
                     .relative()
@@ -2180,6 +2193,9 @@ impl BeeperApp {
     /// Follows a pan to the right over a message, as in Signal and iMessage; one that travels far
     /// enough starts a reply.
     fn swipe(&mut self, id: &str, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fwd.selecting() {
+            return;
+        }
         let delta = event.delta.pixel_delta(px(20.));
         let before = self.swipe.as_ref().map(|(_, far)| *far);
         let held = self.swipe.as_ref().map(|(on, _)| on.clone());
@@ -2942,6 +2958,7 @@ impl Render for BeeperApp {
                     .children(poll_form)
                     .children(gifs)
                     .children(preview)
+                    .children(self.render_forward_layers(window, cx))
                     .children(viewer)
                     .children(heart)
                     .children(self.render_confirm(window, cx))
