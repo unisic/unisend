@@ -20,6 +20,8 @@ pub(crate) const SHEET_OUT: Duration = Duration::from_millis(250);
 /// The message a quote points at stays tinted this long, then the tint fades.
 pub(crate) const FLASH_HOLD: Duration = Duration::from_millis(300);
 pub(crate) const FLASH_FADE: Duration = Duration::from_millis(700);
+/// The heart a double tap pops at the finger.
+pub(crate) const HEART: Duration = Duration::from_millis(700);
 
 /// cubic-bezier(0.23, 1, 0.32, 1): moves at once, settles softly.
 pub(crate) const EASE_OUT: Easing = Easing::CubicBezier { x1: 0.23, y1: 1., x2: 0.32, y2: 1. };

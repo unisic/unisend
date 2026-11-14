@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 mod cards;
 mod gallery;
+mod heart;
 mod menu;
 pub(crate) mod motion;
 mod panels;
@@ -216,6 +217,8 @@ pub struct BeeperApp {
     seek: Option<(String, u8)>,
     /// The user's reaction just given: message, emoji, and when its badge was first drawn.
     fresh_reaction: Option<(String, String, Option<Instant>)>,
+    /// Where and when a double tap last gave a heart.
+    heart_pop: Option<(Point<Pixels>, Instant)>,
     /// What the compose strip showed last, drawn while it leaves.
     strip_last: Option<(Option<IconName>, SharedString, Quote)>,
     /// Bumped when the strip must go at once (Escape), so it does not play its exit.
@@ -374,6 +377,7 @@ impl BeeperApp {
             flash: None,
             seek: None,
             fresh_reaction: None,
+            heart_pop: None,
             strip_last: None,
             strip_epoch: 0,
             chat_sheet: None,
@@ -2792,12 +2796,14 @@ impl Render for BeeperApp {
                 let chat_sheet = self.render_chat_sheet(window, cx);
                 let sheet = self.render_message_menu(window, cx).or(chat_sheet);
                 let gallery = self.render_gallery(window, cx);
+                let heart = self.render_heart(window, cx);
                 root.relative()
                     .child(self.render_banners(window, cx))
                     .child(div().flex_1().min_h_0().child(body))
                     .children(sheet)
                     .children(gallery)
                     .children(viewer)
+                    .children(heart)
                     .into_any_element()
             }
         }

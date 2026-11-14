@@ -55,7 +55,7 @@ is not started.
 | Day separators | done | the timeline's own |
 | Unread divider | done | "New" above what arrived since the chat was last read (`m.fully_read`) |
 | Replies (quote shown) | done | `m.in_reply_to`; a quoted message that is not loaded is fetched; a touch goes to it when it is loaded |
-| Reactions (show, add, remove) | part | `m.reaction`; Signal's six in a bar over the held message (touch) or from the react button beside it (pointer), a double tap for the heart, the user's own reaction marked and taken back with a second touch. No full emoji picker, no custom emoji |
+| Reactions (show, add, remove) | part | `m.reaction`; Signal's six in a bar over the held message (touch) or from the react button beside it (pointer), a double tap for the heart (short pop at the finger, light tick on Android), the user's own reaction marked and taken back with a second touch. No full emoji picker, no custom emoji |
 | Deleted messages | done | `m.room.redaction`; stays a "Message deleted" row |
 | Images, stickers | done | inline thumbnail (800px at most), full-screen view (2048px); plain and encrypted |
 | Video, audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. No inline player |
