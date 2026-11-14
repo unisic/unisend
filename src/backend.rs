@@ -139,6 +139,8 @@ pub enum Cmd {
     Delete { room: OwnedRoomId, target: String },
     /// Sends again a message that failed to leave.
     Retry { room: OwnedRoomId, target: String },
+    /// A recording to send as a voice message; `levels` are its loudness, 0 to 1, per tick.
+    Voice { room: OwnedRoomId, path: PathBuf, duration: Duration, levels: Vec<f32>, reply_to: Option<String> },
 }
 
 pub enum Ev {
@@ -446,6 +448,8 @@ pub struct Media {
     pub duration: Option<Duration>,
     source: MediaSource,
     thumb: Option<MediaSource>,
+    /// A voice message's loudness as `voice::BARS` heights, 0 to 255; empty when it has none.
+    pub waveform: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -1128,6 +1132,21 @@ impl State {
             Cmd::Vote { room, target, unstable, answers } => {
                 let (kind, content) = polls::response(unstable, &target, answers);
                 self.room(&room)?.send_raw(kind, content).await?;
+            }
+            Cmd::Voice { room, path, duration, levels, reply_to } => {
+                // Sent through the attachment queue: `Attached` follows it as well.
+                let room = self.room(&room);
+                let ev = self.ev.clone();
+                tokio::spawn(async move {
+                    let sent = match room {
+                        Ok(room) => voice::send(&room, &path, duration, levels, reply_to).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = sent {
+                        let _ = ev.send(Ev::Error(format!("Voice message not sent: {e:#}"))).await;
+                    }
+                    let _ = ev.send(Ev::Attached).await;
+                });
             }
         }
         Ok(())
@@ -1911,6 +1930,7 @@ fn sticker(content: &StickerEventContent) -> Media {
         duration: None,
         source: content.source.clone().into(),
         thumb: info.thumbnail_source.clone(),
+        waveform: Vec::new(),
     }
 }
 
@@ -1964,6 +1984,7 @@ fn link_preview(content: &serde_json::Value) -> Option<Link> {
             duration: None,
             source,
             thumb: None,
+            waveform: Vec::new(),
         });
         Some(Link { url, title, description, site, image })
     })
@@ -2213,6 +2234,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 duration: None,
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
+                waveform: Vec::new(),
             }
         }
         MessageType::Video(c) => {
@@ -2226,6 +2248,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 duration: info.and_then(|i| i.duration),
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
+                waveform: Vec::new(),
             }
         }
         MessageType::Audio(c) => {
@@ -2236,9 +2259,11 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 size: info.and_then(|i| i.size).map(Into::into),
                 mime: info.and_then(|i| i.mimetype.clone()),
                 dims: None,
-                duration: info.and_then(|i| i.duration),
+                // Bridges may fill in only the MSC1767 block.
+                duration: info.and_then(|i| i.duration).or(c.audio.as_ref().map(|a| a.duration)),
                 source: c.source.clone(),
                 thumb: None,
+                waveform: c.audio.as_ref().map(|a| voice::bars(a.waveform.iter().map(|v| v.get().into()))).unwrap_or_default(),
             }
         }
         MessageType::File(c) => {
@@ -2252,6 +2277,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 duration: None,
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
+                waveform: Vec::new(),
             }
         }
         other => return (None, other.body().to_owned()),
@@ -2272,6 +2298,7 @@ pub use rich::{Block, Rich, Run};
 pub use polls::{Place, Poll};
 
 mod timeline;
+pub(crate) mod voice;
 
 #[cfg(test)]
 mod tests;

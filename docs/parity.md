@@ -58,7 +58,7 @@ is not started.
 | Reactions (show, add, remove) | part | `m.reaction`; Signal's six in a bar over the held message (touch) or from the react button beside it (pointer), a double tap for the heart, the user's own reaction marked and taken back with a second touch. No full emoji picker, no custom emoji |
 | Deleted messages | done | `m.room.redaction`; stays a "Message deleted" row |
 | Images, stickers | done | inline thumbnail (800px at most), full-screen view (2048px); plain and encrypted |
-| Video, audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. No inline player |
+| Video, audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. Voice notes and audio play inside the bubble on Android (waveform, seek, 1×/1.5×/2×, one at a time); desktop shows the waveform and opens the system's player. No inline video |
 | Stickers, GIFs, custom emoji | todo | `m.sticker`, `fi.mau.gif`, `m.image_pack` |
 | Link previews | part | shows the preview that came with a message (`com.beeper.linkpreviews`); links are underlined and open in the browser. Does not make a preview for a link that has none, and attaches none to messages sent from here |
 | Formatted text, mentions, code blocks | part | `formatted_body` (HTML) drawn: bold, italics, strikethrough, underline, links with their own text, quotes, code blocks, lists; previews and notifications read its plain text. Mentions are drawn in the accent, a message that mentions the user is marked, and the chat list shows an `@` (counted locally, a server cannot see into encrypted rooms). Inline code is tinted, not monospace; spoilers are plain text; formatted captions under media are not read |
@@ -79,7 +79,7 @@ is not started.
 | Reply, edit, delete, copy | done | relations, redaction |
 | Forward | todo | new event in the target chat |
 | Attachments | part | one file from the picker, any type, 100 MB at most; no paste, drag and drop, camera, caption or thumbnail upload |
-| Voice notes | todo | `org.matrix.msc3245.voice` |
+| Voice notes | part | Android: hold the microphone to record, slide left to cancel, up to lock; Ogg Opus (AAC in MP4 before Android 10), 15 minutes at most; `m.audio` with `org.matrix.msc3245.voice` and `org.matrix.msc1767.audio` (ms, 64 samples 0 to 1024). Not on desktop |
 | Emoji / GIF / sticker pickers | todo | local, `fi.mau.gif` |
 | Formatting shortcuts, mentions autocomplete | todo | local |
 | Send later, undo send | todo | `com.beeper.is_scheduled`, local delay |
@@ -115,7 +115,7 @@ Verified in the source: typing, read receipts of others and membership changes a
 |---|---|---|---|---|---|
 | Replies, reactions, deletes | yes | yes | yes | yes | done |
 | Edits, mentions | no | yes | yes | yes | done |
-| Images, video, files, voice notes | yes | yes | yes | yes | shown; no inline player |
+| Images, video, files, voice notes | yes | yes | yes | yes | shown; voice notes recorded and played on Android; no inline video |
 | Polls and votes | yes | yes | groups | no | shown, vote; not created |
 | Locations | yes | to Signal only | from Messenger only | no | shown with coordinates, opens in maps; not sent |
 | Contact cards | from WhatsApp | from Signal | no | no | not checked |
@@ -137,7 +137,7 @@ them was taken from its desktop bundle, and the state events were checked agains
 
 1. Message requests labelled and accepted, Matrix invitations. M.
 2. Typing in the chat list, per-message read state. S.
-3. Inline playback for voice notes, audio and video, and recording voice notes. M each.
+3. Inline video playback. M.
 4. Creating and ending polls, sending a location. S each.
 5. Mentions autocomplete; forward; paste and drag and drop attachments. S each.
 6. Disappearing-message timer shown. S.

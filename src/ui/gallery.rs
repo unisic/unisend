@@ -23,7 +23,7 @@ const AHEAD_ROWS: usize = 2;
 const DISMISS_SPEED: f32 = 800.;
 const GRID_GAP: f32 = 2.;
 /// Attachments waiting their turn to upload, all batches together.
-const MAX_QUEUED: usize = 30;
+pub(super) const MAX_QUEUED: usize = 30;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Item {

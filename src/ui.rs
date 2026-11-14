@@ -24,6 +24,7 @@ pub(crate) mod motion;
 mod panels;
 mod rich;
 mod signin;
+mod voice;
 
 use std::path::PathBuf;
 
@@ -224,6 +225,7 @@ pub struct BeeperApp {
     chat_sheet: Option<OwnedRoomId>,
     /// The attach sheet's photos and videos.
     gallery: gallery::Gallery,
+    voice: voice::Voice,
     /// Attachments waiting for the one uploading now, so a batch keeps its order.
     attach_queue: VecDeque<Cmd>,
     attaching: bool,
@@ -287,6 +289,7 @@ impl BeeperApp {
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {
                 this.typed(cx);
+                this.voice_typed(cx);
             }
         }));
         subs.push(cx.subscribe_in(&search, window, |this, _, ev: &InputEvent, _, cx| match ev {
@@ -378,6 +381,7 @@ impl BeeperApp {
             strip_epoch: 0,
             chat_sheet: None,
             gallery: gallery::Gallery::default(),
+            voice: voice::Voice::default(),
             attach_queue: VecDeque::new(),
             attaching: false,
             sheet_last: None,
@@ -480,7 +484,7 @@ impl BeeperApp {
             }
             Ev::Fetched(id, path) => {
                 self.fetching.remove(&id);
-                if let Some(path) = path {
+                if let Some(path) = path.filter(|path| !self.voice_fetched(&id, path, cx)) {
                     let mime = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()?.mime.clone());
                     crate::open_file(cx, &path, mime.as_deref());
                 }
@@ -873,6 +877,9 @@ impl BeeperApp {
                 })
                 .into_any_element();
         }
+        if matches!(media.kind, MediaKind::Voice | MediaKind::Audio) {
+            return self.render_voice(m, media, cx);
+        }
         let icon = match media.kind {
             MediaKind::Voice => IconName::Mic,
             MediaKind::Audio => IconName::Music,
@@ -965,6 +972,7 @@ impl BeeperApp {
 
     fn close_room(&mut self, cx: &mut Context<Self>) {
         self.close_gallery(cx);
+        self.stop_voice(cx);
         if let Some(room) = self.open.take() {
             if self.typing_sent.take().is_some() {
                 let _ = self.cmd.try_send(Cmd::Typing(room, false));
@@ -1831,8 +1839,11 @@ impl BeeperApp {
                             .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
                             .active(|el| el.bg(p.muted))
                             .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
-                            .child(Icon::new(IconName::ArrowUp).size_5()),
-                    ),
+                            .child(Icon::new(if self.mic_shown(cx) { IconName::Mic } else { IconName::ArrowUp }).size_5())
+                            .when(self.mic_shown(cx), |el| el.relative().child(self.mic_touch(cx))),
+                    )
+                    .relative()
+                    .children(self.render_recorder(window, cx)),
             )
     }
 
