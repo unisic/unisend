@@ -512,6 +512,32 @@ impl BeeperApp {
                     .child(div().min_w_0().truncate().text_size(px(14.)).text_color(p.faint).child(title))
                     .child(
                         h_flex()
+                            .gap(px(4.))
+                            .when(super::location::enabled(), |el| {
+                                el.child(
+                                    h_flex()
+                                        .id("gallery-location")
+                                        .h(px(TAP))
+                                        .px(px(12.))
+                                        .gap(px(8.))
+                                        .flex_none()
+                                        .rounded_full()
+                                        .text_size(px(14.))
+                                        .text_color(p.text)
+                                        .cursor_pointer()
+                                        .active(|el| el.bg(p.raised))
+                                        .child(Icon::new(IconName::MapPin).size_4())
+                                        .child("Location")
+                                        .when(live, |el| {
+                                            el.on_click(cx.listener(|this, _, _, cx| {
+                                                this.close_gallery(cx);
+                                                this.open_location(cx);
+                                            }))
+                                        }),
+                                )
+                            })
+                            .child(
+                        h_flex()
                             .id("gallery-files")
                             .h(px(TAP))
                             .px(px(12.))
@@ -530,6 +556,7 @@ impl BeeperApp {
                                     this.attach_file(cx);
                                 }))
                             }),
+                            ),
                     ),
             );
 
