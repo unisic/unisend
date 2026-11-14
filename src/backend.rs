@@ -147,6 +147,8 @@ pub enum Cmd {
     EndPoll { room: OwnedRoomId, target: String },
     /// Reads the contact card in a `.vcf` attachment.
     Contact(String, Media),
+    /// Leaving chats and starting new ones.
+    People(rooms::Ask),
 }
 
 pub enum Ev {
@@ -185,6 +187,7 @@ pub enum Ev {
     Error(String),
     /// The cards of a contact file; empty when it could not be read.
     Contact(String, Vec<crate::vcard::Card>),
+    People(rooms::Answer),
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -1171,6 +1174,7 @@ impl State {
                     let _ = ev.send(Ev::Contact(id, cards)).await;
                 });
             }
+            Cmd::People(ask) => rooms::handle(self.client()?.clone(), self.api().ok(), self.rooms.clone(), self.ev.clone(), ask),
         }
         Ok(())
     }
@@ -1770,7 +1774,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
         let mut changed = Vec::new();
         for (id, update) in &resp.rooms.joined {
             let Some(room) = client.get_room(id) else { continue };
-            if room.is_space() {
+            if room.is_space() || rooms::leaving(id) {
                 continue;
             }
             let (msgs, amends) = to_msgs(&room, &update.timeline.events).await;
@@ -2330,6 +2334,8 @@ pub use pollnew::NewPoll;
 
 mod timeline;
 mod video;
+
+pub(crate) mod rooms;
 
 #[cfg(test)]
 mod tests;

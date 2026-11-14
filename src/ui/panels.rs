@@ -19,6 +19,7 @@ pub(super) enum Panel {
     /// Choosing which network to add.
     Add,
     Login,
+    NewChat,
 }
 
 impl BeeperApp {
@@ -32,12 +33,14 @@ impl BeeperApp {
 
     /// One level up: a login leads back to the networks, a destination back to the chats.
     pub(super) fn back(&mut self, cx: &mut Context<Self>) {
+        let group = self.panel == Some(Panel::NewChat) && self.new_chat_back(cx);
         self.panel = match self.panel {
             Some(Panel::Login) => {
                 self.end_login(cx);
                 Some(Panel::Networks)
             }
             Some(Panel::Add) => Some(Panel::Networks),
+            Some(Panel::NewChat) if group => Some(Panel::NewChat),
             _ => None,
         };
         cx.notify();
@@ -166,6 +169,7 @@ impl BeeperApp {
 
     pub(super) fn render_panel(&mut self, panel: Panel, narrow: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let (title, body) = match panel {
+            Panel::NewChat => return self.render_new_chat(narrow, window, cx),
             Panel::Settings => ("Settings", self.render_settings(cx).into_any_element()),
             Panel::Networks => ("Networks", self.render_networks(cx).into_any_element()),
             Panel::Add => ("Add an account", self.render_add(cx).into_any_element()),
