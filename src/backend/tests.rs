@@ -75,6 +75,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         notif: None,
         incognito: Arc::new(AtomicBool::new(true)),
         tasks: Vec::new(),
+        verify: verify::Verifier::default(),
     };
     (st, Seat { rx, rows: Vec::new() })
 }
@@ -1058,3 +1059,5 @@ async fn a_chat_opens_at_once_after_the_store_lost_its_events() {
     // The SDK waits up to 3 s for a sync to tell it where the chat's history starts.
     assert!(took < Duration::from_secs(2), "the messages took {took:?}");
 }
+
+mod sessions;

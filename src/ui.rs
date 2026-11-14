@@ -24,6 +24,7 @@ pub(crate) mod motion;
 mod panels;
 mod rich;
 mod signin;
+mod verify;
 
 use std::path::PathBuf;
 
@@ -249,6 +250,8 @@ pub struct BeeperApp {
     faces: HashMap<OwnedUserId, Option<Arc<Image>>>,
     /// Rooms whose missing or undecryptable preview was already re-read this session.
     peeked: HashSet<OwnedRoomId>,
+    /// Settings' devices and the verification sheet.
+    verify: verify::Ui,
     _subs: Vec<Subscription>,
     _events: Task<()>,
 }
@@ -283,6 +286,7 @@ impl BeeperApp {
         }
 
         let matrix = signin::Form::new(window, cx, &mut subs);
+        let verify = verify::Ui::new(window, cx, &mut subs);
         subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {
@@ -393,6 +397,7 @@ impl BeeperApp {
             rooms_scroll: UniformListScrollHandle::new(),
             avatars: HashMap::new(),
             peeked: HashSet::new(),
+            verify,
             _subs: subs,
             _events: events,
         }
@@ -570,6 +575,7 @@ impl BeeperApp {
                 self.busy = false;
                 self.loading = false;
             }
+            ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_)) => self.on_verify_event(ev, cx),
         }
         cx.notify();
     }
@@ -698,6 +704,9 @@ impl BeeperApp {
     /// Returns whether there was anything to undo.
     fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let narrow = window.viewport_size().width < px(NARROW);
+        if self.verify_back(cx) {
+            return true;
+        }
         if self.viewer.is_some() {
             self.close_viewer(cx);
         } else if self.menu_open() {
@@ -2792,12 +2801,14 @@ impl Render for BeeperApp {
                 let chat_sheet = self.render_chat_sheet(window, cx);
                 let sheet = self.render_message_menu(window, cx).or(chat_sheet);
                 let gallery = self.render_gallery(window, cx);
+                let verify = self.render_verify_sheet(window, cx);
                 root.relative()
                     .child(self.render_banners(window, cx))
                     .child(div().flex_1().min_h_0().child(body))
                     .children(sheet)
                     .children(gallery)
                     .children(viewer)
+                    .children(verify)
                     .into_any_element()
             }
         }

@@ -213,6 +213,12 @@ impl Api {
         self.bridge(bridge, Method::POST, &format!("logout/{login}"), Some(json!({})), CALL_TIMEOUT).await?;
         Ok(())
     }
+
+    /// The account's email address (`userInfo.email`, bridge-manager api/beeperapi/whoami.go).
+    pub async fn email(&self) -> Result<String> {
+        let whoami = self.send(Method::GET, format!("{}/whoami", self.api), None, CALL_TIMEOUT).await?;
+        whoami.pointer("/userInfo/email").and_then(Value::as_str).filter(|e| !e.is_empty()).map(str::to_owned).context("Beeper did not say which email address this account uses")
+    }
 }
 
 fn network(bridge: &str, state: String, detail: &Value) -> Network {
