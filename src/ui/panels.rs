@@ -327,7 +327,7 @@ impl BeeperApp {
                 .flex()
                 .items_center()
                 .rounded_full()
-                .text_size(px(14.))
+                .text_size(fs(14.))
                 .text_color(if on { p.ground } else { p.muted })
                 .bg(if on { p.text } else { p.raised })
                 .cursor_pointer()

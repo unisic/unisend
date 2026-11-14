@@ -1,6 +1,6 @@
 //! The attach sheet: the newest photos and videos in a grid, as in Signal, so sending a picture
 //! skips the system's picker. Android reads MediaStore through `dev.gpui.beeper.Gallery`. Desktop
-//! keeps its file dialog; a debug build shows the sheet for the directory named by
+//! has a menu of the other entries (`Attach`) instead; a debug build shows the sheet for the directory named by
 //! `BEEPER_GPUI_GALLERY`, only so the sheet can be checked there.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -193,6 +193,122 @@ pub(super) struct Gallery {
     /// Asked for access and watching for the answer.
     waiting: bool,
     asked: bool,
+    /// Where there is no sheet (desktop), the paperclip opens a menu of the same entries.
+    pub menu: bool,
+}
+
+/// What can be attached besides photos and videos, in the order shown.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Attach {
+    File,
+    Gif,
+    Location,
+    Contact,
+    Poll,
+}
+
+/// The entries this build and its keys can offer.
+pub(super) fn attach_actions() -> Vec<Attach> {
+    [
+        Some(Attach::File),
+        crate::backend::gifs_enabled().then_some(Attach::Gif),
+        super::location::enabled().then_some(Attach::Location),
+        super::contacts::enabled().then_some(Attach::Contact),
+        Some(Attach::Poll),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+impl Attach {
+    fn id(self) -> &'static str {
+        match self {
+            Attach::File => "attach-file",
+            Attach::Gif => "attach-gif",
+            Attach::Location => "attach-location",
+            Attach::Contact => "attach-contact",
+            Attach::Poll => "attach-poll",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Attach::File => "File",
+            Attach::Gif => "GIF",
+            Attach::Location => "Location",
+            Attach::Contact => "Contact",
+            Attach::Poll => "Poll",
+        }
+    }
+
+    /// GIF has no picture in the icon set; it is the word in a frame, as other apps draw it.
+    fn icon(self, cx: &App) -> AnyElement {
+        let icon = match self {
+            Attach::File => IconName::File,
+            Attach::Location => IconName::MapPin,
+            Attach::Contact => IconName::User,
+            Attach::Poll => IconName::ChartBar,
+            Attach::Gif => {
+                let ink = Palette::of(cx).text;
+                return div()
+                    .px(px(3.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(ink)
+                    .text_size(px(10.))
+                    .line_height(px(14.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("GIF")
+                    .into_any_element();
+            }
+        };
+        Icon::new(icon).size_5().into_any_element()
+    }
+
+    /// A labelled round button of the attach sheet.
+    fn button(self, cx: &App) -> Stateful<Div> {
+        let p = Palette::of(cx);
+        let group = SharedString::from(self.id());
+        v_flex()
+            .id(self.id())
+            .group(group.clone())
+            .w(px(72.))
+            .pb(px(4.))
+            .items_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .child(
+                div()
+                    .id("circle")
+                    .size(px(52.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(p.raised)
+                    .text_color(p.text)
+                    .group_active(group, |s| s.bg(p.lifted))
+                    .child(self.icon(cx)),
+            )
+            .child(div().max_w_full().truncate().text_size(fs(12.)).text_color(p.muted).child(self.label()))
+    }
+
+    /// A row of the desktop's menu, laid out as `sheet_row` is.
+    fn row(self, cx: &App) -> Stateful<Div> {
+        let p = Palette::of(cx);
+        h_flex()
+            .id(self.id())
+            .h(px(SHEET_ROW_H))
+            .active(|el| el.bg(p.raised))
+            .px(px(GUTTER + 4.))
+            .gap(px(GAP))
+            .text_size(fs(16.))
+            .text_color(p.text)
+            .cursor_pointer()
+            .child(div().size_5().flex_none().flex().items_center().justify_center().child(self.icon(cx)))
+            .child(self.label())
+    }
 }
 
 /// Whether attaching opens the sheet rather than the system's picker.
@@ -204,6 +320,37 @@ pub(super) fn enabled() -> bool {
 }
 
 impl BeeperApp {
+    pub(super) fn attach_action(&mut self, action: Attach, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_gallery(cx);
+        self.gallery.menu = false;
+        match action {
+            Attach::File => self.attach_file(cx),
+            Attach::Gif => self.open_gifs(window, cx),
+            Attach::Location => self.open_location(cx),
+            Attach::Contact => self.pick_contact(cx),
+            Attach::Poll => self.open_poll_form(window, cx),
+        }
+        cx.notify();
+    }
+
+    /// The desktop's attach menu: the sheet's entries as rows.
+    pub(super) fn render_attach_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let live = self.gallery.menu;
+        let motion = if live { Transition::new(motion::SHEET_IN).easing(motion::EASE_SHEET) } else { Transition::new(motion::SHEET_OUT).easing(motion::EASE_OUT) };
+        let shown = Presence::new("attach-menu", live).transition(motion).sample(window, cx);
+        if !shown.should_render() {
+            return None;
+        }
+        let rows = attach_actions()
+            .into_iter()
+            .map(|action| {
+                let row = action.row(cx);
+                if live { row.on_click(cx.listener(move |this, _, window, cx| this.attach_action(action, window, cx))) } else { row }
+            })
+            .collect();
+        Some(self.sheet("Attach".to_owned(), rows, shown.progress, live, cx))
+    }
+
     pub(super) fn open_gallery(&mut self, cx: &mut Context<Self>) {
         let g = &mut self.gallery;
         (g.open, g.fall_from, g.offset) = (true, 0., 0.);
@@ -510,98 +657,9 @@ impl BeeperApp {
             .child(div().h(px(20.)).flex().items_center().justify_center().child(div().w(px(36.)).h(px(4.)).rounded_full().bg(p.faint.opacity(0.5))))
             .child(
                 h_flex()
-                    .h(px(TAP))
-                    .pl(px(GUTTER + 4.))
-                    .pr(px(GUTTER - 4.))
-                    .justify_between()
-                    .child(div().min_w_0().truncate().text_size(fs(14.)).text_color(p.faint).child(title))
-                    .child(
-                        h_flex()
-                            .flex_none()
-                            .gap(px(4.))
-                            .child(
-                        h_flex()
-                            .id("gallery-poll")
-                            .h(px(TAP))
-                            .px(px(12.))
-                            .gap(px(8.))
-                            .flex_none()
-                            .rounded_full()
-                            .text_size(px(14.))
-                            .text_color(p.text)
-                            .cursor_pointer()
-                            .active(|el| el.bg(p.raised))
-                            .child(Icon::new(IconName::ChartBar).size_4())
-                            .child("Poll")
-                            .when(live, |el| el.on_click(cx.listener(|this, _, window, cx| this.open_poll_form(window, cx))))
-                            )
-                            .when(crate::backend::gifs_enabled(), |el| {
-                                el.child(
-                                    h_flex()
-                                        .id("gallery-gifs")
-                                        .h(px(TAP))
-                                        .px(px(12.))
-                                        .flex_none()
-                                        .rounded_full()
-                                        .text_size(px(14.))
-                                        .text_color(p.text)
-                                        .cursor_pointer()
-                                        .active(|el| el.bg(p.raised))
-                                        .child("GIF")
-                                        .when(live, |el| {
-                                            el.on_click(cx.listener(|this, _, window, cx| {
-                                                this.close_gallery(cx);
-                                                this.open_gifs(window, cx);
-                                            }))
-                                        }),
-                                )
-                            })
-                            .when(super::location::enabled(), |el| {
-                                el.child(
-                                    h_flex()
-                                        .id("gallery-location")
-                                        .h(px(TAP))
-                                        .px(px(12.))
-                                        .gap(px(8.))
-                                        .flex_none()
-                                        .rounded_full()
-                                        .text_size(px(14.))
-                                        .text_color(p.text)
-                                        .cursor_pointer()
-                                        .active(|el| el.bg(p.raised))
-                                        .child(Icon::new(IconName::MapPin).size_4())
-                                        .child("Location")
-                                        .when(live, |el| {
-                                            el.on_click(cx.listener(|this, _, _, cx| {
-                                                this.close_gallery(cx);
-                                                this.open_location(cx);
-                                            }))
-                                        }),
-                                )
-                            })
-                            .children(super::contacts::sheet_entry(live, cx))
-                            .child(
-                        h_flex()
-                            .id("gallery-files")
-                            .h(px(TAP))
-                            .px(px(12.))
-                            .gap(px(8.))
-                            .flex_none()
-                            .rounded_full()
-                            .text_size(fs(14.))
-                            .text_color(p.text)
-                            .cursor_pointer()
-                            .active(|el| el.bg(p.raised))
-                            .child(Icon::new(IconName::File).size_4())
-                            .child("Files")
-                            .when(live, |el| {
-                                el.on_click(cx.listener(|this, _, _, cx| {
-                                    this.close_gallery(cx);
-                                    this.attach_file(cx);
-                                }))
-                            }),
-                            ),
-                    ),
+                    .h(px(36.))
+                    .px(px(GUTTER + 4.))
+                    .child(div().min_w_0().truncate().text_size(fs(14.)).text_color(p.faint).child(title)),
             );
 
         let notice = match g.access {
@@ -678,6 +736,18 @@ impl BeeperApp {
             .into_any_element()
         };
 
+        // What else can be attached, under the thumb; choosing photos puts Send in its place.
+        let actions = (count == 0).then(|| {
+            h_flex()
+                .flex_none()
+                .justify_around()
+                .px(px(GUTTER))
+                .pt(px(8.))
+                .children(attach_actions().into_iter().map(|action| {
+                    let row = action.button(cx);
+                    if live { row.on_click(cx.listener(move |this, _, window, cx| this.attach_action(action, window, cx))) } else { row }
+                }))
+        });
         let send = (count > 0).then(|| {
             h_flex().flex_none().justify_end().px(px(GUTTER)).pt(px(8.)).child(
                 h_flex()
@@ -726,6 +796,7 @@ impl BeeperApp {
                         .child(head)
                         .children(notice)
                         .child(grid)
+                        .children(actions)
                         .children(send),
                 )
                 .into_any_element(),

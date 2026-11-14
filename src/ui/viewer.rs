@@ -415,7 +415,7 @@ impl BeeperApp {
                 .child(bar)
                 .children(self.zoom.note.as_ref().map(|(text, _)| {
                     div().absolute().left_0().right_0().bottom(px(crate::insets().1 + 24.)).flex().justify_center().child(
-                        div().max_w(px(screen.0 - 2. * GUTTER)).px(px(GAP)).py(px(10.)).rounded(px(RADIUS)).bg(p.raised).text_color(p.text).text_size(px(14.)).child(text.clone()),
+                        div().max_w(px(screen.0 - 2. * GUTTER)).px(px(GAP)).py(px(10.)).rounded(px(RADIUS)).bg(p.raised).text_color(p.text).text_size(fs(14.)).child(text.clone()),
                     )
                 }))
                 .into_any_element(),

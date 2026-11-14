@@ -526,13 +526,13 @@ impl BeeperApp {
                 v_flex()
                     .min_w_0()
                     .gap(px(2.))
-                    .when(media.kind == MediaKind::Audio, |el| el.child(div().truncate().text_size(px(14.)).child(media.name.clone())))
+                    .when(media.kind == MediaKind::Audio, |el| el.child(div().truncate().text_size(fs(14.)).child(media.name.clone())))
                     .child(self.seekable(m, media, wave(heights, play.map_or(0., Play::progress), p.text), cx))
                     .child(
                         h_flex()
                             .h(px(16.))
                             .justify_between()
-                            .text_size(px(12.))
+                            .text_size(fs(12.))
                             .font_features(tabular())
                             .child(div().opacity(0.7).child(detail.unwrap_or(time)))
                             .when(INLINE && play.is_some(), |el| el.child(self.speed_chip(&m.id, p, cx))),
@@ -618,7 +618,7 @@ impl BeeperApp {
                 return Some(
                     bar()
                         .pl(px(GUTTER))
-                        .child(div().flex_1().min_w_0().text_size(px(14.)).text_color(p.muted).child("Voice messages need the microphone."))
+                        .child(div().flex_1().min_w_0().text_size(fs(14.)).text_color(p.muted).child("Voice messages need the microphone."))
                         .child(Button::new("mic-allow").primary().h(px(TAP)).label("Allow").on_click(cx.listener(|this, _, _, cx| this.ask_mic(cx))))
                         .child(round_button("mic-dismiss", IconName::X, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| {
                             this.voice.denied = false;
@@ -635,7 +635,7 @@ impl BeeperApp {
                     .bg(p.ground)
                     .items_center()
                     .px(px(GUTTER))
-                    .text_size(px(14.))
+                    .text_size(fs(14.))
                     .text_color(p.muted)
                     .child("Hold to record, release to send.")
                     .with_animation("mic-hint", Animation::new(motion::ENTER).with_easing(motion::ease_out), |el, t| el.opacity(t))
@@ -652,7 +652,7 @@ impl BeeperApp {
             Animation::new(Duration::from_millis(1000)).repeat().with_max_fps(24.),
             |el, t| el.opacity(0.4 + 0.6 * (0.5 + 0.5 * (t * std::f32::consts::TAU).cos())),
         );
-        let clock = h_flex().gap(px(8.)).pl(px(10.)).flex_none().text_size(px(16.)).font_features(tabular()).child(dot).child(length(elapsed));
+        let clock = h_flex().gap(px(8.)).pl(px(10.)).flex_none().text_size(fs(16.)).font_features(tabular()).child(dot).child(length(elapsed));
         let send = |id: &'static str| {
             div()
                 .id(id)
@@ -684,7 +684,7 @@ impl BeeperApp {
                             .relative()
                             .left(px(dx))
                             .opacity(1. + dx / CANCEL_X)
-                            .text_size(px(14.))
+                            .text_size(fs(14.))
                             .text_color(p.faint)
                             .child(Icon::new(IconName::ChevronLeft).size_4())
                             .child("Slide to cancel"),
@@ -734,7 +734,7 @@ impl BeeperApp {
                     })
                     .when(!stopped, |el| el.child(clock))
                     .child(div().flex_1().min_w_0().flex().justify_center().overflow_hidden().child(wave(heights, if stopped { draft.map_or(0., Play::progress) } else { 1. }, p.text)))
-                    .when(stopped, |el| el.child(div().flex_none().text_size(px(12.)).font_features(tabular()).text_color(p.muted).child(length(elapsed))))
+                    .when(stopped, |el| el.child(div().flex_none().text_size(fs(12.)).font_features(tabular()).text_color(p.muted).child(length(elapsed))))
                     .when(!stopped, |el| {
                         el.child(
                             round_button("rec-stop", IconName::Square, cx)

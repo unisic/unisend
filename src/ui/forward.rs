@@ -192,7 +192,25 @@ impl BeeperApp {
         cx.notify();
     }
 
-    /// Escape and Android's back: the forward sheet first, then selection mode.
+    /// Escape and Android's back, for the forward sheet over the chat.
+    pub(super) fn close_forward_sheet(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.fwd.picking.take().is_some();
+        if open {
+            cx.notify();
+        }
+        open
+    }
+
+    /// Escape and Android's back in selection mode: Delete for everyone's second step first.
+    pub(super) fn selection_back(&mut self, cx: &mut Context<Self>) -> bool {
+        if !std::mem::take(&mut self.fwd.armed) && self.fwd.selected.take().is_none() {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
+    /// Closes the forward sheet, or else leaves selection mode.
     pub(super) fn forward_back(&mut self, cx: &mut Context<Self>) -> bool {
         if self.fwd.picking.take().is_some() {
         } else if self.fwd.selected.take().is_some() {
@@ -299,7 +317,7 @@ impl BeeperApp {
             .child(round_button("select-close", IconName::X, cx).on_click(cx.listener(|this, _, _, cx| {
                 this.forward_back(cx);
             })))
-            .child(div().flex_1().min_w_0().pl(px(8.)).truncate().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).font_features(tabular()).child(count))
+            .child(div().flex_1().min_w_0().pl(px(8.)).truncate().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).font_features(tabular()).child(count))
             .when(!picked.is_empty() && !armed, |el| {
                 el.child(round_button("select-copy", IconName::Copy, cx).on_click(cx.listener(move |this, _, _, cx| {
                     crate::copy(cx, text.clone());
@@ -333,7 +351,7 @@ impl BeeperApp {
                         .rounded_full()
                         .bg(p.raised)
                         .text_color(p.negative)
-                        .text_size(px(14.))
+                        .text_size(fs(14.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .cursor_pointer()
                         .child("Delete for everyone")
@@ -441,8 +459,8 @@ impl BeeperApp {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().truncate().text_size(px(16.)).child(r.name.clone()))
-                            .children(r.network.clone().map(|n| div().truncate().text_size(px(12.)).text_color(p.faint).child(n))),
+                            .child(div().truncate().text_size(fs(16.)).child(r.name.clone()))
+                            .children(r.network.clone().map(|n| div().truncate().text_size(fs(12.)).text_color(p.faint).child(n))),
                     )
                     .child(
                         div()
@@ -507,8 +525,8 @@ impl BeeperApp {
                                 .h(px(36.))
                                 .px(px(GUTTER + 4.))
                                 .gap(px(8.))
-                                .child(div().flex_1().min_w_0().truncate().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(title))
-                                .child(div().flex_none().text_size(px(12.)).font_features(tabular()).text_color(p.faint).child(hint)),
+                                .child(div().flex_1().min_w_0().truncate().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(title))
+                                .child(div().flex_none().text_size(fs(12.)).font_features(tabular()).text_color(p.faint).child(hint)),
                         )
                         .child(
                             div()
@@ -537,7 +555,7 @@ impl BeeperApp {
                                     .rounded_full()
                                     .bg(p.text)
                                     .text_color(p.ground)
-                                    .text_size(px(16.))
+                                    .text_size(fs(16.))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .cursor_pointer()
                                     .child(send_label)
@@ -584,7 +602,7 @@ impl BeeperApp {
                         .gap(px(8.))
                         .rounded_full()
                         .bg(p.raised)
-                        .text_size(px(14.))
+                        .text_size(fs(14.))
                         .child(toast.text.clone())
                         .when(toast.undo.is_some() && live, |el| {
                             el.child(

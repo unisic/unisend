@@ -36,29 +36,6 @@ pub(super) struct Picker {
 }
 
 impl BeeperApp {
-    /// A button beside the paperclip where no attach sheet carries the GIF entry (desktop).
-    pub(super) fn gif_button(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        let p = Palette::of(cx);
-        (gifs_enabled() && !gallery::enabled()).then(|| {
-            div()
-                .id("gifs")
-                .h(px(TAP))
-                .px(px(8.))
-                .flex()
-                .flex_none()
-                .items_center()
-                .rounded_full()
-                .cursor_pointer()
-                .text_size(px(12.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(p.muted)
-                .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.surface)))
-                .active(|el| el.bg(p.raised))
-                .child(div().px(px(5.)).py(px(1.)).rounded(px(4.)).border_1().border_color(p.muted).child("GIF"))
-                .on_click(cx.listener(|this, _, window, cx| this.open_gifs(window, cx)))
-        })
-    }
-
     pub(super) fn gifs_open(&self) -> bool {
         self.gifs.open
     }
@@ -228,7 +205,7 @@ impl BeeperApp {
                 .items_center()
                 .justify_center()
                 .px(px(GUTTER))
-                .text_size(px(14.))
+                .text_size(fs(14.))
                 .text_color(p.faint)
                 .children(status)
                 .into_any_element()
@@ -283,7 +260,7 @@ impl BeeperApp {
                         .child(div().flex_none().h(px(20.)).flex().items_center().justify_center().child(div().w(px(36.)).h(px(4.)).rounded_full().bg(p.faint.opacity(0.5))))
                         .children(search)
                         .child(grid)
-                        .child(div().flex_none().pt(px(8.)).px(px(GUTTER)).text_size(px(12.)).text_color(p.faint).child("Powered by KLIPY")),
+                        .child(div().flex_none().pt(px(8.)).px(px(GUTTER)).text_size(fs(12.)).text_color(p.faint).child("Powered by KLIPY")),
                 )
                 .into_any_element(),
         )

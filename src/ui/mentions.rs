@@ -161,6 +161,9 @@ impl BeeperApp {
         if !held && self.mention.picked.len() < MAX_PICKED {
             self.mention.picked.push((name, user));
         }
+        // A click on the row took focus from the composer; Enter should still send.
+        let focus = self.composer.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
         cx.notify();
     }
 
@@ -230,7 +233,7 @@ impl BeeperApp {
                         .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.raised)))
                         .active(|el| el.bg(p.raised))
                         .child(avatar(&name, self.faces.get(&user), FACE, cx))
-                        .child(div().flex_1().min_w_0().truncate().text_size(px(16.)).text_color(p.text).child(name))
+                        .child(div().flex_1().min_w_0().truncate().text_size(fs(16.)).text_color(p.text).child(name))
                         .on_click(cx.listener(move |this, _, window, cx| this.pick_mention(row, window, cx)))
                 })),
         )

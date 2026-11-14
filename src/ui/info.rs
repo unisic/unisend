@@ -308,7 +308,7 @@ impl BeeperApp {
         if self.info_open() && window.viewport_size().width >= px(NARROW) && Self::info_beside(window) { INFO_W } else { 0. }
     }
 
-    fn info_rows(&mut self) {
+    pub(super) fn info_rows(&mut self) {
         let group = self.room_summary().is_some_and(|r| !r.dm);
         let new = rows(&self.info, group);
         let (old_range, count) = changed(&self.info.rows, &new);
@@ -467,6 +467,7 @@ impl BeeperApp {
                 };
                 let fact = |icon: IconName, text: SharedString| {
                     h_flex()
+                        .px(px(GAP))
                         .min_h(px(52.))
                         .py(px(8.))
                         .gap(px(GAP))
@@ -474,16 +475,21 @@ impl BeeperApp {
                         .child(div().flex_1().min_w_0().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(text))
                 };
                 let topic = details.as_ref().and_then(|d| d.topic.clone());
+                // The chat sheet's own rows, inset as the facts are.
+                let room = summary.map(|r| r.id);
+                let timer = room.as_ref().and_then(|id| self.disappear_entry(id, true, cx)).map(|row| row.px(px(GAP)));
+                let leave = room.map(|id| self.leave_row(id, true, cx).px(px(GAP)));
                 edge()
                     .pb(px(GAP))
                     .child(
                         v_flex()
-                            .px(px(GAP))
                             .py(px(4.))
                             .rounded(px(RADIUS))
                             .bg(p.surface)
                             .children(topic.map(|t| fact(IconName::Info, t.into())))
-                            .child(fact(icon, text.into())),
+                            .child(fact(icon, text.into()))
+                            .children(timer)
+                            .children(leave),
                     )
                     .into_any_element()
             }

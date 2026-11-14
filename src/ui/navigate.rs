@@ -194,7 +194,7 @@ impl BeeperApp {
                                     .rounded_full()
                                     .bg(p.text)
                                     .text_color(p.ground)
-                                    .text_size(px(12.))
+                                    .text_size(fs(12.))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .font_features(tabular())
                                     .child(if missed > 99 { "99+".to_owned() } else { missed.to_string() }),

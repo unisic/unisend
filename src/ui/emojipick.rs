@@ -303,7 +303,7 @@ impl BeeperApp {
         let searching = !query.trim().is_empty();
         let rows = self.emoji_pick.rows.len();
         let grid = if rows == 0 {
-            div().flex_1().flex().items_center().justify_center().text_size(px(14.)).text_color(p.faint).child("No emoji found").into_any_element()
+            div().flex_1().flex().items_center().justify_center().text_size(fs(14.)).text_color(p.faint).child("No emoji found").into_any_element()
         } else {
             uniform_list(
                 "emoji-grid",
@@ -325,7 +325,7 @@ impl BeeperApp {
                                 .flex()
                                 .items_end()
                                 .pb(px(6.))
-                                .text_size(px(13.))
+                                .text_size(fs(13.))
                                 .text_color(p.faint)
                                 .child(cat.label())
                                 .into_any_element(),

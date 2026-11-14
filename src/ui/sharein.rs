@@ -108,7 +108,8 @@ fn pick_order(rooms: &[RoomSummary], query: &str, order: &mut Vec<OwnedRoomId>) 
 
 impl BeeperApp {
     /// Takes a share the app was opened or brought forward with, once the user is signed in.
-    pub(super) fn take_share(&mut self, cx: &mut Context<Self>) {
+    /// `window` is there unless the user just signed in, when nothing else can be open.
+    pub(super) fn take_share(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         if self.screen != Screen::Main {
             return;
         }
@@ -123,7 +124,16 @@ impl BeeperApp {
         self.close_location(cx);
         self.close_emoji(cx);
         self.close_poll_form(cx);
+        self.close_gifs(cx);
+        self.close_confirm(cx);
+        while self.forward_back(cx) {}
+        if let Some(window) = window
+            && self.preview.open()
+        {
+            self.close_preview(true, window, cx);
+        }
         self.chat_sheet = None;
+        self.gallery.menu = false;
         let target = incoming.chat.and_then(|chat| OwnedRoomId::try_from(chat).map_err(|e| log::warn!("share target: {e}")).ok());
         self.share.text = incoming.text;
         // A Direct Share target with text alone needs no screen.
@@ -300,8 +310,8 @@ impl BeeperApp {
                     .rounded_full()
                     .bg(p.surface)
                     .child(Icon::new(file_icon(path)).size_4().flex_none().text_color(p.muted))
-                    .child(div().min_w_0().truncate().text_size(px(14.)).child(name))
-                    .child(div().flex_none().text_size(px(12.)).font_features(tabular()).text_color(p.faint).child(file_size(*size)))
+                    .child(div().min_w_0().truncate().text_size(fs(14.)).child(name))
+                    .child(div().flex_none().text_size(fs(12.)).font_features(tabular()).text_color(p.faint).child(file_size(*size)))
             }))
         });
         let text_card = (text_only && !s.text.is_empty()).then(|| {
@@ -313,8 +323,8 @@ impl BeeperApp {
                 .gap(px(4.))
                 .rounded(px(RADIUS))
                 .bg(p.surface)
-                .child(div().text_size(px(14.)).line_clamp(3).text_ellipsis().child(s.text.clone()))
-                .child(div().text_size(px(12.)).text_color(p.faint).child("Goes into the message box of the chat you choose."))
+                .child(div().text_size(fs(14.)).line_clamp(3).text_ellipsis().child(s.text.clone()))
+                .child(div().text_size(fs(12.)).text_color(p.faint).child("Goes into the message box of the chat you choose."))
         });
 
         let search = h_flex()
@@ -356,9 +366,9 @@ impl BeeperApp {
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(div().truncate().text_size(px(16.)).line_height(px(22.)).child(room.name.clone()))
+                                    .child(div().truncate().text_size(fs(16.)).line_height(fs(22.)).child(room.name.clone()))
                                     .children(room.network.as_deref().map(|n| {
-                                        div().truncate().text_size(px(12.)).text_color(p.faint).child(short_network(n).to_owned())
+                                        div().truncate().text_size(fs(12.)).text_color(p.faint).child(short_network(n).to_owned())
                                     })),
                             )
                             .when(chosen, |el| el.child(Icon::new(IconName::Check).size_5().flex_none().text_color(p.text)))
@@ -420,11 +430,11 @@ impl BeeperApp {
             .max_w(px(COLUMN_W))
             .child(head)
             .children(items.map(|el| el.pb(px(8.))))
-            .children(status.map(|text| div().flex_none().px(px(GUTTER)).pb(px(8.)).text_size(px(12.)).text_color(p.faint).child(text)))
+            .children(status.map(|text| div().flex_none().px(px(GUTTER)).pb(px(8.)).text_size(fs(12.)).text_color(p.faint).child(text)))
             .children(text_card.map(|el| el.mb(px(GAP))))
             .child(search.mb(px(8.)))
             .child(div().flex_1().min_h_0().child(if s.rows.is_empty() {
-                div().px(px(GUTTER)).py(px(GAP)).text_size(px(14.)).text_color(p.faint).child(empty).into_any_element()
+                div().px(px(GUTTER)).py(px(GAP)).text_size(fs(14.)).text_color(p.faint).child(empty).into_any_element()
             } else {
                 list.into_any_element()
             }))
