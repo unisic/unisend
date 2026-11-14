@@ -49,7 +49,7 @@ pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p
                     .px(px(10.))
                     .gap(px(8.))
                     .items_center()
-                    .text_size(px(14.))
+                    .text_size(fs(14.))
                     .when(chosen, |el| el.child(Icon::new(IconName::Check).size_4()))
                     .child(div().flex_1().min_w_0().line_clamp(2).text_ellipsis().child(answer.text.clone()))
                     .child(div().text_color(p.muted).font_features(tabular()).child(count.to_string())),
@@ -64,10 +64,10 @@ pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p
     v_flex()
         .w(px(width.min(BUBBLE_W)))
         .gap(px(6.))
-        .child(div().text_size(px(16.)).line_height(px(22.)).font_weight(FontWeight::SEMIBOLD).child(poll.question.clone()))
+        .child(div().text_size(fs(16.)).line_height(fs(22.)).font_weight(FontWeight::SEMIBOLD).child(poll.question.clone()))
         .children(rows)
-        .child(div().text_size(px(12.)).text_color(p.faint).child(total))
-        .when(!open, |el| el.child(div().text_size(px(12.)).text_color(p.faint).child("Poll ended")))
+        .child(div().text_size(fs(12.)).text_color(p.faint).child(total))
+        .when(!open, |el| el.child(div().text_size(fs(12.)).text_color(p.faint).child("Poll ended")))
         .into_any_element()
 }
 
@@ -96,9 +96,9 @@ pub(super) fn place_card(id: &str, place: &Place, note: Option<String>, width: f
         .child(
             v_flex()
                 .min_w_0()
-                .when(!place.description.is_empty(), |el| el.child(div().text_size(px(14.)).line_height(px(19.)).line_clamp(2).text_ellipsis().child(place.description.clone())))
-                .child(div().text_size(px(13.)).line_height(px(18.)).text_color(p.muted).child(place.coordinates()))
-                .children(note.map(|note| div().text_size(px(13.)).line_height(px(18.)).text_color(p.faint).child(note))),
+                .when(!place.description.is_empty(), |el| el.child(div().text_size(fs(14.)).line_height(fs(19.)).line_clamp(2).text_ellipsis().child(place.description.clone())))
+                .child(div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.muted).child(place.coordinates()))
+                .children(note.map(|note| div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.faint).child(note))),
         )
         .into_any_element()
 }

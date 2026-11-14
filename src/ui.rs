@@ -18,6 +18,7 @@ use gpui_kit::*;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
 use tokio::sync::mpsc;
 
+pub(crate) mod appearance;
 mod camera;
 mod cards;
 mod emojipick;
@@ -37,6 +38,7 @@ mod video;
 use std::path::PathBuf;
 
 use menu::{MenuKind, QUICK_REACTIONS};
+use appearance::fs;
 use panels::Panel;
 
 use crate::{Keyboard, Palette};
@@ -162,6 +164,7 @@ pub struct BeeperApp {
     dir: PathBuf,
     settings: crate::Settings,
     emoji: panels::EmojiChoice,
+    look: appearance::Look,
     user: Option<OwnedUserId>,
     /// The account is Beeper's, so it has chat networks.
     beeper: bool,
@@ -291,6 +294,8 @@ impl BeeperApp {
         let emoji_pick = emojipick::Picker::new(emoji_search.clone(), &dir);
 
         let mut subs = Vec::new();
+        let look = appearance::Look::new(&settings, &dir, cx);
+        subs.push(cx.subscribe_in(&look.dim, window, |this, _, ev: &appearance::SliderEvent, _, cx| this.dim_changed(ev, cx)));
         for (input, on_enter, keyboard) in [
             (&email, Self::send_code as fn(&mut Self, &mut Window, &mut Context<Self>), Keyboard::Email),
             (&code, Self::submit_code, Keyboard::Key),
@@ -370,6 +375,7 @@ impl BeeperApp {
             focus: cx.focus_handle(),
             dir,
             emoji: Default::default(),
+            look,
             settings,
             user: None,
             beeper: true,
@@ -934,7 +940,7 @@ impl BeeperApp {
                             .rounded_full()
                             .bg(gpui_kit::black().opacity(0.55))
                             .text_color(gpui_kit::white())
-                            .text_size(px(11.))
+                            .text_size(fs(11.))
                             .child(length(d))
                     }))
                 })
@@ -976,11 +982,11 @@ impl BeeperApp {
                 v_flex()
                     .min_w_0()
                     // Two lines, so a long file name keeps its extension in sight more often.
-                    .child(div().line_clamp(2).text_ellipsis().text_size(px(15.)).line_height(px(20.)).child(match media.kind {
+                    .child(div().line_clamp(2).text_ellipsis().text_size(fs(15.)).line_height(fs(20.)).child(match media.kind {
                         MediaKind::Voice => "Voice message".to_owned(),
                         _ => media.name.clone(),
                     }))
-                    .when(!detail.is_empty(), |el| el.child(div().text_size(px(12.)).font_features(tabular()).opacity(0.7).child(detail))),
+                    .when(!detail.is_empty(), |el| el.child(div().text_size(fs(12.)).font_features(tabular()).opacity(0.7).child(detail))),
             )
             .into_any_element()
     }
@@ -1089,9 +1095,9 @@ impl BeeperApp {
                     .w_full()
                     .max_w(px(360.))
                     .gap(px(GAP))
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(p.faint).child("Murmur"))
+                    .child(div().text_size(fs(14.)).font_weight(FontWeight::SEMIBOLD).text_color(p.faint).child("Murmur"))
                     .child(screen_title(title))
-                    .child(div().pb(px(8.)).text_size(px(14.)).line_height(px(20.)).text_color(p.muted).child(hint))
+                    .child(div().pb(px(8.)).text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(hint))
                     .child(Input::new(input).large())
                     .child(
                         Button::new("login-submit")
@@ -1122,7 +1128,7 @@ impl BeeperApp {
                             }),
                         ))
                     })
-                    .children(self.error.clone().map(|e| div().text_size(px(14.)).text_color(p.negative).child(e))),
+                    .children(self.error.clone().map(|e| div().text_size(fs(14.)).text_color(p.negative).child(e))),
             )
     }
 
@@ -1190,7 +1196,7 @@ impl BeeperApp {
                 .on_click(cx.listener(move |this, _, window, cx| this.set_tab(tab, window, cx)))
                 .map(|el| {
                     if narrow {
-                        el.flex_1().h_full().flex_col().justify_center().gap(px(4.)).text_size(px(12.))
+                        el.flex_1().h_full().flex_col().justify_center().gap(px(4.)).text_size(fs(12.))
                     } else {
                         el.h(px(TAP))
                             .px(px(GAP))
@@ -1211,7 +1217,7 @@ impl BeeperApp {
                 .h_full()
                 .px(px(8.))
                 .gap(px(2.))
-                .child(h_flex().h(px(BAR_H)).px(px(GAP)).text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Murmur"))
+                .child(h_flex().h(px(BAR_H)).px(px(GAP)).text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child("Murmur"))
                 .children(items)
         }
     }
@@ -1345,12 +1351,12 @@ impl BeeperApp {
                                                     .flex_1()
                                                     .min_w_0()
                                                     .truncate()
-                                                    .text_size(px(16.))
-                                                    .line_height(px(22.))
+                                                    .text_size(fs(16.))
+                                                    .line_height(fs(22.))
                                                     .when(unread, |el| el.font_weight(FontWeight::SEMIBOLD))
                                                     .child(room.name.clone()),
                                             )
-                                            .child(div().flex_none().text_size(px(12.)).font_features(tabular()).text_color(p.faint).child(meta)),
+                                            .child(div().flex_none().text_size(fs(12.)).font_features(tabular()).text_color(p.faint).child(meta)),
                                     )
                                     .child(
                                         h_flex()
@@ -1360,8 +1366,8 @@ impl BeeperApp {
                                                     .flex_1()
                                                     .min_w_0()
                                                     .truncate()
-                                                    .text_size(px(14.))
-                                                    .line_height(px(20.))
+                                                    .text_size(fs(14.))
+                                                    .line_height(fs(20.))
                                                     .text_color(if unread { p.text } else { p.muted })
                                                     .child(match this.drafts.get(&room.id) {
                                                         Some(draft) => h_flex()
@@ -1450,7 +1456,7 @@ impl BeeperApp {
                     .px(px(GAP))
                     .gap(px(6.))
                     .rounded_full()
-                    .text_size(px(14.))
+                    .text_size(fs(14.))
                     .text_color(if on { p.text } else { p.muted })
                     .when(on, |el| el.bg(p.raised))
                     .child(label)
@@ -1465,7 +1471,7 @@ impl BeeperApp {
             })
             .child(self.row_release(cx))
             .child(div().flex_1().min_h_0().child(if self.shown.is_empty() {
-                div().px(px(GUTTER)).py(px(GAP)).text_size(px(14.)).text_color(p.faint).child(empty).into_any_element()
+                div().px(px(GUTTER)).py(px(GAP)).text_size(fs(14.)).text_color(p.faint).child(empty).into_any_element()
             } else {
                 list.into_any_element()
             }))
@@ -1594,7 +1600,7 @@ impl BeeperApp {
                             None => el,
                         })
                     });
-                    let line = |size: f32, height: f32| div().text_size(px(size)).line_height(px(height));
+                    let line = |size: f32, height: f32| div().text_size(fs(size)).line_height(fs(height));
                     v_flex()
                         .id(SharedString::from(format!("{}-link", m.id)))
                         .w(px(width))
@@ -1652,7 +1658,7 @@ impl BeeperApp {
                         el.child(
                             div()
                                 .px(px(text_x))
-                                .map(|el| if jumbo { el.text_size(px(40.)).line_height(px(48.)) } else { el.text_size(px(16.)).line_height(px(22.)) })
+                                .map(|el| if jumbo { el.text_size(fs(40.)).line_height(fs(48.)) } else { el.text_size(fs(16.)).line_height(fs(22.)) })
                                 .when(faded, |el| el.italic().text_color(inside.faint))
                                 .child(match m.rich.as_ref().filter(|_| !faded) {
                                     Some(rich) => rich::body(m, rich, inside, ink),
@@ -1663,7 +1669,7 @@ impl BeeperApp {
                     .children(link_card)
                     .children(poll_card)
                     .children(place_card)
-                    .when(m.edited && !m.deleted, |el| el.child(div().px(px(text_x)).text_size(px(12.)).text_color(inside.faint).child("Edited")));
+                    .when(m.edited && !m.deleted, |el| el.child(div().px(px(text_x)).text_size(fs(12.)).text_color(inside.faint).child("Edited")));
                 // Badges pinned over the bubble's lower edge, ringed in the ground's colour: standing
                 // free under it they read as small messages of their own.
                 let reactions = (!m.reactions.is_empty()).then(|| {
@@ -1684,8 +1690,8 @@ impl BeeperApp {
                             // The user's own reaction is the ringed one.
                             .border_color(if mine { p.text } else { p.ground })
                             .bg(p.lifted)
-                            .text_size(px(13.))
-                            .line_height(px(18.))
+                            .text_size(fs(13.))
+                            .line_height(fs(18.))
                             .font_weight(FontWeight::MEDIUM)
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, &key_owned, cx)))
@@ -1714,7 +1720,7 @@ impl BeeperApp {
                             div()
                                 .pl(side + px(GAP))
                                 .pb(px(4.))
-                                .text_size(px(12.))
+                                .text_size(fs(12.))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(p.muted)
                                 .truncate()
@@ -1777,7 +1783,7 @@ impl BeeperApp {
                                     (Some((state, _)), false) => state,
                                     (None, _) => clock(m.ts),
                                 };
-                                el.child(div().px(px(GAP)).pt(px(4.)).text_size(px(12.)).font_features(tabular()).text_color(if failed { p.negative } else { p.faint }).child(text))
+                                el.child(div().px(px(GAP)).pt(px(4.)).text_size(fs(12.)).font_features(tabular()).text_color(if failed { p.negative } else { this.on_wallpaper(p.faint, cx) }).child(text))
                             }),
                     )
                     .into_any_element()
@@ -1803,8 +1809,8 @@ impl BeeperApp {
                             .flex_1()
                             .min_w_0()
                             .pl(px(8.))
-                            .child(div().text_size(px(16.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
-                            .children(network.map(|n| div().text_size(px(12.)).line_height(px(16.)).text_color(p.faint).truncate().child(n))),
+                            .child(div().text_size(fs(16.)).line_height(fs(20.)).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
+                            .children(network.map(|n| div().text_size(fs(12.)).line_height(fs(16.)).text_color(p.faint).truncate().child(n))),
                     )
                     .when(room.is_some(), |el| {
                         el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, _, _, cx| {
@@ -1818,6 +1824,7 @@ impl BeeperApp {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .children(self.wallpaper_layer(0., cx))
                     .child(timeline)
                     .child(self.press_tracker(cx))
                     .children(self.jump_button(cx))
@@ -1829,8 +1836,8 @@ impl BeeperApp {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_size(px(14.))
-                                .text_color(p.faint)
+                                .text_size(fs(14.))
+                                .text_color(self.on_wallpaper(p.faint, cx))
                                 .child("Loading messages…")
                                 // Said only when the wait is long enough to notice.
                                 .with_animations(
@@ -1860,7 +1867,7 @@ impl BeeperApp {
                         .px(px(GUTTER + GAP))
                         .pt(px(6.))
                         .gap(px(6.))
-                        .text_size(px(12.))
+                        .text_size(fs(12.))
                         .text_color(faint)
                         .child(dots)
                         .child(line)
@@ -1873,7 +1880,7 @@ impl BeeperApp {
             })
             .children(self.render_compose_strip(window, cx))
             .when(self.uploads > 0, |el| {
-                el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(px(12.)).text_color(p.faint).child("Sending attachment…"))
+                el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(fs(12.)).text_color(p.faint).child("Sending attachment…"))
             })
             .child(
                 h_flex()
@@ -1906,6 +1913,7 @@ impl BeeperApp {
                                     crate::show_keyboard(Keyboard::Text);
                                 }
                             }))
+                            .text_size(fs(16.))
                             .child(Input::new(&self.composer).appearance(false).large()),
                     )
                     .child(
@@ -1966,7 +1974,7 @@ impl BeeperApp {
                     .bg(p.surface)
                     // A tap between the rows is not a tap outside the sheet.
                     .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
-                    .child(div().h(px(36.)).px(px(GUTTER + 4.)).flex().items_center().truncate().text_size(px(14.)).text_color(p.faint).child(title))
+                    .child(div().h(px(36.)).px(px(GUTTER + 4.)).flex().items_center().truncate().text_size(fs(14.)).text_color(p.faint).child(title))
                     .children(rows),
             )
             .into_any_element()
@@ -1977,23 +1985,23 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let m = &self.msgs[ix];
         let (text, ink) = match &m.kind {
-            Kind::Day => (day_label(m.ts), p.faint),
+            Kind::Day => (day_label(m.ts), self.on_wallpaper(p.faint, cx)),
             Kind::Unread => ("New messages".to_owned(), p.accent_ink),
-            Kind::Notice => (m.body.clone(), p.faint),
+            Kind::Notice => (m.body.clone(), self.on_wallpaper(p.faint, cx)),
             // Joins that follow one another are told once, by the last of them.
             Kind::Joined if self.msgs.get(ix + 1).is_none_or(|next| next.kind != Kind::Joined) => {
                 let mut names: Vec<&str> =
                     self.msgs[..=ix].iter().rev().take(MAX_JOINED).take_while(|m| m.kind == Kind::Joined).map(|m| m.sender.as_str()).collect();
                 names.reverse();
-                (format!("{} joined", people(&names).0), p.faint)
+                (format!("{} joined", people(&names).0), self.on_wallpaper(p.faint, cx))
             }
             _ => return div().into_any_element(),
         };
         if m.kind == Kind::Unread {
             let rule = || div().h(px(1.)).flex_1().bg(p.rule);
-            return h_flex().w_full().px(px(GUTTER)).pt(px(GAP)).gap(px(8.)).items_center().text_size(px(12.)).text_color(ink).child(rule()).child(text).child(rule()).into_any_element();
+            return h_flex().w_full().px(px(GUTTER)).pt(px(GAP)).gap(px(8.)).items_center().text_size(fs(12.)).text_color(ink).child(rule()).child(text).child(rule()).into_any_element();
         }
-        div().w_full().px(px(GUTTER)).pt(px(GAP)).flex().justify_center().text_size(px(12.)).text_color(ink).child(text).into_any_element()
+        div().w_full().px(px(GUTTER)).pt(px(GAP)).flex().justify_center().text_size(fs(12.)).text_color(ink).child(text).into_any_element()
     }
 
     /// What became of the user's message at `ix`, and whether that is a failure. Said of the
@@ -2219,7 +2227,7 @@ impl BeeperApp {
         // Fades and opens in, closes and fades out; it sits above everything, so opening its
         // height moves the screen down instead of covering it.
         let offline = Presence::new("offline", self.offline).transition(if self.offline { motion::enter() } else { motion::exit() }).sample(window, cx);
-        let card = || v_flex().mx(px(GUTTER)).mt(px(8.)).p(px(GAP)).gap(px(10.)).rounded(px(RADIUS)).text_size(px(14.)).line_height(px(20.));
+        let card = || v_flex().mx(px(GUTTER)).mt(px(8.)).p(px(GAP)).gap(px(10.)).rounded(px(RADIUS)).text_size(fs(14.)).line_height(fs(20.));
         v_flex()
             // Being retried: a state, said quietly, that goes away by itself.
             .when(offline.should_render(), |el| {
@@ -2231,7 +2239,7 @@ impl BeeperApp {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(12.))
+                        .text_size(fs(12.))
                         .text_color(p.faint)
                         .child("Connection lost. Reconnecting…"),
                 )
@@ -2294,7 +2302,7 @@ fn header() -> Div {
 }
 
 fn screen_title(title: &'static str) -> Div {
-    div().text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::SEMIBOLD).child(title)
+    div().text_size(fs(22.)).line_height(fs(28.)).font_weight(FontWeight::SEMIBOLD).child(title)
 }
 
 /// An icon to tap, with a finger-sized target.
@@ -2444,7 +2452,7 @@ fn inside_of(m: &Msg, p: Palette) -> Palette {
 /// `heading` takes the place of the sender (the compose strip's "Replying to"), with one line of
 /// text under it. `inside` is the palette of what it sits in.
 fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, inside: Palette, thumb: Option<Arc<Image>>) -> Stateful<Div> {
-    let line = |size: f32, height: f32| div().text_size(px(size)).line_height(px(height));
+    let line = |size: f32, height: f32| div().text_size(fs(size)).line_height(fs(height));
     let lines = if heading.is_some() { 1 } else { 2 };
     let top = match heading {
         Some((icon, title)) => Some((icon, title)),
@@ -2628,7 +2636,7 @@ fn sheet_row(id: &'static str, icon: IconName, label: &'static str, ink: Hsla, c
         .active(|el| el.bg(p.raised))
         .px(px(GUTTER + 4.))
         .gap(px(GAP))
-        .text_size(px(16.))
+        .text_size(fs(16.))
         .text_color(ink)
         .cursor_pointer()
         .child(Icon::new(icon).size_5())
@@ -2661,7 +2669,7 @@ fn count_pill(n: u64, muted: bool, cx: &App) -> Div {
         .rounded_full()
         .bg(if muted { p.raised } else { p.accent })
         .text_color(if muted { p.text } else { p.on_accent })
-        .text_size(px(12.))
+        .text_size(fs(12.))
         .font_weight(FontWeight::SEMIBOLD)
         .font_features(tabular())
         .children((n > 0).then(|| if n > 99 { "99+".to_string() } else { n.to_string() }))
@@ -2832,7 +2840,7 @@ impl Render for BeeperApp {
             Screen::Starting => root
                 .items_center()
                 .justify_center()
-                .child(div().text_size(px(14.)).text_color(p.faint).child("Connecting…"))
+                .child(div().text_size(fs(14.)).text_color(p.faint).child("Connecting…"))
                 .into_any_element(),
             Screen::Email | Screen::Code => root.child(self.render_login(cx)).into_any_element(),
             Screen::Matrix => root.child(self.render_matrix_login(cx)).into_any_element(),
@@ -2880,7 +2888,7 @@ impl Render for BeeperApp {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_size(px(14.))
+                                    .text_size(fs(14.))
                                     .text_color(p.faint)
                                     .child("Choose a chat")
                                     .into_any_element()

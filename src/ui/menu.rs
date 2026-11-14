@@ -589,7 +589,7 @@ impl BeeperApp {
                     .h(px(h))
                     .px(px(GUTTER))
                     .gap(px(GUTTER))
-                    .text_size(px(16.))
+                    .text_size(fs(16.))
                     .text_color(ink)
                     .cursor_pointer()
                     .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.text.opacity(0.1))))

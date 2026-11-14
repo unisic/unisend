@@ -231,6 +231,15 @@ pub(crate) struct Settings {
     pub emoji_font: Option<String>,
     #[serde(default)]
     pub lock: applock::LockSettings,
+    /// Text size step, for messages and the rest of the interface.
+    #[serde(default)]
+    pub text_size: ui::appearance::TextSize,
+    /// What is drawn behind the messages, for all chats.
+    #[serde(default)]
+    pub wallpaper: ui::appearance::Wallpaper,
+    /// Percent of black over a photo wallpaper.
+    #[serde(default = "ui::appearance::default_dim")]
+    pub wallpaper_dim: u8,
 }
 
 impl Settings {
@@ -244,7 +253,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, lock: Default::default() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default() })
     }
 
     fn parse(raw: &[u8]) -> Option<Self> {

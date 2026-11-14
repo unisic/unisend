@@ -5,6 +5,7 @@ use std::ops::Range;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
 
+use super::appearance::fs;
 use super::urls;
 use crate::Palette;
 use crate::backend::{Block, Msg, Rich, Run};
@@ -49,8 +50,8 @@ fn one(m: &Msg, block: &Block, look: Look, n: &mut usize) -> AnyElement {
             .rounded(px(10.))
             .bg(look.p.text.opacity(0.07))
             .font_family(MONO)
-            .text_size(px(14.))
-            .line_height(px(20.))
+            .text_size(fs(14.))
+            .line_height(fs(20.))
             .child(StyledText::new(code.clone()))
             .into_any_element(),
         Block::List { start, items } => v_flex()

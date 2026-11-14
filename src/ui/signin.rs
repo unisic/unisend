@@ -77,13 +77,13 @@ impl BeeperApp {
                     .w_full()
                     .max_w(px(360.))
                     .gap(px(GAP))
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(p.faint).child("Matrix"))
+                    .child(div().text_size(fs(14.)).font_weight(FontWeight::SEMIBOLD).text_color(p.faint).child("Matrix"))
                     .child(screen_title("Sign in to your server"))
                     .child(
                         div()
                             .pb(px(8.))
-                            .text_size(px(14.))
-                            .line_height(px(20.))
+                            .text_size(fs(14.))
+                            .line_height(fs(20.))
                             .text_color(p.muted)
                             .child("Any Matrix server that accepts a password, like matrix.org."),
                     )
@@ -106,7 +106,7 @@ impl BeeperApp {
                             cx.notify();
                         },
                     )))
-                    .children(self.error.clone().map(|e| div().text_size(px(14.)).text_color(p.negative).child(e))),
+                    .children(self.error.clone().map(|e| div().text_size(fs(14.)).text_color(p.negative).child(e))),
             )
     }
 }
