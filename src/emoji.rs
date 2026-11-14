@@ -54,12 +54,24 @@ pub(crate) fn apply(settings: &mut Settings, dir: &Path, cx: &mut gpui_kit::App)
     true
 }
 
-/// Makes the APK's bundled copy (already named and given an 'm', see `assets/fonts/README`) the
-/// emoji family. On Android that holds only when the system's own face is not CBDT: then
-/// gpui-mobile loads the system face instead, and requesting the family would drop it.
-pub(crate) fn use_bundled() {
+/// Adds the bundled copy (already named and given an 'm', see `assets/fonts/README`) and makes it
+/// the emoji family, for systems whose own emoji font is COLRv1, which GPUI cannot draw (Fedora,
+/// Android 13+). Where Android's own face is CBDT, gpui-mobile has loaded it and it stays.
+/// Elsewhere the system draws its own emoji (Apple's on macOS and iOS), which must stay first.
+pub(crate) fn use_bundled(cx: &mut gpui_kit::App) {
+    if !SUPPORTED {
+        return;
+    }
     #[cfg(target_os = "android")]
     if has_cbdt(Path::new("/system/fonts/NotoColorEmoji.ttf")) {
+        return;
+    }
+    let bundled: &'static [u8] = include_bytes!("../assets/fonts/NotoColorEmoji.ttf");
+    // shortcut: leans on GPUI dropping faces without a Latin 'm' when a family is requested, which
+    // removes the system's face before ours is added; replace once GPUI can draw COLRv1.
+    let _ = cx.text_system().resolve_font(&gpui_kit::font(FAMILY));
+    if let Err(e) = cx.text_system().add_fonts(vec![bundled.into()]) {
+        log::warn!("emoji font: {e}");
         return;
     }
     let _ = CHAIN.set(gpui_kit::FontFallbacks::from_fonts(vec![FAMILY.into()]));
@@ -455,7 +467,7 @@ mod tests {
 
     #[test]
     fn the_bundled_font_is_ready_to_be_requested() {
-        let bundled = concat!(env!("CARGO_MANIFEST_DIR"), "/android/app/src/main/assets/fonts/NotoColorEmoji.ttf");
+        let bundled = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/NotoColorEmoji.ttf");
         assert!(usable(&map(Path::new(bundled)).unwrap()));
     }
 
@@ -478,7 +490,7 @@ mod tests {
     fn a_new_choice_replaces_the_old() {
         let dir = dir("replace");
         import(&Path::new(FIXTURES).join("emoji-sbix.ttf"), &dir).unwrap();
-        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("android/app/src/main/assets/fonts/NotoColorEmoji.ttf");
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoColorEmoji.ttf");
         assert_eq!(import(&bundled, &dir).unwrap(), "Noto Color Emoji");
         assert!(load(&dir).is_some());
         remove(&dir);

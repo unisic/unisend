@@ -75,9 +75,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     let mut settings = Settings::load(&dir);
     let own = emoji::apply(&mut settings, &dir, cx);
     if !own {
-        #[cfg(not(target_os = "android"))]
-        bundled_emoji(cx);
-        emoji::use_bundled();
+        emoji::use_bundled(cx);
     }
     fonts(cx);
     cx.set_global(settings.theme);
@@ -94,19 +92,6 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, dir, settings, window, cx)))
         .expect("open main window");
     cx.activate(true);
-}
-
-/// Makes emoji draw on desktops whose "Noto Color Emoji" is the COLRv1 build (Fedora, others):
-/// GPUI's shaper draws bitmap emoji only, and it picks the emoji font by that family name.
-/// shortcut: leans on GPUI dropping faces without a Latin 'm' when a family is requested, which
-/// removes the system face before ours is added; replace once GPUI can draw COLRv1.
-#[cfg(not(target_os = "android"))]
-fn bundled_emoji(cx: &mut App) {
-    let emoji: &[u8] = include_bytes!("../android/app/src/main/assets/fonts/NotoColorEmoji.ttf");
-    let _ = cx.text_system().resolve_font(&font("Noto Color Emoji"));
-    if let Err(e) = cx.text_system().add_fonts(vec![emoji.into()]) {
-        log::warn!("emoji font: {e}");
-    }
 }
 
 /// Follows the chosen or the system's light or dark mode and puts the app's colours over the library's.
