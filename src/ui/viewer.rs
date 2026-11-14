@@ -482,14 +482,15 @@ impl BeeperApp {
         }
     }
 
-    fn viewer_tap(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    fn viewer_tap(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         if self.zoom.dragged > DRAG_SLOP {
             self.zoom.dragged = 0.;
             return;
         }
         let reduce = cx.reduce_motion();
+        // Not window.request_animation_frame(): outside render it has no view and panics; the
+        // render this notify causes keeps asking for frames while the zoom glides.
         if self.zoom.tapped(at, reduce) {
-            window.request_animation_frame();
             cx.notify();
             return;
         }
@@ -773,7 +774,7 @@ impl BeeperApp {
                 .child(div().absolute().inset_0().bg(gpui_kit::black()).opacity(1. - fade))
                 .when(live, |el| {
                     el.occlude()
-                        .on_click(cx.listener(|this, e: &ClickEvent, window, cx| this.viewer_tap(e.position(), window, cx)))
+                        .on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.viewer_tap(e.position(), cx)))
                         .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.viewer_wheel(e, cx)))
                         .on_pinch(cx.listener(|this, e: &PinchEvent, _, cx| this.viewer_pinch(e, cx)))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, _| {
