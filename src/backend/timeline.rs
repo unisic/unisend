@@ -339,6 +339,9 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
         }
         _ => m.kind = Kind::Hidden,
     }
+    if let (Some(media), Some(json)) = (&mut m.media, &json) {
+        media.looped = super::video::looped(json);
+    }
     m.delivery = match event.send_state() {
         Some(EventSendState::NotSentYet { .. }) => Delivery::Sending,
         Some(EventSendState::SendingFailed { error, .. }) => Delivery::Failed(clip(&plain(error))),

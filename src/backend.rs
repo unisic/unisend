@@ -446,6 +446,8 @@ pub struct Media {
     pub duration: Option<Duration>,
     source: MediaSource,
     thumb: Option<MediaSource>,
+    /// A video the sender's network plays as a GIF: on repeat, without sound.
+    pub looped: bool,
 }
 
 #[derive(Clone)]
@@ -1911,6 +1913,7 @@ fn sticker(content: &StickerEventContent) -> Media {
         duration: None,
         source: content.source.clone().into(),
         thumb: info.thumbnail_source.clone(),
+        looped: false,
     }
 }
 
@@ -1964,6 +1967,7 @@ fn link_preview(content: &serde_json::Value) -> Option<Link> {
             duration: None,
             source,
             thumb: None,
+            looped: false,
         });
         Some(Link { url, title, description, site, image })
     })
@@ -2213,6 +2217,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 duration: None,
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
+                looped: false,
             }
         }
         MessageType::Video(c) => {
@@ -2226,6 +2231,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 duration: info.and_then(|i| i.duration),
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
+                looped: false,
             }
         }
         MessageType::Audio(c) => {
@@ -2239,6 +2245,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 duration: info.and_then(|i| i.duration),
                 source: c.source.clone(),
                 thumb: None,
+                looped: false,
             }
         }
         MessageType::File(c) => {
@@ -2252,6 +2259,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 duration: None,
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
+                looped: false,
             }
         }
         other => return (None, other.body().to_owned()),
@@ -2272,6 +2280,7 @@ pub use rich::{Block, Rich, Run};
 pub use polls::{Place, Poll};
 
 mod timeline;
+mod video;
 
 #[cfg(test)]
 mod tests;
