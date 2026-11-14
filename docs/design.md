@@ -114,3 +114,7 @@ The common acts take one gesture, and each also has a slower way that can be fou
 - A sideways swipe on a message replies to it.
 - A long press or the right mouse button on a chat in the list, or the dots in a chat's header,
   opens that chat's sheet: rows 52 tall rising from the bottom, named after the chat.
+- The paperclip opens the attach sheet on a phone: the newest photos and videos in a grid, and
+  under it, where the thumb is, a row of labelled round buttons (52, on `raised`) for File, GIF,
+  Location, Contact and Poll, each shown only where it works. Choosing photos puts Send in that
+  row's place. Without the sheet (desktop) the paperclip opens a sheet of the same entries as rows.

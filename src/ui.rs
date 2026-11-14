@@ -372,7 +372,7 @@ impl BeeperApp {
                 // The animation setting may have changed while the app was away.
                 motion::follow_system(cx);
                 this.open_from_notification(cx);
-                this.take_share(cx);
+                this.take_share(Some(window), cx);
                 this.publish_share_targets();
             }
         }));
@@ -536,7 +536,7 @@ impl BeeperApp {
                 self.screen = Screen::Main;
                 self.busy = false;
                 self.error = None;
-                self.take_share(cx);
+                self.take_share(None, cx);
             }
             Ev::NeedRecovery(need) => {
                 if self.need_recovery && !need {
@@ -813,10 +813,12 @@ impl BeeperApp {
             Compose::Edit(id) => (None, Some(id)),
         };
         let mentions = self.picked_mentions(cx);
-        if self.send(Cmd::Send { room, body, reply_to, edit, mentions }, cx) {
+        if self.send(Cmd::Send { room: room.clone(), body, reply_to, edit, mentions }, cx) {
             self.compose = Compose::New;
             self.jump_to_newest(cx);
+            // `set_value` emits no change, so the draft would outlive the message it became.
             self.composer.update(cx, |c, cx| c.set_value("", window, cx));
+            self.drafts.set(&room, "");
         }
     }
 
@@ -850,20 +852,22 @@ impl BeeperApp {
             self.close_preview(true, window, cx);
         } else if self.menu_open() {
             self.close_menu(cx);
+        } else if self.chat_sheet.take().is_some() || std::mem::take(&mut self.gallery.menu) {
+            cx.notify();
         } else if self.location.open {
             self.close_location(cx);
-        } else if self.emoji_open.is_some() {
-            self.close_emoji(cx);
-        } else if self.close_poll_form(cx) || self.forward_back(cx) {
+        } else if self.close_poll_form(cx) || self.close_forward_sheet(cx) {
         } else if self.gallery.open {
             self.close_gallery(cx);
         } else if self.gifs_open() {
             self.close_gifs(cx);
+        } else if self.emoji_open.is_some() {
+            // The emoji panel and the mention list are part of the chat, under every sheet.
+            self.close_emoji(cx);
         } else if self.mention.open() {
             self.mention.close();
             cx.notify();
-        } else if self.chat_sheet.take().is_some() {
-            cx.notify();
+        } else if self.selection_back(cx) {
         } else if self.info_open() {
             self.close_info(cx);
         } else if self.compose != Compose::New {
@@ -947,7 +951,8 @@ impl BeeperApp {
         if gallery::enabled() {
             self.open_gallery(cx);
         } else {
-            self.attach_file(cx);
+            self.gallery.menu = true;
+            cx.notify();
         }
     }
 
@@ -2040,7 +2045,6 @@ impl BeeperApp {
                     .pr(px(GUTTER))
                     .py(px(8.))
                     .child(round_button("attach", IconName::Paperclip, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| this.attach(cx))))
-                    .children(self.gif_button(cx))
                     .child(
                         round_button("emoji", IconName::FaceSlightlySmiling, cx)
                             .text_color(if self.emoji_open == Some(emojipick::Target::Composer) { p.text } else { p.muted })
@@ -2112,6 +2116,7 @@ impl BeeperApp {
             .when(live, |el| {
                 el.occlude().on_click(cx.listener(|this, _, _, cx| {
                     this.chat_sheet = None;
+                    this.gallery.menu = false;
                     cx.notify();
                 }))
             })
@@ -3030,7 +3035,7 @@ impl Render for BeeperApp {
                 let viewer = self.render_viewer(window, cx);
                 // Sampled every frame, so a falling sheet finishes even when a message menu opens.
                 let chat_sheet = self.render_chat_sheet(window, cx);
-                let sheet = self.render_message_menu(window, cx).or(chat_sheet).or_else(|| self.render_emoji_sheet(window, cx));
+                let sheet = self.render_message_menu(window, cx).or(chat_sheet).or_else(|| self.render_emoji_sheet(window, cx)).or_else(|| self.render_attach_menu(window, cx));
                 let gallery = self.render_gallery(window, cx);
                 let heart = self.render_heart(window, cx);
                 let location = self.render_location(window, cx);

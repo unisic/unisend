@@ -102,7 +102,7 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let (top, bottom) = crate::insets();
         let y = f32::from(window.viewport_size().height) * (1. - shown.progress);
-        let label = |text: &'static str| div().px(px(GUTTER)).pt(px(14.)).pb(px(6.)).text_size(px(14.)).text_color(p.faint).child(text);
+        let label = |text: &'static str| div().px(px(GUTTER)).pt(px(14.)).pb(px(6.)).text_size(fs(14.)).text_color(p.faint).child(text);
         let n = f.options.len();
         let rows = f.options.iter().enumerate().map(|(i, (input, _))| {
             h_flex()
@@ -135,7 +135,7 @@ impl BeeperApp {
                 .px(px(6.))
                 .gap(px(10.))
                 .rounded_full()
-                .text_size(px(15.))
+                .text_size(fs(15.))
                 .text_color(p.text)
                 .cursor_pointer()
                 .active(|el| el.bg(p.raised))
@@ -151,7 +151,7 @@ impl BeeperApp {
             .mt(px(8.))
             .justify_between()
             .cursor_pointer()
-            .child(div().text_size(px(16.)).child("Allow multiple answers"))
+            .child(div().text_size(fs(16.)).child("Allow multiple answers"))
             .child(
                 div()
                     .w(px(44.))
@@ -179,7 +179,7 @@ impl BeeperApp {
             .rounded_full()
             .bg(p.text)
             .text_color(p.ground)
-            .text_size(px(15.))
+            .text_size(fs(15.))
             .font_weight(FontWeight::MEDIUM)
             .cursor_pointer()
             .active(|el| el.bg(p.muted))
@@ -196,7 +196,7 @@ impl BeeperApp {
                     this.close_poll_form(cx);
                 }))
             }))
-            .child(div().flex_1().min_w_0().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child("New poll"))
+            .child(div().flex_1().min_w_0().text_size(fs(18.)).font_weight(FontWeight::SEMIBOLD).child("New poll"))
             .child(send);
         Some(
             v_flex()
@@ -224,7 +224,7 @@ impl BeeperApp {
                         .children(rows)
                         .children(add)
                         .child(toggle)
-                        .when_some(f.error, |el, e| el.child(div().px(px(GUTTER)).pt(px(14.)).text_size(px(14.)).text_color(p.negative).child(e))),
+                        .when_some(f.error, |el, e| el.child(div().px(px(GUTTER)).pt(px(14.)).text_size(fs(14.)).text_color(p.negative).child(e))),
                 )
                 .into_any_element(),
         )

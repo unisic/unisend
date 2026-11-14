@@ -17,6 +17,10 @@ impl BeeperApp {
     pub(super) fn on_disappear(&mut self, room: OwnedRoomId, setting: Disappearing) {
         if self.open.as_ref() == Some(&room) {
             self.disappear.chat = Some((room, setting));
+            // Its row on the info screen appears or changes; the list measured it before.
+            if self.info_open() {
+                self.info_rows();
+            }
         }
     }
 
@@ -72,7 +76,10 @@ impl BeeperApp {
         if !live {
             return Some(row);
         }
-        Some(row.on_click(cx.listener(|this, _, _, cx| {
+        let room = room.clone();
+        Some(row.on_click(cx.listener(move |this, _, _, cx| {
+            // From the info screen there is no sheet open yet to show the timers in.
+            this.chat_sheet = Some(room.clone());
             this.disappear.picking = true;
             cx.notify();
         })))

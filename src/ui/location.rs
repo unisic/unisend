@@ -204,13 +204,13 @@ impl BeeperApp {
                 .px(px(18.))
                 .justify_center()
                 .rounded_full()
-                .text_size(px(15.))
+                .text_size(fs(15.))
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
                 .map(|el| if strong { el.bg(p.text).text_color(p.ground).active(|el| el.bg(p.muted)) } else { el.bg(p.raised).text_color(p.text).active(|el| el.bg(p.lifted)) })
                 .child(label)
         };
-        let line = |text: &'static str| div().text_size(px(14.)).line_height(px(20.)).text_color(p.muted).child(text);
+        let line = |text: &'static str| div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(text);
 
         let body = match &state {
             State::Asking => v_flex().gap(px(12.)).child(line("Waiting for your answer to the location question.")),
@@ -233,7 +233,7 @@ impl BeeperApp {
                 v_flex()
                     .gap(px(12.))
                     .child(cards::place_card("location-preview", &place, accuracy_text(fix.accuracy), width - 2. * GUTTER, p, cx))
-                    .children(support.as_ref().map(|s| div().text_size(px(13.)).line_height(px(18.)).text_color(p.muted).child(s.note)))
+                    .children(support.as_ref().map(|s| div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.muted).child(s.note)))
                     .child(
                         h_flex()
                             .gap(px(8.))
@@ -246,7 +246,7 @@ impl BeeperApp {
             }
         };
         let note_only = !matches!(state, State::Found(_));
-        let body = body.when(note_only, |el| el.children(support.as_ref().map(|s| div().text_size(px(13.)).line_height(px(18.)).text_color(p.muted).child(s.note))));
+        let body = body.when(note_only, |el| el.children(support.as_ref().map(|s| div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.muted).child(s.note))));
 
         let y = (1. - shown.progress) * 320.;
         Some(
@@ -273,7 +273,7 @@ impl BeeperApp {
                         .bg(p.surface)
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
                         .child(div().h(px(20.)).flex().items_center().justify_center().child(div().w(px(36.)).h(px(4.)).rounded_full().bg(p.faint.opacity(0.5))))
-                        .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child("Share location"))
+                        .child(div().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child("Share location"))
                         .child(body),
                 )
                 .into_any_element(),

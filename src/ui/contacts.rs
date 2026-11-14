@@ -77,10 +77,10 @@ impl BeeperApp {
                         .child(
                             v_flex()
                                 .min_w_0()
-                                .child(div().line_clamp(2).text_ellipsis().text_size(px(15.)).line_height(px(20.)).child(card.name.clone()))
+                                .child(div().line_clamp(2).text_ellipsis().text_size(fs(15.)).line_height(fs(20.)).child(card.name.clone()))
                                 .children(card.numbers.iter().map(|(kind, number)| {
                                     let text = if kind.is_empty() { number.clone() } else { format!("{kind} {number}") };
-                                    div().truncate().text_size(px(13.)).font_features(tabular()).opacity(0.7).child(text)
+                                    div().truncate().text_size(fs(13.)).font_features(tabular()).opacity(0.7).child(text)
                                 })),
                         ),
                 )
@@ -93,7 +93,7 @@ impl BeeperApp {
                         .justify_center()
                         .rounded_full()
                         .bg(raised)
-                        .text_size(px(14.))
+                        .text_size(fs(14.))
                         .cursor_pointer()
                         .active(|el| el.opacity(0.7))
                         .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
@@ -108,7 +108,7 @@ impl BeeperApp {
                 .gap_3()
                 .w(px(room.min(260.)))
                 .children(blocks)
-                .when(more > 0, |el| el.child(div().text_size(px(12.)).opacity(0.7).child(format!("and {more} more"))))
+                .when(more > 0, |el| el.child(div().text_size(fs(12.)).opacity(0.7).child(format!("and {more} more"))))
                 .into_any_element(),
         )
     }
@@ -146,38 +146,17 @@ fn add_contact(cx: &mut App, card: &Card) {
     }
 }
 
-/// The attach sheet's button for sending a contact; only the phone has an address book to choose from.
-pub(super) fn sheet_entry(live: bool, cx: &mut Context<BeeperApp>) -> Option<AnyElement> {
-    #[cfg(target_os = "android")]
-    {
-        let p = Palette::of(cx);
-        Some(
-            h_flex()
-                .id("gallery-contact")
-                .h(px(TAP))
-                .px(px(12.))
-                .gap(px(8.))
-                .flex_none()
-                .rounded_full()
-                .text_size(px(14.))
-                .text_color(p.text)
-                .cursor_pointer()
-                .active(|el| el.bg(p.raised))
-                .child(Icon::new(IconName::User).size_4())
-                .child("Contact")
-                .when(live, |el| {
-                    el.on_click(cx.listener(|this, _, _, cx| {
-                        this.close_gallery(cx);
-                        this.send_contact(cx);
-                    }))
-                })
-                .into_any_element(),
-        )
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = (live, cx);
-        None
+/// Whether the attach sheet offers a contact; only the phone has an address book to choose from.
+pub(super) fn enabled() -> bool {
+    cfg!(target_os = "android")
+}
+
+impl BeeperApp {
+    pub(super) fn pick_contact(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "android")]
+        self.send_contact(cx);
+        #[cfg(not(target_os = "android"))]
+        let _ = cx;
     }
 }
 

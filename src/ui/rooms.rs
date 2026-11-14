@@ -201,7 +201,7 @@ impl BeeperApp {
                 .rounded_full()
                 .bg(bg)
                 .text_color(ink)
-                .text_size(px(16.))
+                .text_size(fs(16.))
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
                 .active(|el| el.opacity(0.8))
@@ -216,8 +216,8 @@ impl BeeperApp {
             .bg(p.raised)
             .occlude()
             .on_click(|_, _, cx| cx.stop_propagation())
-            .child(div().text_size(px(18.)).font_weight(FontWeight::SEMIBOLD).child(title))
-            .child(div().text_size(px(14.)).line_height(px(20.)).text_color(p.muted).child(body))
+            .child(div().text_size(fs(18.)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(body))
             .child(
                 h_flex()
                     .pt(px(6.))
@@ -483,7 +483,7 @@ impl BeeperApp {
                         .h(px(36.))
                         .px(px(GAP))
                         .rounded_full()
-                        .text_size(px(14.))
+                        .text_size(fs(14.))
                         .text_color(if on { p.text } else { p.muted })
                         .when(on, |el| el.bg(p.raised))
                         .when(!on, |el| el.group_active("network-chip", |el| el.bg(p.surface)))
@@ -525,7 +525,7 @@ impl BeeperApp {
                             .gap(px(6.))
                             .rounded_full()
                             .bg(p.raised)
-                            .text_size(px(14.))
+                            .text_size(fs(14.))
                             .child(person.name.clone())
                             .child(Icon::new(IconName::X).size_3p5().text_color(p.faint)),
                     )
@@ -547,8 +547,8 @@ impl BeeperApp {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .child(div().truncate().text_size(px(16.)).child(title))
-                        .when(!detail.is_empty(), |el| el.child(div().truncate().text_size(px(14.)).text_color(p.faint).child(detail))),
+                        .child(div().truncate().text_size(fs(16.)).child(title))
+                        .when(!detail.is_empty(), |el| el.child(div().truncate().text_size(fs(14.)).text_color(p.faint).child(detail))),
                 )
                 .when_some(check, |el, on| {
                     el.child(
@@ -596,7 +596,7 @@ impl BeeperApp {
                     .into_any_element(),
             );
         }
-        let note = |text: String, ink: Hsla| div().px(px(edge)).py(px(GAP)).text_size(px(14.)).line_height(px(20.)).text_color(ink).child(text);
+        let note = |text: String, ink: Hsla| div().px(px(edge)).py(px(GAP)).text_size(fs(14.)).line_height(fs(20.)).text_color(ink).child(text);
         let status = if let Some(error) = &new.error {
             Some(note(error.clone(), p.negative))
         } else if new.busy {
@@ -621,7 +621,7 @@ impl BeeperApp {
                 .px(px(edge))
                 .py(px(8.))
                 .gap(px(GAP))
-                .child(div().flex_1().text_size(px(14.)).text_color(p.faint).child(need))
+                .child(div().flex_1().text_size(fs(14.)).text_color(p.faint).child(need))
                 .child(
                     Button::new("create-group")
                         .primary()

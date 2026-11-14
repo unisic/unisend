@@ -296,7 +296,7 @@ impl BeeperApp {
             .px(px(GUTTER - 10.))
             .justify_between()
             .child(round_button("preview-close", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| this.close_preview(true, window, cx))))
-            .child(div().text_size(px(14.)).text_color(p.muted).when(count > 1, |el| el.child(format!("{} of {count}", pv.cur + 1))))
+            .child(div().text_size(fs(14.)).text_color(p.muted).when(count > 1, |el| el.child(format!("{} of {count}", pv.cur + 1))))
             .child(
                 h_flex().h(px(TAP)).min_w(px(TAP)).flex_none().items_center().justify_end().when(any_photo, |el| {
                     el.child(
@@ -307,7 +307,7 @@ impl BeeperApp {
                             .flex()
                             .items_center()
                             .rounded_full()
-                            .text_size(px(14.))
+                            .text_size(fs(14.))
                             .font_weight(FontWeight::MEDIUM)
                             .cursor_pointer()
                             .when(hd, |el| el.bg(p.text).text_color(p.ground))
@@ -333,7 +333,7 @@ impl BeeperApp {
             .map(|el| match picture {
                 Some(image) => el.child(img(image).size_full().object_fit(ObjectFit::Contain)),
                 None if entry.failed => el.child(
-                    div().text_size(px(14.)).text_color(p.faint).child(entry.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                    div().text_size(fs(14.)).text_color(p.faint).child(entry.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
                 ),
                 None => el,
             })

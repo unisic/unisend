@@ -205,7 +205,7 @@ impl BeeperApp {
                     .child(panels::row("Cross-signing", keys, cx)),
             )
             .child(panels::card(cx).children(rows))
-            .children(self.verify.failed.clone().map(|e| div().px(px(GAP)).text_size(px(14.)).text_color(p.negative).child(e)))
+            .children(self.verify.failed.clone().map(|e| div().px(px(GAP)).text_size(fs(14.)).text_color(p.negative).child(e)))
     }
 
     fn device_row(&self, d: &crate::backend::verify::Device, cx: &mut Context<Self>) -> AnyElement {
@@ -247,7 +247,7 @@ impl BeeperApp {
     /// What signing out a device asks for, under its row.
     fn sign_out_form(&self, out: &SignOut, cx: &mut Context<Self>) -> Div {
         let p = Palette::of(cx);
-        let text = |s: String| div().text_size(px(14.)).line_height(px(20.)).text_color(p.muted).child(s);
+        let text = |s: String| div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(s);
         let mut form = v_flex().pb(px(12.)).gap(px(8.));
         let device = out.device.clone();
         let (line, field, button): (String, bool, Option<(&'static str, Proof)>) = match &out.need {
@@ -290,7 +290,7 @@ impl BeeperApp {
         let close = if out.need == Some(Auth::Unsupported) { "Close" } else { "Cancel" };
         buttons = buttons
             .child(Button::new("sign-out-cancel").ghost().h(px(TAP)).label(close).on_click(cx.listener(|this, _, window, cx| this.close_sign_out(window, cx))));
-        form.child(buttons).children(out.error.clone().map(|e| div().text_size(px(14.)).text_color(p.negative).child(e)))
+        form.child(buttons).children(out.error.clone().map(|e| div().text_size(fs(14.)).text_color(p.negative).child(e)))
     }
 
     /// Rises like the chat's sheet. A tap outside closes it only once nothing is running, so a
@@ -347,7 +347,7 @@ impl BeeperApp {
                     .items_center()
                     .gap(px(4.))
                     .child(div().text_size(px(32.)).line_height(px(40.)).child(symbol.clone()))
-                    .child(div().text_size(px(12.)).text_color(p.muted).child(name.clone()))
+                    .child(div().text_size(fs(12.)).text_color(p.muted).child(name.clone()))
             }))),
             _ => None,
         };
@@ -410,8 +410,8 @@ impl BeeperApp {
                         .rounded_t(px(RADIUS))
                         .bg(p.surface)
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
-                        .child(div().h(px(36.)).flex().items_center().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned()))
-                        .child(div().text_size(px(14.)).line_height(px(20.)).text_color(p.muted).child(body))
+                        .child(div().h(px(36.)).flex().items_center().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned()))
+                        .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(body))
                         .children(emoji)
                         .child(buttons),
                 )
@@ -431,7 +431,7 @@ type Primary = (&'static str, Cmd, Option<Verify>);
 /// A small labelled control inside a settings row, at a finger's height.
 fn pill(id: impl Into<ElementId>, label: &'static str, ink: Hsla, cx: &App) -> Stateful<Div> {
     let p = Palette::of(cx);
-    h_flex().id(id).flex_none().h(px(TAP)).px(px(GAP)).rounded_full().bg(p.raised).text_size(px(14.)).text_color(ink).cursor_pointer().child(label)
+    h_flex().id(id).flex_none().h(px(TAP)).px(px(GAP)).rounded_full().bg(p.raised).text_size(fs(14.)).text_color(ink).cursor_pointer().child(label)
 }
 
 /// "Active today", "Active yesterday", "Active on 3 May".

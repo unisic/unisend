@@ -27,6 +27,7 @@ gpui_kit::assets::icon_assets!(
         ArrowUp,
         AtSign,
         BellOff,
+        Camera,
         ChartBar,
         ChevronsDown,
         ClipboardPaste,
@@ -1074,7 +1075,35 @@ mod tests {
     /// An icon the UI names but the build does not embed draws as nothing, with only a log line.
     #[test]
     fn every_icon_the_ui_uses_is_embedded() {
-        for source in [include_str!("ui.rs"), include_str!("ui/panels.rs"), include_str!("ui/cards.rs"), include_str!("ui/emojipick.rs"), include_str!("ui/rooms.rs"), include_str!("ui/viewer.rs"), include_str!("ui/menu.rs"), include_str!("ui/voice.rs"), include_str!("ui/forward.rs"), include_str!("ui/disappear.rs")] {
+        for source in [
+            include_str!("ui.rs"),
+            include_str!("ui/appearance.rs"),
+            include_str!("ui/camera.rs"),
+            include_str!("ui/caption.rs"),
+            include_str!("ui/cards.rs"),
+            include_str!("ui/contacts.rs"),
+            include_str!("ui/disappear.rs"),
+            include_str!("ui/emojipick.rs"),
+            include_str!("ui/forward.rs"),
+            include_str!("ui/gallery.rs"),
+            include_str!("ui/gifs.rs"),
+            include_str!("ui/heart.rs"),
+            include_str!("ui/info.rs"),
+            include_str!("ui/location.rs"),
+            include_str!("ui/mentions.rs"),
+            include_str!("ui/menu.rs"),
+            include_str!("ui/navigate.rs"),
+            include_str!("ui/panels.rs"),
+            include_str!("ui/pollnew.rs"),
+            include_str!("ui/rich.rs"),
+            include_str!("ui/rooms.rs"),
+            include_str!("ui/sharein.rs"),
+            include_str!("ui/signin.rs"),
+            include_str!("ui/verify.rs"),
+            include_str!("ui/video.rs"),
+            include_str!("ui/viewer.rs"),
+            include_str!("ui/voice.rs"),
+        ] {
             for name in source.split("IconName::").skip(1) {
                 let name: String = name.chars().take_while(char::is_ascii_alphanumeric).collect();
                 let mut file = String::new();

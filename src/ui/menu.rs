@@ -35,7 +35,8 @@ const DEAD_ZONE: f32 = 40.;
 /// A reaction is chosen by sliding only between the bar's top and this far under the finger.
 const SCRUB_BELOW_FINGER: f32 = 30.;
 const ROW_H: f32 = 50.;
-const LIST_W: f32 = 220.;
+/// At 100% text; the lists widen with the text size so "Delete for everyone" fits.
+const LIST_W: f32 = 232.;
 
 // The pointer's picker and menu.
 const PICK: f32 = 40.;
@@ -47,7 +48,7 @@ const PICK_RISE: f32 = 16.;
 /// Between the react button and the picker.
 const PICK_OFFSET: f32 = 4.;
 const POINTER_ROW_H: f32 = 40.;
-const POINTER_LIST_W: f32 = 200.;
+const POINTER_LIST_W: f32 = 232.;
 /// The buttons beside a message, as tall as they lay out; each takes pointer input over
 /// `SIDE_HIT`, the dense-desktop minimum.
 const SIDE_BUTTON: f32 = 28.;
@@ -146,30 +147,23 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
     let ends = m.own && sent && !m.deleted && m.poll.as_ref().is_some_and(|p| p.ended.is_none());
     let mut out = Vec::new();
     let saveable = crate::can_save() && sent && m.media.as_ref().is_some_and(|media| matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
-    if kind == MenuKind::Touch {
-        out.extend(sent.then_some(Act::Reply));
-        out.extend(editable.then_some(Act::Edit));
-        out.extend((!sent && failed).then_some(Act::Retry));
-        out.extend(link.map(Act::Link));
-        out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
-        out.extend(ends.then_some(Act::EndPoll));
-        out.extend(saveable.then_some(Act::Save));
-        out.extend(more_acts(m));
-        // One that never left is only dropped; one that did is deleted for everyone or hidden here.
-        out.extend((m.own && !sent).then_some(Act::Delete));
-    } else {
-        if extra && sent {
-            out.extend([Act::Reply, Act::React]);
-        }
-        out.extend(link.map(Act::Link));
-        out.extend(editable.then_some(Act::Edit));
-        out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
-        out.extend(ends.then_some(Act::EndPoll));
-        out.extend(saveable.then_some(Act::Save));
-        out.extend(more_acts(m));
-        out.extend((m.own && !sent).then_some(Act::Delete));
-        out.extend((!sent && failed).then_some(Act::Retry));
+    // Reply and React head the list only where no buttons beside the message offer them; the touch
+    // overlay has its own reactions. Past them, every menu lists the same acts in the same order.
+    if sent && (kind == MenuKind::Touch || extra) {
+        out.push(Act::Reply);
     }
+    if kind != MenuKind::Touch && extra && sent {
+        out.push(Act::React);
+    }
+    out.extend(editable.then_some(Act::Edit));
+    out.extend((!sent && failed).then_some(Act::Retry));
+    out.extend(link.map(Act::Link));
+    out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
+    out.extend(ends.then_some(Act::EndPoll));
+    out.extend(saveable.then_some(Act::Save));
+    out.extend(more_acts(m));
+    // One that never left is only dropped; one that did is deleted for everyone or hidden here.
+    out.extend((m.own && !sent).then_some(Act::Delete));
     out
 }
 
@@ -241,7 +235,7 @@ fn place(view: Size<f32>, (top, bottom): (f32, f32), bubble: Bounds<f32>, finger
         let x = if own { bubble.origin.x + bubble.size.width - w } else { bubble.origin.x };
         x.clamp(GUTTER, (view.width - w - GUTTER).max(GUTTER))
     };
-    Placement { lift: end_y - y, bar: slots.map(|n| (side(bar_w(n)), bar_y, n)), list: (side(LIST_W), list_y) }
+    Placement { lift: end_y - y, bar: slots.map(|n| (side(bar_w(n)), bar_y, n)), list: (side(f32::from(fs(LIST_W))), list_y) }
 }
 
 /// The reaction under a finger sliding over the bar: within the bar's width, from its top to a
@@ -731,7 +725,7 @@ impl BeeperApp {
             div().absolute().left(px(lx)).top(px(ly)).child(
                 v_flex()
                     .id("message-actions")
-                    .w(px(LIST_W))
+                    .w(fs(LIST_W))
                     .py(px(8.))
                     .rounded(px(RADIUS))
                     .bg(p.lifted)
@@ -836,16 +830,17 @@ impl BeeperApp {
         let (top, bottom) = crate::insets();
         let (ax, ay) = (f32::from(menu.at.x), f32::from(menu.at.y));
         let (vw, vh) = (f32::from(view.width), f32::from(view.height));
-        let x = if ax + POINTER_LIST_W <= vw - GUTTER { ax } else { ax - POINTER_LIST_W };
+        let w = f32::from(fs(POINTER_LIST_W));
+        let x = if ax + w <= vw - GUTTER { ax } else { ax - w };
         let y = if ay + h <= vh - bottom - GUTTER { ay } else { ay - h };
-        let x = x.clamp(GUTTER, (vw - POINTER_LIST_W - GUTTER).max(GUTTER));
+        let x = x.clamp(GUTTER, (vw - w - GUTTER).max(GUTTER));
         let y = y.clamp(top + GUTTER, (vh - bottom - h - GUTTER).max(top + GUTTER));
         let rows = self.act_rows(&id, acts, POINTER_ROW_H, cx);
         let list = div()
             .absolute()
             .left(px(x))
             .top(px(y))
-            .child(v_flex().id("message-menu").w(px(POINTER_LIST_W)).py(px(6.)).rounded(px(14.)).bg(p.lifted).occlude().children(rows))
+            .child(v_flex().id("message-menu").w(fs(POINTER_LIST_W)).py(px(6.)).rounded(px(14.)).bg(p.lifted).occlude().children(rows))
             .with_animation(SharedString::from(format!("menu-list-{id}")), Animation::new(motion::ENTER).with_easing(motion::ease_out), move |el, t| {
                 el.top(px(y + 4. * (1. - t))).opacity(t)
             });
@@ -891,8 +886,25 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAR_H, OVERLAY_GAP, Placement, TAP, ease_out_expo, place, same_emoji, slot_at};
+    use super::{Act, BAR_H, Delivery, Kind, MenuKind, Msg, OVERLAY_GAP, Placement, TAP, acts, ease_out_expo, place, same_emoji, slot_at};
     use gpui_kit::{Bounds, point, size};
+
+    #[test]
+    fn every_menu_lists_the_acts_in_one_order() {
+        let mut m = Msg::bare("$1".to_owned(), Kind::Message, "@me:x".try_into().unwrap());
+        (m.own, m.body) = (true, "see https://a.example".to_owned());
+        let touch = acts(&m, MenuKind::Touch, false);
+        assert_eq!(touch[..2], [Act::Reply, Act::Edit]);
+        assert_eq!(acts(&m, MenuKind::List, false), touch[1..]);
+        assert_eq!(acts(&m, MenuKind::List, true)[..3], [Act::Reply, Act::React, Act::Edit]);
+        assert_eq!(touch.last(), Some(&Act::DeleteForEveryone));
+
+        let mut failed = Msg::bare("~1".to_owned(), Kind::Message, "@me:x".try_into().unwrap());
+        (failed.own, failed.body, failed.delivery) = (true, "hi".to_owned(), Delivery::Failed(String::new()));
+        let want = [Act::Retry, Act::Copy("hi".to_owned()), Act::Delete];
+        assert_eq!(acts(&failed, MenuKind::Touch, false), want);
+        assert_eq!(acts(&failed, MenuKind::List, true), want);
+    }
 
     #[test]
     fn heart_with_and_without_selector_is_one_emoji() {
