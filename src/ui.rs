@@ -1268,7 +1268,7 @@ impl BeeperApp {
                                                     .text_size(px(14.))
                                                     .line_height(px(20.))
                                                     .text_color(if unread { p.text } else { p.muted })
-                                                    .child(preview.unwrap_or("Message").to_owned()),
+                                                    .child(crate::emoji::styled(preview.unwrap_or("Message").to_owned(), Vec::new())),
                                             )
                                             .when(room.pinned, |el| el.child(mark(IconName::Pin)))
                                             .when(room.muted, |el| el.child(mark(IconName::BellOff)))
@@ -1553,7 +1553,7 @@ impl BeeperApp {
                                 .when(faded, |el| el.italic().text_color(inside.faint))
                                 .child(match m.rich.as_ref().filter(|_| !faded) {
                                     Some(rich) => rich::body(m, rich, inside, ink),
-                                    None => StyledText::new(m.body.clone()).with_highlights(marks).into_any_element(),
+                                    None => crate::emoji::styled(m.body.clone(), marks).into_any_element(),
                                 }),
                         )
                     })
@@ -1586,7 +1586,7 @@ impl BeeperApp {
                             .font_weight(FontWeight::MEDIUM)
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, &key_owned, cx)))
-                            .child(key.to_owned())
+                            .child(crate::emoji::styled(key.to_owned(), Vec::new()))
                             .when(count > 1, |el| el.child(div().font_features(tabular()).child(count.to_string())))
                     }))
                 });

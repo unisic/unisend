@@ -121,7 +121,7 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
         }
     }
 
-    let styled = StyledText::new(text).with_highlights(marks);
+    let styled = crate::emoji::styled(text, marks);
     if links.is_empty() {
         return div().min_w_0().child(styled).into_any_element();
     }

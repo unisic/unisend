@@ -9,6 +9,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -311,6 +312,98 @@ fn checksum(padded: &[u8]) -> u32 {
     padded.as_chunks::<4>().0.iter().fold(0u32, |sum, w| sum.wrapping_add(u32::from_be_bytes(*w)))
 }
 
+/// Byte ranges of the sequences GPUI would keep on the app's face, though they are emoji: a keycap
+/// (digit, `#` or `*`, optional U+FE0F, U+20E3) and a text-default symbol followed by U+FE0F, with
+/// any ZWJ continuation. Plain symbols without U+FE0F stay text.
+fn spans(text: &str) -> Vec<Range<usize>> {
+    const VS: char = '\u{FE0F}';
+    const ZWJ: char = '\u{200D}';
+    let tone = |c: char| ('\u{1F3FB}'..='\u{1F3FF}').contains(&c);
+    let mut out = Vec::new();
+    let mut it = text.char_indices().peekable();
+    while let Some((start, c)) = it.next() {
+        let mut end = start + c.len_utf8();
+        if c.is_ascii_digit() || c == '#' || c == '*' {
+            let mut ahead = it.clone();
+            if matches!(ahead.peek(), Some(&(_, VS))) {
+                ahead.next();
+            }
+            if let Some(&(i, '\u{20E3}')) = ahead.peek() {
+                end = i + '\u{20E3}'.len_utf8();
+                it = ahead;
+                it.next();
+                out.push(start..end);
+            }
+            continue;
+        }
+        if c.is_ascii() || it.peek().map(|&(_, n)| n) != Some(VS) {
+            continue;
+        }
+        end += VS.len_utf8();
+        it.next();
+        while let Some(&(i, n)) = it.peek() {
+            if tone(n) {
+                end = i + n.len_utf8();
+                it.next();
+            } else if n == ZWJ {
+                let mut ahead = it.clone();
+                ahead.next();
+                let Some((j, m)) = ahead.next() else { break };
+                end = j + m.len_utf8();
+                if let Some(&(k, VS)) = ahead.peek() {
+                    end = k + VS.len_utf8();
+                    ahead.next();
+                }
+                it = ahead;
+            } else {
+                break;
+            }
+        }
+        out.push(start..end);
+    }
+    out
+}
+
+/// `text` with `marks` (sorted, apart) as `StyledText`, and, once the user's own emoji font is in,
+/// each emoji sequence of `spans` set in its family (requesting the family of the bundled or
+/// system face would drop that face, which lacks an 'm', so nothing is set without ours); marks are cut at their
+/// edges so a link or mention keeps its colour around them.
+pub(crate) fn styled(text: impl Into<gpui_kit::SharedString>, marks: Vec<(Range<usize>, gpui_kit::HighlightStyle)>) -> gpui_kit::StyledText {
+    let text = text.into();
+    let found = if CHAIN.get().is_some() { spans(&text) } else { Vec::new() };
+    if found.is_empty() {
+        return gpui_kit::StyledText::new(text).with_highlights(marks);
+    }
+    let mut out = Vec::new();
+    for (range, style) in marks {
+        let mut at = range.start;
+        for s in &found {
+            for cut in [s.start, s.end] {
+                if cut > at && cut < range.end {
+                    out.push((at..cut, style));
+                    at = cut;
+                }
+            }
+        }
+        out.push((at..range.end, style));
+    }
+    let marked = out.clone();
+    for s in &found {
+        let mut at = s.start;
+        for (r, _) in marked.iter().filter(|(r, _)| r.start < s.end && r.end > s.start) {
+            if r.start > at {
+                out.push((at..r.start, Default::default()));
+            }
+            at = r.end;
+        }
+        if at < s.end {
+            out.push((at..s.end, Default::default()));
+        }
+    }
+    out.sort_by_key(|(r, _)| r.start);
+    gpui_kit::StyledText::new(text).with_highlights(out).with_font_family_overrides(found.into_iter().map(|r| (r, FAMILY.into())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +474,26 @@ mod tests {
         fs::write(path(&dir), b"garbage").unwrap();
         assert!(load(&dir).is_none());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn emoji_spans() {
+        let cases: [(&str, &[&str]); 11] = [
+            ("1\u{FE0F}\u{20E3}", &["1\u{FE0F}\u{20E3}"]),
+            ("a #\u{20E3} b *\u{FE0F}\u{20E3}", &["#\u{20E3}", "*\u{FE0F}\u{20E3}"]),
+            ("1\u{FE0F}", &[]),
+            ("123 abc", &[]),
+            ("\u{2764}\u{FE0F}", &["\u{2764}\u{FE0F}"]),
+            ("\u{2764} x", &[]),
+            ("\u{1F1F5}\u{1F1F1} \u{1F44D}\u{1F3FD}", &[]),
+            ("zażółć \u{263A}\u{FE0F}!", &["\u{263A}\u{FE0F}"]),
+            ("\u{2764}\u{FE0F}\u{200D}\u{1F525}", &["\u{2764}\u{FE0F}\u{200D}\u{1F525}"]),
+            ("\u{270C}\u{FE0F}\u{1F3FD}", &["\u{270C}\u{FE0F}\u{1F3FD}"]),
+            ("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", &[]),
+        ];
+        for (text, want) in cases {
+            let got: Vec<&str> = super::spans(text).into_iter().map(|r| &text[r]).collect();
+            assert_eq!(got, want, "{text:?}");
+        }
     }
 }
