@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 
+use super::camera::TILES;
 use super::*;
 
 /// Items asked of the store at a time.
@@ -357,7 +358,7 @@ impl BeeperApp {
     /// near the end.
     fn grid_drawn(&mut self, rows: Range<usize>, cols: usize, cx: &mut Context<Self>) {
         let g = &mut self.gallery;
-        let wanted = rows.start * cols..(rows.end + AHEAD_ROWS) * cols;
+        let wanted = (rows.start * cols).saturating_sub(TILES)..((rows.end + AHEAD_ROWS) * cols).saturating_sub(TILES);
         if !g.done && wanted.end >= g.items.len().saturating_sub(PAGE / 4) {
             self.load_page(false, cx);
         }
@@ -564,17 +565,22 @@ impl BeeperApp {
 
         let grid = if g.items.is_empty() || g.access == Some(Access::None) {
             let empty = g.access != Some(Access::None) && !g.paging && !g.waiting;
-            div()
+            v_flex()
                 .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(14.))
-                .text_color(p.faint)
-                .when(empty, |el| el.child("No photos or videos"))
+                .child(h_flex().gap(px(GRID_GAP)).children((0..TILES).map(|ix| self.render_camera_tile(ix, cell, live, cx))))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(14.))
+                        .text_color(p.faint)
+                        .when(empty, |el| el.child("No photos or videos")),
+                )
                 .into_any_element()
         } else {
-            let rows = g.items.len().div_ceil(cols);
+            let rows = (TILES + g.items.len()).div_ceil(cols);
             uniform_list(
                 "gallery-grid",
                 rows,
@@ -584,12 +590,15 @@ impl BeeperApp {
                     }
                     range
                         .map(|row| {
-                            let cells = row * cols..((row + 1) * cols).min(this.gallery.items.len());
+                            let cells = row * cols..((row + 1) * cols).min(TILES + this.gallery.items.len());
                             h_flex()
                                 .h(px(cell + GRID_GAP))
                                 .pb(px(GRID_GAP))
                                 .gap(px(GRID_GAP))
-                                .children(cells.map(|ix| this.render_cell(ix, cell, live, cx)))
+                                .children(cells.map(|ix| match ix.checked_sub(TILES) {
+                                    Some(item) => this.render_cell(item, cell, live, cx),
+                                    None => this.render_camera_tile(ix, cell, live, cx),
+                                }))
                         })
                         .collect()
                 }),

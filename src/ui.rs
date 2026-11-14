@@ -17,6 +17,7 @@ use gpui_kit::*;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
 use tokio::sync::mpsc;
 
+mod camera;
 mod cards;
 mod gallery;
 mod heart;

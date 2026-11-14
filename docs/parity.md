@@ -78,7 +78,7 @@ is not started.
 | Send text | done | `m.room.message` |
 | Reply, edit, delete, copy | done | relations, redaction |
 | Forward | todo | new event in the target chat |
-| Attachments | part | one file from the picker, any type, 100 MB at most; no paste, drag and drop, camera, caption or thumbnail upload |
+| Attachments | part | one file from the picker, any type, 100 MB at most; Photo and Video tiles in the attach sheet start the system camera (Android); no paste, drag and drop, caption or thumbnail upload |
 | Voice notes | todo | `org.matrix.msc3245.voice` |
 | Emoji / GIF / sticker pickers | todo | local, `fi.mau.gif` |
 | Formatting shortcuts, mentions autocomplete | todo | local |
