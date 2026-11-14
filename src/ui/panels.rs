@@ -280,7 +280,7 @@ impl BeeperApp {
                     ),
                 ),
             )
-            .child(div().text_size(px(12.)).text_color(p.faint).child(concat!("beeper-gpui ", env!("CARGO_PKG_VERSION"))))
+            .child(div().text_size(px(12.)).text_color(p.faint).child(concat!("Murmur ", env!("CARGO_PKG_VERSION"))))
     }
 
     fn render_networks(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
