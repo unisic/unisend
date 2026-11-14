@@ -147,6 +147,8 @@ pub enum Cmd {
     EndPoll { room: OwnedRoomId, target: String },
     /// Reads the contact card in a `.vcf` attachment.
     Contact(String, Media),
+    /// Sets the chat's disappearing message timer, in ms; 0 turns it off.
+    SetDisappear { room: OwnedRoomId, ms: u64 },
 }
 
 pub enum Ev {
@@ -185,6 +187,8 @@ pub enum Ev {
     Error(String),
     /// The cards of a contact file; empty when it could not be read.
     Contact(String, Vec<crate::vcard::Card>),
+    /// The open chat's disappearing messages, when it opens and whenever its timer changes.
+    Disappear { room: OwnedRoomId, setting: Disappearing },
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -286,6 +290,9 @@ pub struct Msg {
     pub delivery: Delivery,
     /// The other people whose read receipt stands on this row: they have read this far.
     pub seen: Vec<OwnedUserId>,
+    /// The message disappears after this many ms (`com.beeper.disappearing_timer`); 0 when it
+    /// stays. On a bridge's status row: the timer the bridge gave the user's message.
+    pub disappear: u64,
 }
 
 /// What a row of a conversation is.
@@ -376,6 +383,7 @@ impl Msg {
             reactions: Vec::new(),
             delivery: Delivery::Sent,
             seen: Vec::new(),
+            disappear: 0,
         }
     }
 }
@@ -1170,6 +1178,15 @@ impl State {
                     });
                     let _ = ev.send(Ev::Contact(id, cards)).await;
                 });
+            }
+            Cmd::SetDisappear { room, ms } => {
+                let room = self.room(&room)?;
+                let mut setting = disappear::read(&room).await;
+                let content = setting.content(ms).filter(|_| setting.allowed).context("This chat does not take that timer")?;
+                room.send_state_event_raw(disappear::TIMER, "", content).await?;
+                // The bridge answers with the new state, which reads it again; until then, this.
+                setting.ms = ms;
+                self.emit(Ev::Disappear { room: room.room_id().to_owned(), setting }).await;
             }
         }
         Ok(())
@@ -2330,6 +2347,8 @@ pub use pollnew::NewPoll;
 
 mod timeline;
 mod video;
+mod disappear;
+pub use disappear::{Disappearing, label as disappear_label};
 
 #[cfg(test)]
 mod tests;

@@ -34,7 +34,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::{
     AbortOnDrop, DELETED, Delivery, Ev, Kind, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, UTD, content, display_name, link_preview, mark_read,
-    format, marks, network, other_person, plain, sticker,
+    format, marks, network, other_person, plain, sticker, disappear,
 };
 
 /// Beeper's bridges say in events of this type what the network did with a message.
@@ -120,7 +120,9 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
         async move {
             let mut diffs = std::pin::pin!(diffs);
             let (mut asked, mut keyed): (HashSet<OwnedEventId>, HashSet<String>) = Default::default();
+            let mut first = true;
             while let Some(batch) = diffs.next().await {
+                let timer_changed = std::mem::take(&mut first) || batch.iter().flat_map(touched).any(|item| sets_timer(item));
                 let arrived = batch.iter().any(|diff| matches!(diff, VectorDiff::PushBack { value } if from_someone_else(value)));
                 let quotes: Vec<OwnedEventId> =
                     batch.iter().flat_map(touched).filter_map(unknown_quote).filter(|id| asked.len() < MAX_QUOTES_FETCHED && asked.insert(id.clone())).collect();
@@ -128,6 +130,12 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
                 let diffs = batch.into_iter().map(|diff| diff.map(|item| row(&item, &viewer))).collect();
                 if ev.send(Ev::Timeline { room: id.clone(), diffs }).await.is_err() {
                     break;
+                }
+                if timer_changed {
+                    let setting = disappear::read(timeline.room()).await;
+                    if ev.send(Ev::Disappear { room: id.clone(), setting }).await.is_err() {
+                        break;
+                    }
                 }
                 // Asked once per session, and only once the backup can answer: recovery asks again.
                 let sessions = if !sessions.is_empty() && keyed.len() < MAX_SESSIONS_FETCHED && timeline.room().client().encryption().backups().are_enabled().await {
@@ -182,6 +190,11 @@ fn touched(diff: &VectorDiff<Arc<TimelineItem>>) -> Vec<&Arc<TimelineItem>> {
         | VectorDiff::Set { value, .. } => vec![value],
         _ => Vec::new(),
     }
+}
+
+fn sets_timer(item: &TimelineItem) -> bool {
+    item.as_event()
+        .is_some_and(|event| matches!(event.content(), TimelineItemContent::OtherState(state) if state.content().event_type().to_string() == disappear::TIMER))
 }
 
 fn from_someone_else(item: &Arc<TimelineItem>) -> bool {
@@ -258,6 +271,8 @@ fn shown(event: &AnySyncTimelineEvent, rules: &RoomVersionRules, dm: bool, big: 
     match event {
         AnySyncTimelineEvent::MessageLike(message) if message.event_type().to_string() == SEND_STATUS => true,
         AnySyncTimelineEvent::MessageLike(_) => default_event_filter(event, rules),
+        // Told in a one-to-one chat too: whether what is written there stays is the chat's business.
+        AnySyncTimelineEvent::State(state) if state.event_type().to_string() == disappear::TIMER => true,
         AnySyncTimelineEvent::State(_) if dm => false,
         AnySyncTimelineEvent::State(AnySyncStateEvent::RoomMember(SyncStateEvent::Original(member))) => {
             let by_bot = service.contains(&member.sender);
@@ -314,11 +329,15 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
             m.reply = like.in_reply_to.as_ref().map(|reply| quote(reply, &viewer.own));
             m.reactions =
                 like.reactions.iter().map(|(key, by)| Reaction { key: key.clone(), count: by.len(), own: by.contains_key(&viewer.own) }).collect();
+            let timer = json.as_ref().and_then(|c| c.get(disappear::TIMER)).map(disappear::timer);
+            m.disappear = timer.map_or(0, |(ms, _)| ms);
             match &like.kind {
+                MsgLikeKind::Message(_) if json.as_ref().is_some_and(disappear::repeats_state) => m.kind = Kind::Hidden,
                 MsgLikeKind::Message(_) => m.link = json.as_ref().and_then(link_preview),
                 // The filter lets one custom type through.
                 MsgLikeKind::Other(_) => {
                     m.kind = json.as_ref().and_then(send_status).map_or(Kind::Hidden, |(target, delivery)| Kind::Status { target, delivery });
+                    m.disappear = json.as_ref().and_then(|c| c.get("disappearing_timer")).map_or(0, |t| disappear::timer(t).0);
                 }
                 _ => {}
             }
@@ -330,6 +349,15 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
             m.kind = Kind::Hidden;
         }
         TimelineItemContent::MembershipChange(change) => membership(&mut m, change, viewer),
+        TimelineItemContent::OtherState(state) if state.content().event_type().to_string() == disappear::TIMER => {
+            let actor = (!viewer.service.contains(event.sender())).then_some(if m.own { "You" } else { m.sender.as_str() });
+            let prev = event.latest_json().and_then(|raw| raw.get_field::<serde_json::Value>("unsigned").ok().flatten());
+            let prev = prev.as_ref().and_then(|unsigned| unsigned.get("prev_content"));
+            match json.as_ref().filter(|_| !flag("com.beeper.exclude_from_timeline")).and_then(|c| disappear::notice(c, prev, actor)) {
+                Some(line) => (m.kind, m.body) = (Kind::Notice, line),
+                None => m.kind = Kind::Hidden,
+            }
+        }
         TimelineItemContent::OtherState(state) => {
             let actor = (!viewer.service.contains(event.sender())).then_some(if m.own { "You" } else { m.sender.as_str() });
             match state_line(state.content(), actor) {
