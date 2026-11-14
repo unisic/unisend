@@ -69,6 +69,7 @@ is not started.
 | Disappearing messages | todo | `com.beeper.disappearing_timer` |
 | Search in chat, media gallery, bookmarks | todo | `com.beeper.bookmark`, `com.beeper.gallery` |
 | Chat info: members, admin actions, leave, block | todo | room state, `com.beeper.user_blocked` |
+| Screen lock, screen security (Android) | done | local only: `AppLock.java` asks `BiometricPrompt` (API 29+, biometric or device credential) or the keyguard credential screen (API 26 to 28) after a chosen time in the background; `FLAG_SECURE` for screenshots and recents |
 | Chat theme, wallpaper | part | own bubbles in Beeper's nine chat colours (blue a shade darker, for contrast), for every chat, kept on the device as Beeper Desktop keeps it (`chat_appearance` in its local prefs, not account data). No per-chat colour, no wallpaper, no app-wide theme colour |
 
 ## Composer
