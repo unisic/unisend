@@ -1,7 +1,6 @@
 //! How long things take and how they ease, decided once: strong ease-out to enter, exits faster than
 //! entrances, springs only where a finger let go, nothing on keyboard actions. GPUI and gpui-kit skip
 //! every animation when `App::reduce_motion` is set; `follow_system` sets it from Android.
-#![expect(dead_code, reason = "used by the chat-screen and overlay packages; drop when both have landed")]
 
 use std::time::Duration;
 

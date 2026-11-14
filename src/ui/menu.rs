@@ -387,9 +387,14 @@ impl BeeperApp {
             cx.notify();
             return;
         }
-        let chosen = m.scrub.zip(self.msgs.iter().find(|msg| msg.id == m.id)).map(|(n, msg)| (msg.id.clone(), bar_keys(msg).swap_remove(n)));
+        let chosen = m.scrub.zip(self.msgs.iter().find(|msg| msg.id == m.id)).map(|(n, msg)| (msg.id.clone(), bar_keys(msg).get(n).cloned()));
         match chosen {
-            Some((id, key)) => self.toggle_reaction(&id, &key, cx),
+            Some((id, Some(key))) => self.toggle_reaction(&id, &key, cx),
+            Some((id, None)) => {
+                self.menu = None;
+                self.emoji_open = Some(super::emojipick::Target::React(id));
+                cx.notify();
+            }
             None => self.close_menu(cx),
         }
     }
@@ -622,7 +627,7 @@ impl BeeperApp {
             bubble,
             f32::from(menu.at.y),
             m.own,
-            sent.then_some(keys.len()),
+            sent.then_some(keys.len() + 1),
             ROW_H * acts.len() as f32 + 16.,
         );
         let menu = self.menu.as_mut()?;
@@ -632,6 +637,7 @@ impl BeeperApp {
         let shade = menu.reveal(now, 0., 1., |_| 1.);
         let rise = |n: f32| if still { 0. } else { EMOJI_RISE * (1. - menu.reveal(now, 100. + 10. * n, 200., decelerate)) };
         let bar = placed.bar.map(|(x, y, _)| {
+            let more = self.more_reactions(&id, 1., cx).opacity(menu.reveal(now, 100. + 10. * keys.len() as f32, 200., decelerate));
             let slots = keys.iter().enumerate().map(|(n, key)| {
                 let (id, label, key) = (id.clone(), key.clone(), key.clone());
                 let grown = if still { 0. } else { menu.grown(n, now) };
@@ -665,7 +671,8 @@ impl BeeperApp {
                         .rounded_full()
                         .bg(p.lifted.opacity(menu.reveal(now, 100., 200., decelerate)))
                         .when(open, |el| el.occlude())
-                        .children(slots),
+                        .children(slots)
+                        .child(more),
                 ),
             )
             .with_priority(OVER_LIFTED)
@@ -715,7 +722,7 @@ impl BeeperApp {
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
         let (id, keys) = (m.id.clone(), bar_keys(m));
-        let w = keys.len() as f32 * PICK + 2. * PICK_PAD_X;
+        let w = (keys.len() + 1) as f32 * PICK + 2. * PICK_PAD_X;
         let h = PICK + 2. * PICK_PAD_Y;
         let (top, bottom) = crate::insets();
         let at = (f32::from(menu.at.x), f32::from(menu.at.y));
@@ -763,7 +770,8 @@ impl BeeperApp {
                 .bg(p.lifted)
                 .opacity(if still { 1. } else { ease_out_expo(phase(t, 0., 400.)) })
                 .occlude()
-                .children(buttons),
+                .children(buttons)
+                .child(self.more_reactions(&id, PICK / TAP, cx)),
         );
         Some(self.barrier(picker.into_any_element(), cx))
     }
@@ -798,6 +806,29 @@ impl BeeperApp {
     }
 
     /// The pointer's lists close on a click or a right click anywhere else; nothing is dimmed.
+    /// The + at the end of the bar: every other emoji, in the picker's sheet. `scale` sizes it
+    /// against a bar slot.
+    fn more_reactions(&self, id: &str, scale: f32, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = Palette::of(cx);
+        let id = id.to_owned();
+        div()
+            .id("bar-more")
+            .size(px(TAP * scale))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .cursor_pointer()
+            .text_color(p.muted)
+            .active(|el| el.bg(p.raised))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.menu = None;
+                this.open_emoji(super::emojipick::Target::React(id.clone()), window, cx);
+            }))
+            .child(Icon::new(IconName::Plus).size_5())
+    }
+
     fn barrier(&self, content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id("message-menu-barrier")

@@ -49,7 +49,17 @@ gpui_kit::assets::icon_assets!(
         Unlink,
         Video,
         Waypoints,
-        X
+        X,
+        Clock,
+        FaceSlightlySmiling,
+        Hand,
+        PawPrint,
+        Pizza,
+        Plane,
+        Trophy,
+        Lightbulb,
+        Hash,
+        Flag
     ]
 );
 
@@ -916,7 +926,7 @@ mod tests {
     /// An icon the UI names but the build does not embed draws as nothing, with only a log line.
     #[test]
     fn every_icon_the_ui_uses_is_embedded() {
-        for source in [include_str!("ui.rs"), include_str!("ui/panels.rs"), include_str!("ui/cards.rs")] {
+        for source in [include_str!("ui.rs"), include_str!("ui/panels.rs"), include_str!("ui/cards.rs"), include_str!("ui/emojipick.rs")] {
             for name in source.split("IconName::").skip(1) {
                 let name: String = name.chars().take_while(char::is_ascii_alphanumeric).collect();
                 let mut file = String::new();

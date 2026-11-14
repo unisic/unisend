@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 
 mod camera;
 mod cards;
+mod emojipick;
 mod gallery;
 mod heart;
 mod location;
@@ -243,6 +244,8 @@ pub struct BeeperApp {
     viewer_last: Option<(String, Option<Arc<Image>>)>,
     /// The reaction under the pointer in the picker.
     picker_hover: Option<usize>,
+    emoji_pick: emojipick::Picker,
+    emoji_open: Option<emojipick::Target>,
     /// A finger resting on a chat row, and since when; the row shows it after a tap's time.
     row_press: Option<(OwnedRoomId, std::time::Instant)>,
     compose: Compose,
@@ -276,6 +279,8 @@ impl BeeperApp {
         let recovery = cx.new(|cx| InputState::new(window, cx).placeholder("Recovery code"));
         let composer = cx.new(|cx| InputState::new(window, cx).placeholder("Message"));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search chats"));
+        let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search emoji"));
+        let emoji_pick = emojipick::Picker::new(emoji_search.clone(), &dir);
 
         let mut subs = Vec::new();
         for (input, on_enter, keyboard) in [
@@ -296,6 +301,10 @@ impl BeeperApp {
             if matches!(ev, InputEvent::Change) {
                 this.typed(cx);
             }
+        }));
+        subs.push(cx.subscribe_in(&emoji_search, window, |_, _, ev: &InputEvent, _, cx| match ev {
+            InputEvent::Change => cx.notify(),
+            other => keyboard_follows(other, Keyboard::Text, cx),
         }));
         subs.push(cx.subscribe_in(&search, window, |this, _, ev: &InputEvent, _, cx| match ev {
             InputEvent::Change => this.refilter(cx),
@@ -394,6 +403,8 @@ impl BeeperApp {
             nav: None,
             viewer_last: None,
             picker_hover: None,
+            emoji_pick,
+            emoji_open: None,
             row_press: None,
             faces: HashMap::new(),
             compose: Compose::New,
@@ -719,6 +730,8 @@ impl BeeperApp {
             self.close_menu(cx);
         } else if self.location.open {
             self.close_location(cx);
+        } else if self.emoji_open.is_some() {
+            self.close_emoji(cx);
         } else if self.gallery.open {
             self.close_gallery(cx);
         } else if self.chat_sheet.take().is_some() {
@@ -988,6 +1001,7 @@ impl BeeperApp {
     }
 
     fn close_room(&mut self, cx: &mut Context<Self>) {
+        self.emoji_open = None;
         self.close_gallery(cx);
         if let Some(room) = self.open.take() {
             if self.typing_sent.take().is_some() {
@@ -1829,6 +1843,11 @@ impl BeeperApp {
                     .py(px(8.))
                     .child(round_button("attach", IconName::Paperclip, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| this.attach(cx))))
                     .child(
+                        round_button("emoji", IconName::FaceSlightlySmiling, cx)
+                            .text_color(if self.emoji_open == Some(emojipick::Target::Composer) { p.text } else { p.muted })
+                            .on_click(cx.listener(|this, _, window, cx| this.toggle_emoji_panel(window, cx))),
+                    )
+                    .child(
                         div()
                             .flex_1()
                             .min_w_0()
@@ -1838,6 +1857,13 @@ impl BeeperApp {
                             .items_center()
                             .rounded(px(TAP / 2.))
                             .bg(p.surface)
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                // The field is already focused, so only a press tells that the keyboard is wanted back.
+                                if this.emoji_open == Some(emojipick::Target::Composer) {
+                                    this.close_emoji(cx);
+                                    crate::show_keyboard(Keyboard::Text);
+                                }
+                            }))
                             .child(Input::new(&self.composer).appearance(false).large()),
                     )
                     .child(
@@ -1858,6 +1884,7 @@ impl BeeperApp {
                             .child(Icon::new(IconName::ArrowUp).size_5()),
                     ),
             )
+            .children(self.render_emoji_panel(window, cx))
     }
 
     /// Rows that rise from the bottom over a dimmed screen: the app's menus. Touch has no
@@ -2818,7 +2845,7 @@ impl Render for BeeperApp {
                 let viewer = self.render_viewer(window, cx);
                 // Sampled every frame, so a falling sheet finishes even when a message menu opens.
                 let chat_sheet = self.render_chat_sheet(window, cx);
-                let sheet = self.render_message_menu(window, cx).or(chat_sheet);
+                let sheet = self.render_message_menu(window, cx).or(chat_sheet).or_else(|| self.render_emoji_sheet(window, cx));
                 let gallery = self.render_gallery(window, cx);
                 let heart = self.render_heart(window, cx);
                 let location = self.render_location(window, cx);

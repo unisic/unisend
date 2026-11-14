@@ -55,7 +55,7 @@ is not started.
 | Day separators | done | the timeline's own |
 | Unread divider | done | "New" above what arrived since the chat was last read (`m.fully_read`) |
 | Replies (quote shown) | done | `m.in_reply_to`; a quoted message that is not loaded is fetched; a touch goes to it when it is loaded |
-| Reactions (show, add, remove) | part | `m.reaction`; Signal's six in a bar over the held message (touch) or from the react button beside it (pointer), a double tap for the heart (short pop at the finger, light tick on Android), the user's own reaction marked and taken back with a second touch. No full emoji picker, no custom emoji |
+| Reactions (show, add, remove) | part | `m.reaction`; Signal's six in a bar over the held message (touch) or from the react button beside it (pointer), a double tap for the heart (short pop at the finger, light tick on Android), the user's own reaction marked and taken back with a second touch. The + at the end of the bar opens the emoji picker for any other emoji. No custom emoji |
 | Deleted messages | done | `m.room.redaction`; stays a "Message deleted" row |
 | Images, stickers | done | inline thumbnail (800px at most), full-screen view (2048px); plain and encrypted |
 | Audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. No inline player |
@@ -82,7 +82,7 @@ is not started.
 | Forward | todo | new event in the target chat |
 | Attachments | part | one file from the picker, any type, 100 MB at most; Photo and Video tiles in the attach sheet start the system camera (Android); no paste, drag and drop, caption or thumbnail upload |
 | Voice notes | todo | `org.matrix.msc3245.voice` |
-| Emoji / GIF / sticker pickers | todo | local, `fi.mau.gif` |
+| Emoji / GIF / sticker pickers | part | emoji done: button in the composer swaps the keyboard for a panel (categories, search by name and shortcode, 32 recents, skin tone), also the sheet behind the reaction bar's +; GIF and sticker pickers todo |
 | Formatting shortcuts, mentions autocomplete | todo | local |
 | Send later, undo send | todo | `com.beeper.is_scheduled`, local delay |
 | AI rewrite, translate, transcription | todo | Beeper AI endpoints |
