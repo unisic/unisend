@@ -9,6 +9,7 @@ mod backend;
 mod beeper;
 mod bridges;
 mod emoji;
+mod share;
 mod ui;
 mod vcard;
 

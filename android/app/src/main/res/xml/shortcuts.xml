@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Recent chats as Direct Share targets in other apps' share sheets; see Share.publish. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <share-target android:targetClass="dev.gpui.mobile.GpuiActivity">
+        <data android:mimeType="*/*" />
+        <category android:name="dev.gpui.beeper.SHARE_TARGET" />
+    </share-target>
+</shortcuts>

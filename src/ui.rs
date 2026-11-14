@@ -32,6 +32,7 @@ mod panels;
 mod pollnew;
 mod rich;
 mod signin;
+mod sharein;
 mod video;
 
 use std::path::PathBuf;
@@ -268,6 +269,8 @@ pub struct BeeperApp {
     faces: HashMap<OwnedUserId, Option<Arc<Image>>>,
     /// Rooms whose missing or undecryptable preview was already re-read this session.
     peeked: HashSet<OwnedRoomId>,
+    /// What another app shared in, and the "Send to" screen for it.
+    share: sharein::ShareIn,
     _subs: Vec<Subscription>,
     _events: Task<()>,
 }
@@ -304,6 +307,7 @@ impl BeeperApp {
         }
 
         let matrix = signin::Form::new(window, cx, &mut subs);
+        let share = sharein::ShareIn::new(window, cx, &mut subs);
         subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) && this.composer_changed(cx) {
@@ -330,6 +334,8 @@ impl BeeperApp {
                 // The animation setting may have changed while the app was away.
                 motion::follow_system(cx);
                 this.open_from_notification(cx);
+                this.take_share(cx);
+                this.publish_share_targets();
             }
         }));
 
@@ -435,6 +441,7 @@ impl BeeperApp {
             place: navigate::Place::default(),
             avatars: HashMap::new(),
             peeked: HashSet::new(),
+            share,
             _subs: subs,
             _events: events,
         }
@@ -477,6 +484,7 @@ impl BeeperApp {
                 self.screen = Screen::Main;
                 self.busy = false;
                 self.error = None;
+                self.take_share(cx);
             }
             Ev::NeedRecovery(need) => {
                 if self.need_recovery && !need {
@@ -543,6 +551,7 @@ impl BeeperApp {
                 self.rooms = by_id.into_values().collect();
                 self.rooms.sort_unstable_by_key(|r| (!r.pinned, std::cmp::Reverse(r.ts)));
                 self.refilter(cx);
+                self.publish_share_targets();
             }
             Ev::RoomGone(id) => {
                 self.rooms.retain(|r| r.id != id);
@@ -750,7 +759,9 @@ impl BeeperApp {
     /// Returns whether there was anything to undo.
     fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let narrow = window.viewport_size().width < px(NARROW);
-        if self.viewer.is_some() {
+        if self.share.open {
+            self.close_share(cx);
+        } else if self.viewer.is_some() {
             self.close_viewer(cx);
         } else if self.menu_open() {
             self.close_menu(cx);
@@ -2889,6 +2900,7 @@ impl Render for BeeperApp {
                     };
                     h_flex().size_full().child(self.render_nav(false, cx)).child(main).into_any_element()
                 };
+                let body = self.render_share(window, cx).unwrap_or(body);
                 let viewer = self.render_viewer(window, cx);
                 // Sampled every frame, so a falling sheet finishes even when a message menu opens.
                 let chat_sheet = self.render_chat_sheet(window, cx);
