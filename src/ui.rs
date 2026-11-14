@@ -31,6 +31,7 @@ mod heart;
 mod location;
 mod gifs;
 mod mentions;
+mod info;
 mod menu;
 mod navigate;
 pub(crate) mod motion;
@@ -293,6 +294,7 @@ pub struct BeeperApp {
     fwd: forward::Forward,
     /// Settings' devices and the verification sheet.
     verify: verify::Ui,
+    info: info::Info,
     _subs: Vec<Subscription>,
     _events: Task<()>,
     /// Leaving chats and starting new ones.
@@ -481,6 +483,7 @@ impl BeeperApp {
             share,
             fwd,
             verify,
+            info: info::Info::default(),
             _subs: subs,
             _events: events,
             people: Default::default(),
@@ -575,7 +578,7 @@ impl BeeperApp {
             Ev::Fetched(id, path) => {
                 self.fetching.remove(&id);
                 if let Some(path) = path.filter(|path| !self.voice_fetched(&id, path, cx)) {
-                    let media = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref());
+                    let media = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()).or_else(|| self.info_media(&id));
                     if !media.is_some_and(|media| video::play(&path, media)) {
                         let mime = media.and_then(|media| media.mime.clone());
                         crate::open_file(cx, &path, mime.as_deref());
@@ -681,6 +684,8 @@ impl BeeperApp {
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
             ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_)) => self.on_verify_event(ev, cx),
             Ev::Disappear { room, setting } => self.on_disappear(room, setting),
+            Ev::Info(room, details) => self.info_details(room, *details, cx),
+            Ev::InfoItems { room, items, scanned, done } => self.info_items(room, items, scanned, done, cx),
         }
         cx.notify();
     }
@@ -842,6 +847,8 @@ impl BeeperApp {
             cx.notify();
         } else if self.chat_sheet.take().is_some() {
             cx.notify();
+        } else if self.info_open() {
+            self.close_info(cx);
         } else if self.compose != Compose::New {
             self.strip_epoch += 1;
             self.start_compose(Compose::New, window, cx);
@@ -1120,6 +1127,7 @@ impl BeeperApp {
         self.close_gifs(cx);
         self.mention = mentions::Mentions::default();
         self.stop_voice(cx);
+        self.end_info();
         if let Some(room) = self.open.take() {
             if self.typing_sent.take().is_some() {
                 let _ = self.cmd.try_send(Cmd::Typing(room, false));
@@ -1591,7 +1599,7 @@ impl BeeperApp {
                     return this.render_line(ix, cx);
                 }
                 // What a bubble has inside: its share of the row, less its padding and a mention's bar.
-                let row = f32::from(window.viewport_size().width) - 2. * GUTTER;
+                let row = f32::from(window.viewport_size().width) - 2. * GUTTER - this.info_aside(window);
                 // Wide, the pane beside the lists also holds a face and the hover buttons.
                 let room = if narrow { row * BUBBLE_SHARE } else { BUBBLE_W.min(row - NAV_W - LIST_W - SENDER - 8. - SIDE_ROOM).max(TAP * 4.) } - 2. * GAP - 9.;
                 // A picture sits in its bubble with a thin margin, concentric with it; alone, it is the bubble.
@@ -1904,14 +1912,23 @@ impl BeeperApp {
                         })))
                     })
                     .when(!narrow, |el| el.pl(px(GUTTER)))
-                    .children(header_avatar)
                     .child(
-                        v_flex()
+                        h_flex()
+                            .id("chat-title")
                             .flex_1()
                             .min_w_0()
-                            .pl(px(8.))
-                            .child(div().text_size(fs(16.)).line_height(fs(20.)).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
-                            .children(self.header_subline(network, cx)),
+                            .h_full()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_info(cx)))
+                            .children(header_avatar)
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .pl(px(8.))
+                                    .child(div().text_size(fs(16.)).line_height(fs(20.)).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
+                                    .children(self.header_subline(network, cx)),
+                            ),
                     )
                     .when(room.is_some(), |el| {
                         el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, _, _, cx| {
@@ -2929,11 +2946,14 @@ impl Render for BeeperApp {
                         let t = at.elapsed().as_secs_f32() / motion::PUSH.as_secs_f32();
                         (t < 1. && !cx.reduce_motion()).then(|| (motion::ease_out(t), if push { 32. } else { -32. }))
                     });
+                    let shift = shift.or_else(|| self.info_slide(cx).filter(|_| panel.is_none() && self.open.is_some()));
                     if shift.is_some() {
                         window.request_animation_frame();
                     }
                     let screen = if let Some(panel) = panel {
                         panel
+                    } else if self.info_open() {
+                        self.render_info(false, window, cx)
                     } else if self.open.is_some() {
                         self.render_chat(true, window, cx).into_any_element()
                     } else {
@@ -2945,6 +2965,7 @@ impl Render for BeeperApp {
                         .when(!deep, |el| el.child(self.render_nav(true, cx)))
                         .into_any_element()
                 } else {
+                    let beside = Self::info_beside(window);
                     let main = if let Some(panel) = panel {
                         div().flex_1().min_w_0().h_full().child(panel).into_any_element()
                     } else {
@@ -2953,7 +2974,9 @@ impl Render for BeeperApp {
                             .min_w_0()
                             .h_full()
                             .child(div().w(px(LIST_W)).flex_none().h_full().child(self.render_rooms(cx)))
-                            .child(div().flex_1().min_w_0().h_full().child(if self.open.is_some() {
+                            .child(div().flex_1().min_w_0().h_full().child(if self.info_open() && !beside {
+                                self.render_info(false, window, cx)
+                            } else if self.open.is_some() {
                                 self.render_chat(false, window, cx).into_any_element()
                             } else {
                                 div()
@@ -2966,6 +2989,7 @@ impl Render for BeeperApp {
                                     .child("Choose a chat")
                                     .into_any_element()
                             }))
+                            .when(self.info_open() && beside, |el| el.child(div().w(px(info::INFO_W)).flex_none().h_full().child(self.render_info(true, window, cx))))
                             .into_any_element()
                     };
                     h_flex().size_full().child(self.render_nav(false, cx)).child(main).into_any_element()
