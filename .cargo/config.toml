@@ -1,3 +1,8 @@
 # Static CRT: a stock Windows has no VCRUNTIME140.dll unless the VC++ redistributable is installed.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Test threads poll the backend's futures inline: debug frames outgrow the default 2 MiB stack
+# (see BACKEND_STACK in src/backend.rs).
+[env]
+RUST_MIN_STACK = "8388608"

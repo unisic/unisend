@@ -620,6 +620,10 @@ pub(crate) fn read_from_notification(chat: &str) {
     }
 }
 
+/// Stack of the backend's threads. Opening a chat polls deep matrix-sdk futures whose debug-build
+/// frames outgrow the default 2 MiB; only the pages actually touched cost memory.
+const BACKEND_STACK: usize = 8 << 20;
+
 pub fn start(dir: PathBuf) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Ev>) {
     let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_CAP);
     #[cfg(target_os = "android")]
@@ -627,9 +631,11 @@ pub fn start(dir: PathBuf) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Ev>) {
     let (ev_tx, ev_rx) = mpsc::channel(CHANNEL_CAP);
     std::thread::Builder::new()
         .name("matrix".into())
+        .stack_size(BACKEND_STACK)
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
+                .thread_stack_size(BACKEND_STACK)
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
