@@ -72,9 +72,14 @@ pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p
 }
 
 pub(super) fn place(m: &Msg, place: &Place, width: f32, p: Palette, cx: &mut Context<BeeperApp>) -> AnyElement {
+    place_card(&m.id, place, None, width, p, cx)
+}
+
+/// The card of a place; `note` is a line under the coordinates, the accuracy of a fresh fix.
+pub(super) fn place_card(id: &str, place: &Place, note: Option<String>, width: f32, p: Palette, cx: &mut Context<BeeperApp>) -> AnyElement {
     let place_for_tap = place.clone();
     h_flex()
-        .id(SharedString::from(format!("{}-place", m.id)))
+        .id(SharedString::from(format!("{id}-place")))
         .w(px(width.min(LINK_W)))
         .min_h(px(TAP))
         .px(px(10.))
@@ -92,7 +97,8 @@ pub(super) fn place(m: &Msg, place: &Place, width: f32, p: Palette, cx: &mut Con
             v_flex()
                 .min_w_0()
                 .when(!place.description.is_empty(), |el| el.child(div().text_size(px(14.)).line_height(px(19.)).line_clamp(2).text_ellipsis().child(place.description.clone())))
-                .child(div().text_size(px(13.)).line_height(px(18.)).text_color(p.muted).child(place.coordinates())),
+                .child(div().text_size(px(13.)).line_height(px(18.)).text_color(p.muted).child(place.coordinates()))
+                .children(note.map(|note| div().text_size(px(13.)).line_height(px(18.)).text_color(p.faint).child(note))),
         )
         .into_any_element()
 }

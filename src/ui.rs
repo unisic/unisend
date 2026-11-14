@@ -21,6 +21,7 @@ mod camera;
 mod cards;
 mod gallery;
 mod heart;
+mod location;
 mod menu;
 pub(crate) mod motion;
 mod panels;
@@ -228,6 +229,7 @@ pub struct BeeperApp {
     chat_sheet: Option<OwnedRoomId>,
     /// The attach sheet's photos and videos.
     gallery: gallery::Gallery,
+    location: location::Locate,
     /// Attachments waiting for the one uploading now, so a batch keeps its order.
     attach_queue: VecDeque<Cmd>,
     attaching: bool,
@@ -383,6 +385,7 @@ impl BeeperApp {
             strip_epoch: 0,
             chat_sheet: None,
             gallery: gallery::Gallery::default(),
+            location: location::Locate::default(),
             attach_queue: VecDeque::new(),
             attaching: false,
             sheet_last: None,
@@ -707,6 +710,8 @@ impl BeeperApp {
             self.close_viewer(cx);
         } else if self.menu_open() {
             self.close_menu(cx);
+        } else if self.location.open {
+            self.close_location(cx);
         } else if self.gallery.open {
             self.close_gallery(cx);
         } else if self.chat_sheet.take().is_some() {
@@ -2798,11 +2803,13 @@ impl Render for BeeperApp {
                 let sheet = self.render_message_menu(window, cx).or(chat_sheet);
                 let gallery = self.render_gallery(window, cx);
                 let heart = self.render_heart(window, cx);
+                let location = self.render_location(window, cx);
                 root.relative()
                     .child(self.render_banners(window, cx))
                     .child(div().flex_1().min_h_0().child(body))
                     .children(sheet)
                     .children(gallery)
+                    .children(location)
                     .children(viewer)
                     .children(heart)
                     .into_any_element()

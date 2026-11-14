@@ -139,6 +139,8 @@ pub enum Cmd {
     Delete { room: OwnedRoomId, target: String },
     /// Sends again a message that failed to leave.
     Retry { room: OwnedRoomId, target: String },
+    /// Sends the user's position as an `m.location` message.
+    SendLocation { room: OwnedRoomId, lat: f64, lon: f64, accuracy: Option<f64>, reply_to: Option<String> },
 }
 
 pub enum Ev {
@@ -1128,6 +1130,16 @@ impl State {
             Cmd::Vote { room, target, unstable, answers } => {
                 let (kind, content) = polls::response(unstable, &target, answers);
                 self.room(&room)?.send_raw(kind, content).await?;
+            }
+            Cmd::SendLocation { room, lat, lon, accuracy, reply_to } => {
+                let place = location::content(lat, lon, accuracy);
+                match self.open.as_ref().filter(|open| open.room == room) {
+                    Some(open) => match reply_to {
+                        Some(id) => drop(open.timeline.send_reply(place, EventId::parse(id)?).await?),
+                        None => drop(open.timeline.send(RoomMessageEventContent::from(place).into()).await?),
+                    },
+                    None => drop(self.room(&room)?.send_queue().send(RoomMessageEventContent::from(place).into()).await?),
+                }
             }
         }
         Ok(())
@@ -2266,9 +2278,11 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
     (Some(media), caption.unwrap_or_default().to_owned())
 }
 
+mod location;
 mod polls;
 mod rich;
 pub use rich::{Block, Rich, Run};
+pub use location::support as location_support;
 pub use polls::{Place, Poll};
 
 mod timeline;
