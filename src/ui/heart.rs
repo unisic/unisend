@@ -46,8 +46,8 @@ impl BeeperApp {
                 .items_center()
                 .justify_center()
                 .opacity(opacity)
-                .text_size(px(SIZE * scale))
-                .line_height(px(SIZE))
+                .text_size(fs(SIZE * scale))
+                .line_height(fs(SIZE))
                 .child(LIKE)
                 .into_any_element(),
         )

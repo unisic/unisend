@@ -62,6 +62,13 @@ message; the time is printed once under the run. A mention is accent text; a mes
 you carries an accent bar on its leading edge. Replies quote in a lighter inset; touching the
 quote goes to the message it quotes.
 
+Text size (Settings, Appearance) has five steps, 85 to 130%, and scales every font size and line
+height through `fs()`; paddings, rows and icons keep their size. The chat wallpaper is the one place a
+gradient is allowed: behind the messages only, never behind the bars or the composer. Presets are
+tones of `Palette` no lighter than `raised` at 85%; a photo is darkened to 60% when imported and
+dimmed at least 30% more, so its brightest point is `#6b6b6b`. Text that sits straight on a photo is
+`text`, not `faint`. The light theme has no wallpaper.
+
 Own messages can take a chat colour from Settings: Default (`raised`) or one of Beeper's nine
 (blue, indigo, purple, pink, red, orange, green, teal, slate), the same in dark and light, kept on this
 device. Everything inside such a bubble (text, quote inset, link, mention, poll, place) is drawn in

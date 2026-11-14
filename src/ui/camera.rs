@@ -45,7 +45,7 @@ impl BeeperApp {
             .gap(px(6.))
             .bg(p.raised)
             .text_color(p.text)
-            .text_size(px(13.))
+            .text_size(fs(13.))
             .cursor_pointer()
             .active(|el| el.bg(p.lifted))
             .child(Icon::new(if video { IconName::Video } else { IconName::Camera }).size_6())
