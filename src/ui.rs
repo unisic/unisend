@@ -35,6 +35,7 @@ mod rich;
 mod signin;
 mod video;
 mod rooms;
+mod viewer;
 
 use std::path::PathBuf;
 
@@ -252,6 +253,7 @@ pub struct BeeperApp {
     nav: Option<(std::time::Instant, bool)>,
     /// The picture still fading out after the viewer closed.
     viewer_last: Option<(String, Option<Arc<Image>>)>,
+    zoom: viewer::Zoom,
     /// The reaction under the pointer in the picker.
     picker_hover: Option<usize>,
     emoji_pick: emojipick::Picker,
@@ -430,6 +432,7 @@ impl BeeperApp {
             sheet_last: None,
             nav: None,
             viewer_last: None,
+            zoom: viewer::Zoom::default(),
             picker_hover: None,
             emoji_pick,
             emoji_open: None,
@@ -625,6 +628,7 @@ impl BeeperApp {
                 self.typing = names;
             }
             Ev::Online(online) => self.offline = !online,
+            Ev::Exported(id, path, what) => self.exported(id, path, what, cx),
             Ev::Error(e) => {
                 self.error = Some(crate::backend::plain(&e).into());
                 self.busy = false;
@@ -843,6 +847,7 @@ impl BeeperApp {
         if matches!(media.kind, MediaKind::Image | MediaKind::Sticker) {
             if self.send(Cmd::View(id.clone(), media), cx) {
                 self.viewer = Some((id, None));
+                self.open_zoom();
             }
         } else if !self.fetching.contains(&id) && self.send(Cmd::Fetch(id.clone(), media), cx) {
             self.fetching.insert(id);
@@ -2767,52 +2772,6 @@ fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperA
             }
         })
         .detach();
-    }
-}
-
-impl BeeperApp {
-    /// A picture full-screen: fades in, and fades out quicker without taking taps while it does.
-    /// No zoom from the thumbnail: GPUI cannot scale an element.
-    fn render_viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.viewer.is_some();
-        if live {
-            if let Some((_, Some(image))) = self.viewer_last.take() {
-                image.remove_asset(cx);
-            }
-        } else if self.viewer_last.is_none() {
-            return None;
-        }
-        let shown = Presence::new("viewer", live).transition(if live { motion::enter() } else { motion::exit() }).sample(window, cx);
-        if !shown.should_render() {
-            if let Some((_, Some(image))) = self.viewer_last.take() {
-                image.remove_asset(cx);
-            }
-            return None;
-        }
-        let (top, _) = crate::insets();
-        let (id, full) = self.viewer.as_ref().or(self.viewer_last.as_ref())?;
-        // The thumbnail stands in until the full picture arrives.
-        let picture = full.clone().or_else(|| self.thumbs.get(id).cloned());
-        Some(
-            div()
-                .id("viewer")
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(gpui_kit::black())
-                .text_color(gpui_kit::white())
-                .opacity(shown.progress)
-                .when(live, |el| el.occlude().on_click(cx.listener(|this, _, _, cx| this.close_viewer(cx))))
-                .map(|el| match picture {
-                    Some(image) => el.child(img(image).size_full().object_fit(ObjectFit::Contain)),
-                    None if live => el.child("Loading…"),
-                    None => el,
-                })
-                .child(div().absolute().top(px(top + 12.)).right(px(GUTTER)).child(Icon::new(IconName::X).size_6()))
-                .into_any_element(),
-        )
     }
 }
 

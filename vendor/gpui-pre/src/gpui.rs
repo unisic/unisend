@@ -25,6 +25,7 @@ mod platform_scheduler;
 pub(crate) use platform_scheduler::PlatformScheduler;
 mod geometry;
 mod gestures;
+mod pinch_tracker;
 mod global;
 mod input;
 mod inspector;

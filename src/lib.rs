@@ -29,6 +29,7 @@ gpui_kit::assets::icon_assets!(
         ChartBar,
         ChevronsDown,
         ClipboardPaste,
+        Download,
         ExternalLink,
         Image,
         ListFilter,
@@ -45,6 +46,7 @@ gpui_kit::assets::icon_assets!(
         Reply,
         RotateCw,
         SendHorizontal,
+        Share2,
         Sticker,
         Trash,
         Unlink,
@@ -548,6 +550,62 @@ pub(crate) fn open_file(cx: &mut gpui_kit::App, path: &std::path::Path, mime: Op
     }
 }
 
+/// Whether a picture or video can be saved to the gallery: Android 10 and later, and desktops.
+pub(crate) fn can_save() -> bool {
+    #[cfg(target_os = "android")]
+    return android_files::can_save().unwrap_or(false);
+    #[cfg(not(target_os = "android"))]
+    true
+}
+
+/// Whether there is a share sheet. Desktops have none.
+pub(crate) fn can_share() -> bool {
+    cfg!(target_os = "android")
+}
+
+/// Offers a downloaded file to other apps through the system's share sheet.
+pub(crate) fn share_file(path: &std::path::Path, mime: Option<&str>) {
+    #[cfg(target_os = "android")]
+    match android_files::share(&path.to_string_lossy(), mime.unwrap_or("*/*")) {
+        Ok(true) => {}
+        Ok(false) => log::warn!("no app takes {}", path.display()),
+        Err(e) => log::warn!("share {}: {e}", path.display()),
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (path, mime);
+}
+
+/// Copies a downloaded file into the user's pictures: on Android `Pictures/Murmur` (`Movies/Murmur`
+/// for a video) in the gallery, on desktops `Pictures/Murmur` in the home folder. Returns where it
+/// went, for the user to read. Blocking.
+pub(crate) fn save_file(path: &std::path::Path, name: &str, mime: Option<&str>) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let mime = mime.unwrap_or("application/octet-stream");
+        android_files::save(&path.to_string_lossy(), name, mime)?.ok_or_else(|| "the gallery refused the file".to_owned())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = mime;
+        let folder = dirs::picture_dir().or_else(|| dirs::home_dir().map(|h| h.join("Pictures"))).ok_or("no pictures folder")?.join("Murmur");
+        std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        let target = free_name(&folder, name);
+        std::fs::copy(path, &target).map_err(|e| e.to_string())?;
+        Ok(target.display().to_string())
+    }
+}
+
+/// `name` in `folder`, or `name (2).ext`, `name (3).ext` when taken. Gives up after 999.
+#[cfg(any(test, not(target_os = "android")))]
+fn free_name(folder: &std::path::Path, name: &str) -> PathBuf {
+    let first = folder.join(name);
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+    (2..1000).map(|n| folder.join(format!("{stem} ({n}){ext}"))).find(|p| !p.exists()).filter(|_| first.exists()).unwrap_or(first)
+}
+
 /// Opens a web address in the browser. Addresses come out of other people's messages, so only
 /// http and https ones go any further.
 pub(crate) fn open_link(cx: &mut gpui_kit::App, url: &str) {
@@ -732,6 +790,62 @@ mod android_files {
                 env.exception_clear();
                 e.to_string()
             })
+        })
+    }
+
+    pub fn can_save() -> Result<bool, String> {
+        helpers::with_env(|env| {
+            let class = helpers::find_app_class(env, CLASS)?;
+            env.call_static_method(&class, jni::jni_str!("canSave"), jni::jni_sig!("()Z"), &[]).and_then(|v| v.z()).map_err(|e| {
+                env.exception_clear();
+                e.to_string()
+            })
+        })
+    }
+
+    pub fn share(path: &str, mime: &str) -> Result<bool, String> {
+        view_like("share", path, mime)
+    }
+
+    fn view_like(method: &str, path: &str, mime: &str) -> Result<bool, String> {
+        helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, CLASS)?;
+            let path = env.new_string(path).map_err(|e| e.to_string())?;
+            let mime = env.new_string(mime).map_err(|e| e.to_string())?;
+            env.call_static_method(
+                &class,
+                jni::strings::JNIString::new(method),
+                jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)Z"),
+                &[JValue::Object(&activity), JValue::Object(&path), JValue::Object(&mime)],
+            )
+            .and_then(|v| v.z())
+            .map_err(|e| {
+                env.exception_clear();
+                e.to_string()
+            })
+        })
+    }
+
+    pub fn save(path: &str, name: &str, mime: &str) -> Result<Option<String>, String> {
+        helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, CLASS)?;
+            let mut text = |s: &str| env.new_string(s).map_err(|e| e.to_string());
+            let (path, name, mime) = (text(path)?, text(name)?, text(mime)?);
+            let folder = env
+                .call_static_method(
+                    &class,
+                    jni::jni_str!("save"),
+                    jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+                    &[JValue::Object(&activity), JValue::Object(&path), JValue::Object(&name), JValue::Object(&mime)],
+                )
+                .and_then(|v| v.l())
+                .map_err(|e| {
+                    env.exception_clear();
+                    e.to_string()
+                })?;
+            Ok((!folder.is_null()).then(|| helpers::get_string(env, &folder)))
         })
     }
 
@@ -935,15 +1049,29 @@ mod tests {
     use super::Assets;
     use gpui_kit::AssetSource as _;
 
+    #[test]
+    fn a_taken_name_in_the_pictures_folder_gets_a_number() {
+        let dir = std::env::temp_dir().join(format!("murmur-free-name-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(super::free_name(&dir, "a.jpg"), dir.join("a.jpg"));
+        std::fs::write(dir.join("a.jpg"), b"x").unwrap();
+        assert_eq!(super::free_name(&dir, "a.jpg"), dir.join("a (2).jpg"));
+        std::fs::write(dir.join("a (2).jpg"), b"x").unwrap();
+        std::fs::write(dir.join("b"), b"x").unwrap();
+        assert_eq!(super::free_name(&dir, "a.jpg"), dir.join("a (3).jpg"));
+        assert_eq!(super::free_name(&dir, "b"), dir.join("b (2)"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// An icon the UI names but the build does not embed draws as nothing, with only a log line.
     #[test]
     fn every_icon_the_ui_uses_is_embedded() {
-        for source in [include_str!("ui.rs"), include_str!("ui/panels.rs"), include_str!("ui/cards.rs"), include_str!("ui/emojipick.rs"), include_str!("ui/rooms.rs")] {
+        for source in [include_str!("ui.rs"), include_str!("ui/panels.rs"), include_str!("ui/cards.rs"), include_str!("ui/emojipick.rs"), include_str!("ui/rooms.rs"), include_str!("ui/viewer.rs"), include_str!("ui/menu.rs")] {
             for name in source.split("IconName::").skip(1) {
                 let name: String = name.chars().take_while(char::is_ascii_alphanumeric).collect();
                 let mut file = String::new();
                 for (ix, c) in name.chars().enumerate() {
-                    if c.is_ascii_uppercase() && ix > 0 {
+                    if (c.is_ascii_uppercase() || c.is_ascii_digit()) && ix > 0 {
                         file.push('-');
                     }
                     file.push(c.to_ascii_lowercase());

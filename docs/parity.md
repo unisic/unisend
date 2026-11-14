@@ -100,7 +100,7 @@ is not started.
 | Incognito mode | done | on: `m.read.private`; off: `m.read`. On by default |
 | Command bar, hotkeys | todo | local |
 | Tray icon, launch at login, deep links | todo | local |
-| Media viewer | part | pictures only; no zoom, no gallery |
+| Media viewer | part | pictures only; pinch, double-tap and ctrl+wheel zoom, pan, Save to gallery (Android 10+, desktop Pictures/Murmur), Share on Android; no paging between pictures |
 | PDF preview, storage manager | todo | local |
 | Feedback, help hub, subscription banners | todo | Beeper services |
 | Emoji rendering | part | bundled bitmap Noto Color Emoji (GPUI cannot draw COLRv1). On Linux, emoji that a system text font also holds (the heart U+2764 among them) draw as that font's outline: cosmic-text asks DejaVu Sans before the emoji font |

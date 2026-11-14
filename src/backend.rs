@@ -149,6 +149,8 @@ pub enum Cmd {
     Contact(String, Media),
     /// Leaving chats and starting new ones.
     People(rooms::Ask),
+    /// Downloads the original file for the viewer's Save or Share; answered by `Exported`.
+    Export(String, Media, Export),
 }
 
 pub enum Ev {
@@ -188,6 +190,8 @@ pub enum Ev {
     /// The cards of a contact file; empty when it could not be read.
     Contact(String, Vec<crate::vcard::Card>),
     People(rooms::Answer),
+    /// The original file is in the media cache (or could not be fetched), for what the user asked.
+    Exported(String, Option<PathBuf>, Export),
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -1175,6 +1179,10 @@ impl State {
                 });
             }
             Cmd::People(ask) => rooms::handle(self.client()?.clone(), self.api().ok(), self.rooms.clone(), self.ev.clone(), ask),
+            Cmd::Export(id, media, what) => {
+                let (client, ev, dir) = (self.client()?.clone(), self.ev.clone(), media_dir(&self.dir));
+                tokio::spawn(export::run(client, ev, dir, id, media, what));
+            }
         }
         Ok(())
     }
@@ -2336,6 +2344,9 @@ mod timeline;
 mod video;
 
 pub(crate) mod rooms;
+
+mod export;
+pub use export::Export;
 
 #[cfg(test)]
 mod tests;
