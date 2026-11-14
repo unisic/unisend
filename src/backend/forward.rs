@@ -18,6 +18,7 @@ use matrix_sdk::{
 };
 use matrix_sdk_ui::timeline::Timeline;
 use serde_json::{Map, Value, json};
+use crate::i18n::{t, tn};
 
 /// Most chats one forward goes to, and most messages: what the UI lets the user pick.
 pub const MAX_CHATS: usize = 5;
@@ -41,14 +42,14 @@ const DROPPED: [&str; 7] = [
 pub(super) fn transform(event: &Value, edited: Option<&Value>) -> Result<(String, Map<String, Value>)> {
     let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
     if kind != "m.room.message" && kind != "m.sticker" {
-        bail!("This message cannot be forwarded");
+        bail!(t!("This message cannot be forwarded"));
     }
     let original = event.get("content").and_then(Value::as_object);
     let Some(mut content) = edited.or(event.get("content")).and_then(Value::as_object).cloned() else {
-        bail!("This message cannot be forwarded");
+        bail!(t!("This message cannot be forwarded"));
     };
     if content.contains_key("com.beeper.view_limited") {
-        bail!("Media that can be viewed once cannot be forwarded");
+        bail!(t!("Media that can be viewed once cannot be forwarded"));
     }
     let replied = original.and_then(|c| c.get("m.relates_to")).is_some_and(|r| r.get("m.in_reply_to").is_some());
     for key in DROPPED {
@@ -80,12 +81,12 @@ fn remove_html_reply_fallback(html: &str) -> String {
 /// Nothing is sent when one of the messages cannot be forwarded.
 pub(super) async fn forward(timeline: &Timeline, ids: &[String], to: &[Room]) -> Result<usize> {
     if ids.is_empty() || ids.len() > MAX_MESSAGES || to.is_empty() || to.len() > MAX_CHATS {
-        bail!("Choose up to {MAX_CHATS} chats and {MAX_MESSAGES} messages");
+        bail!(t!("Choose up to {chats} chats and {messages} messages", chats = MAX_CHATS, messages = MAX_MESSAGES));
     }
     let mut events = Vec::with_capacity(ids.len());
     for id in ids {
-        let Some(item) = timeline.item_by_event_id(&EventId::parse(id)?).await else { bail!("That message is no longer loaded") };
-        let Some(original) = item.original_json() else { bail!("That message has not been sent yet") };
+        let Some(item) = timeline.item_by_event_id(&EventId::parse(id)?).await else { bail!(t!("That message is no longer loaded")) };
+        let Some(original) = item.original_json() else { bail!(t!("That message has not been sent yet")) };
         let event: Value = original.deserialize_as_unchecked()?;
         let edit: Option<Value> = item.latest_edit_json().map(|edit| edit.deserialize_as_unchecked::<Value>()).transpose()?;
         let mut new_content = edit.and_then(|mut edit| edit.get_mut("content")?.get_mut("m.new_content").map(Value::take));
@@ -113,7 +114,7 @@ pub(super) async fn forward(timeline: &Timeline, ids: &[String], to: &[Room]) ->
         done += usize::from(ok);
     }
     match failed {
-        Some(e) => bail!("Forwarded to {done} of {} chats: {e}", to.len()),
+        Some(e) => bail!(tn!(to.len(), "Forwarded to {done} of {n} chat: {error}", "Forwarded to {done} of {n} chats: {error}", done = done, error = e)),
         None => Ok(done),
     }
 }

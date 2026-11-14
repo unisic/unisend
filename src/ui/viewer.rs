@@ -6,6 +6,7 @@ use std::io::Cursor;
 
 use super::*;
 use crate::backend::Export;
+use crate::i18n::t;
 
 /// A double-tap zooms in this far.
 const DOUBLE_TAP_SCALE: f32 = 2.5;
@@ -191,13 +192,13 @@ impl BeeperApp {
         }
         if self.send(Cmd::Export(id.to_owned(), media, what), cx) {
             self.zoom.working = Some(what);
-            self.note(if what == Export::Save { "Saving…" } else { "Preparing the file…" }, false, cx);
+            self.note(if what == Export::Save { t!("Saving…") } else { t!("Preparing the file…") }, false, cx);
         }
     }
 
     pub(super) fn exported(&mut self, id: String, path: Option<PathBuf>, what: Export, cx: &mut Context<Self>) {
         self.zoom.working = None;
-        let Some(path) = path else { return self.note("Could not download the file.", true, cx) };
+        let Some(path) = path else { return self.note(t!("Could not download the file."), true, cx) };
         let media = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref());
         let name = media.map(|m| m.name.clone()).or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "file".into());
         let mime = media.and_then(|m| m.mime.clone()).or_else(|| match media.map(|m| m.kind) {
@@ -216,10 +217,10 @@ impl BeeperApp {
                 cx.spawn(async move |this, cx| {
                     let done = saving.await;
                     let _ = this.update(cx, |this, cx| match done {
-                        Ok(place) => this.note(format!("Saved to {place}"), true, cx),
+                        Ok(place) => this.note(t!("Saved to {place}", place = place), true, cx),
                         Err(e) => {
                             log::warn!("save: {e}");
-                            this.note("Could not save the file.", true, cx)
+                            this.note(t!("Could not save the file."), true, cx)
                         }
                     });
                 })
@@ -409,7 +410,7 @@ impl BeeperApp {
                             .h(px(h))
                             .object_fit(ObjectFit::Contain),
                     ),
-                    None if live => el.child(div().size_full().flex().items_center().justify_center().child("Loading…")),
+                    None if live => el.child(div().size_full().flex().items_center().justify_center().child(t!("Loading…"))),
                     None => el,
                 })
                 .child(bar)

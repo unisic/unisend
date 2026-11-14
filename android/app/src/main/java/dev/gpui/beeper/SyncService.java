@@ -18,7 +18,7 @@ public final class SyncService extends Service {
         Notification notification = new Notification.Builder(this, Notify.CONNECTION)
                 .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
                 .setContentTitle("Murmur")
-                .setContentText("Connected for new messages")
+                .setContentText(getString(R.string.connected_for_new))
                 .setOngoing(true)
                 .build();
         startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);

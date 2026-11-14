@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use matrix_sdk::Client;
 use tokio::sync::mpsc;
 
+use crate::i18n::t;
+
 use super::{Ev, Media, MediaFormat, MediaRequestParameters, safe_name, write_private};
 
 /// What the user wants done with the file once it is here.
@@ -28,7 +30,7 @@ pub(super) async fn run(client: Client, ev: mpsc::Sender<Ev>, dir: PathBuf, id: 
     let path = match saved.await {
         Ok(path) => Some(path),
         Err(e) => {
-            let _ = ev.send(Ev::Error(format!("Could not download {}: {e:#}", media.name))).await;
+            let _ = ev.send(Ev::Error(t!("Could not download {name}: {error}", name = media.name, error = format!("{e:#}")))).await;
             None
         }
     };

@@ -9,6 +9,7 @@ mod backend;
 mod beeper;
 mod bridges;
 mod emoji;
+mod i18n;
 mod share;
 mod ui;
 mod vcard;
@@ -17,6 +18,7 @@ use std::path::PathBuf;
 
 use gpui_kit::component::Theme;
 use gpui_kit::*;
+use crate::i18n::t;
 
 // Icons beyond the 101 the component library embeds; each costs its SVG, about 400 bytes.
 gpui_kit::assets::icon_assets!(
@@ -175,16 +177,16 @@ impl ChatColour {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Default => "Default",
-            Self::Blue => "Blue",
-            Self::Indigo => "Indigo",
-            Self::Purple => "Purple",
-            Self::Pink => "Pink",
-            Self::Red => "Red",
-            Self::Orange => "Orange",
-            Self::Green => "Green",
-            Self::Teal => "Teal",
-            Self::Slate => "Slate",
+            Self::Default => t!("Default"),
+            Self::Blue => t!("Blue"),
+            Self::Indigo => t!("Indigo"),
+            Self::Purple => t!("Purple"),
+            Self::Pink => t!("Pink"),
+            Self::Red => t!("Red"),
+            Self::Orange => t!("Orange"),
+            Self::Green => t!("Green"),
+            Self::Teal => t!("Teal"),
+            Self::Slate => t!("Slate"),
         }
     }
 
@@ -444,6 +446,7 @@ fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 #[cfg(not(target_os = "android"))]
 pub fn run_desktop() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,beeper_gpui=info")).init();
+    i18n::init(None);
     let dir = std::env::var_os("BEEPER_GPUI_DATA_DIR")
         .map(PathBuf::from)
         // Local, not roaming, on Windows: the store is large and belongs to one device.
@@ -478,6 +481,7 @@ fn android_main(app: android_activity::AndroidApp) {
         android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("beeper-gpui"),
     );
     jni::install_panic_hook();
+    i18n::init(Some(app.config().language().unwrap_or_default()));
     let dir = app.internal_data_path().expect("app files dir").join("beeper");
     if let Err(e) = private_dir(&dir) {
         log::error!("data dir {}: {e}", dir.display());

@@ -8,6 +8,7 @@ use std::path::Path;
 use emojis::{Group, SkinTone};
 use super::*;
 use crate::emoji;
+use crate::i18n::t;
 
 /// Recents kept, newest first.
 const RECENTS: usize = 32;
@@ -55,16 +56,16 @@ impl Cat {
 
     fn label(self) -> &'static str {
         match self {
-            Cat::Recent => "Recent",
-            Cat::Group(Group::SmileysAndEmotion) => "Smileys",
-            Cat::Group(Group::PeopleAndBody) => "People",
-            Cat::Group(Group::AnimalsAndNature) => "Animals",
-            Cat::Group(Group::FoodAndDrink) => "Food",
-            Cat::Group(Group::TravelAndPlaces) => "Travel",
-            Cat::Group(Group::Activities) => "Activities",
-            Cat::Group(Group::Objects) => "Objects",
-            Cat::Group(Group::Symbols) => "Symbols",
-            Cat::Group(Group::Flags) => "Flags",
+            Cat::Recent => t!("Recent"),
+            Cat::Group(Group::SmileysAndEmotion) => t!("Smileys"),
+            Cat::Group(Group::PeopleAndBody) => t!("People"),
+            Cat::Group(Group::AnimalsAndNature) => t!("Animals"),
+            Cat::Group(Group::FoodAndDrink) => t!("Food"),
+            Cat::Group(Group::TravelAndPlaces) => t!("Travel"),
+            Cat::Group(Group::Activities) => t!("Activities"),
+            Cat::Group(Group::Objects) => t!("Objects"),
+            Cat::Group(Group::Symbols) => t!("Symbols"),
+            Cat::Group(Group::Flags) => t!("Flags"),
         }
     }
 
@@ -303,7 +304,7 @@ impl BeeperApp {
         let searching = !query.trim().is_empty();
         let rows = self.emoji_pick.rows.len();
         let grid = if rows == 0 {
-            div().flex_1().flex().items_center().justify_center().text_size(fs(14.)).text_color(p.faint).child("No emoji found").into_any_element()
+            div().flex_1().flex().items_center().justify_center().text_size(fs(14.)).text_color(p.faint).child(t!("No emoji found")).into_any_element()
         } else {
             uniform_list(
                 "emoji-grid",

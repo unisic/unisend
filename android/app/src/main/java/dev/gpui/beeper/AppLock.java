@@ -150,7 +150,7 @@ public final class AppLock {
         }
         authenticating = true;
         if (Build.VERSION.SDK_INT >= 29) {
-            BiometricPrompt.Builder b = new BiometricPrompt.Builder(activity).setTitle("Unlock Murmur");
+            BiometricPrompt.Builder b = new BiometricPrompt.Builder(activity).setTitle(activity.getString(R.string.unlock_app));
             if (Build.VERSION.SDK_INT >= 30) {
                 b.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_WEAK
                         | BiometricManager.Authenticators.DEVICE_CREDENTIAL);
@@ -179,7 +179,7 @@ public final class AppLock {
             });
         } else {
             KeyguardManager km = activity.getSystemService(KeyguardManager.class);
-            Intent intent = km.createConfirmDeviceCredentialIntent("Unlock Murmur", null);
+            Intent intent = km.createConfirmDeviceCredentialIntent(activity.getString(R.string.unlock_app), null);
             if (intent == null) {
                 authenticating = false;
                 unlocked(activity);

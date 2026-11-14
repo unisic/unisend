@@ -11,6 +11,7 @@ use crate::{ChatColour, ThemeChoice};
 const ROW_H: f32 = 52.;
 const PANEL_W: f32 = 560.;
 use crate::bridges::{self, Step, StepKind};
+use crate::i18n::t;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Panel {
@@ -117,7 +118,7 @@ impl BeeperApp {
         match bridges::fill_cookies(&wanted.fields, &bridges::parse_cookies(pasted)) {
             Ok(values) => self.submit(values, cx),
             Err(missing) => {
-                self.error = Some(format!("The sign-in is not complete: the \"{missing}\" cookie is missing.").into());
+                self.error = Some(t!("The sign-in is not complete: the \"{missing}\" cookie is missing.", missing = missing).into());
                 cx.notify();
             }
         }
@@ -173,10 +174,10 @@ impl BeeperApp {
     pub(super) fn render_panel(&mut self, panel: Panel, narrow: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let (title, body) = match panel {
             Panel::NewChat => return self.render_new_chat(narrow, window, cx),
-            Panel::Settings => ("Settings", self.render_settings(cx).into_any_element()),
-            Panel::Networks => ("Networks", self.render_networks(cx).into_any_element()),
-            Panel::Add => ("Add an account", self.render_add(cx).into_any_element()),
-            Panel::Login => ("Sign in", self.render_login_step(window, cx).into_any_element()),
+            Panel::Settings => (t!("Settings"), self.render_settings(cx).into_any_element()),
+            Panel::Networks => (t!("Networks"), self.render_networks(cx).into_any_element()),
+            Panel::Add => (t!("Add an account"), self.render_add(cx).into_any_element()),
+            Panel::Login => (t!("Sign in"), self.render_login_step(window, cx).into_any_element()),
         };
         // The destinations are reached from the navigation; only what lies under them leads back.
         let deep = matches!(panel, Panel::Add | Panel::Login);
@@ -221,12 +222,12 @@ impl BeeperApp {
             .p(px(4.))
             .rounded_full()
             .bg(p.raised)
-            .child(choice("Dark", ThemeChoice::Dark, cx))
-            .child(choice("Light", ThemeChoice::Light, cx))
-            .child(choice("System", ThemeChoice::System, cx));
+            .child(choice(t!("Dark"), ThemeChoice::Dark, cx))
+            .child(choice(t!("Light"), ThemeChoice::Light, cx))
+            .child(choice(t!("System"), ThemeChoice::System, cx));
         let swatches = h_flex().flex_wrap().gap_x(px(4.)).pb(px(8.)).children(ChatColour::ALL.map(|colour| {
             let on = self.settings.chat_colour == colour;
-            let name = format!("Chat colour: {}", colour.label());
+            let name = t!("Chat colour: {colour}", colour = colour.label());
             let fill = colour.fill().map_or(p.raised, |hex| rgb(hex).into());
             div()
                 .id(SharedString::from(name.clone()))
@@ -254,17 +255,17 @@ impl BeeperApp {
         let security = cfg!(target_os = "android").then(|| self.render_security(cx));
         v_flex()
             .gap(px(GAP * 2.))
-            .child(section("Appearance", cx).child(
+            .child(section(t!("Appearance"), cx).child(
                 card(cx)
-                    .child(row("Theme", "", cx).child(themes))
-                    .child(row("Chat colour", &format!("{}. Your own messages, on this device.", self.settings.chat_colour.label()), cx))
+                    .child(row(t!("Theme"), "", cx).child(themes))
+                    .child(row(t!("Chat colour"), &t!("{colour}. Your own messages, on this device.", colour = self.settings.chat_colour.label()), cx))
                     .child(swatches)
                     .children(self.render_look(cx))
                     .children(self.render_emoji(cx)),
             ))
             .when(cfg!(target_os = "android"), |el| {
-                el.child(section("Notifications", cx).child(card(cx).child(
-                    row("Sounds and importance", "Direct messages, group chats and mentions each have their own.", cx).child(
+                el.child(section(t!("Notifications"), cx).child(card(cx).child(
+                    row(t!("Sounds and importance"), t!("Direct messages, group chats and mentions each have their own."), cx).child(
                         h_flex()
                             .id("notification-settings")
                             .h(px(TAP))
@@ -273,17 +274,17 @@ impl BeeperApp {
                             .bg(Palette::of(cx).raised)
                             .cursor_pointer()
                             .on_click(|_, _, _| crate::notification_settings())
-                            .child("Change"),
+                            .child(t!("Change")),
                     ),
                 )))
             })
-            .child(section("Privacy", cx).child(card(cx).child(
-                row("Incognito", "Others do not see that you have read their messages.", cx).child(incognito),
+            .child(section(t!("Privacy"), cx).child(card(cx).child(
+                row(t!("Incognito"), t!("Others do not see that you have read their messages."), cx).child(incognito),
             )))
             .children(security)
             .child(self.render_devices(cx))
             .child(
-                section("Account", cx).child(
+                section(t!("Account"), cx).child(
                     card(cx).child(row(if self.beeper { "Beeper" } else { "Matrix" }, &user, cx)).child(
                         h_flex()
                             .id("sign-out")
@@ -296,7 +297,7 @@ impl BeeperApp {
                                 this.panel = None;
                                 this.send(Cmd::SignOut, cx);
                             }))
-                            .child("Sign out"),
+                            .child(t!("Sign out")),
                     ),
                 ),
             )
@@ -332,24 +333,24 @@ impl BeeperApp {
                 .bg(if on { p.text } else { p.raised })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.set_lock(None, Some(secs), None, cx)))
-                .child(label)
+                .child(crate::i18n::tr(label))
         }));
-        section("Security", cx).child(
+        section(t!("Security"), cx).child(
             card(cx)
                 .child(
                     row(
-                        "Screen lock",
+                        t!("Screen lock"),
                         if can_lock {
-                            "Ask for your fingerprint, face or device lock when the app is opened."
+                            t!("Ask for your fingerprint, face or device lock when the app is opened.")
                         } else {
-                            "Set a PIN, pattern or password in the system settings first."
+                            t!("Set a PIN, pattern or password in the system settings first.")
                         },
                         cx,
                     )
                     .when(can_lock, |el| el.child(lock_switch)),
                 )
-                .when(lock.lock && can_lock, |el| el.child(row("Lock after leaving the app", "", cx)).child(timeouts))
-                .child(row("Screen security", "Blocks screenshots and hides the app in the recent apps list.", cx).child(secure_switch)),
+                .when(lock.lock && can_lock, |el| el.child(row(t!("Lock after leaving the app"), "", cx)).child(timeouts))
+                .child(row(t!("Screen security"), t!("Blocks screenshots and hides the app in the recent apps list."), cx).child(secure_switch)),
         )
         .into_any_element()
     }
@@ -361,21 +362,21 @@ impl BeeperApp {
                 .text_size(fs(14.))
                 .line_height(fs(20.))
                 .text_color(p.muted)
-                .child("Networks are a Beeper feature. Chats from WhatsApp, Signal and the rest come through Beeper's bridges, and this account is on another Matrix server.")
+                .child(t!("Networks are a Beeper feature. Chats from WhatsApp, Signal and the rest come through Beeper's bridges, and this account is on another Matrix server."))
                 .into_any_element();
         }
         let note = |text: &'static str| div().text_size(fs(14.)).text_color(p.faint).child(text);
         let list = match &self.networks {
-            None => note(if self.working { "Loading…" } else { "Could not load the networks." }).into_any_element(),
-            Some(networks) if networks.is_empty() => note("No chat network is connected yet.").into_any_element(),
+            None => note(if self.working { t!("Loading…") } else { t!("Could not load the networks.") }).into_any_element(),
+            Some(networks) if networks.is_empty() => note(t!("No chat network is connected yet.")).into_any_element(),
             Some(networks) => v_flex()
                 .gap(px(GAP * 2.))
                 .children(networks.iter().map(|network| {
                     let stopped = network.state != "RUNNING";
                     section(&network.name, cx).child(
                         card(cx)
-                            .when(stopped, |el| el.child(row(&format!("Bridge {}", pretty(&network.state).to_lowercase()), "", cx).text_color(p.warning)))
-                            .when(network.logins.is_empty() && !stopped, |el| el.child(row("Not signed in", "", cx).text_color(p.faint)))
+                            .when(stopped, |el| el.child(row(&t!("Bridge {state}", state = pretty(&network.state).to_lowercase()), "", cx).text_color(p.warning)))
+                            .when(network.logins.is_empty() && !stopped, |el| el.child(row(t!("Not signed in"), "", cx).text_color(p.faint)))
                             .children(network.logins.iter().map(|login| {
                                 let (bridge, id) = (network.bridge.clone(), login.id.clone());
                                 let ok = login.state == "CONNECTED";
@@ -390,7 +391,7 @@ impl BeeperApp {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.working = this.send(Cmd::Logout { bridge: bridge.clone(), login: id.clone() }, cx);
                                         }))
-                                        .child("Sign out"),
+                                        .child(t!("Sign out")),
                                 )
                             })),
                     )
@@ -399,7 +400,7 @@ impl BeeperApp {
         };
         v_flex()
             .gap(px(GAP * 2.))
-            .child(h_flex().child(Button::new("add-network").primary().h(px(TAP)).px(px(GUTTER + 4.)).label("Add an account").on_click(cx.listener(|this, _, _, cx| {
+            .child(h_flex().child(Button::new("add-network").primary().h(px(TAP)).px(px(GUTTER + 4.)).label(t!("Add an account")).on_click(cx.listener(|this, _, _, cx| {
                 this.open_panel(Panel::Add, cx);
             }))))
             .child(list)
@@ -411,7 +412,7 @@ impl BeeperApp {
         v_flex()
             .gap(px(GAP))
             .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(
-                "The account is added to Beeper itself, so every Beeper app you use gets it, not only this one.",
+                t!("The account is added to Beeper itself, so every Beeper app you use gets it, not only this one."),
             ))
             .child(card(cx).children(bridges::KNOWN.iter().map(|&(bridge, name)| {
                 h_flex()
@@ -432,7 +433,7 @@ impl BeeperApp {
             return match &self.flows {
                 Some((bridge, flows)) => v_flex()
                     .gap_2()
-                    .child(note("Choose how to sign in."))
+                    .child(note(t!("Choose how to sign in.")))
                     .children(flows.iter().map(|flow| {
                         let (bridge, id) = (bridge.clone(), flow.id.clone());
                         v_flex()
@@ -447,7 +448,7 @@ impl BeeperApp {
                             .child(div().text_size(fs(13.)).text_color(dim).child(flow.description.clone()))
                     }))
                     .into_any_element(),
-                None => note(if self.working { "Starting… this can take a minute." } else { "Could not start the sign-in." }).into_any_element(),
+                None => note(if self.working { t!("Starting… this can take a minute.") } else { t!("Could not start the sign-in.") }).into_any_element(),
             };
         };
         let name = bridges::display_name(&step.bridge).to_owned();
@@ -480,7 +481,7 @@ impl BeeperApp {
                     .child(h_flex().child(
                         Button::new("login-continue")
                             .primary()
-                            .label("Continue")
+                            .label(t!("Continue"))
                             .loading(self.working)
                             .disabled(self.working)
                             .on_click(cx.listener(|this, _, _, cx| this.submit_fields(cx))),
@@ -492,22 +493,21 @@ impl BeeperApp {
                 v_flex()
                     .gap_3()
                     .child(note(if phone {
-                        "A browser opens for you to sign in. It closes by itself when you are in."
+                        t!("A browser opens for you to sign in. It closes by itself when you are in.")
                     } else {
-                        "Sign in on the page that opens in your browser. Then copy the request's cookies from the \
-                         browser's developer tools (Network, any request to the site, Copy as cURL) and paste them here."
+                        t!("Sign in on the page that opens in your browser. Then copy the request's cookies from the browser's developer tools (Network, any request to the site, Copy as cURL) and paste them here.")
                     }))
                     .child(h_flex().child(
                         Button::new("login-browser")
                             .primary()
-                            .label(if phone { "Sign in" } else { "Open the sign-in page" })
+                            .label(if phone { t!("Sign in") } else { t!("Open the sign-in page") })
                             .disabled(self.working)
                             .on_click(cx.listener(|this, _, _, cx| this.browser_login(cx))),
                     ))
                     .child(Input::new(&self.cookie_paste))
                     .child(h_flex().child(
                         Button::new("login-cookies")
-                            .label("Continue with pasted cookies")
+                            .label(t!("Continue with pasted cookies"))
                             .loading(self.working)
                             .disabled(self.working)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -525,13 +525,13 @@ impl BeeperApp {
                     (None, "nothing") => el,
                     (None, _) => el.child(div().text_size(fs(28.)).font_weight(FontWeight::SEMIBOLD).child(data.clone())),
                 })
-                .child(note("Waiting for the other device…"))
+                .child(note(t!("Waiting for the other device…")))
                 .into_any_element(),
             StepKind::Done => v_flex()
                 .gap_3()
-                .child(div().text_size(fs(16.)).child(format!("{name} is connected.")))
-                .child(note("Its chats appear in the list as the bridge brings them in."))
-                .child(h_flex().child(Button::new("login-done").primary().label("Done").on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
+                .child(div().text_size(fs(16.)).child(t!("{name} is connected.", name = name)))
+                .child(note(t!("Its chats appear in the list as the bridge brings them in.")))
+                .child(h_flex().child(Button::new("login-done").primary().label(t!("Done")).on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
                 .into_any_element(),
         };
         v_flex()
@@ -543,8 +543,26 @@ impl BeeperApp {
     }
 }
 
-/// "BAD_CREDENTIALS" as "Bad credentials".
+/// "BAD_CREDENTIALS" as "Bad credentials". The known states are mautrix bridgev2's
+/// (`bridgev2/status/bridgestate.go`); a new one shows as its code in words.
 fn pretty(state: &str) -> String {
+    let known = match state {
+        "STARTING" => t!("Starting"),
+        "UNCONFIGURED" => t!("Unconfigured"),
+        "RUNNING" => t!("Running"),
+        "BRIDGE_UNREACHABLE" => t!("Bridge unreachable"),
+        "CONNECTING" => t!("Connecting"),
+        "BACKFILLING" => t!("Backfilling"),
+        "CONNECTED" => t!("Connected"),
+        "TRANSIENT_DISCONNECT" => t!("Transient disconnect"),
+        "BAD_CREDENTIALS" => t!("Bad credentials"),
+        "UNKNOWN_ERROR" => t!("Unknown error"),
+        "LOGGED_OUT" => t!("Logged out"),
+        _ => "",
+    };
+    if !known.is_empty() {
+        return known.to_owned();
+    }
     let lower = state.replace('_', " ").to_lowercase();
     let mut chars = lower.chars();
     chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
@@ -605,10 +623,10 @@ impl BeeperApp {
         }
         let p = Palette::of(cx);
         let chosen = self.settings.emoji_font.as_deref();
-        let name = chosen.unwrap_or("System");
+        let name = chosen.unwrap_or(t!("System|emoji"));
         let detail = match () {
-            _ if self.emoji.copying => "Copying the font…".to_owned(),
-            _ if self.emoji.pending => format!("{name}. Applies after restart."),
+            _ if self.emoji.copying => t!("Copying the font…").to_owned(),
+            _ if self.emoji.pending => t!("{name}. Applies after restart.", name = name),
             _ => name.to_owned(),
         };
         let change = h_flex()
@@ -623,16 +641,16 @@ impl BeeperApp {
                     cx.notify();
                 }))
             })
-            .child("Change");
+            .child(t!("Change"));
         let option = |id: &'static str, label: &'static str| h_flex().id(id).min_h(px(ROW_H)).text_size(fs(16.)).cursor_pointer().child(label);
         Some(
             v_flex()
                 .child(row("Emoji", &detail, cx).child(change))
                 .when_some(self.emoji.error.clone(), |el, error| el.child(div().pb(px(8.)).text_size(fs(13.)).text_color(p.negative).child(error)))
                 .when(self.emoji.open, |el| {
-                    el.child(option("emoji-file", "Choose font file…").on_click(cx.listener(|this, _, _, cx| this.choose_emoji_font(cx))))
+                    el.child(option("emoji-file", t!("Choose font file…")).on_click(cx.listener(|this, _, _, cx| this.choose_emoji_font(cx))))
                         .when(chosen.is_some(), |el| {
-                            el.child(option("emoji-system", "Use system emoji").on_click(cx.listener(|this, _, _, cx| this.use_system_emoji(cx))))
+                            el.child(option("emoji-system", t!("Use system emoji")).on_click(cx.listener(|this, _, _, cx| this.use_system_emoji(cx))))
                         })
                 }),
         )

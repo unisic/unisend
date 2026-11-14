@@ -1,6 +1,7 @@
 //! Signing in to a Matrix homeserver other than Beeper's, with a user name and password.
 
 use super::*;
+use crate::i18n::t;
 
 pub(super) struct Form {
     server: Entity<InputState>,
@@ -10,9 +11,9 @@ pub(super) struct Form {
 
 impl Form {
     pub(super) fn new(window: &mut Window, cx: &mut Context<BeeperApp>, subs: &mut Vec<Subscription>) -> Self {
-        let server = cx.new(|cx| InputState::new(window, cx).placeholder("Server, like matrix.org"));
-        let user = cx.new(|cx| InputState::new(window, cx).placeholder("User name"));
-        let password = cx.new(|cx| InputState::new(window, cx).placeholder("Password").masked(true));
+        let server = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Server, like matrix.org")));
+        let user = cx.new(|cx| InputState::new(window, cx).placeholder(t!("User name")));
+        let password = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Password")).masked(true));
         for input in [&server, &user, &password] {
             subs.push(cx.subscribe_in(input, window, |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { shift: false, .. } => this.password_login(window, cx),
@@ -53,7 +54,7 @@ impl BeeperApp {
             return;
         }
         if user.trim().is_empty() || password.is_empty() {
-            self.error = Some("Enter your user name and password.".into());
+            self.error = Some(t!("Enter your user name and password.").into());
             cx.notify();
             return;
         }
@@ -78,14 +79,14 @@ impl BeeperApp {
                     .max_w(px(360.))
                     .gap(px(GAP))
                     .child(div().text_size(fs(14.)).font_weight(FontWeight::SEMIBOLD).text_color(p.faint).child("Matrix"))
-                    .child(screen_title("Sign in to your server"))
+                    .child(screen_title(t!("Sign in to your server")))
                     .child(
                         div()
                             .pb(px(8.))
                             .text_size(fs(14.))
                             .line_height(fs(20.))
                             .text_color(p.muted)
-                            .child("Any Matrix server that accepts a password, like matrix.org."),
+                            .child(t!("Any Matrix server that accepts a password, like matrix.org.")),
                     )
                     .child(Input::new(&self.matrix.server).large())
                     .child(Input::new(&self.matrix.user).large())
@@ -94,12 +95,12 @@ impl BeeperApp {
                         Button::new("matrix-submit")
                             .primary()
                             .h(px(TAP))
-                            .label("Sign in")
+                            .label(t!("Sign in"))
                             .loading(self.busy)
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _, window, cx| this.password_login(window, cx))),
                     )
-                    .child(Button::new("matrix-back").ghost().label("Sign in with Beeper instead").on_click(cx.listener(
+                    .child(Button::new("matrix-back").ghost().label(t!("Sign in with Beeper instead")).on_click(cx.listener(
                         |this, _, _, cx| {
                             this.screen = Screen::Email;
                             this.error = None;

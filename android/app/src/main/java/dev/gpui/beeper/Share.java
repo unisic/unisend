@@ -98,7 +98,7 @@ public final class Share {
         int max = ShortcutManagerCompat.getMaxShortcutCountPerActivity(activity);
         for (int i = 0; i + 2 < f.length && list.size() < max; i += 3) {
             String id = f[i];
-            String name = f[i + 1].isEmpty() ? "Chat" : f[i + 1];
+            String name = f[i + 1].isEmpty() ? activity.getString(R.string.chat) : f[i + 1];
             IconCompat icon = null;
             if (!f[i + 2].isEmpty()) {
                 Bitmap picture = BitmapFactory.decodeFile(f[i + 2]);

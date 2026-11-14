@@ -29,7 +29,7 @@ use matrix_sdk::Client;
 use rusqlite::{Connection, OptionalExtension as _, params};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{Diff, Kind, MediaKind, Msg, UTD, content, remove_plain_reply_fallback};
+use super::{Diff, Kind, MediaKind, Msg, content, remove_plain_reply_fallback};
 
 /// Messages kept; the oldest go first once this is passed by `PRUNE_SLACK`.
 const MAX_MESSAGES: i64 = 50_000;
@@ -159,7 +159,7 @@ fn row(room: &RoomId, m: &Msg) -> Option<Change> {
     if m.deleted {
         return Some(Change::Remove(m.id.clone()));
     }
-    if m.body == UTD {
+    if m.body == crate::backend::utd() {
         return None;
     }
     let file = m.media.as_ref().filter(|media| media.kind == MediaKind::File).map(|media| media.name.as_str());

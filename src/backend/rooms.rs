@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 
 use super::{Ev, Rooms};
 use crate::bridges::Api;
+use crate::i18n::t;
 
 /// Chats being left or deleted at once; each holds a task for at most `BRIDGE_DELETE_WAIT`.
 const LEAVING_MAX: usize = 32;
@@ -155,7 +156,7 @@ pub(super) fn handle(client: Client, api: Option<Api>, rooms: Rooms, ev: mpsc::S
                     Target::Matrix => Ok(Caps::matrix()),
                     Target::Bridge { bridge, login } => match &api {
                         Some(api) => provision(api, bridge, login, Method::GET, &["capabilities"], None, CALL_TIMEOUT).await.map(|v| caps(&v)),
-                        None => Err(anyhow!("Networks are a Beeper feature")),
+                        None => Err(anyhow!(t!("Networks are a Beeper feature"))),
                     },
                 };
                 match caps {
@@ -167,10 +168,10 @@ pub(super) fn handle(client: Client, api: Option<Api>, rooms: Rooms, ev: mpsc::S
                         }
                         match find(&client, api.as_ref(), &target, "").await {
                             Ok(people) => Answer::People { target, query: String::new(), people },
-                            Err(e) => Answer::Failed(format!("Could not load contacts: {}", super::plain(&format!("{e:#}")))),
+                            Err(e) => Answer::Failed(t!("Could not load contacts: {error}", error = super::plain(&format!("{e:#}")))),
                         }
                     }
-                    Err(e) => Answer::Failed(format!("Could not reach the bridge: {}", super::plain(&format!("{e:#}")))),
+                    Err(e) => Answer::Failed(t!("Could not reach the bridge: {error}", error = super::plain(&format!("{e:#}")))),
                 }
             }
             Ask::Find { target, query } => match find(&client, api.as_ref(), &target, &query).await {
@@ -213,7 +214,7 @@ async fn leave(client: &Client, rooms: &Rooms, ev: &mpsc::Sender<Ev>, id: OwnedR
         return;
     };
     if !mark(&id) {
-        let _ = ev.send(Ev::Error("Already leaving this chat".to_owned())).await;
+        let _ = ev.send(Ev::Error(t!("Already leaving this chat").to_owned())).await;
         return;
     }
     let summary = rooms.lock().unwrap().remove(&id);
@@ -225,7 +226,7 @@ async fn leave(client: &Client, rooms: &Rooms, ev: &mpsc::Sender<Ev>, id: OwnedR
             rooms.lock().unwrap().insert(id, summary.clone());
             let _ = ev.send(Ev::Rooms(vec![summary])).await;
         }
-        let _ = ev.send(Ev::Error(format!("Could not leave the chat: {}", super::plain(&format!("{e:#}"))))).await;
+        let _ = ev.send(Ev::Error(t!("Could not leave the chat: {error}", error = super::plain(&format!("{e:#}"))))).await;
     }
 }
 
@@ -317,7 +318,7 @@ fn people(v: &Value, key: &str) -> Vec<Person> {
 }
 
 fn bridge_api(api: Option<&Api>) -> Result<&Api> {
-    api.ok_or_else(|| anyhow!("Networks are a Beeper feature"))
+    api.ok_or_else(|| anyhow!(t!("Networks are a Beeper feature")))
 }
 
 /// `query` empty: the contact list.
@@ -349,7 +350,7 @@ async fn find(client: &Client, api: Option<&Api>, target: &Target, query: &str) 
 }
 
 fn matrix_user(who: &str) -> Result<OwnedUserId> {
-    UserId::parse(who.trim()).map_err(|_| anyhow!("Enter a full Matrix ID, like @name:matrix.org"))
+    UserId::parse(who.trim()).map_err(|_| anyhow!(t!("Enter a full Matrix ID, like @name:matrix.org")))
 }
 
 async fn resolve(api: Option<&Api>, target: &Target, who: &str) -> Result<Person> {
@@ -360,7 +361,7 @@ async fn resolve(api: Option<&Api>, target: &Target, who: &str) -> Result<Person
         }
         Target::Bridge { bridge, login } => {
             let found = provision(bridge_api(api)?, bridge, login, Method::GET, &["resolve_identifier", who.trim()], None, CALL_TIMEOUT).await?;
-            person(&found).context("The bridge did not find anyone")
+            person(&found).context(t!("The bridge did not find anyone"))
         }
     }
 }
@@ -371,7 +372,7 @@ async fn start(client: &Client, api: Option<&Api>, target: &Target, who: &str) -
         Target::Matrix => {
             let user = matrix_user(who)?;
             if client.user_id() == Some(&*user) {
-                bail!("That is your own account");
+                bail!(t!("That is your own account"));
             }
             let room = match client.get_dm_room(&user) {
                 Some(room) => room,
@@ -382,7 +383,7 @@ async fn start(client: &Client, api: Option<&Api>, target: &Target, who: &str) -
         Target::Bridge { bridge, login } => {
             // `create_dm` answers with the chat there is, when there is one (`provisionutil.ResolveIdentifier`).
             let made = provision(bridge_api(api)?, bridge, login, Method::POST, &["create_dm", who.trim()], Some(json!({})), CREATE_TIMEOUT).await?;
-            let room = made.get("dm_room_mxid").and_then(Value::as_str).context("The bridge made no chat")?;
+            let room = made.get("dm_room_mxid").and_then(Value::as_str).context(t!("The bridge made no chat"))?;
             arrived(client, RoomId::parse(room)?).await
         }
     }
@@ -407,7 +408,7 @@ async fn group(client: &Client, api: Option<&Api>, target: &Target, kind: &str, 
                 body["name"] = json!({ "name": name });
             }
             let made = provision(bridge_api(api)?, bridge, login, Method::POST, &["create_group", kind], Some(body), CREATE_TIMEOUT).await?;
-            let room = made.get("mxid").and_then(Value::as_str).filter(|r| !r.is_empty()).context("The bridge made no chat")?;
+            let room = made.get("mxid").and_then(Value::as_str).filter(|r| !r.is_empty()).context(t!("The bridge made no chat"))?;
             arrived(client, RoomId::parse(room)?).await
         }
     }
@@ -420,7 +421,7 @@ async fn arrived(client: &Client, id: OwnedRoomId) -> Result<OwnedRoomId> {
         match client.get_room(&id).map(|r| (r.state(), r)) {
             Some((RoomState::Joined, _)) => return Ok(id),
             Some((RoomState::Invited, room)) => room.join().await?,
-            _ if Instant::now() >= deadline => bail!("The chat was made but has not reached this device yet"),
+            _ if Instant::now() >= deadline => bail!(t!("The chat was made but has not reached this device yet")),
             _ => tokio::time::sleep(POLL / 2).await,
         }
     }

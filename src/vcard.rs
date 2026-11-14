@@ -2,6 +2,8 @@
 //! is kept (name, numbers, addresses); every other field is ignored, and the input is bounded so
 //! a hostile file costs little.
 
+use crate::i18n::t;
+
 /// Largest file read, in bytes. Real cards are a few hundred bytes; ones with a photo, some KB.
 pub const MAX_BYTES: usize = 256 * 1024;
 const MAX_CARDS: usize = 50;
@@ -168,10 +170,10 @@ fn kind(params: &[String]) -> String {
     let words = params.iter().flat_map(|p| p.trim_start_matches("TYPE=").trim_matches('"').split(',').map(str::to_owned).collect::<Vec<_>>());
     for word in words {
         match word.as_str() {
-            "CELL" | "MOBILE" | "IPHONE" => return "Mobile".into(),
-            "WORK" => return "Work".into(),
-            "HOME" => return "Home".into(),
-            "FAX" => return "Fax".into(),
+            "CELL" | "MOBILE" | "IPHONE" => return t!("Mobile").into(),
+            "WORK" => return t!("Work").into(),
+            "HOME" => return t!("Home").into(),
+            "FAX" => return t!("Fax").into(),
             _ => {}
         }
     }

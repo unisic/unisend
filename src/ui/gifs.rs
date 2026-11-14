@@ -7,6 +7,7 @@ use std::ops::Range;
 
 use super::*;
 use crate::backend::{Gif, GifPage, gifs_enabled};
+use crate::i18n::t;
 
 /// A search goes out once typing has paused this long; KLIPY's testing keys allow 100 requests an
 /// hour.
@@ -45,7 +46,7 @@ impl BeeperApp {
             return;
         }
         if self.gifs.input.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search KLIPY"));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search KLIPY")));
             self.gifs._input_events = Some(cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, _, cx| match ev {
                 InputEvent::Change => this.gif_typed(cx),
                 other => keyboard_follows(other, Keyboard::Text, cx),
@@ -192,9 +193,9 @@ impl BeeperApp {
 
         let g = &self.gifs;
         let status = if g.failed {
-            Some("Could not load GIFs. Check the connection and search again.")
+            Some(t!("Could not load GIFs. Check the connection and search again."))
         } else if g.gifs.is_empty() && !g.loading {
-            Some("No GIFs found")
+            Some(t!("No GIFs found"))
         } else {
             None
         };
@@ -260,7 +261,7 @@ impl BeeperApp {
                         .child(div().flex_none().h(px(20.)).flex().items_center().justify_center().child(div().w(px(36.)).h(px(4.)).rounded_full().bg(p.faint.opacity(0.5))))
                         .children(search)
                         .child(grid)
-                        .child(div().flex_none().pt(px(8.)).px(px(GUTTER)).text_size(fs(12.)).text_color(p.faint).child("Powered by KLIPY")),
+                        .child(div().flex_none().pt(px(8.)).px(px(GUTTER)).text_size(fs(12.)).text_color(p.faint).child(t!("Powered by KLIPY"))),
                 )
                 .into_any_element(),
         )

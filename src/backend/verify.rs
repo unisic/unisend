@@ -25,6 +25,7 @@ use matrix_sdk::{
 use tokio::sync::mpsc;
 
 use super::{Ev, plain};
+use crate::i18n::t;
 
 /// Synapse refuses longer device names (`MAX_DEVICE_DISPLAY_NAME_LEN`, synapse/handlers/device.py).
 pub const NAME_MAX: usize = 100;
@@ -198,30 +199,30 @@ impl Verifier {
     /// Asks the user's other devices to verify this one.
     pub async fn start(&self, client: &Client, ev: &mpsc::Sender<Ev>) -> Result<()> {
         if self.slot.lock().unwrap().is_some() {
-            return Err(anyhow!("A verification is already running"));
+            return Err(anyhow!(t!("A verification is already running")));
         }
-        let own = client.user_id().context("Not signed in")?;
+        let own = client.user_id().context(t!("Not signed in"))?;
         let enc = client.encryption();
         // Right after sign-in the account's keys may not have been fetched yet.
         let identity = match enc.get_user_identity(own).await? {
             Some(identity) => Some(identity),
             None => enc.request_user_identity(own).await?,
         };
-        let identity = identity.ok_or_else(|| anyhow!("This account has no cross-signing keys yet, so another device cannot vouch for this one"))?;
+        let identity = identity.ok_or_else(|| anyhow!(t!("This account has no cross-signing keys yet, so another device cannot vouch for this one")))?;
         let request = identity.request_verification().await?;
         follow(client.clone(), request, self.slot.clone(), ev.clone());
         Ok(())
     }
 
     pub async fn accept(&self) -> Result<()> {
-        let request = self.slot.lock().unwrap().as_ref().map(|f| f.request.clone()).context("No verification is running")?;
+        let request = self.slot.lock().unwrap().as_ref().map(|f| f.request.clone()).context(t!("No verification is running"))?;
         request.accept().await?;
         Ok(())
     }
 
     /// The user compared the emoji: `true` when they match.
     pub async fn answer(&self, matched: bool) -> Result<()> {
-        let sas = self.slot.lock().unwrap().as_ref().and_then(|f| f.sas.clone()).context("No emoji to compare")?;
+        let sas = self.slot.lock().unwrap().as_ref().and_then(|f| f.sas.clone()).context(t!("No emoji to compare"))?;
         if matched {
             sas.confirm().await?
         } else {
@@ -244,7 +245,7 @@ impl Verifier {
     pub async fn sign_out(&mut self, client: &Client, beeper: Option<&crate::bridges::Api>, device: String, proof: Proof) -> Result<Option<Auth>> {
         let device = OwnedDeviceId::from(device);
         if client.device_id() == Some(&*device) {
-            return Err(anyhow!("Sign this device out from Settings, under Account"));
+            return Err(anyhow!(t!("Sign this device out from Settings, under Account")));
         }
         if self.pending.as_ref().is_none_or(|p| p.device != device) {
             self.pending = Some(Pending { device: device.clone(), session: None, email: None, request: None });
@@ -253,20 +254,20 @@ impl Verifier {
         let auth = match proof {
             Proof::Ask => None,
             Proof::Password(password) => {
-                let user = client.user_id().context("Not signed in")?.to_string();
+                let user = client.user_id().context(t!("Not signed in"))?.to_string();
                 let mut password = Password::new(UserIdentifier::Matrix(MatrixUserIdentifier::new(user)), password);
                 password.session = pending.session.clone();
                 Some(AuthData::Password(password))
             }
             Proof::SendCode => {
-                let api = beeper.context("Codes are a Beeper feature")?;
-                let email = pending.email.clone().context("No email address for this account")?;
+                let api = beeper.context(t!("Codes are a Beeper feature"))?;
+                let email = pending.email.clone().context(t!("No email address for this account"))?;
                 pending.request = Some(crate::beeper::send_code(&api.http, &email).await?);
                 return Ok(Some(Auth::CodeSent));
             }
             Proof::Code(code) => {
-                let api = beeper.context("Codes are a Beeper feature")?;
-                let request = pending.request.clone().context("Ask for a code first")?;
+                let api = beeper.context(t!("Codes are a Beeper feature"))?;
+                let request = pending.request.clone().context(t!("Ask for a code first"))?;
                 let jwt = crate::beeper::submit_code(&api.http, &request, code.trim()).await?;
                 Some(jwt_auth(jwt, pending.session.clone()))
             }
@@ -279,20 +280,20 @@ impl Verifier {
             }
             Err(e) => {
                 let Some(info) = e.as_uiaa_response() else {
-                    return Err(anyhow!("Could not sign the device out: {}", plain(&e)));
+                    return Err(anyhow!(t!("Could not sign the device out: {error}", error = plain(&e))));
                 };
                 pending.session = info.session.clone().or(pending.session.take());
                 if tried && let Some(error) = &info.auth_error {
                     return Err(match error.kind {
                         ErrorKind::Forbidden if pending.request.is_none() => {
-                            anyhow!("Wrong password.")
+                            anyhow!(t!("Wrong password."))
                         }
-                        _ => anyhow!("Not accepted: {}", error.message),
+                        _ => anyhow!(t!("Not accepted: {error}", error = error.message)),
                     });
                 }
                 let need = needs(info, beeper.is_some());
                 if matches!(need, Auth::Code { .. }) {
-                    let email = beeper.context("Codes are a Beeper feature")?.email().await?;
+                    let email = beeper.context(t!("Codes are a Beeper feature"))?.email().await?;
                     pending.email = Some(email.clone());
                     return Ok(Some(Auth::Code { email }));
                 }
@@ -324,21 +325,21 @@ fn needs(info: &UiaaInfo, beeper: bool) -> Auth {
 pub async fn rename(client: &Client, name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(anyhow!("Enter a name for this device."));
+        return Err(anyhow!(t!("Enter a name for this device.")));
     }
     if name.chars().count() > NAME_MAX {
-        return Err(anyhow!("A device name has at most {NAME_MAX} characters."));
+        return Err(anyhow!(t!("A device name has at most {max} characters.", max = NAME_MAX)));
     }
-    let device = client.device_id().context("Not signed in")?;
-    client.rename_device(device, name).await.map_err(|e| anyhow!("Could not rename this device: {}", plain(&e)))?;
+    let device = client.device_id().context(t!("Not signed in"))?;
+    client.rename_device(device, name).await.map_err(|e| anyhow!(t!("Could not rename this device: {error}", error = plain(&e))))?;
     Ok(())
 }
 
 pub async fn devices(client: &Client) -> Result<Devices> {
-    let own = client.user_id().context("Not signed in")?;
-    let this = client.device_id().context("Not signed in")?;
+    let own = client.user_id().context(t!("Not signed in"))?;
+    let this = client.device_id().context(t!("Not signed in"))?;
     let enc = client.encryption();
-    let listed = client.devices().await.map_err(|e| anyhow!("Could not load your devices: {}", plain(&e)))?.devices;
+    let listed = client.devices().await.map_err(|e| anyhow!(t!("Could not load your devices: {error}", error = plain(&e))))?.devices;
     // Asked of the server each time (one /keys/query): what sync last fetched may predate a new
     // device or the account's cross-signing keys.
     let identity = enc.request_user_identity(own).await?;
@@ -437,7 +438,7 @@ async fn drive(request: &VerificationRequest, slot: &Slot, ev: &mpsc::Sender<Ev>
             VerificationRequestState::Created { .. } => send(ev, Verify::Waiting).await,
             VerificationRequestState::Requested { other_device_data, .. } => {
                 let who = if request.is_self_verification() {
-                    other_device_data.display_name().map_or_else(|| format!("Your device {}", other_device_data.device_id()), |n| format!("Your device {n}"))
+                    other_device_data.display_name().map_or_else(|| t!("Your device {name}", name = other_device_data.device_id()), |n| t!("Your device {name}", name = n))
                 } else {
                     request.other_user_id().to_string()
                 };
@@ -456,7 +457,7 @@ async fn drive(request: &VerificationRequest, slot: &Slot, ev: &mpsc::Sender<Ev>
                     Ok(None) => return lost(),
                     Err(_) => {
                         if let Err(e) = request.start_sas().await {
-                            return Verify::Failed(format!("Could not start comparing emoji: {e}"));
+                            return Verify::Failed(t!("Could not start comparing emoji: {error}", error = e));
                         }
                     }
                 }
@@ -470,7 +471,7 @@ async fn drive(request: &VerificationRequest, slot: &Slot, ev: &mpsc::Sender<Ev>
                 }
                 None => {
                     let _ = request.cancel().await;
-                    return Verify::Failed("The other device chose a method this app does not offer.".into());
+                    return Verify::Failed(t!("The other device chose a method this app does not offer.").into());
                 }
             },
             VerificationRequestState::Done => return Verify::Done,
@@ -492,14 +493,14 @@ async fn emoji(sas: &SasVerification, ev: &mpsc::Sender<Ev>) -> Verify {
             SasState::Started { .. } if !sas.we_started() && !accepted => {
                 accepted = true;
                 if let Err(e) = sas.accept().await {
-                    return Verify::Failed(format!("Could not accept: {e}"));
+                    return Verify::Failed(t!("Could not accept: {error}", error = e));
                 }
             }
             SasState::KeysExchanged { .. } => match sas.emoji() {
                 Some(list) => send(ev, Verify::Emoji(list.iter().map(|e| (e.symbol.to_owned(), e.description.to_owned())).collect())).await,
                 None => {
                     let _ = sas.cancel().await;
-                    return Verify::Failed("The other device cannot show emoji.".into());
+                    return Verify::Failed(t!("The other device cannot show emoji.").into());
                 }
             },
             SasState::Confirmed => send(ev, Verify::Confirmed).await,
@@ -515,17 +516,17 @@ async fn emoji(sas: &SasVerification, ev: &mpsc::Sender<Ev>) -> Verify {
 }
 
 fn lost() -> Verify {
-    Verify::Failed("The verification stopped.".into())
+    Verify::Failed(t!("The verification stopped.").into())
 }
 
 fn failed(info: &CancelInfo) -> Verify {
     Verify::Failed(match (info.cancel_code(), info.cancelled_by_us()) {
-        (CancelCode::MismatchedSas, _) => "The emoji did not match, so nothing was verified.".into(),
-        (CancelCode::User, true) => "You cancelled the verification.".into(),
-        (CancelCode::User, false) => "The other side cancelled the verification.".into(),
-        (CancelCode::Timeout, _) => "The other side did not answer in time.".into(),
-        (CancelCode::Accepted, _) => "Another of your devices answered this request.".into(),
-        (_, _) => format!("Verification stopped: {}", info.reason()),
+        (CancelCode::MismatchedSas, _) => t!("The emoji did not match, so nothing was verified.").into(),
+        (CancelCode::User, true) => t!("You cancelled the verification.").into(),
+        (CancelCode::User, false) => t!("The other side cancelled the verification.").into(),
+        (CancelCode::Timeout, _) => t!("The other side did not answer in time.").into(),
+        (CancelCode::Accepted, _) => t!("Another of your devices answered this request.").into(),
+        (_, _) => t!("Verification stopped: {reason}", reason = info.reason()),
     })
 }
 

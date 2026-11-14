@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::backend::{Hit, MAX_HITS, MIN_QUERY};
+use crate::i18n::t;
 
 /// Older pages a jump to a found message may load before it gives up; 40 events each.
 const JUMP_PAGES: u8 = 50;
@@ -20,7 +21,7 @@ pub(super) struct Find {
 
 impl Find {
     pub(super) fn new(window: &mut Window, cx: &mut Context<BeeperApp>, subs: &mut Vec<Subscription>) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search this chat"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search this chat")));
         subs.push(cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, _, cx| {
             match ev {
                 InputEvent::Change => this.find_in_chat(cx),
@@ -135,13 +136,13 @@ impl BeeperApp {
                 .text_size(fs(14.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(p.faint)
-                .child("Messages");
+                .child(t!("Messages"));
         };
         let room = self.rooms.iter().find(|r| r.id == hit.room);
         let name = room.map_or_else(|| hit.room.to_string(), |r| r.name.clone());
         let dm = room.is_some_and(|r| r.dm);
         let prefix = match (hit.own, dm) {
-            (true, _) => "You: ".to_owned(),
+            (true, _) => t!("You: ").to_owned(),
             (false, true) => String::new(),
             (false, false) => format!("{}: ", hit.sender),
         };
@@ -241,7 +242,7 @@ impl BeeperApp {
                                 .text_size(fs(16.))
                                 .line_height(fs(22.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(if hit.own { "You".to_owned() } else { hit.sender.clone() }),
+                                .child(if hit.own { t!("You").to_owned() } else { hit.sender.clone() }),
                         )
                         .child(div().flex_none().text_size(fs(12.)).font_features(tabular()).text_color(p.faint).child(short_time(hit.ts))),
                 )
@@ -267,9 +268,9 @@ impl BeeperApp {
                     v_flex()
                         .w_full()
                         .children(rows)
-                        .when(hits.is_empty() && !waiting, |el| el.child(note("No messages match")))
-                        .when(hits.len() == MAX_HITS, |el| el.child(note("Showing the newest matches. Type more to narrow them down.")))
-                        .when(!waiting, |el| el.child(note("Searches the messages this device has received or loaded."))),
+                        .when(hits.is_empty() && !waiting, |el| el.child(note(t!("No messages match"))))
+                        .when(hits.len() == MAX_HITS, |el| el.child(note(t!("Showing the newest matches. Type more to narrow them down."))))
+                        .when(!waiting, |el| el.child(note(t!("Searches the messages this device has received or loaded.")))),
                 ),
         )
     }

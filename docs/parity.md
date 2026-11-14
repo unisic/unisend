@@ -101,6 +101,7 @@ is not started.
 | Background connection on Android | part | a foreground service keeps the process connected while the app is in the background; it ends when the app is swiped away, and Android's Doze can delay it. No push (FCM) |
 | Settings | part | theme (dark by default), incognito, chat networks, sign out; kept locally, not in `com.beeper.desktop.prefs`. Beeper's chat list, notification, shortcut and AI settings: todo |
 | Incognito mode | done | on: `m.read.private`; off: `m.read`. On by default |
+| Interface language | part | English and Polish, following the system language (Android's locale; on desktop `LC_ALL`, `LC_MESSAGES`, `LANG`). No in-app switch. Glossary and how to add a string: `docs/i18n.md` |
 | Command bar, hotkeys | todo | local |
 | Tray icon, launch at login, deep links | todo | local |
 | Media viewer | part | pictures only; pinch, double-tap and ctrl+wheel zoom, pan, Save to gallery (Android 10+, desktop Pictures/Murmur), Share on Android; no paging between pictures |

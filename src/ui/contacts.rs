@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::vcard::{self, Card};
+use crate::i18n::t;
 
 /// Cards kept, newest answers last; older ones are asked for again when scrolled back to.
 const MAX_KEPT: usize = 100;
@@ -108,7 +109,7 @@ impl BeeperApp {
                 .gap_3()
                 .w(px(room.min(260.)))
                 .children(blocks)
-                .when(more > 0, |el| el.child(div().text_size(fs(12.)).opacity(0.7).child(format!("and {more} more"))))
+                .when(more > 0, |el| el.child(div().text_size(fs(12.)).opacity(0.7).child(t!("and {more} more", more = more))))
                 .into_any_element(),
         )
     }
@@ -123,10 +124,10 @@ fn add_label(card: &Card) -> Option<&'static str> {
     #[cfg(target_os = "android")]
     {
         let _ = card;
-        Some("Add contact")
+        Some(t!("Add contact"))
     }
     #[cfg(not(target_os = "android"))]
-    card.numbers.first().map(|_| "Copy number")
+    card.numbers.first().map(|_| t!("Copy number"))
 }
 
 /// Android: the system's screen for a new contact, filled in. Elsewhere: copies the first number.

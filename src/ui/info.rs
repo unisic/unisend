@@ -6,6 +6,7 @@ use std::ops::Range;
 
 use super::*;
 use crate::backend::{Block, Details, MAX_MEMBERS, MAX_SCAN, Role};
+use crate::i18n::{t, tn};
 
 /// Kept of each kind; the history scan stops after `backend::info::MAX_SCAN` events anyway.
 const MAX_ITEMS: usize = 200;
@@ -185,19 +186,19 @@ fn note(info: &Info) -> Option<&'static str> {
         Shelf::Files => info.files.len(),
     };
     if !info.done {
-        return Some("Looking through the chat's history.");
+        return Some(t!("Looking through the chat's history."));
     }
     // The scan ran out of budget rather than history when it read that many events.
     let partial = info.scanned >= MAX_SCAN;
     Some(match (info.shelf, len) {
-        (_, MAX_ITEMS..) => "Only the newest 200 are shown.",
-        (Shelf::Media, 0) if partial => "No photos or videos in the recent history.",
-        (Shelf::Media, 0) => "No photos or videos.",
-        (Shelf::Links, 0) if partial => "No links in the recent history.",
-        (Shelf::Links, 0) => "No links.",
-        (Shelf::Files, 0) if partial => "No files in the recent history.",
-        (Shelf::Files, 0) => "No files.",
-        _ if partial => "Older history is not searched.",
+        (_, MAX_ITEMS..) => t!("Only the newest 200 are shown."),
+        (Shelf::Media, 0) if partial => t!("No photos or videos in the recent history."),
+        (Shelf::Media, 0) => t!("No photos or videos."),
+        (Shelf::Links, 0) if partial => t!("No links in the recent history."),
+        (Shelf::Links, 0) => t!("No links."),
+        (Shelf::Files, 0) if partial => t!("No files in the recent history."),
+        (Shelf::Files, 0) => t!("No files."),
+        _ if partial => t!("Older history is not searched."),
         _ => return None,
     })
 }
@@ -216,10 +217,10 @@ fn identifier(id: &str) -> &str {
 
 fn role_label(role: Role) -> Option<&'static str> {
     match role {
-        Role::Creator => Some("Owner"),
-        Role::Admin => Some("Admin"),
-        Role::Moderator => Some("Moderator"),
-        Role::Service => Some("Bot"),
+        Role::Creator => Some(t!("Owner")),
+        Role::Admin => Some(t!("Admin")),
+        Role::Moderator => Some(t!("Moderator")),
+        Role::Service => Some(t!("Bot")),
         Role::Member => None,
     }
 }
@@ -389,7 +390,7 @@ impl BeeperApp {
             .when_some(slide, |el, (v, far)| el.relative().left(px(far * (1. - v))).opacity(v))
             .child(
                 header().map(|el| {
-                    let title = div().flex_1().min_w_0().pl(px(if beside { 10. } else { 4. })).child(screen_title("Chat info"));
+                    let title = div().flex_1().min_w_0().pl(px(if beside { 10. } else { 4. })).child(screen_title(t!("Chat info")));
                     if beside { el.child(title).child(close) } else { el.child(close).child(title) }
                 }),
             )
@@ -433,17 +434,18 @@ impl BeeperApp {
                 let Some(room) = summary else { return div().into_any_element() };
                 let [(_, read_icon, read), pin, mute, archive, _] = chat_actions(&room);
                 // The sheet's "Mark as unread" does not fit a quarter of a phone.
-                let unread = (if room.is_unread() { "Mark read" } else { "Mark unread" }, read_icon, read);
+                let unread = (if room.is_unread() { t!("Mark read") } else { t!("Mark unread") }, read_icon, read);
                 let id = room.id.clone();
                 edge()
                     .pb(px(GAP))
-                    .child(h_flex().gap(px(8.)).children([mute, pin, archive, unread].into_iter().map(|(label, icon, action)| {
+                    .child(h_flex().items_stretch().gap(px(8.)).children([mute, pin, archive, unread].into_iter().map(|(label, icon, action)| {
                         let id = id.clone();
                         v_flex()
                             .id(label)
                             .flex_1()
                             .min_w_0()
-                            .h(px(64.))
+                            .min_h(px(64.))
+                            .py(px(8.))
                             .items_center()
                             .justify_center()
                             .gap(px(4.))
@@ -452,7 +454,7 @@ impl BeeperApp {
                             .cursor_pointer()
                             .active(|el| el.bg(p.raised))
                             .child(Icon::new(icon).size_5())
-                            .child(div().max_w_full().px(px(4.)).text_size(fs(12.)).text_color(p.muted).truncate().child(label))
+                            .child(div().max_w_full().px(px(4.)).text_size(fs(12.)).line_height(fs(15.)).text_center().text_color(p.muted).line_clamp(2).text_ellipsis().child(label))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.send(Cmd::Chat(id.clone(), action), cx);
                             }))
@@ -461,9 +463,9 @@ impl BeeperApp {
             }
             Row::Facts => {
                 let (icon, text) = match details.as_ref().and_then(|d| d.encrypted) {
-                    Some(true) => (IconName::Lock, "Messages are end-to-end encrypted."),
-                    Some(false) => (IconName::LockOpen, "Messages are not end-to-end encrypted."),
-                    None => (IconName::Lock, "Checking encryption."),
+                    Some(true) => (IconName::Lock, t!("Messages are end-to-end encrypted.")),
+                    Some(false) => (IconName::LockOpen, t!("Messages are not end-to-end encrypted.")),
+                    None => (IconName::Lock, t!("Checking encryption.")),
                 };
                 let fact = |icon: IconName, text: SharedString| {
                     h_flex()
@@ -495,8 +497,8 @@ impl BeeperApp {
             }
             Row::Members => {
                 let text = match details.as_ref() {
-                    Some(d) if d.members_loaded => format!("{} members", d.joined.max(d.members.len() as u64)),
-                    _ => "Loading members".to_owned(),
+                    Some(d) if d.members_loaded => tn!(d.joined.max(d.members.len() as u64), "{n} member", "{n} members"),
+                    _ => t!("Loading members").to_owned(),
                 };
                 edge().pt(px(8.)).pb(px(4.)).text_size(fs(12.)).text_color(p.faint).child(text).into_any_element()
             }
@@ -516,7 +518,7 @@ impl BeeperApp {
             Row::AllMembers => {
                 let Some(d) = details else { return div().into_any_element() };
                 if self.info.all_members {
-                    let text = format!("Showing {} of {} members.", d.members.len(), d.joined);
+                    let text = t!("Showing {shown} of {all} members.", shown = d.members.len(), all = d.joined);
                     return edge().py(px(8.)).text_size(fs(14.)).text_color(p.faint).child(text).into_any_element();
                 }
                 let more = d.joined.max(d.members.len() as u64).min(MAX_MEMBERS as u64);
@@ -529,7 +531,7 @@ impl BeeperApp {
                     .cursor_pointer()
                     .active(|el| el.bg(p.surface))
                     .child(div().size(px(MEMBER_AVATAR)).flex().flex_none().items_center().justify_center().child(Icon::new(IconName::ChevronDown).size_5().text_color(p.muted)))
-                    .child(div().text_size(fs(16.)).text_color(p.muted).child(format!("Show all {more}")))
+                    .child(div().text_size(fs(16.)).text_color(p.muted).child(t!("Show all {more}", more = more)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.info.all_members = true;
                         this.info_rows();
@@ -564,9 +566,9 @@ impl BeeperApp {
                             .p(px(4.))
                             .rounded_full()
                             .bg(p.raised)
-                            .child(choice("Media", Shelf::Media, cx))
-                            .child(choice("Links", Shelf::Links, cx))
-                            .child(choice("Files", Shelf::Files, cx)),
+                            .child(choice(t!("Media"), Shelf::Media, cx))
+                            .child(choice(t!("Links"), Shelf::Links, cx))
+                            .child(choice(t!("Files"), Shelf::Files, cx)),
                     )
                     .into_any_element()
             }
@@ -631,12 +633,12 @@ impl BeeperApp {
             Row::File(ix) => {
                 let Some(file) = self.info.files.get(ix).cloned() else { return div().into_any_element() };
                 let second = if self.fetching.contains(&file.id) {
-                    "Downloading".to_owned()
+                    t!("Downloading").to_owned()
                 } else {
                     [file.media.size.map(file_size), Some(day_label(file.ts))].into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
                 };
                 let icon = if file.media.kind == MediaKind::Audio { IconName::Music } else { IconName::File };
-                let name = if file.media.name.is_empty() { "File".to_owned() } else { file.media.name.clone() };
+                let name = if file.media.name.is_empty() { t!("File").to_owned() } else { file.media.name.clone() };
                 let (id, media) = (file.id.clone(), file.media.clone());
                 self.info_item(SharedString::from(format!("info-file-{ix}")), None, icon, name, second, cx)
                     .on_click(cx.listener(move |this, _, _, cx| this.open_media(id.clone(), media.clone(), cx)))

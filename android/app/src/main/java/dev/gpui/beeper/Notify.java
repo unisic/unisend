@@ -49,7 +49,6 @@ public final class Notify {
     /** Chat pictures kept for replies that rebuild a notification, 96 px squares. */
     private static final int ICONS = 16;
 
-    private static final Person ME = new Person.Builder().setName("You").setKey("me").build();
     private static final Map<String, Bitmap> icons = new LinkedHashMap<String, Bitmap>(ICONS, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, Bitmap> eldest) {
@@ -66,10 +65,10 @@ public final class Notify {
 
     static void channels(Context context) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
-        manager.createNotificationChannel(channel(MESSAGES, "Direct messages", NotificationManager.IMPORTANCE_HIGH));
-        manager.createNotificationChannel(channel(GROUPS, "Group chats", NotificationManager.IMPORTANCE_DEFAULT));
-        manager.createNotificationChannel(channel(MENTIONS, "Mentions", NotificationManager.IMPORTANCE_HIGH));
-        NotificationChannel connection = channel(CONNECTION, "Background connection", NotificationManager.IMPORTANCE_MIN);
+        manager.createNotificationChannel(channel(MESSAGES, context.getString(R.string.channel_direct), NotificationManager.IMPORTANCE_HIGH));
+        manager.createNotificationChannel(channel(GROUPS, context.getString(R.string.channel_groups), NotificationManager.IMPORTANCE_DEFAULT));
+        manager.createNotificationChannel(channel(MENTIONS, context.getString(R.string.channel_mentions), NotificationManager.IMPORTANCE_HIGH));
+        NotificationChannel connection = channel(CONNECTION, context.getString(R.string.channel_connection), NotificationManager.IMPORTANCE_MIN);
         connection.setShowBadge(false);
         manager.createNotificationChannel(connection);
     }
@@ -139,7 +138,7 @@ public final class Notify {
         }
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         NotificationCompat.MessagingStyle old = conversation(manager, chat);
-        NotificationCompat.MessagingStyle style = extend(old, group ? name : null, group,
+        NotificationCompat.MessagingStyle style = extend(context, old, group ? name : null, group,
                 new NotificationCompat.MessagingStyle.Message(text, time, person));
         // Once a chat has been mentioned in, its notification stays on the mentions channel until
         // it is read, so the sound of a later message is the mention's.
@@ -175,9 +174,9 @@ public final class Notify {
         long now = System.currentTimeMillis();
         NotificationCompat.MessagingStyle.Message line = sent
                 ? new NotificationCompat.MessagingStyle.Message(text, now, old.getUser())
-                : new NotificationCompat.MessagingStyle.Message("Not sent. Open Murmur and try again.", now,
+                : new NotificationCompat.MessagingStyle.Message(context.getString(R.string.reply_not_sent), now,
                         new Person.Builder().setName("Murmur").setKey("beeper").build());
-        NotificationCompat.MessagingStyle style = extend(old, old.getConversationTitle() == null ? null
+        NotificationCompat.MessagingStyle style = extend(context, old, old.getConversationTitle() == null ? null
                 : old.getConversationTitle().toString(), old.isGroupConversation(), line);
         Bundle extras = shown.getNotification().extras;
         CharSequence title = extras.getCharSequence(Notification.EXTRA_TITLE);
@@ -197,9 +196,10 @@ public final class Notify {
         summarize(context, manager, chat, false);
     }
 
-    private static NotificationCompat.MessagingStyle extend(NotificationCompat.MessagingStyle old, String title,
+    private static NotificationCompat.MessagingStyle extend(Context context, NotificationCompat.MessagingStyle old, String title,
             boolean group, NotificationCompat.MessagingStyle.Message add) {
-        NotificationCompat.MessagingStyle style = new NotificationCompat.MessagingStyle(old == null ? ME : old.getUser());
+        NotificationCompat.MessagingStyle style = new NotificationCompat.MessagingStyle(old == null
+                ? new Person.Builder().setName(context.getString(R.string.you)).setKey("me").build() : old.getUser());
         style.setConversationTitle(title).setGroupConversation(group);
         if (old != null) {
             List<NotificationCompat.MessagingStyle.Message> before = old.getMessages();
@@ -219,7 +219,7 @@ public final class Notify {
         PendingIntent tap = PendingIntent.getActivity(
                 context, code, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
 
-        RemoteInput input = new RemoteInput.Builder(KEY_REPLY).setLabel("Reply").build();
+        RemoteInput input = new RemoteInput.Builder(KEY_REPLY).setLabel(context.getString(R.string.reply)).build();
         PendingIntent reply = PendingIntent.getBroadcast(context, code, receiver(context, ACTION_REPLY, chat),
                 PendingIntent.FLAG_MUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         PendingIntent read = PendingIntent.getBroadcast(context, code, receiver(context, ACTION_READ, chat),
@@ -237,13 +237,13 @@ public final class Notify {
                 .setAutoCancel(true)
                 .setSilent(!alert)
                 .setContentIntent(tap)
-                .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_menu_send, "Reply", reply)
+                .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_menu_send, context.getString(R.string.reply), reply)
                         .addRemoteInput(input)
                         .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
                         .setShowsUserInterface(false)
                         .setAllowGeneratedReplies(true)
                         .build())
-                .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_menu_view, "Mark as read", read)
+                .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_menu_view, context.getString(R.string.mark_read), read)
                         .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
                         .setShowsUserInterface(false)
                         .build());
@@ -277,7 +277,7 @@ public final class Notify {
         manager.notify(SUMMARY, 0, new NotificationCompat.Builder(context, MESSAGES)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
                 .setContentTitle("Murmur")
-                .setContentText(chats == 1 ? "1 chat has new messages" : chats + " chats have new messages")
+                .setContentText(context.getResources().getQuantityString(R.plurals.chats_with_new, chats, chats))
                 .setGroup(GROUP)
                 .setGroupSummary(true)
                 // The chats alert on their own; the line over them stays quiet.

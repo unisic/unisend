@@ -69,6 +69,7 @@ use tokio::sync::mpsc;
 
 use crate::beeper;
 use crate::bridges::{self, Flow, Network, Step};
+use crate::i18n::t;
 
 const CHANNEL_CAP: usize = 64;
 const PAGE: u16 = 40;
@@ -489,18 +490,18 @@ impl Msg {
     /// One-line description for previews: Beeper's label for media, plus the caption.
     pub fn summary(&self) -> String {
         if let Some(poll) = &self.poll {
-            return format!("📊 Poll: {}", poll.question);
+            return t!("📊 Poll: {question}", question = poll.question);
         }
         if let Some(place) = &self.place {
-            return if place.description.is_empty() { "📍 Location".to_owned() } else { format!("📍 Location: {}", place.description) };
+            return if place.description.is_empty() { t!("📍 Location").to_owned() } else { t!("📍 Location: {place}", place = place.description) };
         }
         let Some(media) = &self.media else { return self.body.clone() };
         let label = match media.kind {
-            MediaKind::Image => "📷 Photo",
-            MediaKind::Sticker => "🖼 Sticker",
-            MediaKind::Video => "🎬 Video",
-            MediaKind::Voice => "🎤 Voice Note",
-            MediaKind::Audio => "🎵 Audio",
+            MediaKind::Image => t!("📷 Photo"),
+            MediaKind::Sticker => t!("🖼 Sticker"),
+            MediaKind::Video => t!("🎬 Video"),
+            MediaKind::Voice => t!("🎤 Voice Note"),
+            MediaKind::Audio => t!("🎵 Audio"),
             MediaKind::File => return format!("📎 {}", media.name),
         };
         if self.body.is_empty() { label.to_owned() } else { format!("{label}: {}", self.body) }
@@ -702,7 +703,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         Ok(true) => {}
         Ok(false) => st.emit(Ev::NeedLogin).await,
         Err(e) => {
-            st.emit(Ev::Error(format!("Could not restore session: {e:#}"))).await;
+            st.emit(Ev::Error(t!("Could not restore session: {error}", error = format!("{e:#}")))).await;
             st.emit(Ev::NeedLogin).await;
         }
     }
@@ -742,14 +743,14 @@ fn is_local(host: &str) -> bool {
 pub(crate) fn server_from_input(input: &str) -> Result<String, &'static str> {
     let input = input.trim();
     let input = match input.strip_prefix('@') {
-        Some(user) => user.split_once(':').map(|(_, server)| server).ok_or("Enter a server, like matrix.org.")?,
+        Some(user) => user.split_once(':').map(|(_, server)| server).ok_or(t!("Enter a server, like matrix.org."))?,
         None => input,
     };
     if input.is_empty() {
-        return Err("Enter a server, like matrix.org.");
+        return Err(t!("Enter a server, like matrix.org."));
     }
     if input.contains(char::is_whitespace) {
-        return Err("A server address has no spaces.");
+        return Err(t!("A server address has no spaces."));
     }
     let lower = input.to_ascii_lowercase();
     let (scheme, rest) = match lower.split_once("://") {
@@ -762,13 +763,13 @@ pub(crate) fn server_from_input(input: &str) -> Result<String, &'static str> {
         None => authority.split(':').next().unwrap_or_default(),
     };
     if host.is_empty() {
-        return Err("Enter a server, like matrix.org.");
+        return Err(t!("Enter a server, like matrix.org."));
     }
     match scheme {
         Some("https") => Ok(input.to_owned()),
         Some("http") if is_local(host) => Ok(input.to_owned()),
-        Some("http") => Err("This address is not encrypted. Use https."),
-        Some(_) => Err("Enter a server, like matrix.org, or an https address."),
+        Some("http") => Err(t!("This address is not encrypted. Use https.")),
+        Some(_) => Err(t!("Enter a server, like matrix.org, or an https address.")),
         None if is_local(host) => Ok(format!("http://{input}")),
         None => Ok(input.to_owned()),
     }
@@ -871,7 +872,7 @@ impl State {
             .login_custom("org.matrix.login.jwt", data)?
             .initial_device_display_name("Murmur")
             .await?;
-        let session = client.matrix_auth().session().ok_or_else(|| anyhow!("Login returned no session"))?;
+        let session = client.matrix_auth().session().ok_or_else(|| anyhow!(t!("Login returned no session")))?;
         write_private(&self.session_path(), &serde_json::to_vec(&SavedSession { session, homeserver: None })?)?;
         self.go_live(client).await;
         Ok(())
@@ -882,44 +883,46 @@ impl State {
         let server = server_from_input(server).map_err(|e| anyhow!(e))?;
         let user = user.trim();
         if user.is_empty() || password.is_empty() {
-            return Err(anyhow!("Enter your user name and password."));
+            return Err(anyhow!(t!("Enter your user name and password.")));
         }
         self.drop_orphaned_store()?;
-        let not_reached = || anyhow!("Could not reach {server}. Check the address and your connection.");
+        let not_reached = || anyhow!(t!("Could not reach {server}. Check the address and your connection.", server = server));
         // The SDK retries a silent host for minutes; someone waiting at the form should hear sooner.
         let discovery = self.client_builder().server_name_or_homeserver_url(&server).build();
         let client = tokio::time::timeout(Duration::from_secs(30), discovery).await.map_err(|_| not_reached())?.map_err(|e| {
             log::warn!("homeserver discovery for {server}: {e}");
             match unreachable(&e) {
                 true => not_reached(),
-                false => anyhow!("No Matrix server found at {server}."),
+                false => anyhow!(t!("No Matrix server found at {server}.", server = server)),
             }
         })?;
         // A server's .well-known may point anywhere; the password only goes over https.
         let homeserver = client.homeserver();
         if homeserver.scheme() != "https" && !homeserver.host_str().is_some_and(is_local) {
-            return Err(anyhow!("{server} does not offer an encrypted (https) connection, so this app will not send it a password."));
+            return Err(anyhow!(t!("{server} does not offer an encrypted (https) connection, so this app will not send it a password.", server = server)));
         }
         let auth = client.matrix_auth();
         let types = auth.get_login_types().await.map_err(|e| match unreachable(&e) {
-            true => anyhow!("Could not reach {server}. Check your connection."),
-            false => anyhow!("{server} did not answer like a Matrix server: {}", plain(&e)),
+            true => anyhow!(t!("Could not reach {server}. Check your connection.", server = server)),
+            false => anyhow!(t!("{server} did not answer like a Matrix server: {error}", server = server, error = plain(&e))),
         })?;
         if !types.flows.iter().any(|flow| matches!(flow, LoginType::Password(_))) {
-            return Err(anyhow!(
-                "{server} signs people in another way (such as single sign-on) that this app does not support yet."
-            ));
+            return Err(anyhow!(t!(
+                "{server} signs people in another way (such as single sign-on) that this app does not support yet.",
+                server = server
+            )));
+
         }
         auth.login_username(user, password).initial_device_display_name("Beeper GPUI").await.map_err(|e| {
             match e.client_api_error_kind() {
-                Some(ErrorKind::Forbidden) => anyhow!("Wrong user name or password."),
-                Some(ErrorKind::UserDeactivated) => anyhow!("This account has been deactivated."),
-                Some(ErrorKind::LimitExceeded(_)) => anyhow!("Too many attempts. Wait a minute and try again."),
-                _ if unreachable(&e) => anyhow!("Could not reach {server}. Check your connection."),
-                _ => anyhow!("Could not sign in: {}", plain(&e)),
+                Some(ErrorKind::Forbidden) => anyhow!(t!("Wrong user name or password.")),
+                Some(ErrorKind::UserDeactivated) => anyhow!(t!("This account has been deactivated.")),
+                Some(ErrorKind::LimitExceeded(_)) => anyhow!(t!("Too many attempts. Wait a minute and try again.")),
+                _ if unreachable(&e) => anyhow!(t!("Could not reach {server}. Check your connection.", server = server)),
+                _ => anyhow!(t!("Could not sign in: {error}", error = plain(&e))),
             }
         })?;
-        let session = auth.session().ok_or_else(|| anyhow!("Login returned no session"))?;
+        let session = auth.session().ok_or_else(|| anyhow!(t!("Login returned no session")))?;
         self.homeserver = homeserver.to_string();
         self.beeper = false;
         let saved = SavedSession { session, homeserver: Some(self.homeserver.clone()) };
@@ -929,7 +932,7 @@ impl State {
     }
 
     fn client(&self) -> Result<&Client> {
-        self.client.as_ref().ok_or_else(|| anyhow!("Not signed in"))
+        self.client.as_ref().ok_or_else(|| anyhow!(t!("Not signed in")))
     }
 
     async fn handle(&mut self, cmd: Cmd) -> Result<()> {
@@ -939,7 +942,7 @@ impl State {
                 self.emit(Ev::CodeSent).await;
             }
             Cmd::SubmitCode(code) => {
-                let request = self.login_request.clone().ok_or_else(|| anyhow!("Request a code first"))?;
+                let request = self.login_request.clone().ok_or_else(|| anyhow!(t!("Request a code first")))?;
                 let jwt = beeper::submit_code(&self.http, &request, code.trim()).await?;
                 self.login_request = None;
                 self.login_jwt(jwt).await?;
@@ -950,15 +953,14 @@ impl State {
                 if let Err(e) = recovery.recover(key.trim()).await {
                     return Err(match e {
                         RecoveryError::SecretStorage(SecretStorageError::SecretStorageKey(DecodeError::Mac(_))) => {
-                            anyhow!(
-                                "This recovery code is valid but does not match your account's current key. \
-                                 It may be an older code; get the current one from another app where you are signed in."
-                            )
+                            anyhow!(t!(
+                                "This recovery code is valid but does not match your account's current key. It may be an older code; get the current one from another app where you are signed in."
+                            ))
                         }
                         RecoveryError::SecretStorage(SecretStorageError::SecretStorageKey(_)) => {
-                            anyhow!("This is not a recovery code. Check it for typos: {e}")
+                            anyhow!(t!("This is not a recovery code. Check it for typos: {error}", error = e))
                         }
-                        e => anyhow::Error::new(e).context("Recovery code was not accepted"),
+                        e => anyhow::Error::new(e).context(t!("Recovery code was not accepted")),
                     });
                 }
                 if let Some(open) = &self.open {
@@ -967,7 +969,7 @@ impl State {
                 let incomplete = recovery.state() == RecoveryState::Incomplete;
                 self.emit(Ev::NeedRecovery(incomplete)).await;
                 if incomplete {
-                    self.emit(Ev::Error("Recovery code accepted, but the account's key storage is incomplete".into()))
+                    self.emit(Ev::Error(t!("Recovery code accepted, but the account's key storage is incomplete").into()))
                         .await;
                 }
             }
@@ -1008,7 +1010,7 @@ impl State {
                         mark_read(&room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito.load(Ordering::Relaxed)).await?;
                     }
                     ChatAction::Mute(on) => {
-                        let notif = self.notif.as_ref().context("Not signed in")?;
+                        let notif = self.notif.as_ref().context(t!("Not signed in"))?;
                         if on {
                             notif.set_room_notification_mode(&room_id, RoomNotificationMode::MentionsAndKeywordsOnly).await?;
                         } else {
@@ -1020,7 +1022,7 @@ impl State {
                     }
                     ChatAction::Archive(true) => {
                         if room.is_favourite() {
-                            return Err(anyhow!("Pinned chats can't be archived"));
+                            return Err(anyhow!(t!("Pinned chats can't be archived")));
                         }
                         // Like Beeper: archived up to the newest event, by the server's own order.
                         let resp = room.messages(MessagesOptions::backward()).await?;
@@ -1092,7 +1094,7 @@ impl State {
                     };
                     let _ = match bytes.await {
                         Ok(bytes) => ev.send(Ev::Viewed(id, bytes)).await,
-                        Err(e) => ev.send(Ev::Error(format!("Could not load the image: {e:#}"))).await,
+                        Err(e) => ev.send(Ev::Error(t!("Could not load the image: {error}", error = format!("{e:#}")))).await,
                     };
                 });
             }
@@ -1113,7 +1115,7 @@ impl State {
                     let path = match saved.await {
                         Ok(path) => Some(path),
                         Err(e) => {
-                            let _ = ev.send(Ev::Error(format!("Could not download {}: {e:#}", media.name))).await;
+                            let _ = ev.send(Ev::Error(t!("Could not download {name}: {error}", name = media.name, error = format!("{e:#}")))).await;
                             None
                         }
                     };
@@ -1135,7 +1137,7 @@ impl State {
                         Err(e) => Err(e),
                     };
                     if let Err(e) = sent {
-                        let _ = ev.send(Ev::Error(format!("Attachment not sent: {e:#}"))).await;
+                        let _ = ev.send(Ev::Error(t!("Attachment not sent: {error}", error = format!("{e:#}")))).await;
                     }
                     let _ = ev.send(Ev::Attached).await;
                 });
@@ -1217,15 +1219,15 @@ impl State {
                 }
             }
             Cmd::React { room, target, key } => {
-                let open = self.open.as_ref().filter(|open| open.room == room).context("That chat is not open")?;
+                let open = self.open.as_ref().filter(|open| open.room == room).context(t!("That chat is not open"))?;
                 open.timeline.toggle_reaction(&timeline::item_id(&target)?, &key).await?;
             }
             Cmd::Delete { room, target } => {
-                let open = self.open.as_ref().filter(|open| open.room == room).context("That chat is not open")?;
+                let open = self.open.as_ref().filter(|open| open.room == room).context(t!("That chat is not open"))?;
                 open.timeline.redact(&timeline::item_id(&target)?, None).await?;
             }
             Cmd::Retry { room, target } => {
-                let open = self.open.as_ref().filter(|open| open.room == room).context("That chat is not open")?;
+                let open = self.open.as_ref().filter(|open| open.room == room).context(t!("That chat is not open"))?;
                 // A failed send stops the chat's queue; trying again starts it.
                 open.timeline.room().send_queue().set_enabled(true);
                 timeline::retry(&open.timeline, &target).await?;
@@ -1319,14 +1321,14 @@ impl State {
                         Err(e) => Err(e),
                     };
                     if let Err(e) = sent {
-                        let _ = ev.send(Ev::Error(format!("GIF not sent: {e:#}"))).await;
+                        let _ = ev.send(Ev::Error(t!("GIF not sent: {error}", error = format!("{e:#}")))).await;
                     }
                     let _ = ev.send(Ev::GifSent).await;
                 });
             }
             Cmd::Members(room_id) => {
                 let room = self.room(&room_id)?;
-                let own = self.client()?.user_id().context("Not signed in")?.to_owned();
+                let own = self.client()?.user_id().context(t!("Not signed in"))?.to_owned();
                 let ev = self.ev.clone();
                 // Fetching a big chat's members can take a while; the command loop goes on meanwhile.
                 tokio::spawn(async move {
@@ -1346,13 +1348,13 @@ impl State {
                         Err(e) => Err(e),
                     };
                     if let Err(e) = sent {
-                        let _ = ev.send(Ev::Error(format!("Voice message not sent: {e:#}"))).await;
+                        let _ = ev.send(Ev::Error(t!("Voice message not sent: {error}", error = format!("{e:#}")))).await;
                     }
                     let _ = ev.send(Ev::Attached).await;
                 });
             }
             Cmd::Forward { room, targets, to } => {
-                let open = self.open.as_ref().filter(|open| open.room == room).context("That chat is not open")?;
+                let open = self.open.as_ref().filter(|open| open.room == room).context(t!("That chat is not open"))?;
                 let rooms = to.iter().map(|id| self.room(id)).collect::<Result<Vec<_>>>()?;
                 let done = forward::forward(&open.timeline, &targets, &rooms).await?;
                 self.emit(Ev::Forwarded(done)).await;
@@ -1360,7 +1362,7 @@ impl State {
             Cmd::SetDisappear { room, ms } => {
                 let room = self.room(&room)?;
                 let mut setting = disappear::read(&room).await;
-                let content = setting.content(ms).filter(|_| setting.allowed).context("This chat does not take that timer")?;
+                let content = setting.content(ms).filter(|_| setting.allowed).context(t!("This chat does not take that timer"))?;
                 room.send_state_event_raw(disappear::TIMER, "", content).await?;
                 // The bridge answers with the new state, which reads it again; until then, this.
                 setting.ms = ms;
@@ -1392,7 +1394,7 @@ impl State {
                 match timeline.paginate_backwards(PAGE).await {
                     Ok(start) => more = !start,
                     Err(e) => {
-                        let _ = ev.send(Ev::Error(format!("Could not load messages: {e}"))).await;
+                        let _ = ev.send(Ev::Error(t!("Could not load messages: {error}", error = e))).await;
                         break;
                     }
                 }
@@ -1411,7 +1413,7 @@ impl State {
     fn api(&self) -> Result<bridges::Api> {
         // Another homeserver's access token must never reach Beeper's servers.
         if !self.beeper {
-            return Err(anyhow!("Networks are a Beeper feature"));
+            return Err(anyhow!(t!("Networks are a Beeper feature")));
         }
         let client = self.client()?;
         let debug = |var: &str| std::env::var(var).ok().filter(|_| cfg!(debug_assertions));
@@ -1419,8 +1421,8 @@ impl State {
             http: self.http.clone(),
             api: debug("BEEPER_GPUI_API").unwrap_or_else(|| beeper::API_URL.to_owned()),
             homeserver: debug("BEEPER_GPUI_BRIDGES").unwrap_or_else(|| self.homeserver.clone()),
-            token: client.access_token().context("Not signed in")?,
-            user_id: client.user_id().context("Not signed in")?.to_string(),
+            token: client.access_token().context(t!("Not signed in"))?,
+            user_id: client.user_id().context(t!("Not signed in"))?.to_string(),
         })
     }
 
@@ -1465,7 +1467,7 @@ async fn messages(room: &Room, from: Option<&str>, limit: u16) -> Result<Message
 /// List preview: the newest message on one line, prefixed with its sender outside one-to-one chats.
 fn preview(m: &Msg, dm: bool) -> String {
     let text = match m {
-        m if m.own => format!("You: {}", m.summary()),
+        m if m.own => format!("{}: {}", t!("You"), m.summary()),
         m if dm => m.summary(),
         m => format!("{}: {}", m.sender, m.summary()),
     };
@@ -1533,7 +1535,8 @@ async fn thumbnail(client: &Client, media: &Media) -> Result<Option<Vec<u8>>> {
 async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &str, hd: bool) -> Result<()> {
     let size = tokio::fs::metadata(path).await?.len();
     if size > MAX_UPLOAD {
-        return Err(anyhow!("the file is larger than {} MB", MAX_UPLOAD / 1024 / 1024));
+        return Err(anyhow!(t!("the file is larger than {mb} MB", mb = MAX_UPLOAD / 1024 / 1024)));
+
     }
     let mut name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".to_owned());
     let mut mime = mime_guess::from_path(path).first_or_octet_stream();
@@ -1971,7 +1974,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
             Ok(r) => r,
             Err(e) if matches!(e.client_api_error_kind(), Some(ErrorKind::UnknownToken(_))) => {
                 let _ = std::fs::remove_file(dir.join("session.json"));
-                let _ = ev.send(Ev::Error(format!("Signed out by server: {e}"))).await;
+                let _ = ev.send(Ev::Error(t!("Signed out by server: {error}", error = e))).await;
                 let _ = ev.send(Ev::NeedLogin).await;
                 return;
             }
@@ -2086,8 +2089,12 @@ pub(crate) fn plain(error: &dyn std::fmt::Display) -> String {
     text
 }
 
-pub(crate) const UTD: &str = "Unable to decrypt this message yet";
-pub(crate) const DELETED: &str = "Message deleted";
+pub(crate) fn utd() -> &'static str {
+    t!("Unable to decrypt this message yet")
+}
+pub(crate) fn deleted() -> &'static str {
+    t!("Message deleted")
+}
 
 /// The messages among timeline events, oldest first, as the chat list and notifications need
 /// them: what each says, by whom and when. Edits, reactions and deletions belong to the open
@@ -2110,7 +2117,7 @@ async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> (Vec<Msg>, Vec<Msg>) 
             if is_redacted(event) {
                 continue;
             }
-            m.body = UTD.to_owned();
+            m.body = utd().to_owned();
         } else if let Some(poll) = poll_start(event) {
             m.poll = Some(poll);
         } else {
@@ -2138,16 +2145,16 @@ async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> (Vec<Msg>, Vec<Msg>) 
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(r))) => {
                     let Some(target) = r.redacts(&rules.redaction) else { continue };
                     amends_id = Some(target.to_string());
-                    (m.body, m.deleted) = (DELETED.to_owned(), true);
+                    (m.body, m.deleted) = (deleted().to_owned(), true);
                 }
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Redacted(_)))) => {
-                    (m.body, m.deleted) = (DELETED.to_owned(), true);
+                    (m.body, m.deleted) = (deleted().to_owned(), true);
                 }
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Sticker(SyncMessageLikeEvent::Original(s)))) => {
                     m.media = Some(sticker(&s.content));
                 }
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(_))) if !is_redacted(event) => {
-                    m.body = UTD.into();
+                    m.body = utd().into();
                 }
                 _ => continue,
             }

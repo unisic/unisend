@@ -10,6 +10,7 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 
 use super::*;
 use crate::backend::voice::{BARS, resample};
+use crate::i18n::t;
 
 /// Whether audio plays inside the app.
 const INLINE: bool = cfg!(target_os = "android");
@@ -178,7 +179,7 @@ impl BeeperApp {
                 };
                 let Some(path) = path else {
                     this.voice.rec = None;
-                    this.error = Some("Could not start recording".into());
+                    this.error = Some(t!("Could not start recording").into());
                     cx.notify();
                     return false;
                 };
@@ -279,7 +280,7 @@ impl BeeperApp {
                 match length {
                     None => {
                         this.voice.rec = None;
-                        this.error = Some("Nothing was recorded".into());
+                        this.error = Some(t!("Nothing was recorded").into());
                     }
                     Some(length) if send => {
                         rec.state = RecState::Stopped(Some(length));
@@ -300,7 +301,7 @@ impl BeeperApp {
             self.stop_player();
         }
         if self.attach_queue.len() >= gallery::MAX_QUEUED {
-            self.error = Some("Too many attachments waiting, try again when these are sent".into());
+            self.error = Some(t!("Too many attachments waiting, try again when these are sent").into());
             post(move || native::delete(&path));
             return cx.notify();
         }
@@ -436,7 +437,7 @@ impl BeeperApp {
                     None => {
                         let id = this.voice.play.take().map(|p| p.id);
                         this.voice.files.retain(|(f, _)| Some(f) != id.as_ref());
-                        this.error = Some("Could not play this audio".into());
+                        this.error = Some(t!("Could not play this audio").into());
                     }
                 }
                 cx.notify();
@@ -515,7 +516,7 @@ impl BeeperApp {
         });
         // Desktop hands the file to the system's player, from anywhere on the row as before.
         let (on_button, on_row) = if INLINE { (Some(button), None) } else { (None, Some(button)) };
-        let detail = if self.fetching.contains(&m.id) { Some("Downloading…".to_owned()) } else { None };
+        let detail = if self.fetching.contains(&m.id) { Some(t!("Downloading…").to_owned()) } else { None };
         h_flex()
             .id(SharedString::from(format!("{}-voice", m.id)))
             .gap(px(10.))
@@ -618,8 +619,8 @@ impl BeeperApp {
                 return Some(
                     bar()
                         .pl(px(GUTTER))
-                        .child(div().flex_1().min_w_0().text_size(fs(14.)).text_color(p.muted).child("Voice messages need the microphone."))
-                        .child(Button::new("mic-allow").primary().h(px(TAP)).label("Allow").on_click(cx.listener(|this, _, _, cx| this.ask_mic(cx))))
+                        .child(div().flex_1().min_w_0().text_size(fs(14.)).text_color(p.muted).child(t!("Voice messages need the microphone.")))
+                        .child(Button::new("mic-allow").primary().h(px(TAP)).label(t!("Allow")).on_click(cx.listener(|this, _, _, cx| this.ask_mic(cx))))
                         .child(round_button("mic-dismiss", IconName::X, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| {
                             this.voice.denied = false;
                             cx.notify();
@@ -637,7 +638,7 @@ impl BeeperApp {
                     .px(px(GUTTER))
                     .text_size(fs(14.))
                     .text_color(p.muted)
-                    .child("Hold to record, release to send.")
+                    .child(t!("Hold to record, release to send."))
                     .with_animation("mic-hint", Animation::new(motion::ENTER).with_easing(motion::ease_out), |el, t| el.opacity(t))
                     .into_any_element()
             });
@@ -687,7 +688,7 @@ impl BeeperApp {
                             .text_size(fs(14.))
                             .text_color(p.faint)
                             .child(Icon::new(IconName::ChevronLeft).size_4())
-                            .child("Slide to cancel"),
+                            .child(t!("Slide to cancel")),
                     )
                     .child(
                         div()

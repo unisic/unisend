@@ -7,6 +7,7 @@ use std::time::Duration;
 use super::cards;
 use super::*;
 use crate::backend::{Place, location_support};
+use crate::i18n::t;
 
 /// How long to wait for a fix before giving up.
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -50,7 +51,7 @@ impl Default for Locate {
 fn accuracy_text(metres: Option<f64>) -> Option<String> {
     let m = metres.filter(|m| *m > 0.)?;
     let size = if m >= 1000. { format!("{:.1} km", m / 1000.) } else { format!("{} m", m.round() as u32) };
-    Some(if m > APPROXIMATE { format!("Approximate, within about {size}") } else { format!("Accurate to about {size}") })
+    Some(if m > APPROXIMATE { t!("Approximate, within about {size}", size = size) } else { t!("Accurate to about {size}", size = size) })
 }
 
 /// `"lat\tlon\taccuracy"` from the Java side, or the word for why there is none.
@@ -213,20 +214,20 @@ impl BeeperApp {
         let line = |text: &'static str| div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(text);
 
         let body = match &state {
-            State::Asking => v_flex().gap(px(12.)).child(line("Waiting for your answer to the location question.")),
+            State::Asking => v_flex().gap(px(12.)).child(line(t!("Waiting for your answer to the location question."))),
             State::Denied => v_flex()
                 .gap(px(12.))
-                .child(line("Murmur has no access to your location. Allow it to share where you are."))
-                .child(button("location-allow", "Allow", true).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.ask_location(cx))))),
+                .child(line(t!("Murmur has no access to your location. Allow it to share where you are.")))
+                .child(button("location-allow", t!("Allow"), true).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.ask_location(cx))))),
             State::Off => v_flex()
                 .gap(px(12.))
-                .child(line("Location is switched off on this phone. Turn it on in the quick settings, then try again."))
-                .child(button("location-retry", "Try again", true).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.open_location(cx))))),
-            State::Locating => v_flex().gap(px(12.)).child(line("Finding your location. This can take up to 20 seconds.")),
+                .child(line(t!("Location is switched off on this phone. Turn it on in the quick settings, then try again.")))
+                .child(button("location-retry", t!("Try again"), true).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.open_location(cx))))),
+            State::Locating => v_flex().gap(px(12.)).child(line(t!("Finding your location. This can take up to 20 seconds."))),
             State::Failed => v_flex()
                 .gap(px(12.))
-                .child(line("No location fix in time. Try again with a clearer view of the sky."))
-                .child(button("location-retry", "Try again", true).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.open_location(cx))))),
+                .child(line(t!("No location fix in time. Try again with a clearer view of the sky.")))
+                .child(button("location-retry", t!("Try again"), true).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.open_location(cx))))),
             State::Found(fix) => {
                 let fix = *fix;
                 let place = Place { lat: fix.lat, lon: fix.lon, description: String::new() };
@@ -238,9 +239,9 @@ impl BeeperApp {
                         h_flex()
                             .gap(px(8.))
                             .justify_end()
-                            .child(button("location-refresh", "Update", false).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.open_location(cx)))))
+                            .child(button("location-refresh", t!("Update"), false).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.open_location(cx)))))
                             .when(!blocked, |el| {
-                                el.child(button("location-send", "Send", true).when(live, |el| el.on_click(cx.listener(move |this, _, _, cx| this.send_location(fix, cx)))))
+                                el.child(button("location-send", t!("Send"), true).when(live, |el| el.on_click(cx.listener(move |this, _, _, cx| this.send_location(fix, cx)))))
                             }),
                     )
             }
@@ -273,7 +274,7 @@ impl BeeperApp {
                         .bg(p.surface)
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
                         .child(div().h(px(20.)).flex().items_center().justify_center().child(div().w(px(36.)).h(px(4.)).rounded_full().bg(p.faint.opacity(0.5))))
-                        .child(div().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child("Share location"))
+                        .child(div().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(t!("Share location")))
                         .child(body),
                 )
                 .into_any_element(),

@@ -22,7 +22,7 @@ pub struct InvalidCode {
 
 impl std::fmt::Display for InvalidCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Invalid code, {} attempts left", self.retries_left)
+        f.write_str(&crate::i18n::tn!(self.retries_left, "Invalid code, {n} attempt left", "Invalid code, {n} attempts left"))
     }
 }
 
