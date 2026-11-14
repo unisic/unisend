@@ -80,6 +80,7 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
     let inside = |r: &Range<usize>| r.start >= whole.start && r.end <= whole.end;
     let shift = |r: &Range<usize>| r.start - base..r.end - base;
     let mentions: Vec<_> = m.mentions.iter().filter(|r| inside(r)).map(shift).collect();
+    let to_me: Vec<_> = m.to_me.iter().filter(|r| inside(r)).map(shift).collect();
     let apart = |u: &Range<usize>| mentions.iter().all(|r| r.end <= u.start || u.end <= r.start);
     let bare: Vec<_> = urls(&m.body).iter().filter(|r| inside(r)).map(shift).filter(apart).collect();
 
@@ -111,7 +112,9 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
             style.underline = Some(UnderlineStyle { thickness: px(1.), ..Default::default() });
         }
         if mentions.iter().any(|r| r.start <= seg.start && seg.end <= r.end) {
-            style = HighlightStyle { color: look.mention.color, font_weight: look.mention.font_weight, ..style };
+            // The accent is for what addresses the user; a mention of someone else is only bold.
+            let color = if m.mentioned && to_me.iter().any(|r| r.start <= seg.start && seg.end <= r.end) { look.mention.color } else { None };
+            style = HighlightStyle { color, font_weight: look.mention.font_weight, ..style };
         }
         if let Some(href) = &run.href {
             links.push(seg.clone());

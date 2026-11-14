@@ -58,8 +58,8 @@ when you were mentioned. Unread rows have a white bold name and a white preview.
 
 Incoming messages sit left on `surface`, own messages right on `raised`. In a group, each run of
 messages from one person starts with their name and ends with their picture beside the last
-message; the time is printed once under the run. A mention is accent text; a message that mentions
-you carries an accent bar on its leading edge. Replies quote in a lighter inset; touching the
+message; the time is printed once under the run. A mention of you is accent text, one of someone else
+semibold; a message that mentions you carries an accent bar on its leading edge. Replies quote in a lighter inset; touching the
 quote goes to the message it quotes.
 
 Text size (Settings, Appearance) has five steps, 85 to 130%, and scales every font size and line

@@ -27,6 +27,7 @@ mod gallery;
 mod heart;
 mod location;
 mod gifs;
+mod mentions;
 mod menu;
 mod navigate;
 pub(crate) mod motion;
@@ -245,6 +246,8 @@ pub struct BeeperApp {
     location: location::Locate,
     poll_form: pollnew::Form,
     gifs: gifs::Picker,
+    /// The `@` list over the composer.
+    mention: mentions::Mentions,
     /// Attachments waiting for the one uploading now, so a batch keeps its order.
     attach_queue: VecDeque<Cmd>,
     attaching: bool,
@@ -324,6 +327,7 @@ impl BeeperApp {
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) && this.composer_changed(cx) {
                 this.typed(cx);
+                this.mention_typed(cx);
             }
         }));
         subs.push(cx.subscribe_in(&emoji_search, window, |_, _, ev: &InputEvent, _, cx| match ev {
@@ -435,6 +439,7 @@ impl BeeperApp {
             location: location::Locate::default(),
             poll_form: pollnew::Form::default(),
             gifs: gifs::Picker::default(),
+            mention: mentions::Mentions::default(),
             attach_queue: VecDeque::new(),
             attaching: false,
             contacts: contacts::State::default(),
@@ -651,6 +656,7 @@ impl BeeperApp {
             Ev::Gifs { query, page, found } => self.on_gifs(query, page, found),
             Ev::GifPreview(url, bytes) => self.on_gif_preview(url, bytes),
             Ev::GifSent => self.uploads = self.uploads.saturating_sub(1),
+            Ev::Members { room, list } => self.members_arrived(room, list, cx),
         }
         cx.notify();
     }
@@ -745,6 +751,11 @@ impl BeeperApp {
     }
 
     fn send_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Enter picks from the list on a keyboard; on a phone the list is tapped and Send sends.
+        if self.mention.open() && !gpui_kit::is_mobile() {
+            self.pick_mention(self.mention.selected, window, cx);
+            return;
+        }
         let body = self.composer.read(cx).value().trim().to_string();
         let Some(room) = self.open.clone() else { return };
         if body.is_empty() {
@@ -755,7 +766,8 @@ impl BeeperApp {
             Compose::Reply(id) => (Some(id), None),
             Compose::Edit(id) => (None, Some(id)),
         };
-        if self.send(Cmd::Send { room, body, reply_to, edit }, cx) {
+        let mentions = self.picked_mentions(cx);
+        if self.send(Cmd::Send { room, body, reply_to, edit, mentions }, cx) {
             self.compose = Compose::New;
             self.jump_to_newest(cx);
             self.composer.update(cx, |c, cx| c.set_value("", window, cx));
@@ -796,6 +808,9 @@ impl BeeperApp {
             self.close_gallery(cx);
         } else if self.gifs_open() {
             self.close_gifs(cx);
+        } else if self.mention.open() {
+            self.mention.close();
+            cx.notify();
         } else if self.chat_sheet.take().is_some() {
             cx.notify();
         } else if self.compose != Compose::New {
@@ -1071,6 +1086,7 @@ impl BeeperApp {
         self.emoji_open = None;
         self.close_gallery(cx);
         self.close_gifs(cx);
+        self.mention = mentions::Mentions::default();
         if let Some(room) = self.open.take() {
             if self.typing_sent.take().is_some() {
                 let _ = self.cmd.try_send(Cmd::Typing(room, false));
@@ -1615,7 +1631,9 @@ impl BeeperApp {
                 let inside = inside_of(m, p);
                 let ink = HighlightStyle { color: Some(inside.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
                 let underline = HighlightStyle { underline: Some(UnderlineStyle { thickness: px(1.), ..Default::default() }), ..Default::default() };
-                let mut marks: Vec<_> = m.mentions.iter().map(|r| (r.clone(), ink)).collect();
+                // The accent is for what addresses the user; a mention of someone else is only bold.
+                let bold = HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
+                let mut marks: Vec<_> = m.mentions.iter().map(|r| (r.clone(), if m.mentioned && m.to_me.contains(r) { ink } else { bold })).collect();
                 let apart = |u: &std::ops::Range<usize>| m.mentions.iter().all(|r| r.end <= u.start || u.end <= r.start);
                 marks.extend(urls(&m.body).into_iter().filter(apart).map(|r| (r, underline)));
                 marks.sort_by_key(|(r, _)| r.start);
@@ -1912,6 +1930,7 @@ impl BeeperApp {
                 )
             })
             .children(self.render_compose_strip(window, cx))
+            .children(self.render_mentions(cx))
             .when(self.uploads > 0, |el| {
                 el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(fs(12.)).text_color(p.faint).child("Sending attachment…"))
             })
@@ -1948,7 +1967,8 @@ impl BeeperApp {
                                 }
                             }))
                             .text_size(fs(16.))
-                            .child(Input::new(&self.composer).appearance(false).large()),
+                            .map(|el| self.mention_keys(el, cx))
+                            .child(Input::new(&self.composer).appearance(false).large().token(|t, _, cx| mentions::token(t, cx))),
                     )
                     .child(
                         div()

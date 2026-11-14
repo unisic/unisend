@@ -171,7 +171,7 @@ async fn login_sync_decrypt_send_recover() {
     assert!(alice_rx.rows.iter().any(|m| m.kind == Kind::Day), "a day row heads the messages");
 
     // Send path: the message shows at once, becomes an event, and Bob receives it decrypted.
-    alice.handle(Cmd::Send { room: room_id.clone(), body: "hi bob".into(), reply_to: None, edit: None }).await.unwrap();
+    alice.handle(Cmd::Send { room: room_id.clone(), body: "hi bob".into(), reply_to: None, edit: None, mentions: Vec::new() }).await.unwrap();
     until(&mut alice_rx, "the sent message as an event", |rows| {
         rows.iter().any(|m| m.body == "hi bob" && m.own && m.id.starts_with('$') && m.delivery == Delivery::Sent)
     })
@@ -299,11 +299,11 @@ async fn login_sync_decrypt_send_recover() {
     until(&mut alice2_rx, "the new message", |rows| rows.iter().any(|m| m.id == ping.as_str())).await;
     alice2.handle(Cmd::React { room: room.clone(), target: ping.to_string(), key: "👍".into() }).await.unwrap();
     until(&mut alice2_rx, "the reaction", reacted).await;
-    alice2.handle(Cmd::Send { room: room.clone(), body: "yes".into(), reply_to: Some(ping.to_string()), edit: None }).await.unwrap();
+    alice2.handle(Cmd::Send { room: room.clone(), body: "yes".into(), reply_to: Some(ping.to_string()), edit: None, mentions: Vec::new() }).await.unwrap();
     let replied = |m: &&Msg| m.body == "yes" && m.own && m.id.starts_with('$') && m.reply.as_ref().is_some_and(|q| q.id == ping.as_str() && q.text == "are you there?");
     until(&mut alice2_rx, "the reply with its quote", |rows| rows.iter().any(|m| replied(&m))).await;
     let reply_id = alice2_rx.rows.iter().find(replied).unwrap().id.clone();
-    alice2.handle(Cmd::Send { room: room.clone(), body: "yes!".into(), reply_to: None, edit: Some(reply_id.clone()) }).await.unwrap();
+    alice2.handle(Cmd::Send { room: room.clone(), body: "yes!".into(), reply_to: None, edit: Some(reply_id.clone()), mentions: Vec::new() }).await.unwrap();
     until(&mut alice2_rx, "the edit", |rows| rows.iter().any(|m| m.id == reply_id && m.body == "yes!" && m.edited)).await;
     // The chat list's preview follows an edit and a deletion of the message it shows.
     let rooms = alice2.rooms.clone();
@@ -1231,4 +1231,72 @@ async fn a_gif_arrives_as_a_marked_mp4_in_an_encrypted_chat() {
     let mp4 = bob.media().get_media_content(&request, false).await.unwrap();
     assert_eq!(&mp4[4..8], b"ftyp", "the file is an MP4");
     assert_eq!(info["size"].as_u64(), Some(mp4.len() as u64));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn members_are_listed_and_a_picked_one_is_mentioned() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-test-mention-{tag}"));
+    let (alice_name, bob_name) = (format!("alice{tag}"), format!("bob{tag}"));
+    let (mut alice, mut alice_rx) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &alice_name)).await.unwrap();
+    wait_for(&mut alice_rx, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &bob_name).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    let bob_id = bob.user_id().unwrap().to_owned();
+    bob.account().set_display_name(Some("Bob Builder")).await.unwrap();
+
+    let room = alice.client().unwrap().create_dm(&bob_id).await.unwrap();
+    let room_id = room.room_id().to_owned();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    bob.join_room_by_id(&room_id).await.unwrap();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+
+    alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
+    let mut list = Vec::new();
+    for _ in 0..30 {
+        alice.handle(Cmd::Members(room_id.clone())).await.unwrap();
+        list = wait_for(&mut alice_rx, "members", |e| match e {
+            Ev::Members { room, list } if room == room_id => Some(list),
+            _ => None,
+        })
+        .await;
+        if list.iter().any(|(user, name)| user == &bob_id && name == "Bob Builder") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(list, [(bob_id.clone(), "Bob Builder".to_owned())], "the list is everyone but the user");
+
+    let body = "**hey** @Bob Builder, see `@Bob Builder`".to_owned();
+    let mentions = vec![("Bob Builder".to_owned(), bob_id.clone())];
+    alice.handle(Cmd::Send { room: room_id.clone(), body, reply_to: None, edit: None, mentions }).await.unwrap();
+    until(&mut alice_rx, "the sent message as an event", |rows| {
+        rows.iter().any(|m| m.own && m.id.starts_with('$') && m.rich.is_some() && !m.mentioned && !m.mentions.is_empty())
+    })
+    .await;
+
+    let bob_room = bob.get_room(&room_id).unwrap();
+    let mut seen = None;
+    for _ in 0..20 {
+        let resp = bob.sync_once(SyncSettings::default().timeout(Duration::from_secs(2))).await.unwrap();
+        if let Some(update) = resp.rooms.joined.get(&room_id) {
+            seen = to_msgs(&bob_room, &update.timeline.events).await.0.into_iter().find(|m| m.kind == Kind::Message && m.rich.is_some());
+        }
+        if seen.is_some() {
+            break;
+        }
+    }
+    let seen = seen.expect("bob never saw the message");
+    assert_eq!(seen.body, "hey Bob Builder, see @Bob Builder", "the pill's text is the bare name; code keeps the @");
+    assert!(seen.mentioned, "m.mentions names bob");
+    let named: Vec<&str> = seen.to_me.iter().map(|r| &seen.body[r.clone()]).collect();
+    assert_eq!(named[0], "Bob Builder");
 }

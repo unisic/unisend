@@ -217,7 +217,7 @@ impl BeeperApp {
         self.enter_chat(room.clone(), cx);
         // Before the files, which wait for their uploads.
         if !body.is_empty() {
-            self.send(Cmd::Send { room: room.clone(), body, reply_to: None, edit: None }, cx);
+            self.send(Cmd::Send { room: room.clone(), body, reply_to: None, edit: None, mentions: Vec::new() }, cx);
         }
         self.uploads += files.len();
         self.queue_attach(room, files, None, cx);

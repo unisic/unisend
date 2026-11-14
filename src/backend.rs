@@ -50,7 +50,7 @@ use matrix_sdk::{
             room::{
                 EncryptedFile, MediaSource,
                 message::{
-                    AddMentions, MessageFormat, MessageType, Relation, RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
+                    AddMentions, MessageFormat, MessageType, Relation, RoomMessageEventContent,
                     sanitize::remove_plain_reply_fallback,
                 },
             },
@@ -130,8 +130,9 @@ pub enum Cmd {
     SignOut,
     /// Re-read the latest message of rooms whose preview is missing or undecryptable.
     Previews(Vec<OwnedRoomId>),
-    /// `reply_to` and `edit` are event IDs; an edit replaces that message's text.
-    Send { room: OwnedRoomId, body: String, reply_to: Option<String>, edit: Option<String> },
+    /// `reply_to` and `edit` are event IDs; an edit replaces that message's text. `mentions` are
+    /// the people picked from the mention list, as (name, user).
+    Send { room: OwnedRoomId, body: String, reply_to: Option<String>, edit: Option<String>, mentions: Vec<(String, OwnedUserId)> },
     React { room: OwnedRoomId, target: String, key: String },
     /// Sets the user's vote on a poll to `answers`; empty withdraws it.
     Vote { room: OwnedRoomId, target: String, unstable: bool, answers: Vec<String> },
@@ -157,6 +158,8 @@ pub enum Cmd {
     GifStop,
     /// `query` is the search the GIF was found with, empty from trending.
     SendGif { room: OwnedRoomId, gif: gifs::Gif, query: String, reply_to: Option<String> },
+    /// The people in a chat, for the mention list.
+    Members(OwnedRoomId),
 }
 
 pub enum Ev {
@@ -204,6 +207,8 @@ pub enum Ev {
     GifPreview(String, Vec<u8>),
     /// A GIF finished sending, or failed.
     GifSent,
+    /// Joined members of a chat other than the user, as (user, name), at most `MAX_MEMBERS`.
+    Members { room: OwnedRoomId, list: Vec<(OwnedUserId, String)> },
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -297,6 +302,8 @@ pub struct Msg {
     pub mentions: Vec<std::ops::Range<usize>>,
     /// Someone else mentions the user, by name or with the whole room.
     pub mentioned: bool,
+    /// The ranges of `mentions` that name the user or the whole room.
+    pub to_me: Vec<std::ops::Range<usize>>,
     /// Preview of a link in the message, when the sender's client or bridge attached one.
     pub link: Option<Link>,
     /// One per emoji, in the order they were first used.
@@ -391,6 +398,7 @@ impl Msg {
             notify: false,
             mentions: Vec::new(),
             mentioned: false,
+            to_me: Vec::new(),
             link: None,
             reactions: Vec::new(),
             delivery: Delivery::Sent,
@@ -553,7 +561,7 @@ static COMMANDS: std::sync::OnceLock<mpsc::Sender<Cmd>> = std::sync::OnceLock::n
 pub(crate) fn reply(chat: &str, body: &str) -> bool {
     log::info!("notification: reply to {chat}");
     let (body, Ok(room)) = (body.trim(), OwnedRoomId::try_from(chat)) else { return false };
-    !body.is_empty() && COMMANDS.get().is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None }).is_ok())
+    !body.is_empty() && COMMANDS.get().is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None, mentions: Vec::new() }).is_ok())
 }
 
 /// Marks a chat read from its notification.
@@ -1129,8 +1137,8 @@ impl State {
                     });
                 }
             }
-            Cmd::Send { room, body, reply_to, edit } => {
-                let text = RoomMessageEventContentWithoutRelation::text_plain(body);
+            Cmd::Send { room, body, reply_to, edit, mentions } => {
+                let text = mentions::content(&body, &mentions);
                 match self.open.as_ref().filter(|open| open.room == room) {
                     // The timeline shows the message at once and keeps trying to send it.
                     Some(open) => match (edit, reply_to) {
@@ -1210,6 +1218,18 @@ impl State {
                         let _ = ev.send(Ev::Error(format!("GIF not sent: {e:#}"))).await;
                     }
                     let _ = ev.send(Ev::GifSent).await;
+                });
+            }
+            Cmd::Members(room_id) => {
+                let room = self.room(&room_id)?;
+                let own = self.client()?.user_id().context("Not signed in")?.to_owned();
+                let ev = self.ev.clone();
+                // Fetching a big chat's members can take a while; the command loop goes on meanwhile.
+                tokio::spawn(async move {
+                    match mentions::members(&room, &own).await {
+                        Ok(list) => drop(ev.send(Ev::Members { room: room_id, list }).await),
+                        Err(e) => log::warn!("members of {room_id}: {e:#}"),
+                    }
                 });
             }
         }
@@ -1947,7 +1967,7 @@ async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> (Vec<Msg>, Vec<Msg>) 
                     // The place's description is told with the place.
                     m.body = if m.place.is_some() { String::new() } else { text };
                     format(&mut m, msgtype);
-                    (m.mentions, m.mentioned) = marks(&m.body, msgtype, mentions, &own);
+                    (m.mentions, m.mentioned, m.to_me) = marks(&m.body, msgtype, mentions, &own);
                 }
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(r))) => {
                     let Some(target) = r.redacts(&rules.redaction) else { continue };
@@ -2086,9 +2106,9 @@ fn format(m: &mut Msg, msgtype: &MessageType) {
     }
 }
 
-/// Where `body` mentions someone, and whether it mentions `own`. Matrix writes a mention twice:
-/// as a link to the user in the HTML form, and in `m.mentions`.
-fn marks(body: &str, msgtype: &MessageType, mentions: Option<&Mentions>, own: &UserId) -> (Vec<std::ops::Range<usize>>, bool) {
+/// Where `body` mentions someone, whether it mentions `own`, and where it names `own`. Matrix
+/// writes a mention twice: as a link to the user in the HTML form, and in `m.mentions`.
+fn marks(body: &str, msgtype: &MessageType, mentions: Option<&Mentions>, own: &UserId) -> (Vec<std::ops::Range<usize>>, bool, Vec<std::ops::Range<usize>>) {
     let html = match msgtype {
         MessageType::Text(c) => c.formatted.as_ref(),
         MessageType::Notice(c) => c.formatted.as_ref(),
@@ -2099,7 +2119,8 @@ fn marks(body: &str, msgtype: &MessageType, mentions: Option<&Mentions>, own: &U
     let room = mentions.is_some_and(|m| m.room);
     let mentioned = room || mentions.is_some_and(|m| m.user_ids.contains(own)) || linked.iter().any(|(user, _)| user == own.as_str());
     let names: Vec<&str> = linked.iter().map(|(_, name)| name.as_str()).collect();
-    (mention_ranges(body, &names, room), mentioned)
+    let mine: Vec<&str> = linked.iter().filter(|(user, _)| user == own.as_str()).map(|(_, name)| name.as_str()).collect();
+    (mention_ranges(body, &names, room), mentioned, mention_ranges(body, &mine, room))
 }
 
 /// Users linked in a message's HTML as (user ID, link text).
@@ -2378,6 +2399,8 @@ pub(crate) mod rooms;
 
 mod export;
 pub use export::Export;
+
+mod mentions;
 
 #[cfg(test)]
 mod tests;

@@ -36,6 +36,8 @@ matrix-sdk-crypto = { version = "=0.19.1", default-features = false }
 fontdb = { version = "0.23", default-features = false }
 memmap2 = "0.9"
 ttf-parser = { version = "0.25", default-features = false }
+# Already in the tree (gpui-kit's Markdown view): the composer's CommonMark turned into Matrix HTML.
+markdown = { version = "1", default-features = false }
 # gpui-kit re-exports gpui (gpui-pre 0.3.6) and, on desktop, its platform layer.
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "13c716b687b47f96a677aaf46c8fa341fa7208da", default-features = false, features = ["component", "assets"] }
 
