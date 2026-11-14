@@ -71,6 +71,25 @@ public class GpuiActivity extends GpuiInputActivity {
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
         super.onCreate(savedInstanceState);
+        dev.gpui.beeper.AppLock.onCreate(this);
+    }
+
+    @Override
+    protected void onPause() {
+        dev.gpui.beeper.AppLock.onPause(this);
+        super.onPause();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        dev.gpui.beeper.AppLock.onResume(this);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        dev.gpui.beeper.AppLock.onResult(this, requestCode, resultCode);
     }
 
     /**

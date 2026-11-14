@@ -74,6 +74,15 @@ impl BeeperApp {
         self.send(Cmd::Incognito(on), cx);
     }
 
+    fn set_lock(&mut self, lock: Option<bool>, timeout: Option<u32>, secure: Option<bool>, cx: &mut Context<Self>) {
+        let l = &mut self.settings.lock;
+        (l.lock, l.timeout, l.secure) = (lock.unwrap_or(l.lock), timeout.unwrap_or(l.timeout_secs()), secure.unwrap_or(l.secure));
+        self.settings.save(&self.dir);
+        let l = &self.settings.lock;
+        crate::applock::configure(l.lock, l.timeout, l.secure);
+        cx.notify();
+    }
+
     fn choose_network(&mut self, bridge: &str, cx: &mut Context<Self>) {
         self.end_login(cx);
         self.panel = Some(Panel::Login);
@@ -235,6 +244,7 @@ impl BeeperApp {
             let _ = weak.update(cx, |this, cx| this.set_incognito(*on, cx));
         });
         let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
+        let security = cfg!(target_os = "android").then(|| self.render_security(cx));
         v_flex()
             .gap(px(GAP * 2.))
             .child(section("Appearance", cx).child(
@@ -262,6 +272,7 @@ impl BeeperApp {
             .child(section("Privacy", cx).child(card(cx).child(
                 row("Incognito", "Others do not see that you have read their messages.", cx).child(incognito),
             )))
+            .children(security)
             .child(
                 section("Account", cx).child(
                     card(cx).child(row(if self.beeper { "Beeper" } else { "Matrix" }, &user, cx)).child(
@@ -281,6 +292,57 @@ impl BeeperApp {
                 ),
             )
             .child(div().text_size(px(12.)).text_color(p.faint).child(concat!("Murmur ", env!("CARGO_PKG_VERSION"))))
+    }
+
+    /// Screen lock with its timeout, and screen security. Android only: desktop has neither.
+    fn render_security(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let lock = self.settings.lock.clone();
+        let can_lock = crate::applock::available();
+        let weak = cx.entity().downgrade();
+        let lock_switch = Switch::new("screen-lock").checked(lock.lock && can_lock).on_click({
+            let weak = weak.clone();
+            move |on, _, cx| {
+                let _ = weak.update(cx, |this, cx| this.set_lock(Some(*on), None, None, cx));
+            }
+        });
+        let secure_switch = Switch::new("screen-security").checked(lock.secure).on_click(move |on, _, cx| {
+            let _ = weak.update(cx, |this, cx| this.set_lock(None, None, Some(*on), cx));
+        });
+        let timeouts = h_flex().flex_wrap().gap(px(4.)).pb(px(8.)).children(crate::applock::TIMEOUTS.map(|(secs, label)| {
+            let on = lock.timeout_secs() == secs;
+            div()
+                .id(SharedString::from(format!("lock-after-{secs}")))
+                .h(px(36.))
+                .px(px(GAP))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .text_size(px(14.))
+                .text_color(if on { p.ground } else { p.muted })
+                .bg(if on { p.text } else { p.raised })
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| this.set_lock(None, Some(secs), None, cx)))
+                .child(label)
+        }));
+        section("Security", cx).child(
+            card(cx)
+                .child(
+                    row(
+                        "Screen lock",
+                        if can_lock {
+                            "Ask for your fingerprint, face or device lock when the app is opened."
+                        } else {
+                            "Set a PIN, pattern or password in the system settings first."
+                        },
+                        cx,
+                    )
+                    .when(can_lock, |el| el.child(lock_switch)),
+                )
+                .when(lock.lock && can_lock, |el| el.child(row("Lock after leaving the app", "", cx)).child(timeouts))
+                .child(row("Screen security", "Blocks screenshots and hides the app in the recent apps list.", cx).child(secure_switch)),
+        )
+        .into_any_element()
     }
 
     fn render_networks(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

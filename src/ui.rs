@@ -438,6 +438,8 @@ impl BeeperApp {
                 self.open_from_notification(cx);
                 self.user = Some(user);
                 self.send(Cmd::Incognito(self.settings.incognito), cx);
+                let l = &self.settings.lock;
+                crate::applock::configure(l.lock, l.timeout_secs(), l.secure);
                 self.screen = Screen::Main;
                 self.busy = false;
                 self.error = None;
@@ -2715,6 +2717,10 @@ impl BeeperApp {
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
+        if self.settings.lock.lock && crate::applock::is_locked() {
+            crate::applock::watch(cx);
+            return crate::applock::screen(cx).into_any_element();
+        }
         let (top, bottom) = crate::insets();
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);

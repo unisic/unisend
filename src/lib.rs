@@ -4,6 +4,7 @@
 // The matrix-sdk futures nested in the command handler exceed the default layout query depth.
 #![recursion_limit = "256"]
 
+mod applock;
 mod backend;
 mod beeper;
 mod bridges;
@@ -217,6 +218,8 @@ pub(crate) struct Settings {
     /// Family name of the user's own emoji font, kept as `emoji::FILE`; `None` for the system's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emoji_font: Option<String>,
+    #[serde(default)]
+    pub lock: applock::LockSettings,
 }
 
 impl Settings {
@@ -230,7 +233,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, lock: Default::default() })
     }
 
     fn parse(raw: &[u8]) -> Option<Self> {
