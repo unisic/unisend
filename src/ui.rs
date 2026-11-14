@@ -18,6 +18,7 @@ use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
 use tokio::sync::mpsc;
 
 mod cards;
+mod gallery;
 mod menu;
 pub(crate) mod motion;
 mod panels;
@@ -221,6 +222,11 @@ pub struct BeeperApp {
     strip_epoch: usize,
     /// The chat whose actions are showing.
     chat_sheet: Option<OwnedRoomId>,
+    /// The attach sheet's photos and videos.
+    gallery: gallery::Gallery,
+    /// Attachments waiting for the one uploading now, so a batch keeps its order.
+    attach_queue: VecDeque<Cmd>,
+    attaching: bool,
     /// The chat whose sheet is still falling after it closed.
     sheet_last: Option<OwnedRoomId>,
     /// The phone's last move between the chat list and a chat: when, and whether it went in.
@@ -371,6 +377,9 @@ impl BeeperApp {
             strip_last: None,
             strip_epoch: 0,
             chat_sheet: None,
+            gallery: gallery::Gallery::default(),
+            attach_queue: VecDeque::new(),
+            attaching: false,
             sheet_last: None,
             nav: None,
             viewer_last: None,
@@ -476,7 +485,11 @@ impl BeeperApp {
                     crate::open_file(cx, &path, mime.as_deref());
                 }
             }
-            Ev::Attached => self.uploads = self.uploads.saturating_sub(1),
+            Ev::Attached => {
+                self.uploads = self.uploads.saturating_sub(1);
+                self.attaching = false;
+                self.next_attach(cx);
+            }
             Ev::Rooms(changed) => {
                 let mut by_id: HashMap<_, _> = self.rooms.drain(..).map(|r| (r.id.clone(), r)).collect();
                 by_id.extend(changed.into_iter().map(|r| (r.id.clone(), r)));
@@ -689,6 +702,8 @@ impl BeeperApp {
             self.close_viewer(cx);
         } else if self.menu_open() {
             self.close_menu(cx);
+        } else if self.gallery.open {
+            self.close_gallery(cx);
         } else if self.chat_sheet.take().is_some() {
             cx.notify();
         } else if self.compose != Compose::New {
@@ -765,6 +780,15 @@ impl BeeperApp {
     }
 
     fn attach(&mut self, cx: &mut Context<Self>) {
+        if gallery::enabled() {
+            self.open_gallery(cx);
+        } else {
+            self.attach_file(cx);
+        }
+    }
+
+    /// The system's picker, for documents and for anything on desktop.
+    fn attach_file(&mut self, cx: &mut Context<Self>) {
         let picked = crate::pick_file(cx);
         cx.spawn(async move |this, cx| {
             let Some(path) = picked.await else { return };
@@ -774,9 +798,8 @@ impl BeeperApp {
                     Compose::Reply(id) => Some(id),
                     _ => None,
                 };
-                if this.send(Cmd::Attach { room, path, reply_to }, cx) {
-                    this.uploads += 1;
-                }
+                this.uploads += 1;
+                this.queue_attach(room, vec![path], reply_to, cx);
             });
         })
         .detach();
@@ -941,6 +964,7 @@ impl BeeperApp {
     }
 
     fn close_room(&mut self, cx: &mut Context<Self>) {
+        self.close_gallery(cx);
         if let Some(room) = self.open.take() {
             if self.typing_sent.take().is_some() {
                 let _ = self.cmd.try_send(Cmd::Typing(room, false));
@@ -2767,10 +2791,12 @@ impl Render for BeeperApp {
                 // Sampled every frame, so a falling sheet finishes even when a message menu opens.
                 let chat_sheet = self.render_chat_sheet(window, cx);
                 let sheet = self.render_message_menu(window, cx).or(chat_sheet);
+                let gallery = self.render_gallery(window, cx);
                 root.relative()
                     .child(self.render_banners(window, cx))
                     .child(div().flex_1().min_h_0().child(body))
                     .children(sheet)
+                    .children(gallery)
                     .children(viewer)
                     .into_any_element()
             }

@@ -1023,10 +1023,15 @@ impl State {
                 });
             }
             Cmd::Attach { room, path, reply_to } => {
-                let room = self.room(&room)?;
+                // `Attached` follows every attachment, sent or not: the next one waits for it.
+                let room = self.room(&room);
                 let ev = self.ev.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = attach(&room, &path, reply_to).await {
+                    let sent = match room {
+                        Ok(room) => attach(&room, &path, reply_to).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = sent {
                         let _ = ev.send(Ev::Error(format!("Attachment not sent: {e:#}"))).await;
                     }
                     let _ = ev.send(Ev::Attached).await;
