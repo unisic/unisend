@@ -9,6 +9,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
+    spinner::Spinner,
     v_flex,
 };
 use gpui_kit::base::{Presence, PresencePhase, Transition, spring, transition};
@@ -27,6 +28,7 @@ pub(crate) mod motion;
 mod panels;
 mod rich;
 mod signin;
+mod video;
 
 use std::path::PathBuf;
 
@@ -491,8 +493,11 @@ impl BeeperApp {
             Ev::Fetched(id, path) => {
                 self.fetching.remove(&id);
                 if let Some(path) = path {
-                    let mime = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()?.mime.clone());
-                    crate::open_file(cx, &path, mime.as_deref());
+                    let media = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref());
+                    if !media.is_some_and(|media| video::play(&path, media)) {
+                        let mime = media.and_then(|media| media.mime.clone());
+                        crate::open_file(cx, &path, mime.as_deref());
+                    }
                 }
             }
             Ev::Attached => {
@@ -780,7 +785,8 @@ impl BeeperApp {
         }
     }
 
-    /// A tap on an attachment: pictures open full-screen, everything else in the system's app.
+    /// A tap on an attachment: pictures open full-screen, videos on Android in the app's player,
+    /// everything else in the system's app.
     fn open_media(&mut self, id: String, media: Media, cx: &mut Context<Self>) {
         if matches!(media.kind, MediaKind::Image | MediaKind::Sticker) {
             if self.send(Cmd::View(id.clone(), media), cx) {
@@ -867,7 +873,13 @@ impl BeeperApp {
                                 .rounded_full()
                                 .bg(gpui_kit::black().opacity(0.55))
                                 .text_color(gpui_kit::white())
-                                .child(Icon::new(IconName::Play).size_5()),
+                                .map(|el| {
+                                    if self.fetching.contains(&m.id) {
+                                        el.child(Spinner::new().color(gpui_kit::white()))
+                                    } else {
+                                        el.child(Icon::new(IconName::Play).size_5())
+                                    }
+                                }),
                         ),
                     )
                     .children(media.duration.map(|d| {

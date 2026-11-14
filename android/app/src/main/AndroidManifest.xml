@@ -78,6 +78,13 @@
             android:windowSoftInputMode="adjustResize"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
 
+        <!-- Full-screen video player. Turning the phone keeps the activity, so playback goes on. -->
+        <activity
+            android:name="dev.gpui.beeper.Player"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode"
+            android:exported="false"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
+
         <!-- Lets other apps open a downloaded attachment, one grant per file. -->
         <provider
             android:name="androidx.core.content.FileProvider"
