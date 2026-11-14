@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Lets Android 13+ set Murmur's language apart from the phone's (Settings, Apps, Murmur, Language). -->
+<locale-config xmlns:android="http://schemas.android.com/apk/res/android">
+    <locale android:name="en" />
+    <locale android:name="pl" />
+</locale-config>

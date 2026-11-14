@@ -1187,6 +1187,7 @@ impl State {
                 self.rooms.lock().unwrap().clear();
                 let _ = std::fs::remove_file(self.session_path());
                 let _ = std::fs::remove_file(rooms_path(&self.dir));
+                let _ = std::fs::remove_file(rooms_lang_path(&self.dir));
                 let _ = std::fs::remove_dir_all(self.dir.join("store"));
                 let _ = std::fs::remove_dir_all(media_dir(&self.dir));
                 search::wipe(&self.dir);
@@ -1693,8 +1694,22 @@ fn rooms_path(dir: &Path) -> PathBuf {
     dir.join("rooms.json")
 }
 
+/// The interface language the cached previews were written in; caches without it are English.
+fn rooms_lang_path(dir: &Path) -> PathBuf {
+    dir.join("rooms-lang.txt")
+}
+
+fn rooms_lang() -> &'static str {
+    if crate::i18n::polish() { "pl" } else { "en" }
+}
+
 fn load_rooms(dir: &Path) -> Option<HashMap<OwnedRoomId, RoomSummary>> {
-    serde_json::from_slice(&std::fs::read(rooms_path(dir)).ok()?).ok()
+    let mut rooms: HashMap<OwnedRoomId, RoomSummary> = serde_json::from_slice(&std::fs::read(rooms_path(dir)).ok()?).ok()?;
+    // Previews are text in the interface language: after a switch, each chat's is read again.
+    if std::fs::read_to_string(rooms_lang_path(dir)).unwrap_or_else(|_| "en".into()) != rooms_lang() {
+        rooms.values_mut().for_each(|r| r.dated = false);
+    }
+    Some(rooms)
 }
 
 async fn watch_recovery(client: Client, ev: mpsc::Sender<Ev>) {
@@ -2054,7 +2069,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
         // Probes change summaries between syncs; only this loop writes the file.
         if !changed.is_empty() || gone || UNSAVED_PROBES.swap(false, std::sync::atomic::Ordering::Relaxed) {
             let saved = serde_json::to_vec(&*rooms.lock().unwrap()).map_err(anyhow::Error::from);
-            if let Err(e) = saved.and_then(|b| write_private(&rooms_path(&dir), &b)) {
+            let saved = saved.and_then(|b| write_private(&rooms_path(&dir), &b)).and_then(|()| write_private(&rooms_lang_path(&dir), rooms_lang().as_bytes()));
+            if let Err(e) = saved {
                 log::warn!("rooms.json: {e:#}");
             }
         }
