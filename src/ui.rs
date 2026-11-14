@@ -22,6 +22,7 @@ mod cards;
 mod gallery;
 mod heart;
 mod location;
+mod gifs;
 mod menu;
 pub(crate) mod motion;
 mod panels;
@@ -230,6 +231,7 @@ pub struct BeeperApp {
     /// The attach sheet's photos and videos.
     gallery: gallery::Gallery,
     location: location::Locate,
+    gifs: gifs::Picker,
     /// Attachments waiting for the one uploading now, so a batch keeps its order.
     attach_queue: VecDeque<Cmd>,
     attaching: bool,
@@ -386,6 +388,7 @@ impl BeeperApp {
             chat_sheet: None,
             gallery: gallery::Gallery::default(),
             location: location::Locate::default(),
+            gifs: gifs::Picker::default(),
             attach_queue: VecDeque::new(),
             attaching: false,
             sheet_last: None,
@@ -580,6 +583,9 @@ impl BeeperApp {
                 self.busy = false;
                 self.loading = false;
             }
+            Ev::Gifs { query, page, found } => self.on_gifs(query, page, found),
+            Ev::GifPreview(url, bytes) => self.on_gif_preview(url, bytes),
+            Ev::GifSent => self.uploads = self.uploads.saturating_sub(1),
         }
         cx.notify();
     }
@@ -716,6 +722,8 @@ impl BeeperApp {
             self.close_location(cx);
         } else if self.gallery.open {
             self.close_gallery(cx);
+        } else if self.gifs_open() {
+            self.close_gifs(cx);
         } else if self.chat_sheet.take().is_some() {
             cx.notify();
         } else if self.compose != Compose::New {
@@ -977,6 +985,7 @@ impl BeeperApp {
 
     fn close_room(&mut self, cx: &mut Context<Self>) {
         self.close_gallery(cx);
+        self.close_gifs(cx);
         if let Some(room) = self.open.take() {
             if self.typing_sent.take().is_some() {
                 let _ = self.cmd.try_send(Cmd::Typing(room, false));
@@ -1816,6 +1825,7 @@ impl BeeperApp {
                     .pr(px(GUTTER))
                     .py(px(8.))
                     .child(round_button("attach", IconName::Paperclip, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| this.attach(cx))))
+                    .children(self.gif_button(cx))
                     .child(
                         div()
                             .flex_1()
@@ -2810,12 +2820,14 @@ impl Render for BeeperApp {
                 let gallery = self.render_gallery(window, cx);
                 let heart = self.render_heart(window, cx);
                 let location = self.render_location(window, cx);
+                let gifs = self.render_gifs(window, cx);
                 root.relative()
                     .child(self.render_banners(window, cx))
                     .child(div().flex_1().min_h_0().child(body))
                     .children(sheet)
                     .children(gallery)
                     .children(location)
+                    .children(gifs)
                     .children(viewer)
                     .children(heart)
                     .into_any_element()

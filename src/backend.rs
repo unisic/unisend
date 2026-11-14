@@ -141,6 +141,12 @@ pub enum Cmd {
     Retry { room: OwnedRoomId, target: String },
     /// Sends the user's position as an `m.location` message.
     SendLocation { room: OwnedRoomId, lat: f64, lon: f64, accuracy: Option<f64>, reply_to: Option<String> },
+    /// A page of KLIPY GIFs: trending when `query` is empty. Page 1 stops the previous search.
+    GifSearch { query: String, page: u32 },
+    /// The GIF picker closed.
+    GifStop,
+    /// `query` is the search the GIF was found with, empty from trending.
+    SendGif { room: OwnedRoomId, gif: gifs::Gif, query: String, reply_to: Option<String> },
 }
 
 pub enum Ev {
@@ -177,6 +183,12 @@ pub enum Ev {
     /// A request made for the settings pages failed; `Error` carries the reason.
     PanelFailed,
     Error(String),
+    /// A page of GIFs for the picker; `None` when it could not be loaded.
+    Gifs { query: String, page: u32, found: Option<gifs::Found> },
+    /// A GIF's preview (JPEG) by its URL.
+    GifPreview(String, Vec<u8>),
+    /// A GIF finished sending, or failed.
+    GifSent,
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -1140,6 +1152,23 @@ impl State {
                     },
                     None => drop(self.room(&room)?.send_queue().send(RoomMessageEventContent::from(place).into()).await?),
                 }
+            }
+            Cmd::GifSearch { query, page } => gifs::search(self.http.clone(), self.dir.clone(), self.ev.clone(), query, page),
+            Cmd::GifStop => gifs::stop(),
+            Cmd::SendGif { room, gif, query, reply_to } => {
+                let network = self.rooms.lock().unwrap().get(&room).and_then(|r| r.network.clone());
+                let room = self.room(&room);
+                let (http, dir, ev) = (self.http.clone(), self.dir.clone(), self.ev.clone());
+                tokio::spawn(async move {
+                    let sent = match room {
+                        Ok(room) => gifs::send(&http, &dir, &room, &gif, &query, network.as_deref(), reply_to).await,
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = sent {
+                        let _ = ev.send(Ev::Error(format!("GIF not sent: {e:#}"))).await;
+                    }
+                    let _ = ev.send(Ev::GifSent).await;
+                });
             }
         }
         Ok(())
@@ -2279,6 +2308,8 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
 }
 
 mod location;
+mod gifs;
+pub(crate) use gifs::{Found as GifPage, Gif, enabled as gifs_enabled};
 mod polls;
 mod rich;
 pub use rich::{Block, Rich, Run};

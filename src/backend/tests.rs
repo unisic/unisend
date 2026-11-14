@@ -1058,3 +1058,50 @@ async fn a_chat_opens_at_once_after_the_store_lost_its_events() {
     // The SDK waits up to 3 s for a sync to tell it where the chat's history starts.
     assert!(took < Duration::from_secs(2), "the messages took {took:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, and static.klipy.com"]
+async fn a_gif_arrives_as_a_marked_mp4_in_an_encrypted_chat() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-gif-{tag}"));
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    let room = alice.client().unwrap().create_dm(bob.user_id().unwrap()).await.unwrap();
+    assert!(room.latest_encryption_state().await.unwrap().is_encrypted());
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    bob.join_room_by_id(room.room_id()).await.unwrap();
+
+    let gif = gifs::parse(include_bytes!("klipy-trending.json")).unwrap().gifs.remove(0);
+    gifs::send(&alice.http, &root, &room, &gif, "", None, None).await.unwrap();
+
+    let mut content = None;
+    for _ in 0..20 {
+        bob.sync_once(SyncSettings::default().timeout(Duration::from_secs(1))).await.unwrap();
+        let messages = bob.get_room(room.room_id()).unwrap().messages(MessagesOptions::backward()).await.unwrap();
+        content = messages.chunk.iter().find_map(|e| {
+            let c: serde_json::Value = e.raw().get_field("content").ok()??;
+            (c["msgtype"] == "m.video").then_some(c)
+        });
+        if content.is_some() {
+            break;
+        }
+    }
+    let content = content.expect("the GIF reached bob decrypted");
+    let info = &content["info"];
+    assert_eq!((info["mimetype"].as_str(), info["fi.mau.gif"].as_bool(), info["fi.mau.loop"].as_bool()), (Some("video/mp4"), Some(true), Some(true)));
+    assert!(content["file"]["url"].as_str().is_some_and(|u| u.starts_with("mxc://")), "encrypted upload: {content}");
+    assert!(info["thumbnail_file"]["url"].as_str().is_some(), "encrypted thumbnail: {content}");
+    let file: EncryptedFile = serde_json::from_value(content["file"].clone()).unwrap();
+    let request = MediaRequestParameters { source: MediaSource::Encrypted(Box::new(file)), format: MediaFormat::File };
+    let mp4 = bob.media().get_media_content(&request, false).await.unwrap();
+    assert_eq!(&mp4[4..8], b"ftyp", "the file is an MP4");
+    assert_eq!(info["size"].as_u64(), Some(mp4.len() as u64));
+}
