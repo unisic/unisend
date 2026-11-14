@@ -177,6 +177,8 @@ pub enum Cmd {
     VerifyCancel,
     /// One step of signing out another device.
     SignOutDevice { device: String, proof: verify::Proof },
+    /// Sets the chat's disappearing message timer, in ms; 0 turns it off.
+    SetDisappear { room: OwnedRoomId, ms: u64 },
 }
 
 pub enum Ev {
@@ -234,6 +236,8 @@ pub enum Ev {
     Verify(verify::Verify),
     /// What signing out a device needs next; `Ok(None)` when it is signed out.
     SignOutStep(Result<Option<verify::Auth>, String>),
+    /// The open chat's disappearing messages, when it opens and whenever its timer changes.
+    Disappear { room: OwnedRoomId, setting: Disappearing },
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -337,6 +341,9 @@ pub struct Msg {
     pub delivery: Delivery,
     /// The other people whose read receipt stands on this row: they have read this far.
     pub seen: Vec<OwnedUserId>,
+    /// The message disappears after this many ms (`com.beeper.disappearing_timer`); 0 when it
+    /// stays. On a bridge's status row: the timer the bridge gave the user's message.
+    pub disappear: u64,
 }
 
 /// What a row of a conversation is.
@@ -428,6 +435,7 @@ impl Msg {
             reactions: Vec::new(),
             delivery: Delivery::Sent,
             seen: Vec::new(),
+            disappear: 0,
         }
     }
 }
@@ -1325,6 +1333,15 @@ impl State {
                 let rooms = to.iter().map(|id| self.room(id)).collect::<Result<Vec<_>>>()?;
                 let done = forward::forward(&open.timeline, &targets, &rooms).await?;
                 self.emit(Ev::Forwarded(done)).await;
+            }
+            Cmd::SetDisappear { room, ms } => {
+                let room = self.room(&room)?;
+                let mut setting = disappear::read(&room).await;
+                let content = setting.content(ms).filter(|_| setting.allowed).context("This chat does not take that timer")?;
+                room.send_state_event_raw(disappear::TIMER, "", content).await?;
+                // The bridge answers with the new state, which reads it again; until then, this.
+                setting.ms = ms;
+                self.emit(Ev::Disappear { room: room.room_id().to_owned(), setting }).await;
             }
         }
         Ok(())
@@ -2515,6 +2532,8 @@ pub use pollnew::NewPoll;
 
 mod timeline;
 mod video;
+mod disappear;
+pub use disappear::{Disappearing, label as disappear_label};
 
 pub(crate) mod rooms;
 

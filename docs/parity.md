@@ -70,7 +70,7 @@ is not started.
 | Read receipts of others, typing | part | "Seen" in a one-to-one chat, "Seen by ..." in a group; who is typing in the open chat, and the user's own typing is sent unless incognito is on (Beeper keeps sending it and asks separately). No per-message receipts, no typing in the chat list |
 | Polls, locations, contacts | part | polls of the `org.matrix.msc3381` types (what bridges send) are shown with their votes, counted by the SDK, and can be voted on; the stable `m.poll.*` types only reach the chat list's preview. A poll is made from the attach sheet's Poll entry (question, 2 to 20 options, one or several answers; 140 characters each, the Messenger limit) and the user's own open polls end from the message menu. Locations show a card with coordinates that opens in maps (Android: the maps app; elsewhere OpenStreetMap). Sending the current location is built on Android (attach sheet, Location: one fix, preview card with accuracy, `m.location` with `geo_uri` and MSC3488 fields). Contact files (`.vcf`, as WhatsApp and Signal bridges send them) show as a card with name and numbers; Android adds it through the system's new-contact screen, desktop copies the number. Android can send a contact from the attach sheet as a `text/vcard` file |
 | Threads | todo | `m.thread` |
-| Disappearing messages | todo | `com.beeper.disappearing_timer` |
+| Disappearing messages | done | state event `com.beeper.disappearing_timer` (`{type, timer}` in ms, `{}` off) shown under the chat's name and as a line when it changes; set from the chat's sheet with the timers the bridge lists in `com.beeper.room_features` `disappearing_timer` (read only, with the reason, where it lists none or power levels forbid it); a message whose content or bridge status carries the timer gets a timer mark. The bridge's own notice of a change is hidden as the line already tells it. Expired messages are redacted by the bridge |
 | Search in chat, media gallery, bookmarks | todo | `com.beeper.bookmark`, `com.beeper.gallery` |
 | Chat info: members, admin actions, leave, block | todo | room state, `com.beeper.user_blocked` |
 | Screen lock, screen security (Android) | done | local only: `AppLock.java` asks `BiometricPrompt` (API 29+, biometric or device credential) or the keyguard credential screen (API 26 to 28) after a chosen time in the background; `FLAG_SECURE` for screenshots and recents |
@@ -126,7 +126,7 @@ Verified in the source: typing, read receipts of others and membership changes a
 | Polls and votes | yes | yes | groups | no | shown, vote, create, end |
 | Locations | yes | to Signal only | from Messenger only | no | shown with coordinates, opens in maps; sent from Android: WhatsApp gets a location, Signal a map link as text, Messenger may refuse, Instagram cannot (the sheet says so first) |
 | Contact cards | from WhatsApp | from Signal | no | no | not checked |
-| Disappearing messages | no | yes | no | no | timer not shown |
+| Disappearing messages | yes: 24 h, 7 d, 90 d | yes: any timer, after read | shown, not set from Matrix | no | shown and set where the bridge allows |
 | Typing, read receipts of others | yes | yes | yes | yes | shown in the open chat |
 | GIFs, stickers received | not listed | yes | yes | yes | stickers shown; GIFs sent from the KLIPY picker: WhatsApp `GifPlayback` and Signal's GIF flag from `fi.mau.gif`, Meta gets the GIF file (not checked on a bridge) |
 | Story, reel and profile shares | no | no | yes | stories | not checked how they arrive |
@@ -147,7 +147,6 @@ them was taken from its desktop bundle, and the state events were checked agains
 3. Inline video playback. M.
 4. Creating and ending polls, sending a location. S each.
 5. Mentions autocomplete; forward; paste and drag and drop attachments. S each.
-6. Disappearing-message timer shown. S.
 7. New chat from a contact, chat info and group admin. L.
 8. Notifications on the desktop, and without the app running (needs Google's push, FCM). L.
 

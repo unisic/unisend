@@ -1370,3 +1370,84 @@ async fn a_forward_reuses_the_file_and_drops_the_reply() {
 }
 
 mod sessions;
+
+/// A bridge's timer: read with what the bridge takes, set from here, told as a line, and marked on
+/// the messages it applies to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn a_disappearing_timer_is_read_set_and_told() {
+    const DAY: u64 = 86_400_000;
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-disappear-{tag}"));
+
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+    req.invite = vec![alice.client().unwrap().user_id().unwrap().to_owned()];
+    let room = bob.create_room(req).await.unwrap();
+    let room_id = room.room_id().to_owned();
+    // What WhatsApp's bridge says it takes, and a timer anyone in the chat may set, as bridges allow
+    // in a one-to-one chat.
+    let features = serde_json::json!({ "disappearing_timer": { "types": ["after_send"], "timers": [DAY, 7 * DAY] } });
+    room.send_state_event_raw("com.beeper.room_features", "fi.mau.whatsapp", features).await.unwrap();
+    // The room's creator outranks everyone without being listed (room version 12).
+    let levels = serde_json::json!({ "events": { "com.beeper.disappearing_timer": 0 }, "state_default": 50, "users_default": 0 });
+    room.send_state_event_raw("m.room.power_levels", "", levels).await.unwrap();
+    alice.client().unwrap().join_room_by_id(&room_id).await.unwrap();
+    wait_for(&mut seat, "the chat in the list", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id).then_some(()),
+        _ => None,
+    })
+    .await;
+
+    alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
+    let read = wait_for(&mut seat, "the timer", |e| match e {
+        Ev::Disappear { setting, .. } => Some(setting),
+        _ => None,
+    })
+    .await;
+    assert_eq!(read.ms, 0);
+    assert!(read.settable(), "{read:?}");
+    assert_eq!(read.choices.as_ref().unwrap().timers, [DAY, 7 * DAY]);
+
+    alice.handle(Cmd::SetDisappear { room: room_id.clone(), ms: DAY }).await.unwrap();
+    until(&mut seat, "the line of the change", |rows| rows.iter().any(|m| m.kind == Kind::Notice && m.body == "You set disappearing messages to 1 day")).await;
+    // The newest word on the timer, once the change has come back by sync, is the new one.
+    let mut last = None;
+    let settle = tokio::time::Instant::now() + Duration::from_secs(3);
+    while let Ok(Some(ev)) = tokio::time::timeout_at(settle, seat.rx.recv()).await {
+        match ev {
+            Ev::Timeline { diffs, .. } => {
+                for diff in diffs {
+                    apply(&mut seat.rows, diff);
+                }
+            }
+            Ev::Disappear { setting, .. } => last = Some(setting.ms),
+            _ => {}
+        }
+    }
+    assert_eq!(last.unwrap_or(DAY), DAY);
+    assert_eq!(disappear::read(&alice.room(&room_id).unwrap()).await.ms, DAY);
+    assert!(alice.handle(Cmd::SetDisappear { room: room_id.clone(), ms: 3_600_000 }).await.is_err(), "a timer the bridge does not take");
+
+    // As the bridge sends a message from the other network, and its own notice of a change.
+    room.send_raw("m.room.message", serde_json::json!({ "msgtype": "m.text", "body": "gone tomorrow", "com.beeper.disappearing_timer": { "type": "after_send", "timer": DAY } })).await.unwrap();
+    room.send_raw(
+        "m.room.message",
+        serde_json::json!({ "msgtype": "m.notice", "body": "Set the disappearing message timer to 1d", "com.beeper.action_message": { "type": "disappearing_timer", "timer": DAY, "implicit": false } }),
+    )
+    .await
+    .unwrap();
+    room.send(RoomMessageEventContent::text_plain("after")).await.unwrap();
+    until(&mut seat, "the messages", |rows| bodies(rows).iter().any(|b| b == "after")).await;
+    let gone = seat.rows.iter().find(|m| m.body == "gone tomorrow").unwrap();
+    assert_eq!(gone.disappear, DAY);
+    assert!(!seat.rows.iter().any(|m| m.kind != Kind::Hidden && m.body.starts_with("Set the disappearing")), "the bridge's notice repeats the line");
+}

@@ -25,6 +25,7 @@ mod cards;
 mod emojipick;
 mod contacts;
 mod forward;
+mod disappear;
 mod gallery;
 mod heart;
 mod location;
@@ -296,6 +297,7 @@ pub struct BeeperApp {
     _events: Task<()>,
     /// Leaving chats and starting new ones.
     people: rooms::People,
+    disappear: disappear::Disappear,
 }
 
 impl BeeperApp {
@@ -482,6 +484,7 @@ impl BeeperApp {
             _subs: subs,
             _events: events,
             people: Default::default(),
+            disappear: disappear::Disappear::default(),
         }
     }
 
@@ -677,6 +680,7 @@ impl BeeperApp {
             Ev::Members { room, list } => self.members_arrived(room, list, cx),
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
             ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_)) => self.on_verify_event(ev, cx),
+            Ev::Disappear { room, setting } => self.on_disappear(room, setting),
         }
         cx.notify();
     }
@@ -1469,6 +1473,7 @@ impl BeeperApp {
                                 move |this, event: &ClickEvent, _, cx| {
                                     if event.is_secondary() {
                                         this.chat_sheet = Some(id.clone());
+                                        this.disappear.picking = false;
                                         cx.notify();
                                     }
                                 }
@@ -1866,7 +1871,18 @@ impl BeeperApp {
                                     (Some((state, _)), false) => state,
                                     (None, _) => clock(m.ts),
                                 };
-                                el.child(div().px(px(GAP)).pt(px(4.)).text_size(fs(12.)).font_features(tabular()).text_color(if failed { p.negative } else { this.on_wallpaper(p.faint, cx) }).child(text))
+                                let ink = if failed { p.negative } else { this.on_wallpaper(p.faint, cx) };
+                                el.child(
+                                    h_flex()
+                                        .gap(px(3.))
+                                        .px(px(GAP))
+                                        .pt(px(4.))
+                                        .text_size(fs(12.))
+                                        .font_features(tabular())
+                                        .text_color(ink)
+                                        .when(this.disappears(ix), |el| el.child(Icon::new(IconName::Timer).size_3().text_color(ink)))
+                                        .child(text),
+                                )
                             }),
                     )
                     .children(this.selection_mark(m, cx))
@@ -1895,11 +1911,12 @@ impl BeeperApp {
                             .min_w_0()
                             .pl(px(8.))
                             .child(div().text_size(fs(16.)).line_height(fs(20.)).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
-                            .children(network.map(|n| div().text_size(fs(12.)).line_height(fs(16.)).text_color(p.faint).truncate().child(n))),
+                            .children(self.header_subline(network, cx)),
                     )
                     .when(room.is_some(), |el| {
                         el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, _, _, cx| {
                             this.chat_sheet = this.open.clone();
+                            this.disappear.picking = false;
                             cx.notify();
                         })))
                     }),
@@ -2245,6 +2262,11 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let room = self.sheet_last.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id))?;
         let (id, title) = (room.id.clone(), room.name.clone());
+        if self.disappear.picking
+            && let Some((title, rows)) = self.disappear_sheet(&id, live, cx)
+        {
+            return Some(self.sheet(title, rows, shown.progress, live, cx));
+        }
         let mut rows: Vec<_> = chat_actions(room)
             .into_iter()
             .map(|(label, icon, action)| {
@@ -2260,6 +2282,7 @@ impl BeeperApp {
                 }))
             })
             .collect();
+        rows.extend(self.disappear_entry(&id, live, cx));
         rows.push(self.leave_row(id, live, cx));
         Some(self.sheet(title, rows, shown.progress, live, cx))
     }
