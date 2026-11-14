@@ -54,6 +54,25 @@ pub(crate) fn apply(settings: &mut Settings, dir: &Path, cx: &mut gpui_kit::App)
     true
 }
 
+/// Makes the APK's bundled copy (already named and given an 'm', see `assets/fonts/README`) the
+/// emoji family. On Android that holds only when the system's own face is not CBDT: then
+/// gpui-mobile loads the system face instead, and requesting the family would drop it.
+pub(crate) fn use_bundled() {
+    #[cfg(target_os = "android")]
+    if has_cbdt(Path::new("/system/fonts/NotoColorEmoji.ttf")) {
+        return;
+    }
+    let _ = CHAIN.set(gpui_kit::FontFallbacks::from_fonts(vec![FAMILY.into()]));
+}
+
+#[cfg(target_os = "android")]
+fn has_cbdt(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else { return false };
+    let Ok(head) = read_at(&mut file, 0, 12) else { return false };
+    let count = usize::from(be16(&head, 4).unwrap_or(0));
+    read_at(&mut file, 12, 16 * count).is_ok_and(|records| records.chunks(16).any(|r| r.starts_with(b"CBDT")))
+}
+
 static CHAIN: OnceLock<gpui_kit::FontFallbacks> = OnceLock::new();
 
 /// For the root text style, once the user's own font is in: it then draws every grapheme whose
@@ -431,6 +450,19 @@ mod tests {
         assert_eq!(glyph('m'), glyph(' '));
         assert!(['a', '1', '\u{1F600}', '\u{2764}', '\u{1F1F5}'].into_iter().all(|c| glyph(c).is_some_and(|g| g > 3)));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_bundled_font_is_ready_to_be_requested() {
+        let bundled = concat!(env!("CARGO_MANIFEST_DIR"), "/android/app/src/main/assets/fonts/NotoColorEmoji.ttf");
+        assert!(usable(&map(Path::new(bundled)).unwrap()));
+    }
+
+    #[test]
+    #[ignore = "regenerates the bundled asset, see assets/fonts/README"]
+    fn make_bundled_font() {
+        let out = std::env::var("MAKE_BUNDLED_OUT").unwrap();
+        import(Path::new(&std::env::var("MAKE_BUNDLED_SRC").unwrap()), Path::new(&out)).unwrap();
     }
 
     #[test]

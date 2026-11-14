@@ -73,11 +73,11 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::init(cx);
     ui::motion::follow_system(cx);
     let mut settings = Settings::load(&dir);
-    #[cfg_attr(target_os = "android", expect(unused_variables))]
     let own = emoji::apply(&mut settings, &dir, cx);
-    #[cfg(not(target_os = "android"))]
     if !own {
+        #[cfg(not(target_os = "android"))]
         bundled_emoji(cx);
+        emoji::use_bundled();
     }
     fonts(cx);
     cx.set_global(settings.theme);
