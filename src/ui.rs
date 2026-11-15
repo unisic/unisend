@@ -248,6 +248,8 @@ pub struct BeeperApp {
     opened_at: Option<Instant>,
     /// A finger resting on a message's bubble, before it is a long press.
     bubble_press: Option<BubblePress>,
+    /// The state last said under the user's newest message, and since when.
+    status_last: Option<(String, String, Instant)>,
     /// The message a quote led to, tinted for a moment; the tint's clock starts when it is drawn.
     flash: Option<(String, Option<Instant>)>,
     /// A message being looked for among older ones, with how many more pages it may load.
@@ -485,6 +487,7 @@ impl BeeperApp {
             strip_last: None,
             strip_sent: false,
             bubble_press: None,
+            status_last: None,
             strip_epoch: 0,
             chat_sheet: None,
             gallery: gallery::Gallery::default(),
@@ -660,10 +663,14 @@ impl BeeperApp {
                 for diff in diffs {
                     if let Diff::Set { index, value } = &diff
                         && let Some(old) = self.msgs.get(*index)
-                        && let Some(arrival) = self.arrivals.iter_mut().find(|a| a.id == old.id)
                     {
                         // The user's message reached the server: its transaction ID became the event's.
-                        arrival.id = value.id.clone();
+                        if let Some(arrival) = self.arrivals.iter_mut().find(|a| a.id == old.id) {
+                            arrival.id = value.id.clone();
+                        }
+                        if let Some((on, _, _)) = self.status_last.as_mut().filter(|(on, _, _)| *on == old.id) {
+                            *on = value.id.clone();
+                        }
                     }
                     let len_before = self.msgs.len();
                     match crate::backend::apply(&mut self.msgs, diff) {
@@ -1210,6 +1217,7 @@ impl BeeperApp {
         self.close_viewer(cx);
         self.fetching.clear();
         (self.swipe, self.swipe_back, self.flash, self.seek, self.fresh_reaction, self.strip_last) = (None, None, None, None, None, None);
+        (self.bubble_press, self.status_last) = (None, None);
         self.arrivals.clear();
         for (_, image) in self.faces.drain() {
             if let Some(image) = image {
@@ -1878,6 +1886,7 @@ impl BeeperApp {
                     this.want_face(ix);
                 }
                 let arriving = this.arriving(ix, window, cx);
+                let state_level = state.as_ref().and_then(|(text, _)| this.status_level(ix, text, window, cx));
                 let m = &this.msgs[ix];
                 let side = if faces { px(SENDER + 8.) } else { px(0.) };
                 let row = v_flex()
@@ -1951,10 +1960,11 @@ impl BeeperApp {
                             .children(reactions)
                             .when(last || state.is_some() || shrink.is_some(), |el| {
                                 let failed = state.as_ref().is_some_and(|(_, failed)| *failed);
-                                let text = match (state, last) {
-                                    (Some((state, _)), true) => format!("{} \u{b7} {state}", clock(m.ts)),
-                                    (Some((state, _)), false) => state,
-                                    (None, _) => clock(m.ts),
+                                // A new state fades in where the old one was; the time stays.
+                                let (time, said) = match (state, last) {
+                                    (Some((state, _)), true) => (Some(format!("{} \u{b7} ", clock(m.ts))), Some(state)),
+                                    (Some((state, _)), false) => (None, Some(state)),
+                                    (None, _) => (Some(clock(m.ts)), None),
                                 };
                                 let ink = if failed { p.negative } else { this.on_wallpaper(p.faint, cx) };
                                 el.child(
@@ -1968,7 +1978,7 @@ impl BeeperApp {
                                         .font_features(tabular())
                                         .text_color(ink)
                                         .when(this.disappears(ix), |el| el.child(Icon::new(IconName::Timer).size_3().text_color(ink)))
-                                        .child(text),
+                                        .child(h_flex().children(time).children(said.map(|said| div().when_some(state_level, |el, v| el.opacity(v)).child(said)))),
                                 )
                             }),
                     )
@@ -2304,6 +2314,25 @@ impl BeeperApp {
         let Some(since) = arrival.since else { return Some(0.) };
         let t = since.elapsed().as_secs_f32() / motion::ENTER.as_secs_f32();
         (t < 1.).then(|| motion::ease_out(t))
+    }
+
+    /// How far the newest own message's state (Sending, Sent, Seen) has faded in since it last
+    /// changed; the first state seen for a message is shown as it is.
+    fn status_level(&mut self, ix: usize, text: &str, window: &mut Window, cx: &App) -> Option<f32> {
+        let id = &self.msgs[ix].id;
+        match &mut self.status_last {
+            Some((on, said, at)) if on == id => {
+                if said != text {
+                    (*said, *at) = (text.to_owned(), Instant::now());
+                }
+                fresh(*at, motion::EXIT, window, cx)
+            }
+            last => {
+                // A long-past change: nothing to fade.
+                *last = Some((id.clone(), text.to_owned(), Instant::now().checked_sub(motion::EXIT).unwrap_or_else(Instant::now)));
+                None
+            }
+        }
     }
 
     fn bubble_pressed(&mut self, id: String, cx: &mut Context<Self>) {
