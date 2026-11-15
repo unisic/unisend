@@ -32,7 +32,7 @@ impl ReceiptStyle {
     }
 }
 
-/// When someone else's message shows whether the user has read it.
+/// When someone else's message shows what its sender sees of it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum IncomingStatus {
     /// Beside the time under each run of their messages.
@@ -53,7 +53,48 @@ impl IncomingStatus {
     }
 }
 
-/// What became of one of the user's messages, or of someone else's on the user's side.
+/// What the sender's app shows for a message the user received.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum View {
+    Sent,
+    Delivered,
+    /// Read, in Instagram's and Messenger's word.
+    Seen,
+    Read,
+}
+
+impl View {
+    fn read(self) -> bool {
+        matches!(self, Self::Seen | Self::Read)
+    }
+}
+
+/// What `network`'s app shows the sender of a message the user has not read (`read` is `None`),
+/// read privately (`Some(false)`) or read for the sender to see (`Some(true)`); `None` where that
+/// is not known. Bridges forward only `m.read` (mautrix-go bridgev2 portal.go
+/// `handleMatrixReceipts`), so a private read looks unread. On arrival mautrix-signal sends a
+/// delivery receipt (signalmeow receiving.go); WhatsApp's comes from the user's phone, as the
+/// bridge's own is the kind WhatsApp does not show (whatsmeow receipt.go); Telegram has no
+/// delivered state (telegram.org/faq); Matrix clients and Instagram show only sent until read;
+/// whether Messenger shows delivered is not known.
+pub(super) fn their_view(network: Option<&str>, read: Option<bool>) -> Option<View> {
+    let n = network.map(str::to_ascii_lowercase);
+    let on = |k: &str| n.as_deref().is_some_and(|n| n.contains(k));
+    let (arrived, read_word) = if n.is_none() || on("telegram") {
+        (Some(View::Sent), View::Read)
+    } else if on("whatsapp") || on("signal") {
+        (Some(View::Delivered), View::Read)
+    } else if on("instagram") {
+        (Some(View::Sent), View::Seen)
+    } else if on("messenger") || on("facebook") {
+        (None, View::Seen)
+    } else {
+        return None;
+    };
+    if read == Some(true) { Some(read_word) } else { arrived }
+}
+
+/// What became of one of the user's messages, or how its sender sees someone else's.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Receipt {
     Sending,
@@ -63,11 +104,8 @@ pub(super) enum Receipt {
     Seen { who: Option<String>, readers: Vec<(OwnedUserId, String)> },
     /// The bridge's reason, empty when it gave none.
     Failed(String),
-    /// Someone else's message the user has not read yet.
-    Unread,
-    /// Someone else's message the user has read; `public` when its sender can see that. `others`
-    /// names who else read it, in a group.
-    Heard { public: bool, others: Option<String> },
+    /// Someone else's message as its sender's app shows it; `me` is the user (id, name).
+    Theirs { view: View, me: (OwnedUserId, String) },
 }
 
 impl Receipt {
@@ -81,14 +119,13 @@ impl Receipt {
             Self::Seen { who: Some(who), .. } => t!("Seen by {who}", who = who),
             Self::Failed(why) if why.is_empty() => t!("Not sent").to_owned(),
             Self::Failed(why) => t!("Not sent: {why}", why = why),
-            Self::Unread => t!("Not read yet").to_owned(),
-            Self::Heard { public, others } => {
-                let status = if *public { t!("Seen") } else { t!("Seen privately") };
-                match others {
-                    Some(who) => t!("{status}, also by {who}", status = status, who = who),
-                    None => status.to_owned(),
-                }
+            Self::Theirs { view, .. } => match view {
+                View::Sent => t!("The sender sees: Sent"),
+                View::Delivered => t!("The sender sees: Delivered"),
+                View::Seen => t!("The sender sees: Seen"),
+                View::Read => t!("The sender sees: Read"),
             }
+            .to_owned(),
         }
     }
 }
@@ -104,9 +141,6 @@ pub(super) enum Glyph {
     Disc,
     /// A filled circle with two ticks.
     DiscTicks,
-    /// Read without telling the sender: the ticks or the disc beside a crossed eye.
-    TicksPrivate,
-    DiscPrivate,
 }
 
 /// How a receipt is drawn after the time.
@@ -141,12 +175,11 @@ pub(super) fn mark(receipt: &Receipt, style: ReceiptStyle) -> Option<Mark> {
         (ReceiptStyle::Ticks, Receipt::Sent) => glyph(Tick, false),
         (ReceiptStyle::Ticks, Receipt::Delivered) => glyph(Ticks, false),
         (ReceiptStyle::Ticks, Receipt::Seen { .. }) => glyph(Ticks, true),
-        (ReceiptStyle::Ticks, Receipt::Unread) => glyph(Tick, false),
-        (ReceiptStyle::Ticks, Receipt::Heard { public: true, .. }) => glyph(Ticks, true),
-        (ReceiptStyle::Ticks, Receipt::Heard { .. }) => glyph(TicksPrivate, false),
-        (_, Receipt::Unread) => glyph(RingTick, false),
-        (_, Receipt::Heard { public: true, .. }) => glyph(Disc, true),
-        (_, Receipt::Heard { .. }) => glyph(DiscPrivate, false),
+        (ReceiptStyle::Ticks, Receipt::Theirs { view: View::Sent, .. }) => glyph(Tick, false),
+        (ReceiptStyle::Ticks, Receipt::Theirs { view, .. }) => glyph(Ticks, view.read()),
+        (ReceiptStyle::Avatars, Receipt::Theirs { view, me }) if view.read() => faces(std::slice::from_ref(me), 1),
+        (_, Receipt::Theirs { view: View::Sent, .. }) => glyph(RingTick, false),
+        (_, Receipt::Theirs { view, .. }) => glyph(Disc, view.read()),
         (_, Receipt::Sending) => glyph(Ring, false),
         (_, Receipt::Sent) => glyph(RingTick, false),
         (_, Receipt::Delivered) => glyph(Disc, false),
@@ -213,7 +246,6 @@ impl BeeperApp {
 /// Lucide's stroke at the size of 12 px text; the filled ones are its circle, filled, with the
 /// ticks in the ground's colour.
 fn glyph_el(glyph: Glyph, ink: Hsla, ground: Hsla) -> AnyElement {
-    let private = |first: Glyph| h_flex().gap(px(2.)).child(glyph_el(first, ink, ground)).child(Icon::new(IconName::EyeOff).size(fs(12.)).text_color(ink)).into_any_element();
     let icon = |name: IconName| Icon::new(name).size(fs(13.)).text_color(ink).into_any_element();
     let disc = |name: IconName, size: f32| {
         div()
@@ -232,14 +264,12 @@ fn glyph_el(glyph: Glyph, ink: Hsla, ground: Hsla) -> AnyElement {
         Glyph::RingTick => icon(IconName::CircleCheck),
         Glyph::Disc => disc(IconName::Check, 9.),
         Glyph::DiscTicks => disc(IconName::CheckCheck, 10.),
-        Glyph::TicksPrivate => private(Glyph::Ticks),
-        Glyph::DiscPrivate => private(Glyph::Disc),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Glyph, Kind, Mark, Msg, OwnRead, OwnedUserId, Receipt, ReceiptStyle, heard, mark};
+    use super::{Glyph, Kind, Mark, Msg, OwnRead, OwnedUserId, Receipt, ReceiptStyle, View, heard, mark, their_view};
 
     fn seen(dm: bool) -> Receipt {
         let readers = ["@a:x", "@b:x", "@c:x", "@d:x"].iter().take(if dm { 1 } else { 4 }).map(|u| (OwnedUserId::try_from(*u).unwrap(), u[1..2].to_owned())).collect();
@@ -279,16 +309,39 @@ mod tests {
     }
 
     #[test]
-    fn received_messages_say_whether_the_sender_sees_the_read() {
-        let heard = |public| Receipt::Heard { public, others: None };
-        assert_eq!(mark(&Receipt::Unread, ReceiptStyle::Ticks), Some(Mark::Glyph { glyph: Glyph::Tick, read: false }));
-        assert_eq!(mark(&heard(true), ReceiptStyle::Ticks), Some(Mark::Glyph { glyph: Glyph::Ticks, read: true }));
-        assert_eq!(mark(&heard(false), ReceiptStyle::Ticks), Some(Mark::Glyph { glyph: Glyph::TicksPrivate, read: false }));
-        assert_eq!(mark(&heard(true), ReceiptStyle::Circles), Some(Mark::Glyph { glyph: Glyph::Disc, read: true }));
-        assert_eq!(mark(&heard(false), ReceiptStyle::Avatars), Some(Mark::Glyph { glyph: Glyph::DiscPrivate, read: false }));
-        assert_eq!(mark(&heard(false), ReceiptStyle::Off), None);
-        assert_eq!(mark(&Receipt::Heard { public: false, others: Some("Ann".into()) }, ReceiptStyle::Text), Some(Mark::Words("Seen privately, also by Ann".into())));
-        assert_eq!(mark(&Receipt::Unread, ReceiptStyle::Text), Some(Mark::Words("Not read yet".into())));
+    fn each_network_shows_its_sender_what_its_app_does() {
+        use View::*;
+        // (network, unread, read privately, read publicly)
+        let table = [
+            (Some("WhatsApp"), Some(Delivered), Some(Delivered), Some(Read)),
+            (Some("Signal"), Some(Delivered), Some(Delivered), Some(Read)),
+            (Some("Telegram"), Some(Sent), Some(Sent), Some(Read)),
+            (None, Some(Sent), Some(Sent), Some(Read)),
+            (Some("Instagram"), Some(Sent), Some(Sent), Some(Seen)),
+            (Some("Facebook Messenger"), None, None, Some(Seen)),
+            (Some("Discord"), None, None, None),
+        ];
+        for (network, unread, private, public) in table {
+            assert_eq!((their_view(network, None), their_view(network, Some(false)), their_view(network, Some(true))), (unread, private, public), "{network:?}");
+        }
+    }
+
+    #[test]
+    fn received_messages_mirror_the_senders_view() {
+        let me = (OwnedUserId::try_from("@me:x").unwrap(), "Me".to_owned());
+        let theirs = |view| Receipt::Theirs { view, me: me.clone() };
+        let glyph = |glyph, read| Some(Mark::Glyph { glyph, read });
+        assert_eq!(mark(&theirs(View::Sent), ReceiptStyle::Ticks), glyph(Glyph::Tick, false));
+        assert_eq!(mark(&theirs(View::Delivered), ReceiptStyle::Ticks), glyph(Glyph::Ticks, false));
+        assert_eq!(mark(&theirs(View::Seen), ReceiptStyle::Ticks), glyph(Glyph::Ticks, true));
+        assert_eq!(mark(&theirs(View::Sent), ReceiptStyle::Circles), glyph(Glyph::RingTick, false));
+        assert_eq!(mark(&theirs(View::Delivered), ReceiptStyle::Circles), glyph(Glyph::Disc, false));
+        assert_eq!(mark(&theirs(View::Read), ReceiptStyle::Circles), glyph(Glyph::Disc, true));
+        assert_eq!(mark(&theirs(View::Delivered), ReceiptStyle::Avatars), glyph(Glyph::Disc, false));
+        assert_eq!(mark(&theirs(View::Read), ReceiptStyle::Avatars), Some(Mark::Faces(vec![me.clone()], 0)));
+        assert_eq!(mark(&theirs(View::Read), ReceiptStyle::Off), None);
+        assert_eq!(mark(&theirs(View::Delivered), ReceiptStyle::Text), Some(Mark::Words("The sender sees: Delivered".into())));
+        assert_eq!(theirs(View::Seen).words(), "The sender sees: Seen");
     }
 
     #[test]
