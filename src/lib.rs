@@ -317,6 +317,9 @@ pub(crate) struct Settings {
     /// What a chat row swiped left to right does.
     #[serde(default = "ui::rowswipe::SwipeAction::right_default")]
     pub swipe_right: ui::rowswipe::SwipeAction,
+    /// Android: text fields ask the keyboard not to learn from what is typed. Secrets always do.
+    #[serde(default = "Settings::private_by_default")]
+    pub incognito_keyboard: bool,
 }
 
 impl Settings {
@@ -330,7 +333,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true })
     }
 
     fn parse(raw: &[u8]) -> Option<Self> {
@@ -1285,6 +1288,15 @@ mod tests {
         assert_eq!((old.swipe_left, old.swipe_right), (SwipeAction::Archive, SwipeAction::Unread));
         let mut changed = old.clone();
         (changed.swipe_left, changed.swipe_right) = (SwipeAction::Delete, SwipeAction::None);
+        assert_eq!(super::Settings::parse(&serde_json::to_vec(&changed).unwrap()).unwrap(), changed);
+    }
+
+    #[test]
+    fn incognito_keyboard_defaults_on_and_round_trips() {
+        let old = super::Settings::parse(br#"{"theme":"Light"}"#).unwrap();
+        assert!(old.incognito_keyboard, "files from before the switch keep the keyboard incognito");
+        let mut changed = old.clone();
+        changed.incognito_keyboard = false;
         assert_eq!(super::Settings::parse(&serde_json::to_vec(&changed).unwrap()).unwrap(), changed);
     }
 

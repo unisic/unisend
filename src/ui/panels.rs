@@ -151,6 +151,13 @@ impl BeeperApp {
         self.send(Cmd::Incognito(on), cx);
     }
 
+    fn set_incognito_keyboard(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.incognito_keyboard = on;
+        self.settings.save(&self.dir);
+        crate::ime::set_incognito(on);
+        cx.notify();
+    }
+
     fn set_stay_connected(&mut self, on: bool, cx: &mut Context<Self>) {
         self.settings.stay_connected = on;
         self.settings.save(&self.dir);
@@ -376,6 +383,10 @@ impl BeeperApp {
             let _ = weak.update(cx, |this, cx| this.set_incognito(*on, cx));
         });
         let weak = cx.entity().downgrade();
+        let keyboard = Switch::new("incognito-keyboard").checked(self.settings.incognito_keyboard).on_click(move |on, _, cx| {
+            let _ = weak.update(cx, |this, cx| this.set_incognito_keyboard(*on, cx));
+        });
+        let weak = cx.entity().downgrade();
         let stay = Switch::new("stay-connected").checked(self.settings.stay_connected).on_click(move |on, _, cx| {
             let _ = weak.update(cx, |this, cx| this.set_stay_connected(*on, cx));
         });
@@ -435,7 +446,9 @@ impl BeeperApp {
             })
             .child(section(t!("Privacy"), cx).child(card(cx).child(
                 row(t!("Incognito"), t!("Others do not see that you have read their messages."), cx).child(incognito),
-            )))
+            ).when(cfg!(target_os = "android"), |el| {
+                el.child(row(t!("Incognito keyboard"), t!("The keyboard learns nothing from what you type. Off: better suggestions and voice typing."), cx).child(keyboard))
+            })))
             .child(security)
             .child(self.render_devices(cx))
             .child(

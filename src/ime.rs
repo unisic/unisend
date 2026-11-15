@@ -73,10 +73,14 @@ fn plan(edit: &Edit) -> Vec<Op> {
 }
 
 #[cfg(target_os = "android")]
-pub(crate) use android::follow;
+pub(crate) use android::{follow, set_incognito};
 
 #[cfg(not(target_os = "android"))]
 pub(crate) fn follow<T: 'static>(_: &gpui_kit::Entity<gpui_kit::component::input::InputState>, _: &mut gpui_kit::Window, _: &mut gpui_kit::Context<T>) {}
+
+/// Settings > Privacy > Incognito keyboard; only the Android keyboard has the flag.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn set_incognito(_: bool) {}
 
 #[cfg(target_os = "android")]
 mod android {
@@ -326,6 +330,19 @@ mod android {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeImeResync(_env: *mut c_void, _class: *mut c_void) {
         let _ = sender().try_send(Msg::Resync);
+    }
+
+    /// Settings > Privacy > Incognito keyboard: whether text fields ask the keyboard not to learn.
+    pub(crate) fn set_incognito(on: bool) {
+        let sent = with_env(|env| {
+            let activity = activity(env)?;
+            let result = env.call_method(&activity, jni::jni_str!("gpuiImeIncognito"), jni::jni_sig!("(Z)V"), &[JValue::Bool(on)]);
+            env.exception_clear();
+            result.map(|_| ()).map_err(|e| e.to_string())
+        });
+        if let Err(e) = sent {
+            log::warn!("ime incognito: {e}");
+        }
     }
 }
 

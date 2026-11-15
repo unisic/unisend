@@ -193,6 +193,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("If you forget it, the only way back in is to clear Murmur's data and sign in again.", "Jeśli go zapomnisz, jedyną drogą powrotu jest wyczyszczenie danych Murmura i ponowne zalogowanie."),
     ("Immediately", "Od razu"),
     ("Incognito", "Incognito"),
+    ("Incognito keyboard", "Klawiatura incognito"),
+    ("The keyboard learns nothing from what you type. Off: better suggestions and voice typing.", "Klawiatura nie uczy się z tego, co piszesz. Wyłączona: lepsze podpowiedzi i pisanie głosem."),
     ("Indigo", "Indygo"),
     ("Instagram cannot receive locations, so this one would not arrive.", "Instagram nie przyjmuje lokalizacji, więc ta by nie dotarła."),
     ("Its chats appear in the list as the bridge brings them in.", "Czaty pojawią się na liście, gdy mostek je pobierze."),

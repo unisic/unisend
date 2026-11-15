@@ -29,6 +29,8 @@ public class GpuiInputActivity extends NativeActivity {
     private Field latest;
     // Last mirror edit sent; Rust publishes the last one it applied.
     private long seq;
+    // Settings > Privacy > Incognito keyboard, set by src/ime.rs; secrets (type 4) stay incognito.
+    private boolean incognito = true;
 
     private static final class Field {
         final long id, applied;
@@ -96,8 +98,22 @@ public class GpuiInputActivity extends NativeActivity {
             case 5: type = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL; break;
         }
         input.setInputType(type);
-        // Incognito keyboard for every field: the IME must not learn from what is typed here.
-        input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        int options = EditorInfo.IME_FLAG_NO_EXTRACT_UI;
+        if (incognito || keyboardType == 4) options |= EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING;
+        input.setImeOptions(options);
+    }
+
+    /** Called by src/ime.rs at start and from Settings; a shown keyboard restarts with the new flags. */
+    public void gpuiImeIncognito(boolean on) {
+        runOnUiThread(() -> {
+            if (incognito == on) return;
+            incognito = on;
+            if (input == null || !input.shown) return;
+            input.reset(input.session);
+            if (keyboardType == 0 && latest != null) input.seed(latest);
+            configure();
+            input.restart();
+        });
     }
 
     public void gpuiHideKeyboard(long session) {

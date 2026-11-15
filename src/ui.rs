@@ -368,6 +368,7 @@ impl BeeperApp {
         for input in [&composer, &search, &emoji_search] {
             crate::ime::follow(input, window, cx);
         }
+        crate::ime::set_incognito(settings.incognito_keyboard);
         let mut subs = Vec::new();
         let look = appearance::Look::new(&settings, &dir, cx);
         subs.push(cx.subscribe_in(&look.dim, window, |this, _, ev: &appearance::SliderEvent, _, cx| this.dim_changed(ev, cx)));
