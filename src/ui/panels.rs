@@ -379,7 +379,14 @@ impl BeeperApp {
                     )
                 })
                 .when(android && lock.mode != LockMode::Off, |el| el.child(row(t!("Lock after leaving the app"), "", cx)).child(timeouts))
-                .when(android, |el| el.child(row(t!("Screen security"), t!("Blocks screenshots and hides the app in the recent apps list."), cx).child(secure_switch))),
+                .when(android, |el| el.child(row(t!("Screen security"), t!("Blocks screenshots and hides the app in the recent apps list."), cx).child(secure_switch)))
+                .when(self.unencrypted, |el| {
+                    el.child(row(
+                        t!("Data on this device is not encrypted"),
+                        t!("Signed in before Murmur encrypted its data. Sign out and in again to encrypt it; keep your recovery key to bring back message history."),
+                        cx,
+                    ))
+                }),
         )
         .into_any_element()
     }

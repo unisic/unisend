@@ -5,18 +5,22 @@
 //! backward page `messages` reads, and the rows of the open conversation, which carry edits and
 //! deletions as the SDK resolves them.
 //!
-//! At rest: the index sits next to the SDK's store in the app's private directory, owner-only. The
-//! store itself is opened without a passphrase (`sqlite_store(.., None)`), so its event cache already
-//! holds the same decrypted text in plain SQLite; the index is protected exactly as much. If the
-//! store ever gets a passphrase, this file must be encrypted with it or dropped.
+//! At rest: next to the SDK's store in the app's private directory, owner-only, and protected as
+//! much as the store. A plain store (desktop, Android from before encryption) gets a plain SQLite
+//! file. With a store key the index lives in memory and is written back sealed with that key
+//! (`search.enc`, see `vault`) every `SAVE_EVERY` while it changes; FTS5 needs the words in clear,
+//! so no part of the file can stay plain. A kill loses at most the last `SAVE_EVERY` of indexing.
 //!
 //! Cost: at most `MAX_MESSAGES` rows, oldest pruned first; 16 MB on disk at the cap for short chat
-//! lines (the `size_at_cap` test), more for long messages. One thread, idle while nothing arrives;
-//! a write is one transaction per batch, a query one FTS lookup ordered by time.
+//! lines (the `size_at_cap` test), more for long messages. Sealed, that much is also held in memory,
+//! and each save copies, seals and writes all of it (twice its size in memory for a moment). One
+//! thread, idle while nothing arrives; a write is one transaction per batch, a query one FTS lookup
+//! ordered by time.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use matrix_sdk::Room;
 use matrix_sdk::deserialized_responses::TimelineEvent;
@@ -26,10 +30,11 @@ use matrix_sdk::ruma::room_version_rules::RedactionRules;
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 use matrix_sdk::Client;
-use rusqlite::{Connection, OptionalExtension as _, params};
+use rusqlite::{Connection, MAIN_DB, OptionalExtension as _, params};
 use tokio::sync::{mpsc, oneshot};
 
 use super::{Diff, Kind, MediaKind, Msg, content, remove_plain_reply_fallback};
+use crate::vault::Seal;
 
 /// Messages kept; the oldest go first once this is passed by `PRUNE_SLACK`.
 const MAX_MESSAGES: i64 = 50_000;
@@ -45,6 +50,8 @@ const MAX_WORDS: usize = 8;
 /// Words around the match in a snippet.
 const SNIPPET_WORDS: i32 = 10;
 const FILE: &str = "search.sqlite3";
+/// How often a sealed index is written back while it changes.
+const SAVE_EVERY: Duration = Duration::from_secs(300);
 // Mark the match in `snippet()`; stripped from indexed text so they cannot be faked.
 const OPEN: char = '\u{2}';
 const CLOSE: char = '\u{3}';
@@ -76,6 +83,7 @@ enum Change {
 enum Op {
     Write(Vec<Change>),
     Query { room: Option<String>, query: String, reply: oneshot::Sender<Vec<Found>> },
+    Save,
 }
 
 struct Found {
@@ -87,6 +95,9 @@ struct Found {
 }
 
 static INDEX: Mutex<Option<mpsc::Sender<Op>>> = Mutex::new(None);
+/// Moved on by `wipe`, under this lock, so a sealed index is never written back for an account that
+/// signed out meanwhile.
+static GENERATION: Mutex<u64> = Mutex::new(0);
 
 fn sender() -> Option<mpsc::Sender<Op>> {
     INDEX.lock().unwrap().clone()
@@ -102,19 +113,41 @@ async fn write(changes: Vec<Change>) {
 }
 
 /// Opens the index under `dir` and starts following `client`'s syncs.
-pub(super) fn start(dir: &Path, client: &Client) {
-    let path = dir.join(FILE);
-    let conn = match open(&path) {
-        Ok(conn) => conn,
+pub(super) fn start(dir: &Path, client: &Client, seal: &Seal) {
+    let opened = match seal {
+        Seal::Plain => open(&dir.join(FILE)).map(|conn| (conn, None)),
+        Seal::Sealed(_) => {
+            let generation = *GENERATION.lock().unwrap();
+            open_sealed(dir, seal).map(|conn| (conn, Some(Saver { dir: dir.to_owned(), seal: seal.clone(), generation, dirty: false })))
+        }
+    };
+    let (conn, saver) = match opened {
+        Ok(opened) => opened,
         Err(e) => {
             log::warn!("search index: {e:#}");
             return;
         }
     };
     let (tx, rx) = mpsc::channel(QUEUE);
-    if let Err(e) = std::thread::Builder::new().name("search".into()).spawn(move || serve(conn, rx)) {
+    let sealed = saver.is_some();
+    if let Err(e) = std::thread::Builder::new().name("search".into()).spawn(move || serve(conn, rx, saver)) {
         log::warn!("search thread: {e}");
         return;
+    }
+    if sealed {
+        // Weak, so the ticks stop with the index instead of keeping it open.
+        let weak = tx.downgrade();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(SAVE_EVERY);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let Some(tx) = weak.upgrade() else { break };
+                if tx.send(Op::Save).await.is_err() {
+                    break;
+                }
+            }
+        });
     }
     *INDEX.lock().unwrap() = Some(tx);
     client.add_event_handler(|event: Raw<AnySyncTimelineEvent>, room: Room| async move {
@@ -127,9 +160,12 @@ pub(super) fn start(dir: &Path, client: &Client) {
 pub(super) fn wipe(dir: &Path) {
     // Dropping the sender ends the thread once its queue is empty; the files can go before it closes.
     INDEX.lock().unwrap().take();
+    let mut generation = GENERATION.lock().unwrap();
+    *generation += 1;
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let _ = std::fs::remove_file(PathBuf::from(format!("{}{suffix}", dir.join(FILE).display())));
     }
+    crate::vault::remove(dir, FILE);
 }
 
 /// Indexes a page of events read from the server.
@@ -284,6 +320,55 @@ fn open(path: &Path) -> anyhow::Result<Connection> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     let conn = Connection::open(path)?;
+    schema(&conn)?;
+    Ok(conn)
+}
+
+/// The index in memory, from its sealed copy when there is one. A copy that does not open is a
+/// cache lost, not the account's data: the index starts again.
+fn open_sealed(dir: &Path, seal: &Seal) -> anyhow::Result<Connection> {
+    let mut conn = Connection::open_in_memory()?;
+    match seal.read(dir, FILE) {
+        Ok(bytes) => {
+            if let Err(e) = conn.deserialize_read_exact(MAIN_DB, &bytes[..], bytes.len(), false) {
+                log::warn!("search index: {e}, starting again");
+                conn = Connection::open_in_memory()?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => log::warn!("search index: {e}, starting again"),
+    }
+    schema(&conn)?;
+    Ok(conn)
+}
+
+/// Writes a sealed index back.
+struct Saver {
+    dir: PathBuf,
+    seal: Seal,
+    generation: u64,
+    dirty: bool,
+}
+
+impl Saver {
+    fn save(&mut self, conn: &Connection) {
+        if !self.dirty {
+            return;
+        }
+        let generation = GENERATION.lock().unwrap();
+        if *generation != self.generation {
+            return;
+        }
+        let saved = conn.serialize(MAIN_DB).map_err(std::io::Error::other).and_then(|data| self.seal.write(&self.dir, FILE, &data));
+        drop(generation);
+        match saved {
+            Ok(()) => self.dirty = false,
+            Err(e) => log::warn!("search index: save: {e}"),
+        }
+    }
+}
+
+fn schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
@@ -305,18 +390,28 @@ fn open(path: &Path) -> anyhow::Result<Connection> {
              text TEXT NOT NULL,
              ts INTEGER NOT NULL
          );",
-    )?;
-    Ok(conn)
+    )
 }
 
-fn serve(conn: Connection, mut rx: mpsc::Receiver<Op>) {
+fn serve(conn: Connection, mut rx: mpsc::Receiver<Op>, mut saver: Option<Saver>) {
     let mut count: i64 = conn.query_row("SELECT count(*) FROM msg", [], |r| r.get(0)).unwrap_or(0);
     while let Some(op) = rx.blocking_recv() {
         let result = match op {
-            Op::Write(changes) => apply(&conn, &changes, &mut count),
+            Op::Write(changes) => {
+                if let Some(saver) = &mut saver {
+                    saver.dirty = true;
+                }
+                apply(&conn, &changes, &mut count)
+            }
             Op::Query { room, query, reply } => query_hits(&conn, room.as_deref(), &query).map(|found| {
                 let _ = reply.send(found);
             }),
+            Op::Save => {
+                if let Some(saver) = &mut saver {
+                    saver.save(&conn);
+                }
+                Ok(())
+            }
         };
         if let Err(e) = result {
             log::warn!("search index: {e}");
@@ -471,6 +566,32 @@ mod tests {
         apply(&conn, &[Change::Remove("$2".into()), Change::Remove("$unknown".into())], &mut n).unwrap();
         assert!(find(&conn, None, "brunch").is_empty());
         assert_eq!(n, 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sealed_index_saves_and_reopens() {
+        let dir = temp("sealed");
+        let seal = Seal::Sealed(std::sync::Arc::new(zeroize::Zeroizing::new([5; crate::vault::KEY_LEN])));
+        let conn = open_sealed(&dir, &seal).unwrap();
+        let mut n = 0;
+        apply(&conn, &[add("$1", "!r", 1, "the secret meeting place")], &mut n).unwrap();
+        let mut saver = Saver { dir: dir.clone(), seal: seal.clone(), generation: *GENERATION.lock().unwrap(), dirty: true };
+        saver.save(&conn);
+        assert!(!saver.dirty);
+        assert!(!dir.join(FILE).exists(), "nothing plain on disk");
+        let sealed = std::fs::read(dir.join("search.enc")).unwrap();
+        assert!(!sealed.windows(6).any(|w| w == b"secret"));
+        let again = open_sealed(&dir, &seal).unwrap();
+        assert_eq!(find(&again, None, "secret").len(), 1);
+        // Another key reads nothing and starts over.
+        let other = Seal::Sealed(std::sync::Arc::new(zeroize::Zeroizing::new([6; crate::vault::KEY_LEN])));
+        assert!(find(&open_sealed(&dir, &other).unwrap(), None, "secret").is_empty());
+        // Signed out meanwhile: the index is not written back.
+        wipe(&dir);
+        saver.dirty = true;
+        saver.save(&conn);
+        assert!(!dir.join("search.enc").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 

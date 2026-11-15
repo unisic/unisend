@@ -8,19 +8,20 @@ const MAX_DRAFTS: usize = 200;
 const MAX_DRAFT_BYTES: usize = 4096;
 
 /// Unsent composer text by chat, least recently written first. At most `MAX_DRAFTS * MAX_DRAFT_BYTES`
-/// (800 kB) in memory and in `drafts.json`, which is rewritten when a chat closes or the app leaves
-/// the screen, not on every key.
+/// (800 kB) in memory and in `drafts.json` (sealed: `drafts.enc`), which is rewritten when a chat
+/// closes or the app leaves the screen, not on every key.
 pub(super) struct Drafts {
-    path: PathBuf,
+    dir: PathBuf,
+    seal: crate::vault::Seal,
     items: Vec<(OwnedRoomId, String)>,
     dirty: bool,
 }
 
 impl Drafts {
-    pub(super) fn load(dir: &std::path::Path) -> Self {
-        let path = dir.join("drafts.json");
-        let stored: Vec<(String, String)> = std::fs::read(&path).ok().and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default();
-        let mut drafts = Self { path, items: Vec::new(), dirty: false };
+    pub(super) fn load(dir: &std::path::Path, seal: crate::vault::Seal) -> Self {
+        use crate::vault::DRAFTS;
+        let stored: Vec<(String, String)> = seal.read(dir, DRAFTS).ok().and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default();
+        let mut drafts = Self { dir: dir.to_owned(), seal, items: Vec::new(), dirty: false };
         for (room, text) in stored {
             if let Ok(room) = OwnedRoomId::try_from(room) {
                 drafts.set(&room, &text);
@@ -59,8 +60,7 @@ impl Drafts {
         if !std::mem::take(&mut self.dirty) {
             return;
         }
-        let tmp = self.path.with_extension("tmp");
-        let written = serde_json::to_vec(&self.items).map_err(std::io::Error::other).and_then(|raw| std::fs::write(&tmp, raw)).and_then(|()| std::fs::rename(&tmp, &self.path));
+        let written = serde_json::to_vec(&self.items).map_err(std::io::Error::other).and_then(|raw| self.seal.write(&self.dir, crate::vault::DRAFTS, &raw));
         if let Err(e) = written {
             log::warn!("drafts.json: {e}");
         }
@@ -214,13 +214,14 @@ mod tests {
     use matrix_sdk::ruma::OwnedRoomId;
 
     use super::{Drafts, MAX_DRAFT_BYTES, MAX_DRAFTS};
+    use crate::vault::Seal;
 
     fn room(n: usize) -> OwnedRoomId {
         OwnedRoomId::try_from(format!("!r{n}:example.org")).unwrap()
     }
 
     fn drafts() -> Drafts {
-        Drafts { path: PathBuf::new(), items: Vec::new(), dirty: false }
+        Drafts { dir: PathBuf::new(), seal: Seal::Plain, items: Vec::new(), dirty: false }
     }
 
     #[test]
@@ -248,10 +249,16 @@ mod tests {
     fn survives_a_restart() {
         let dir = std::env::temp_dir().join(format!("murmur-drafts-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut d = Drafts::load(&dir);
+        let mut d = Drafts::load(&dir, Seal::Plain);
         d.set(&room(7), "unsent");
         d.save();
-        assert_eq!(Drafts::load(&dir).get(&room(7)), Some("unsent"));
+        assert_eq!(Drafts::load(&dir, Seal::Plain).get(&room(7)), Some("unsent"));
+        let sealed = Seal::Sealed(std::sync::Arc::new(zeroize::Zeroizing::new([9; crate::vault::KEY_LEN])));
+        let mut d = Drafts::load(&dir, sealed.clone());
+        d.set(&room(8), "secret plan");
+        d.save();
+        assert!(!std::fs::read(dir.join("drafts.enc")).unwrap().windows(6).any(|w| w == b"secret"));
+        assert_eq!(Drafts::load(&dir, sealed).get(&room(8)), Some("secret plan"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

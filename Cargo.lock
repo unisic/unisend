@@ -828,6 +828,7 @@ dependencies = [
  "markdown",
  "matrix-sdk",
  "matrix-sdk-crypto",
+ "matrix-sdk-sqlite",
  "matrix-sdk-ui",
  "memmap2",
  "mime_guess",
@@ -840,6 +841,7 @@ dependencies = [
  "tokio",
  "ttf-parser",
  "webpki-root-certs",
+ "zeroize",
 ]
 
 [[package]]

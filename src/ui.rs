@@ -182,6 +182,8 @@ pub struct BeeperApp {
     user: Option<OwnedUserId>,
     /// The account is Beeper's, so it has chat networks.
     beeper: bool,
+    /// Signed in on Android with the data on this device kept plain, from before encryption.
+    unencrypted: bool,
     /// Settings page shown in place of the chat.
     panel: Option<Panel>,
     /// `None` until loaded.
@@ -409,7 +411,8 @@ impl BeeperApp {
         });
         let fwd = forward::Forward::new(window, cx);
 
-        let drafts = navigate::Drafts::load(&dir);
+        // Plain until the backend says otherwise: a sealed install has no plain drafts to find.
+        let drafts = navigate::Drafts::load(&dir, crate::vault::Seal::Plain);
         Self {
             cmd,
             screen: Screen::Starting,
@@ -429,6 +432,7 @@ impl BeeperApp {
             settings,
             user: None,
             beeper: true,
+            unencrypted: false,
             panel: None,
             networks: None,
             flows: None,
@@ -523,9 +527,14 @@ impl BeeperApp {
         match ev {
             Ev::NeedLogin => {
                 // Signed out, here or by the server: the session is gone, and the app lock with it.
-                if !self.dir.join("session.json").exists() && self.settings.lock.mode != crate::applock::LockMode::Off {
-                    crate::applock::pin::clear(&self.dir);
-                    self.set_lock(Some(crate::applock::LockMode::Off), None, None, cx);
+                if !crate::vault::signed_in(&self.dir) {
+                    if self.settings.lock.mode != crate::applock::LockMode::Off {
+                        crate::applock::pin::clear(&self.dir);
+                        self.set_lock(Some(crate::applock::LockMode::Off), None, None, cx);
+                    }
+                    // The backend removed the file; what is in memory must not write it back.
+                    self.drafts = navigate::Drafts::load(&self.dir, crate::vault::Seal::Plain);
+                    self.unencrypted = false;
                 }
                 (self.panel, self.networks, self.user) = (None, None, None);
                 self.rooms.clear();
@@ -540,8 +549,12 @@ impl BeeperApp {
                 self.error = None;
             }
             ev @ (Ev::Networks(_) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
-            Ev::Ready { user, beeper } => {
+            Ev::Ready { user, beeper, seal } => {
                 self.beeper = beeper;
+                self.unencrypted = cfg!(target_os = "android") && crate::vault::layout(&self.dir) == crate::vault::Layout::Legacy;
+                if seal.sealed() {
+                    self.drafts = navigate::Drafts::load(&self.dir, seal);
+                }
                 crate::background(true);
                 crate::stay_connected(self.settings.stay_connected);
                 // The app may have been started by a tap on a notification.

@@ -67,6 +67,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         beeper: true,
         http: http_client().unwrap(),
         ev,
+        seal: crate::vault::Seal::Plain,
         client: None,
         login_request: None,
         open: None,
@@ -685,7 +686,7 @@ async fn password_login_restore_sign_out() {
     let (mut st, mut rx) = state(root.clone(), beeper::HOMESERVER_URL);
     assert!(st.restore().await.unwrap());
     let user = wait_for(&mut rx, "Ready after restart", |e| match e {
-        Ev::Ready { user, beeper: false } => Some(user),
+        Ev::Ready { user, beeper: false, .. } => Some(user),
         _ => None,
     })
     .await;
@@ -699,6 +700,47 @@ async fn password_login_restore_sign_out() {
     assert!(st.beeper);
     assert_eq!(st.homeserver, beeper_homeserver());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The SDK's store opens only with the key it was made with, and keeps the values unreadable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn store_opens_only_with_its_key() {
+    let dir = std::env::temp_dir().join(format!("beeper-gpui-storekey-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (mut st, _rx) = state(dir.clone(), "http://localhost:1");
+    let key = |byte| Seal::Sealed(Arc::new(zeroize::Zeroizing::new([byte; vault::KEY_LEN])));
+    use matrix_sdk::store::{StateStoreDataKey, StateStoreDataValue};
+    // A filter is stored like the rest of the state; `set_custom_value` would not do, the SDK keeps
+    // those values plain (only sliding sync and OAuth use them).
+    let secret = "meet at the old mill";
+    let probe = StateStoreDataKey::Filter("probe");
+    st.seal = key(1);
+    let client = st.client_builder().homeserver_url("http://localhost:1").build().await.unwrap();
+    client.state_store().set_kv_data(probe, StateStoreDataValue::Filter(secret.into())).await.unwrap();
+    drop(client);
+
+    let client = st.client_builder().homeserver_url("http://localhost:1").build().await.unwrap();
+    assert_eq!(client.state_store().get_kv_data(probe).await.unwrap().and_then(|v| v.into_filter()).as_deref(), Some(secret));
+    drop(client);
+
+    st.seal = key(2);
+    let wrong = st.client_builder().homeserver_url("http://localhost:1").build().await.expect_err("another key is refused");
+    assert!(key_rejected(&wrong), "{wrong}");
+
+    // Without a key the store opens, but the value does not come out of it.
+    st.seal = Seal::Plain;
+    let client = st.client_builder().homeserver_url("http://localhost:1").build().await.unwrap();
+    let read = client.state_store().get_kv_data(probe).await;
+    assert!(!matches!(read, Ok(Some(StateStoreDataValue::Filter(ref f))) if f == secret));
+    drop(client);
+
+    for file in std::fs::read_dir(dir.join("store")).unwrap() {
+        let file = file.unwrap().path();
+        // A closing connection may remove its WAL meanwhile.
+        let Ok(raw) = std::fs::read(&file) else { continue };
+        assert!(!raw.windows(secret.len()).any(|w| w == secret.as_bytes()), "plain value in {}", file.display());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

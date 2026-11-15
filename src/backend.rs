@@ -64,6 +64,7 @@ use matrix_sdk::{
     store::RoomLoadSettings,
 };
 use matrix_sdk_crypto::secret_storage::DecodeError;
+use crate::vault::{self, KeyError, Seal};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
@@ -192,7 +193,8 @@ pub enum Ev {
     NeedLogin,
     CodeSent,
     /// Signed in as this user; `beeper` says the account is Beeper's, with its bridges and account API.
-    Ready { user: OwnedUserId, beeper: bool },
+    /// `seal` keeps the UI's own files the way the store is kept.
+    Ready { user: OwnedUserId, beeper: bool, seal: Seal },
     /// The connection to the server is lost (false) or back (true).
     Online(bool),
     /// True while this device lacks the secrets needed to decrypt history.
@@ -667,6 +669,8 @@ struct State {
     beeper: bool,
     http: reqwest::Client,
     ev: mpsc::Sender<Ev>,
+    /// How the store and the files with chat content are kept; plain until a key is read or made.
+    seal: Seal,
     client: Option<Client>,
     login_request: Option<String>,
     /// The conversation on screen.
@@ -696,10 +700,11 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         }
     };
     let _ = std::fs::remove_dir_all(media_dir(&dir));
-    let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, client: None, login_request: None, open: None,
+    let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
         incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None };
-    match st.restore().await {
+    let restored = if st.unlock().await { st.restore().await } else { Ok(false) };
+    match restored {
         Ok(true) => {}
         Ok(false) => st.emit(Ev::NeedLogin).await,
         Err(e) => {
@@ -795,10 +800,6 @@ impl State {
         let _ = self.ev.send(ev).await;
     }
 
-    fn session_path(&self) -> PathBuf {
-        self.dir.join("session.json")
-    }
-
     fn client_builder(&self) -> matrix_sdk::ClientBuilder {
         // Fetch a missing room key from the server-side backup when an event fails to decrypt,
         // instead of downloading the whole backup after recovery.
@@ -806,7 +807,44 @@ impl State {
             backup_download_strategy: BackupDownloadStrategy::AfterDecryptionFailure,
             ..Default::default()
         };
-        Client::builder().sqlite_store(self.dir.join("store"), None).http_client(self.http.clone()).with_encryption_settings(e2ee)
+        let store = matrix_sdk::SqliteStoreConfig::new(self.dir.join("store")).key(self.seal.key());
+        Client::builder().sqlite_store_with_config_and_cache_path(store, None::<PathBuf>).http_client(self.http.clone()).with_encryption_settings(e2ee)
+    }
+
+    /// Reads the store key. A Keystore that fails for now is asked again, with nothing deleted; a
+    /// key that is gone leaves the device signed out (false).
+    async fn unlock(&mut self) -> bool {
+        let mut wait = Duration::from_secs(2);
+        let mut told = false;
+        loop {
+            match vault::load(&self.dir, vault::keystore()) {
+                Ok(seal) => {
+                    self.seal = seal;
+                    return true;
+                }
+                Err(KeyError::Lost(e)) => {
+                    log::warn!("{e}");
+                    self.lost().await;
+                    return false;
+                }
+                Err(KeyError::Transient(e)) => {
+                    log::warn!("{e}");
+                    if !std::mem::replace(&mut told, true) {
+                        self.emit(Ev::Error(t!("Could not open the encrypted data on this device. Trying again.").into())).await;
+                    }
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(Duration::from_secs(60));
+                }
+            }
+        }
+    }
+
+    /// The key to this device's data is gone for good, so the data is unreadable: the device is
+    /// signed out, and only then are the files that cannot be decrypted removed.
+    async fn lost(&mut self) {
+        self.emit(Ev::Error(t!("The key that encrypts this device's data is gone, so it was signed out. Sign in again; your recovery key brings back message history.").into())).await;
+        wipe_account(&self.dir);
+        self.seal = Seal::Plain;
     }
 
     async fn build_client(&self) -> Result<Client> {
@@ -814,14 +852,32 @@ impl State {
     }
 
     async fn restore(&mut self) -> Result<bool> {
-        let Ok(raw) = std::fs::read(self.session_path()) else { return Ok(false) };
-        let saved: SavedSession = serde_json::from_slice(&raw).context("session.json")?;
+        let raw = match self.seal.read(&self.dir, vault::SESSION) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            // A key that unwraps but does not open the session is not this device's key.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData && self.seal.sealed() => {
+                log::warn!("{e}");
+                self.lost().await;
+                return Ok(false);
+            }
+            Err(e) => return Err(e).context("session"),
+        };
+        let saved: SavedSession = serde_json::from_slice(&raw).context("session")?;
         let beeper = saved.homeserver.is_none();
         let homeserver = saved.homeserver.unwrap_or_else(|| self.homeserver.clone());
-        let client = self.client_builder().homeserver_url(&homeserver).build().await?;
+        let client = match self.client_builder().homeserver_url(&homeserver).build().await {
+            Ok(client) => client,
+            Err(e) if key_rejected(&e) => {
+                log::warn!("store: {e}");
+                self.lost().await;
+                return Ok(false);
+            }
+            Err(e) => return Err(e.into()),
+        };
         client.matrix_auth().restore_session(saved.session, RoomLoadSettings::default()).await?;
         (self.homeserver, self.beeper) = (homeserver, beeper);
-        if let Some(rooms) = load_rooms(&self.dir) {
+        if let Some(rooms) = load_rooms(&self.dir, &self.seal) {
             let list = rooms.values().cloned().collect();
             *self.rooms.lock().unwrap() = rooms;
             self.emit(Ev::Rooms(list)).await;
@@ -838,31 +894,39 @@ impl State {
         let notif = client.notification_settings().await;
         self.tasks = vec![
             tokio::spawn(watch_recovery(client.clone(), self.ev.clone())),
-            tokio::spawn(sync_loop(client.clone(), notif.clone(), self.dir.clone(), self.rooms.clone(), self.ev.clone())),
+            tokio::spawn(sync_loop(client.clone(), notif.clone(), self.dir.clone(), self.seal.clone(), self.rooms.clone(), self.ev.clone())),
         ];
         self.notif = Some(notif);
         self.verify.listen(&client, &self.ev);
-        search::start(&self.dir, &client);
+        search::start(&self.dir, &client, &self.seal);
         let user = client.user_id().map(ToOwned::to_owned);
         self.client = Some(client);
         if let Some(user) = user {
-            self.emit(Ev::Ready { user, beeper: self.beeper }).await;
+            self.emit(Ev::Ready { user, beeper: self.beeper, seal: self.seal.clone() }).await;
         }
     }
 
-    /// No session file means any store left behind belongs to a device that never finished logging in.
-    fn drop_orphaned_store(&self) -> Result<()> {
+    /// A sign-in starts clean: a store left behind belongs to a device that never finished logging
+    /// in. On Android it gets a key of its own, so the store is encrypted from its first byte.
+    fn fresh_store(&mut self) -> Result<()> {
         let store = self.dir.join("store");
         if store.exists() {
             log::warn!("removing orphaned store at {}", store.display());
             std::fs::remove_dir_all(&store)?;
-            search::wipe(&self.dir);
         }
+        wipe_account(&self.dir);
+        self.seal = match vault::keystore() {
+            Some(keystore) => vault::create(&self.dir, keystore).map_err(|e| {
+                log::warn!("{e}");
+                anyhow!(t!("Could not create the key that encrypts this device's data. Try again."))
+            })?,
+            None => Seal::Plain,
+        };
         Ok(())
     }
 
     async fn login_jwt(&mut self, jwt: String) -> Result<()> {
-        self.drop_orphaned_store()?;
+        self.fresh_store()?;
         self.beeper = true;
         let client = self.build_client().await?;
         let mut data = JsonObject::new();
@@ -873,7 +937,7 @@ impl State {
             .initial_device_display_name("Murmur")
             .await?;
         let session = client.matrix_auth().session().ok_or_else(|| anyhow!(t!("Login returned no session")))?;
-        write_private(&self.session_path(), &serde_json::to_vec(&SavedSession { session, homeserver: None })?)?;
+        self.seal.write(&self.dir, vault::SESSION, &serde_json::to_vec(&SavedSession { session, homeserver: None })?)?;
         self.go_live(client).await;
         Ok(())
     }
@@ -885,7 +949,7 @@ impl State {
         if user.is_empty() || password.is_empty() {
             return Err(anyhow!(t!("Enter your user name and password.")));
         }
-        self.drop_orphaned_store()?;
+        self.fresh_store()?;
         let not_reached = || anyhow!(t!("Could not reach {server}. Check the address and your connection.", server = server));
         // The SDK retries a silent host for minutes; someone waiting at the form should hear sooner.
         let discovery = self.client_builder().server_name_or_homeserver_url(&server).build();
@@ -926,7 +990,7 @@ impl State {
         self.homeserver = homeserver.to_string();
         self.beeper = false;
         let saved = SavedSession { session, homeserver: Some(self.homeserver.clone()) };
-        write_private(&self.session_path(), &serde_json::to_vec(&saved)?)?;
+        self.seal.write(&self.dir, vault::SESSION, &serde_json::to_vec(&saved)?)?;
         self.go_live(client).await;
         Ok(())
     }
@@ -1185,13 +1249,8 @@ impl State {
                 self.notif = None;
                 (self.open, self.info) = (None, None);
                 self.rooms.lock().unwrap().clear();
-                let _ = std::fs::remove_file(self.session_path());
-                let _ = std::fs::remove_file(rooms_path(&self.dir));
-                let _ = std::fs::remove_file(rooms_lang_path(&self.dir));
-                let _ = std::fs::remove_dir_all(self.dir.join("store"));
-                let _ = std::fs::remove_dir_all(media_dir(&self.dir));
-                search::wipe(&self.dir);
-                (self.homeserver, self.beeper) = (beeper_homeserver(), true);
+                wipe_account(&self.dir);
+                (self.homeserver, self.beeper, self.seal) = (beeper_homeserver(), true, Seal::Plain);
                 self.emit(Ev::NeedLogin).await;
             }
             Cmd::Previews(ids) => {
@@ -1475,6 +1534,20 @@ fn preview(m: &Msg, dm: bool) -> String {
     text.replace('\n', " ")
 }
 
+/// Everything this account left on the device: store, key, session, caches, downloads, index.
+fn wipe_account(dir: &Path) {
+    vault::wipe(dir);
+    let _ = std::fs::remove_file(rooms_lang_path(dir));
+    let _ = std::fs::remove_dir_all(media_dir(dir));
+    let _ = std::fs::remove_dir_all(dir.join("notify"));
+    search::wipe(dir);
+}
+
+/// The store refused its key: it was made with another one, or none.
+fn key_rejected(e: &matrix_sdk::ClientBuildError) -> bool {
+    matches!(e, matrix_sdk::ClientBuildError::SqliteStore(matrix_sdk_sqlite::OpenStoreError::InitCipher(_)))
+}
+
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes)?;
@@ -1690,9 +1763,7 @@ async fn panel(ev: &mpsc::Sender<Ev>, result: Result<Ev>) {
     }
 }
 
-fn rooms_path(dir: &Path) -> PathBuf {
-    dir.join("rooms.json")
-}
+const ROOMS: &str = "rooms.json";
 
 /// The interface language the cached previews were written in; caches without it are English.
 fn rooms_lang_path(dir: &Path) -> PathBuf {
@@ -1703,8 +1774,8 @@ fn rooms_lang() -> &'static str {
     if crate::i18n::polish() { "pl" } else { "en" }
 }
 
-fn load_rooms(dir: &Path) -> Option<HashMap<OwnedRoomId, RoomSummary>> {
-    let mut rooms: HashMap<OwnedRoomId, RoomSummary> = serde_json::from_slice(&std::fs::read(rooms_path(dir)).ok()?).ok()?;
+fn load_rooms(dir: &Path, seal: &Seal) -> Option<HashMap<OwnedRoomId, RoomSummary>> {
+    let mut rooms: HashMap<OwnedRoomId, RoomSummary> = serde_json::from_slice(&seal.read(dir, ROOMS).inspect_err(|e| if e.kind() != std::io::ErrorKind::NotFound { log::warn!("{e}") }).ok()?).ok()?;
     // Previews are text in the interface language: after a switch, each chat's is read again.
     if std::fs::read_to_string(rooms_lang_path(dir)).unwrap_or_else(|_| "en".into()) != rooms_lang() {
         rooms.values_mut().for_each(|r| r.dated = false);
@@ -1952,7 +2023,7 @@ async fn forgotten(client: &Client, rooms: &Rooms) -> bool {
     cache.events().await.is_ok_and(|events| events.is_empty())
 }
 
-async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, rooms: Rooms, ev: mpsc::Sender<Ev>) {
+async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, seal: Seal, rooms: Rooms, ev: mpsc::Sender<Ev>) {
     drop_left(&client, &rooms, &ev).await;
     let cached = refresh_cached(&client, &notif, &rooms).await;
     // Chats whose last message is not known are looked up in the background. A full queue drops
@@ -1988,7 +2059,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
         let resp = match resp {
             Ok(r) => r,
             Err(e) if matches!(e.client_api_error_kind(), Some(ErrorKind::UnknownToken(_))) => {
-                let _ = std::fs::remove_file(dir.join("session.json"));
+                vault::remove(&dir, vault::SESSION);
                 let _ = ev.send(Ev::Error(t!("Signed out by server: {error}", error = e))).await;
                 let _ = ev.send(Ev::NeedLogin).await;
                 return;
@@ -2069,7 +2140,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, ro
         // Probes change summaries between syncs; only this loop writes the file.
         if !changed.is_empty() || gone || UNSAVED_PROBES.swap(false, std::sync::atomic::Ordering::Relaxed) {
             let saved = serde_json::to_vec(&*rooms.lock().unwrap()).map_err(anyhow::Error::from);
-            let saved = saved.and_then(|b| write_private(&rooms_path(&dir), &b)).and_then(|()| write_private(&rooms_lang_path(&dir), rooms_lang().as_bytes()));
+            let saved = saved.and_then(|b| Ok(seal.write(&dir, ROOMS, &b)?)).and_then(|()| write_private(&rooms_lang_path(&dir), rooms_lang().as_bytes()));
             if let Err(e) = saved {
                 log::warn!("rooms.json: {e:#}");
             }
