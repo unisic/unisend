@@ -3345,10 +3345,13 @@ impl Interactivity {
                             .filter(&mut delta, event.touch_phase);
                     }
 
+                    // murmur patch: a touch pan is already locked to its axis, so a sideways
+                    // finger must not scroll a one-axis container along the other axis.
+                    let cross_axis = !restrict_scroll_to_axis && !window.last_input_was_touch();
                     let mut delta_x = match overflow.x {
                         Overflow::Scroll if !delta.x.is_zero() => delta.x,
                         Overflow::Scroll
-                            if !restrict_scroll_to_axis && overflow.y != Overflow::Scroll =>
+                            if cross_axis && overflow.y != Overflow::Scroll =>
                         {
                             delta.y
                         }
@@ -3357,7 +3360,7 @@ impl Interactivity {
                     let mut delta_y = match overflow.y {
                         Overflow::Scroll if !delta.y.is_zero() => delta.y,
                         Overflow::Scroll
-                            if !restrict_scroll_to_axis && overflow.x != Overflow::Scroll =>
+                            if cross_axis && overflow.x != Overflow::Scroll =>
                         {
                             delta.x
                         }
