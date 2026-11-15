@@ -5,6 +5,7 @@
 
 use std::ops::Range;
 
+use super::sheet::{self, SheetMotion};
 use super::*;
 use crate::backend::{Gif, GifPage, gifs_enabled};
 use crate::i18n::t;
@@ -34,6 +35,7 @@ pub(super) struct Picker {
     /// One per loaded GIF at most (KLIPY's small JPEGs, about 200 KB of pixels each), so at most
     /// `MAX_PAGES` × 24 of them: under 20 MB. Dropped with the results.
     previews: HashMap<String, Arc<Image>>,
+    pub sheet: SheetMotion,
 }
 
 impl BeeperApp {
@@ -154,24 +156,14 @@ impl BeeperApp {
     }
 
     pub(super) fn render_gifs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.gifs.open;
-        let motion = if live {
-            Transition::new(motion::SHEET_IN).easing(motion::EASE_SHEET)
-        } else {
-            Transition::new(motion::SHEET_OUT).easing(motion::EASE_OUT)
-        };
-        let shown = Presence::new("gifs", live).transition(motion).sample(window, cx);
-        if !shown.should_render() {
-            return None;
-        }
+        let frame = self.gifs.sheet.sample(self.gifs.open, window, cx)?;
+        let live = frame.live;
         let p = Palette::of(cx);
         let view = window.viewport_size();
         let (view_w, view_h) = (f32::from(view.width), f32::from(view.height));
         let (top, bottom) = crate::insets();
         let width = view_w.min(SHEET_W);
         let height = ((view_h - top) * 0.72).round();
-        let y = height * (1. - shown.progress);
-        let present = shown.progress.clamp(0., 1.);
 
         let cols = if width >= 480. { 4 } else { 3 };
         let cell = ((width - GRID_GAP * (cols - 1) as f32) / cols as f32).floor();
@@ -236,21 +228,13 @@ impl BeeperApp {
         };
 
         Some(
-            div()
-                .id("gifs-scrim")
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .justify_end()
-                .items_center()
-                .bg(gpui_kit::black().opacity(0.6 * present))
-                .when(live, |el| el.occlude().on_click(cx.listener(|this, _, _, cx| this.close_gifs(cx))))
+            sheet::scrim("gifs-scrim", frame)
+                .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.close_gifs(cx))))
                 .child(
                     v_flex()
                         .id("gifs-sheet")
                         .relative()
-                        .top(px(y))
+                        .top(px(frame.y))
                         .w(px(width))
                         .h(px(height + bottom))
                         .pb(px(bottom + 8.))
@@ -258,7 +242,15 @@ impl BeeperApp {
                         .overflow_hidden()
                         .bg(p.surface)
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
-                        .child(div().flex_none().h(px(20.)).flex().items_center().justify_center().child(div().w(px(36.)).h(px(4.)).rounded_full().bg(p.faint.opacity(0.5))))
+                        .child(self.gifs.sheet.probe(cx.entity_id()))
+                        .child(sheet::handle(p.faint).id("gifs-handle").when(live, |el| {
+                            el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+                                if this.gifs.sheet.drag(e) {
+                                    this.close_gifs(cx);
+                                }
+                                cx.notify();
+                            }))
+                        }))
                         .children(search)
                         .child(grid)
                         .child(div().flex_none().pt(px(8.)).px(px(GUTTER)).text_size(fs(12.)).text_color(p.faint).child(t!("Powered by KLIPY"))),

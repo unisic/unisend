@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 
 use super::camera::TILES;
+use super::sheet::{self, SheetMotion};
 use super::*;
 use crate::i18n::t;
 
@@ -21,8 +22,6 @@ const THUMB_MAX: f32 = 320.;
 const MAX_LOADS: usize = 4;
 /// Rows below the visible ones whose thumbnails load ahead of the scroll.
 const AHEAD_ROWS: usize = 2;
-/// A downward flick this fast (px/s) dismisses the sheet however short it was.
-const DISMISS_SPEED: f32 = 800.;
 const GRID_GAP: f32 = 2.;
 /// Attachments waiting their turn to upload, all batches together.
 pub(super) const MAX_QUEUED: usize = 30;
@@ -145,12 +144,6 @@ impl Thumbs {
     }
 }
 
-/// A finger dragging the sheet by its top: how far it has gone down, and its last positions.
-struct Drag {
-    offset: f32,
-    samples: VecDeque<(Instant, f32)>,
-}
-
 /// Speed in px/s over the last 100 ms of a drag.
 pub(super) fn speed(samples: &VecDeque<(Instant, f32)>) -> f32 {
     let Some(&(end, at)) = samples.back() else { return 0. };
@@ -159,14 +152,14 @@ pub(super) fn speed(samples: &VecDeque<(Instant, f32)>) -> f32 {
     if dt < 0.001 { 0. } else { (at - from) / dt }
 }
 
-fn dismisses(offset: f32, speed: f32, height: f32) -> bool {
-    offset > height * 0.3 || (offset > 0. && speed > DISMISS_SPEED)
-}
-
-/// Up past the open position the sheet follows a fifth of the way, so it meets resistance.
-fn follow(offset: f32) -> f32 {
-    if offset >= 0. { offset } else { offset * 0.2 }
-}
+/// The attach buttons rise in after the sheet has started to, one after another.
+const STAGGER_FIRST: Duration = Duration::from_millis(160);
+const STAGGER_STEP: Duration = Duration::from_millis(25);
+const STAGGER_RISE: f32 = 12.;
+/// A chosen photo draws in this far from each side, its badge pops this much.
+const PICK_INSET: f32 = 7.;
+const PICK_RADIUS: f32 = 8.;
+const PICK_POP: f32 = 4.;
 
 #[derive(Default)]
 pub(super) struct Gallery {
@@ -187,10 +180,8 @@ pub(super) struct Gallery {
     /// Items whose thumbnails are wanted now: the visible rows and a few below.
     visible: Range<usize>,
     thumb_px: u32,
-    drag: Option<Drag>,
-    /// How far down the sheet was drawn last, where it falls from when it closes.
-    offset: f32,
-    fall_from: f32,
+    pub sheet: SheetMotion,
+    menu_sheet: SheetMotion,
     /// Asked for access and watching for the answer.
     waiting: bool,
     asked: bool,
@@ -322,6 +313,7 @@ pub(super) fn enabled() -> bool {
 
 impl BeeperApp {
     pub(super) fn attach_action(&mut self, action: Attach, window: &mut Window, cx: &mut Context<Self>) {
+        let from_sheet = self.gallery.open;
         self.close_gallery(cx);
         self.gallery.menu = false;
         match action {
@@ -331,17 +323,22 @@ impl BeeperApp {
             Attach::Contact => self.pick_contact(cx),
             Attach::Poll => self.open_poll_form(window, cx),
         }
+        // GIFs and location rise over the scrim the gallery leaves behind, so there is never a second one.
+        let next = match action {
+            Attach::Gif if self.gifs_open() => Some(&mut self.gifs.sheet),
+            Attach::Location if self.location.open => Some(&mut self.location.sheet),
+            _ => None,
+        };
+        if let Some(next) = next.filter(|_| from_sheet) {
+            (next.handoff, self.gallery.sheet.quiet) = (true, true);
+        }
         cx.notify();
     }
 
     /// The desktop's attach menu: the sheet's entries as rows.
     pub(super) fn render_attach_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.gallery.menu;
-        let motion = if live { Transition::new(motion::SHEET_IN).easing(motion::EASE_SHEET) } else { Transition::new(motion::SHEET_OUT).easing(motion::EASE_OUT) };
-        let shown = Presence::new("attach-menu", live).transition(motion).sample(window, cx);
-        if !shown.should_render() {
-            return None;
-        }
+        let frame = self.gallery.menu_sheet.sample(self.gallery.menu, window, cx)?;
+        let live = frame.live;
         let rows = attach_actions()
             .into_iter()
             .map(|action| {
@@ -349,12 +346,12 @@ impl BeeperApp {
                 if live { row.on_click(cx.listener(move |this, _, window, cx| this.attach_action(action, window, cx))) } else { row }
             })
             .collect();
-        Some(self.sheet(t!("Attach").to_owned(), rows, shown.progress, live, cx))
+        Some(self.sheet(&self.gallery.menu_sheet, frame, 0, t!("Attach").to_owned(), rows, |this| &mut this.gallery.menu_sheet, window, cx))
     }
 
     pub(super) fn open_gallery(&mut self, cx: &mut Context<Self>) {
         let g = &mut self.gallery;
-        (g.open, g.fall_from, g.offset) = (true, 0., 0.);
+        g.open = true;
         g.epoch += 1;
         let access = store::access();
         g.access = Some(access);
@@ -375,8 +372,7 @@ impl BeeperApp {
         }
         g.open = false;
         g.epoch += 1;
-        g.fall_from = g.offset;
-        (g.drag, g.waiting, g.paging) = (None, false, false);
+        (g.waiting, g.paging) = (false, false);
         g.selection = Selection::default();
         g.loading.clear();
         g.failed.clear();
@@ -585,60 +581,15 @@ impl BeeperApp {
         }
     }
 
-    /// Follows a finger on the sheet's top; on release it closes or springs back.
-    fn drag_gallery(&mut self, e: &ScrollWheelEvent, height: f32, cx: &mut Context<Self>) {
-        let dy = f32::from(e.delta.pixel_delta(px(20.)).y);
-        let now = Instant::now();
-        match e.touch_phase {
-            TouchPhase::Started => self.gallery.drag = Some(Drag { offset: dy, samples: VecDeque::from([(now, dy)]) }),
-            TouchPhase::Moved => {
-                // A mouse wheel has no start, so it never drags.
-                let Some(drag) = &mut self.gallery.drag else { return };
-                drag.offset += dy;
-                drag.samples.push_back((now, drag.offset));
-                if drag.samples.len() > 6 {
-                    drag.samples.pop_front();
-                }
-            }
-            TouchPhase::Ended => {
-                let Some(mut drag) = self.gallery.drag.take() else { return };
-                // A finger that rested before lifting has no speed left.
-                drag.samples.push_back((now, drag.offset));
-                if dismisses(drag.offset, speed(&drag.samples), height) {
-                    self.gallery.offset = follow(drag.offset);
-                    self.close_gallery(cx);
-                }
-            }
-            TouchPhase::Cancelled => self.gallery.drag = None,
-        }
-        cx.notify();
-    }
-
     pub(super) fn render_gallery(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.gallery.open;
-        let dragged = self.gallery.drag.as_ref().map(|d| follow(d.offset));
-        // Pinned to the finger while it drags, springing back after; at rest while closed, so
-        // the next opening starts from the bottom.
-        let held = spring("gallery-drag", if live { dragged.unwrap_or(0.) } else { 0. }, motion::RELEASE.with_travel(live && dragged.is_none()), window, cx);
-        let motion = if live {
-            Transition::new(motion::SHEET_IN).easing(motion::EASE_SHEET)
-        } else {
-            Transition::new(motion::SHEET_OUT).easing(motion::EASE_OUT)
-        };
-        let shown = Presence::new("gallery", live).transition(motion).sample(window, cx);
-        if !shown.should_render() {
-            return None;
-        }
+        let frame = self.gallery.sheet.sample(self.gallery.open, window, cx)?;
+        let live = frame.live;
         let p = Palette::of(cx);
         let view = window.viewport_size();
         let (view_w, view_h) = (f32::from(view.width), f32::from(view.height));
         let (top, bottom) = crate::insets();
         let width = view_w.min(SHEET_W);
         let height = ((view_h - top) * 0.72).round();
-        let offset = if live { held } else { self.gallery.fall_from };
-        self.gallery.offset = offset;
-        let y = offset + (height - offset) * (1. - shown.progress);
-        let present = (1. - y / height).clamp(0., 1.);
 
         let cols = if width >= 480. { 4 } else { 3 };
         let cell = ((width - GRID_GAP * (cols - 1) as f32) / cols as f32).floor();
@@ -654,8 +605,15 @@ impl BeeperApp {
         let head = v_flex()
             .id("gallery-head")
             .flex_none()
-            .when(live, |el| el.on_scroll_wheel(cx.listener(move |this, e: &ScrollWheelEvent, _, cx| this.drag_gallery(e, height, cx))))
-            .child(div().h(px(20.)).flex().items_center().justify_center().child(div().w(px(36.)).h(px(4.)).rounded_full().bg(p.faint.opacity(0.5))))
+            .when(live, |el| {
+                el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+                    if this.gallery.sheet.drag(e) {
+                        this.close_gallery(cx);
+                    }
+                    cx.notify();
+                }))
+            })
+            .child(sheet::handle(p.faint))
             .child(
                 h_flex()
                     .h(px(36.))
@@ -714,7 +672,7 @@ impl BeeperApp {
             uniform_list(
                 "gallery-grid",
                 rows,
-                cx.processor(move |this, range: Range<usize>, _, cx| {
+                cx.processor(move |this, range: Range<usize>, window, cx| {
                     if live {
                         this.grid_drawn(range.clone(), cols, cx);
                     }
@@ -726,7 +684,7 @@ impl BeeperApp {
                                 .pb(px(GRID_GAP))
                                 .gap(px(GRID_GAP))
                                 .children(cells.map(|ix| match ix.checked_sub(TILES) {
-                                    Some(item) => this.render_cell(item, cell, live, cx),
+                                    Some(item) => this.render_cell(item, cell, live, window, cx),
                                     None => this.render_camera_tile(ix, cell, live, cx),
                                 }))
                         })
@@ -737,20 +695,27 @@ impl BeeperApp {
             .into_any_element()
         };
 
-        // What else can be attached, under the thumb; choosing photos puts Send in its place.
-        let actions = (count == 0).then(|| {
-            h_flex()
-                .flex_none()
-                .justify_around()
-                .px(px(GUTTER))
-                .pt(px(8.))
-                .children(attach_actions().into_iter().map(|action| {
-                    let row = action.button(cx);
-                    if live { row.on_click(cx.listener(move |this, _, window, cx| this.attach_action(action, window, cx))) } else { row }
-                }))
-        });
-        let send = (count > 0).then(|| {
-            h_flex().flex_none().justify_end().px(px(GUTTER)).pt(px(8.)).child(
+        // What else can be attached, under the thumb; choosing photos crossfades Send into its place.
+        // The buttons keep the row's height either way, so the grid above never jumps.
+        let sending = transition("gallery-row", (count > 0) as u8 as f32, motion::enter(), window, cx);
+        let risen = self.gallery.sheet.risen_for();
+        let buttons = attach_actions();
+        if sheet::stagger(risen, buttons.len().saturating_sub(1), STAGGER_FIRST, STAGGER_STEP) < 1. {
+            window.request_animation_frame();
+        }
+        let actions = h_flex()
+            .flex_none()
+            .justify_around()
+            .px(px(GUTTER))
+            .pt(px(8.))
+            .opacity(1. - sending)
+            .children(buttons.into_iter().enumerate().map(|(i, action)| {
+                let shown = sheet::stagger(risen, i, STAGGER_FIRST, STAGGER_STEP);
+                let row = action.button(cx).relative().top(px(STAGGER_RISE * (1. - shown))).opacity(shown);
+                if live && count == 0 { row.on_click(cx.listener(move |this, _, window, cx| this.attach_action(action, window, cx))) } else { row }
+            }));
+        let send = (sending > 0.).then(|| {
+            h_flex().absolute().left_0().right_0().top(px(8. * (1. - sending))).justify_end().px(px(GUTTER)).pt(px(8.)).opacity(sending).child(
                 h_flex()
                     .id("gallery-send")
                     .h(px(TAP))
@@ -766,26 +731,18 @@ impl BeeperApp {
                     .active(|el| el.bg(p.muted))
                     .child(div().font_features(tabular()).child(t!("Send {count}", count = count)))
                     .child(Icon::new(IconName::ArrowUp).size_5())
-                    .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.send_chosen(cx)))),
+                    .when(live && count > 0, |el| el.on_click(cx.listener(|this, _, _, cx| this.send_chosen(cx)))),
             )
         });
 
         Some(
-            div()
-                .id("gallery")
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .justify_end()
-                .items_center()
-                .bg(gpui_kit::black().opacity(0.6 * present))
-                .when(live, |el| el.occlude().on_click(cx.listener(|this, _, _, cx| this.close_gallery(cx))))
+            sheet::scrim("gallery", frame)
+                .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.close_gallery(cx))))
                 .child(
                     v_flex()
                         .id("gallery-sheet")
                         .relative()
-                        .top(px(y))
+                        .top(px(frame.y))
                         .w(px(width))
                         .h(px(height + bottom))
                         .pb(px(bottom + 8.))
@@ -794,17 +751,17 @@ impl BeeperApp {
                         .bg(p.surface)
                         // A tap inside is not a tap outside.
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
+                        .child(self.gallery.sheet.probe(cx.entity_id()))
                         .child(head)
                         .children(notice)
                         .child(grid)
-                        .children(actions)
-                        .children(send),
+                        .child(div().flex_none().relative().child(actions).children(send)),
                 )
                 .into_any_element(),
         )
     }
 
-    fn render_cell(&mut self, ix: usize, cell: f32, live: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_cell(&mut self, ix: usize, cell: f32, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let g = &mut self.gallery;
         let item = &g.items[ix];
         let (id, video, duration) = (item.id, item.video(), item.duration_ms);
@@ -812,24 +769,33 @@ impl BeeperApp {
         let blocked = number.is_none() && g.selection.is_full();
         let thumb = g.thumbs.get(id);
         let p = Palette::of(cx);
+        // Keyed by the item, not the cell, so a pick stays with its photo as the grid pages; a cell
+        // first drawn with its thumbnail takes it at once, so scrolling never blinks.
+        let key = |what: &'static str| ElementId::NamedInteger(what.into(), id as u64);
+        let fade = || Transition::new(motion::FADE_IN).easing(motion::EASE_OUT);
+        let pick = transition(key("gallery-pick"), number.is_some() as u8 as f32, if number.is_some() { motion::enter() } else { motion::exit() }, window, cx);
+        let shade = transition(key("gallery-lock"), if blocked { 0.4 } else { 1. }, fade(), window, cx);
+        let loaded = transition(key("gallery-thumb"), thumb.is_some() as u8 as f32, fade(), window, cx);
+        // The badge grows and settles back once, about a fixed centre, only on the way in.
+        let badge = 24. + if number.is_some() { PICK_POP * (std::f32::consts::PI * pick).sin() } else { 0. };
         let marker = div()
             .absolute()
-            .top(px(6.))
-            .right(px(6.))
-            .size(px(24.))
+            .top(px(18. - badge / 2.))
+            .right(px(18. - badge / 2.))
+            .size(px(badge))
             .flex()
             .items_center()
             .justify_center()
             .rounded_full()
             .border_2()
             .border_color(gpui_kit::white())
+            .bg(gpui_kit::black().opacity(0.2))
             .text_size(fs(13.))
             .font_weight(FontWeight::SEMIBOLD)
             .font_features(tabular())
-            .map(|el| match number {
-                Some(n) => el.bg(p.text).text_color(p.ground).child(n.to_string()),
-                None => el.bg(gpui_kit::black().opacity(0.2)),
-            });
+            .child(div().absolute().inset_0().rounded_full().bg(p.text.opacity(pick)))
+            .children(number.map(|n| div().relative().text_color(p.ground.opacity(pick)).child(n.to_string())));
+        let inset = PICK_INSET * pick;
         div()
             .id(("gallery-cell", ix))
             .relative()
@@ -838,9 +804,11 @@ impl BeeperApp {
             .overflow_hidden()
             .bg(p.raised)
             .cursor_pointer()
-            .when(blocked, |el| el.opacity(0.4))
+            .opacity(shade)
             .map(|el| match thumb {
-                Some(image) => el.child(img(image).size_full().object_fit(ObjectFit::Cover)),
+                Some(image) => el.child(
+                    img(image).absolute().top(px(inset)).left(px(inset)).right(px(inset)).bottom(px(inset)).rounded(px(PICK_RADIUS * pick)).opacity(loaded).object_fit(ObjectFit::Cover),
+                ),
                 None => el.child(
                     div()
                         .size_full()
@@ -851,7 +819,7 @@ impl BeeperApp {
                         .child(Icon::new(if video { IconName::Video } else { IconName::Image }).size_5()),
                 ),
             })
-            .when(number.is_some(), |el| el.child(div().absolute().inset_0().bg(gpui_kit::black().opacity(0.25))))
+            .when(pick > 0., |el| el.child(div().absolute().inset_0().bg(gpui_kit::black().opacity(0.25 * pick))))
             .when(video, |el| {
                 el.child(
                     div()
@@ -1044,7 +1012,7 @@ mod tests {
 
     use gpui_kit::{Image, ImageFormat};
 
-    use super::{Item, MAX_CACHED, MAX_SELECTED, Selection, Thumbs, dismisses, page_after, parse_page, speed};
+    use super::{Item, MAX_CACHED, MAX_SELECTED, Selection, Thumbs, page_after, parse_page, speed};
 
     fn item(id: i64, date: i64) -> Item {
         Item { id, uri: format!("content://media/external/images/media/{id}"), mime: "image/jpeg".into(), date, duration_ms: 0, width: 4, height: 3 }
@@ -1109,15 +1077,12 @@ mod tests {
     }
 
     #[test]
-    fn a_long_drag_or_a_quick_flick_dismisses() {
+    fn a_drag_is_as_fast_as_its_last_100_ms() {
         let start = Instant::now();
         let at = |ms: u64, y: f32| (start + Duration::from_millis(ms), y);
         let flick = VecDeque::from([at(0, 0.), at(16, 20.), at(32, 40.)]);
-        assert!(speed(&flick) > 1000.);
-        assert!(dismisses(40., speed(&flick), 600.));
-        let slow = VecDeque::from([at(0, 0.), at(500, 30.), at(1000, 60.)]);
-        assert!(!dismisses(60., speed(&slow), 600.), "a short slow drag springs back");
-        assert!(dismisses(200., 0., 600.), "past 30 %");
-        assert!(!dismisses(-20., 2000., 600.), "flicked up");
+        assert!((speed(&flick) - 1250.).abs() < 1.);
+        let rested = VecDeque::from([at(0, 0.), at(500, 30.), at(1000, 60.)]);
+        assert_eq!(speed(&rested), 0., "no samples in the last 100 ms but the end");
     }
 }

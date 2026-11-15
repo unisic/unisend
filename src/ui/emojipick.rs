@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use emojis::{Group, SkinTone};
+use super::sheet::{self, SheetMotion};
 use super::*;
 use crate::emoji;
 use crate::i18n::t;
@@ -154,6 +155,7 @@ pub(super) struct Picker {
     starts: Vec<(Cat, usize)>,
     /// What `rows` was built for: columns, query, tone, recents.
     built: Option<(usize, String, usize, Vec<&'static str>)>,
+    pub sheet: SheetMotion,
 }
 
 impl Picker {
@@ -170,6 +172,7 @@ impl Picker {
             rows: Vec::new(),
             starts: Vec::new(),
             built: None,
+            sheet: SheetMotion::default(),
         }
     }
 
@@ -249,11 +252,16 @@ impl BeeperApp {
         Some(div().id("emoji-panel").w_full().h(px(height)).flex_none().child(self.emoji_body(width, cx)).into_any_element())
     }
 
-    /// The sheet for a reaction: rises from the bottom over a dimmed screen.
+    /// The sheet for a reaction: rises from the bottom over a dimmed screen, falls when an emoji is
+    /// picked. Opened from the long-press menu it rises over the menu's fading dim, its own scrim
+    /// already full, so the screen never brightens between the two.
     pub(super) fn render_emoji_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !matches!(self.emoji_open, Some(Target::React(_))) {
-            return None;
+        let live = matches!(self.emoji_open, Some(Target::React(_)));
+        if live && !self.emoji_pick.sheet.is_live() {
+            self.emoji_pick.sheet.handoff = self.menu.is_some();
         }
+        let frame = self.emoji_pick.sheet.sample(live, window, cx)?;
+        let live = frame.live;
         let p = Palette::of(cx);
         let view = window.viewport_size();
         let (_, bottom) = crate::insets();
@@ -262,33 +270,26 @@ impl BeeperApp {
         let card = v_flex()
             .id("emoji-sheet")
             .relative()
+            .top(px(frame.y))
             .w(px(width))
-            .h(px(height))
+            .h(px(height + sheet::HANDLE_H))
             .pb(px(bottom))
             .rounded_t(px(RADIUS))
             .bg(p.surface)
-            .occlude()
+            .when(live, |el| el.occlude())
+            .child(self.emoji_pick.sheet.probe(cx.entity_id()))
+            .child(sheet::handle(p.faint).id("emoji-sheet-handle").when(live, |el| {
+                el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+                    if this.emoji_pick.sheet.drag(e) {
+                        this.close_emoji(cx);
+                    }
+                    cx.notify();
+                }))
+            }))
             .child(self.emoji_body(width, cx));
-        let card = if cx.reduce_motion() {
-            card.into_any_element()
-        } else {
-            card.with_animation("emoji-sheet-in", Animation::new(motion::SHEET_IN).with_easing(motion::ease_sheet), move |el, t| {
-                el.top(px(height * (1. - t)))
-            })
-            .into_any_element()
-        };
         Some(
-            div()
-                .id("emoji-sheet-barrier")
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .justify_end()
-                .items_center()
-                .bg(gpui_kit::black().opacity(0.6))
-                .occlude()
-                .on_click(cx.listener(|this, _, _, cx| this.close_emoji(cx)))
+            sheet::scrim("emoji-sheet-barrier", frame)
+                .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.close_emoji(cx))))
                 .child(card)
                 .into_any_element(),
         )

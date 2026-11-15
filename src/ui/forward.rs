@@ -9,6 +9,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use super::motion::Glide;
+use super::sheet::{self, SheetMotion};
 use super::*;
 use crate::backend::forward::{MAX_CHATS, MAX_MESSAGES};
 use crate::i18n::{t, tn};
@@ -92,6 +93,7 @@ pub(super) struct Forward {
     /// The forward sheet: the chat the messages are in and the messages, oldest first.
     picking: Option<(OwnedRoomId, Vec<String>)>,
     picker_last: Option<(OwnedRoomId, Vec<String>)>,
+    sheet: SheetMotion,
     chosen: Vec<OwnedRoomId>,
     search: Entity<InputState>,
     pub hidden: Hidden,
@@ -113,6 +115,7 @@ impl Forward {
             armed: false,
             picking: None,
             picker_last: None,
+            sheet: SheetMotion::default(),
             chosen: Vec::new(),
             search,
             hidden: Hidden::default(),
@@ -421,18 +424,14 @@ impl BeeperApp {
     }
 
     fn render_picker_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.fwd.picking.is_some();
-        if live {
+        if self.fwd.picking.is_some() {
             self.fwd.picker_last = self.fwd.picking.clone();
-        } else if self.fwd.picker_last.is_none() {
-            return None;
         }
-        let motion = if live { Transition::new(motion::SHEET_IN).easing(motion::EASE_SHEET) } else { Transition::new(motion::SHEET_OUT).easing(motion::EASE_OUT) };
-        let shown = Presence::new("forward-sheet", live).transition(motion).sample(window, cx);
-        if !shown.should_render() {
+        let Some(frame) = self.fwd.sheet.sample(self.fwd.picking.is_some(), window, cx) else {
             self.fwd.picker_last = None;
             return None;
-        }
+        };
+        let live = frame.live;
         let p = Palette::of(cx);
         let (top, bottom) = crate::insets();
         let height = ((f32::from(window.viewport_size().height) - top) * 0.85).round();
@@ -493,18 +492,11 @@ impl BeeperApp {
         };
         let hint = t!("{chosen} of {max} chats", chosen = chosen, max = MAX_CHATS);
         let send_label = tn!(chosen, "Send to {n} chat", "Send to {n} chats");
+        let send = Presence::new("forward-send", chosen > 0).transition(if chosen > 0 { motion::enter() } else { motion::exit() }).sample(window, cx);
         Some(
-            div()
-                .id("forward-scrim")
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .justify_end()
-                .items_center()
-                .bg(gpui_kit::black().opacity(0.6 * shown.progress))
+            sheet::scrim("forward-scrim", frame)
                 .when(live, |el| {
-                    el.occlude().on_click(cx.listener(|this, _, _, cx| {
+                    el.on_click(cx.listener(|this, _, _, cx| {
                         this.fwd.picking = None;
                         cx.notify();
                     }))
@@ -513,22 +505,36 @@ impl BeeperApp {
                     v_flex()
                         .id("forward-sheet")
                         .relative()
-                        .top(px(height * (1. - shown.progress)))
+                        .top(px(frame.y))
                         .w_full()
                         .max_w(px(SHEET_W))
                         .h(px(height))
-                        .pt(px(8.))
                         .pb(px(bottom + 8.))
                         .rounded_t(px(RADIUS))
                         .bg(p.surface)
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
+                        .child(self.fwd.sheet.probe(cx.entity_id()))
                         .child(
-                            h_flex()
-                                .h(px(36.))
-                                .px(px(GUTTER + 4.))
-                                .gap(px(8.))
-                                .child(div().flex_1().min_w_0().truncate().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(title))
-                                .child(div().flex_none().text_size(fs(12.)).font_features(tabular()).text_color(p.faint).child(hint)),
+                            v_flex()
+                                .id("forward-head")
+                                .flex_none()
+                                .when(live, |el| {
+                                    el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+                                        if this.fwd.sheet.drag(e) {
+                                            this.fwd.picking = None;
+                                        }
+                                        cx.notify();
+                                    }))
+                                })
+                                .child(sheet::handle(p.faint))
+                                .child(
+                                    h_flex()
+                                        .h(px(36.))
+                                        .px(px(GUTTER + 4.))
+                                        .gap(px(8.))
+                                        .child(div().flex_1().min_w_0().truncate().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(title))
+                                        .child(div().flex_none().text_size(fs(12.)).font_features(tabular()).text_color(p.faint).child(hint)),
+                                ),
                         )
                         .child(
                             div()
@@ -543,8 +549,8 @@ impl BeeperApp {
                                 .child(Input::new(&self.fwd.search).appearance(false)),
                         )
                         .child(div().id("forward-chats").flex_1().min_h_0().overflow_y_scroll().children(rows))
-                        .when(chosen > 0, |el| {
-                            el.child(
+                        .when(send.should_render(), |el| {
+                            el.child(div().flex_none().overflow_hidden().h(px((TAP + 8.) * send.progress)).opacity(send.progress).child(
                                 div()
                                     .id("forward-send")
                                     .mx(px(GUTTER))
@@ -561,8 +567,8 @@ impl BeeperApp {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .cursor_pointer()
                                     .child(send_label)
-                                    .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.forward_send(cx)))),
-                            )
+                                    .when(live && chosen > 0, |el| el.on_click(cx.listener(|this, _, _, cx| this.forward_send(cx)))),
+                            ))
                         }),
                 )
                 .into_any_element(),

@@ -22,6 +22,12 @@ pub(crate) const FLASH_HOLD: Duration = Duration::from_millis(300);
 pub(crate) const FLASH_FADE: Duration = Duration::from_millis(700);
 /// The heart a double tap pops at the finger.
 pub(crate) const HEART: Duration = Duration::from_millis(700);
+// Sheets
+/// A sheet leaving under the one that replaces it, and how long the new one waits to rise.
+pub(crate) const SHEET_HANDOFF: Duration = Duration::from_millis(200);
+pub(crate) const HANDOFF_DELAY: Duration = Duration::from_millis(60);
+/// New content inside a sheet, a thumbnail that finished loading.
+pub(crate) const FADE_IN: Duration = Duration::from_millis(150);
 
 // Navigation and the chat list.
 /// A chat or a deep panel sliding in; the way back is `PUSH`.
