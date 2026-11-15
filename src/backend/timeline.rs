@@ -15,6 +15,7 @@ use anyhow::{Context as _, Result};
 use futures_util::StreamExt as _;
 use matrix_sdk::{
     Room,
+    event_handler::EventHandlerDropGuard,
     ruma::{
         EventId, OwnedEventId, OwnedRoomId, OwnedTransactionId, OwnedUserId, UserId,
         events::{
@@ -22,6 +23,7 @@ use matrix_sdk::{
             room::{member::MembershipChange as Change, message::MessageType},
         },
         room_version_rules::RoomVersionRules,
+        serde::Raw,
     },
 };
 use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
@@ -34,7 +36,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::{
     AbortOnDrop, deleted, utd, Delivery, Ev, Kind, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
-    format, marks, network, other_person, plain, sticker, disappear,
+    format, marks, network, other_person, plain, sticker, disappear, features,
 };
 use crate::i18n::t;
 
@@ -60,6 +62,7 @@ pub(super) struct Open {
     /// Builds every row again, as after a change of the interface language.
     pub relabel: Arc<tokio::sync::Notify>,
     _tasks: [AbortOnDrop; 3],
+    _features: EventHandlerDropGuard,
 }
 
 /// Who is looking at the conversation: what a row needs to know besides its own item.
@@ -192,7 +195,24 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
             }
         }
     });
-    Ok(Open { room: id, timeline, relabel, _tasks: [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing)] })
+    let _features = follow_features(room, ev).await;
+    Ok(Open { room: id, timeline, relabel, _tasks: [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing)], _features })
+}
+
+/// Sends the room's features now and again whenever sync brings the event; the SDK has stored
+/// the state by the time it calls the handler.
+async fn follow_features(room: &Room, ev: &mpsc::Sender<Ev>) -> EventHandlerDropGuard {
+    let _ = ev.send(Ev::Features { room: room.room_id().to_owned(), features: features::read(room).await }).await;
+    let ev = ev.clone();
+    let handle = room.client().add_room_event_handler(room.room_id(), move |raw: Raw<AnySyncStateEvent>, room: Room| {
+        let ev = ev.clone();
+        async move {
+            if raw.get_field::<String>("type").ok().flatten().as_deref() == Some(features::KIND) {
+                let _ = ev.send(Ev::Features { room: room.room_id().to_owned(), features: features::read(&room).await }).await;
+            }
+        }
+    });
+    room.client().event_handler_drop_guard(handle)
 }
 
 /// The items a change brings: new ones, and ones that took the place of an old one.
