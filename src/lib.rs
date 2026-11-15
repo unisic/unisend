@@ -506,6 +506,10 @@ fn apply_palette(cx: &mut App) {
         (k.button_primary_foreground, k.ring, k.caret) = (p.ground, p.faint, p.text);
         (k.danger, k.danger_hover, k.danger_active) = (p.negative, p.negative, p.negative);
         (k.switch, k.switch_thumb, k.selection) = (p.faint.opacity(0.5), p.ground, p.text.opacity(0.28));
+        // Desktop only: a thumb with no track, one and two steps above the ground.
+        if !gpui_kit::is_mobile() {
+            (k.scrollbar, k.scrollbar_thumb, k.scrollbar_thumb_hover) = (p.ground.opacity(0.), p.raised, p.faint);
+        }
     });
 }
 
