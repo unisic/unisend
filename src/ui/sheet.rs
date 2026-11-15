@@ -327,7 +327,12 @@ pub(super) fn stagger(risen: Option<Duration>, i: usize, first: Duration, step: 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
+    use std::time::{Duration, Instant};
+
+    use gpui_kit::TouchPhase;
+
+    use super::{SCRIM, SheetMotion, dismisses, motion, stagger};
 
     const FRAME: Duration = Duration::from_millis(8);
 
@@ -448,6 +453,7 @@ mod tests {
         let (mut out, t) = up(300.);
         out.quiet = true;
         out.set_live(false);
+        out.advance(t, false);
         let y = out.advance(t + Duration::from_millis(50), false);
         assert_eq!(out.scrim(y), 0.);
         out.advance(t + motion::SHEET_HANDOFF, false);
