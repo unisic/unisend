@@ -139,9 +139,9 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let bridged = self.rooms.iter().any(|r| r.id == room && r.network.is_some());
         let row = if bridged {
-            sheet_row("chat-delete", IconName::Trash, t!("Delete chat"), p.negative, cx)
+            sheet_row_idle("chat-delete", IconName::Trash, t!("Delete chat"), p.negative, cx)
         } else {
-            sheet_row("chat-leave", IconName::LogOut, t!("Leave chat"), p.negative, cx)
+            sheet_row_idle("chat-leave", IconName::LogOut, t!("Leave chat"), p.negative, cx)
         };
         if !live {
             return row;
@@ -463,7 +463,6 @@ impl BeeperApp {
             Answer::Ready(room) => {
                 self.people.new = None;
                 self.panel = None;
-                self.nav = Some((Instant::now(), true));
                 self.open_room(room, cx);
             }
             Answer::Failed(why) => match self.people.new.as_mut() {

@@ -23,6 +23,21 @@ pub(crate) const FLASH_FADE: Duration = Duration::from_millis(700);
 /// The heart a double tap pops at the finger.
 pub(crate) const HEART: Duration = Duration::from_millis(700);
 
+// Navigation and the chat list.
+/// A chat or a deep panel sliding in; the way back is `PUSH`.
+pub(crate) const PUSH_IN: Duration = Duration::from_millis(300);
+/// How far the screen underneath retreats, as a share of the width, and how dark its veil gets.
+pub(crate) const PUSH_PARALLAX: f32 = 0.25;
+pub(crate) const PUSH_VEIL: f32 = 0.5;
+/// The crossfade that stands in for the slide when motion is reduced.
+pub(crate) const PUSH_FADE: Duration = Duration::from_millis(150);
+/// The chat list scrolling back to its top.
+pub(crate) const SCROLL_TOP: Duration = Duration::from_millis(300);
+/// The row that was left fades back from `raised`.
+pub(crate) const ROW_FADE: Duration = Duration::from_millis(300);
+/// Rows displaced by a new message settle with this spring (no finger, so no velocity).
+pub(crate) const ROW_SETTLE: (Duration, f32) = (Duration::from_millis(350), 1.0);
+
 /// cubic-bezier(0.23, 1, 0.32, 1): moves at once, settles softly.
 pub(crate) const EASE_OUT: Easing = Easing::CubicBezier { x1: 0.23, y1: 1., x2: 0.32, y2: 1. };
 /// Vaul's iOS sheet curve, cubic-bezier(0.32, 0.72, 0, 1): steep start, so 400 ms still feels quick.

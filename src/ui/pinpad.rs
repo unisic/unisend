@@ -26,6 +26,8 @@ pub(super) struct Pad {
     shake: Option<Instant>,
     /// A PIN is being hashed off the UI thread.
     busy: bool,
+    /// Digits the dots keep showing while that PIN is checked and while a wrong one shakes.
+    shown: usize,
     /// Unix seconds before which no PIN is tried.
     retry_at: u64,
     /// `retry_at` has been read from the file for this screen.
@@ -222,6 +224,7 @@ impl BeeperApp {
         if self.pad.entry.len() < pin::MIN_LEN {
             return;
         }
+        self.pad.shown = self.pad.entry.len();
         let entry = std::mem::take(&mut self.pad.entry);
         let dir = self.dir.clone();
         if self.pin_locked() || self.pad_step() == Some(Step::CheckPin) {
@@ -362,26 +365,29 @@ impl BeeperApp {
     fn render_pad(&mut self, prompt: &'static str, hint: Option<&'static str>, hide_hint: bool, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let p = Palette::of(cx);
         let wait = self.pad_wait();
-        let len = self.pad.entry.len();
-        let ready = len >= pin::MIN_LEN && !self.pad.busy && wait == 0;
-        let offset = match self.pad.shake {
+        let ready = self.pad.entry.len() >= pin::MIN_LEN && !self.pad.busy && wait == 0;
+        let (offset, shaking) = match self.pad.shake {
             Some(at) if at.elapsed() < SHAKE && !cx.reduce_motion() => {
                 window.request_animation_frame();
-                shake_offset(at.elapsed().as_secs_f32() / SHAKE.as_secs_f32())
+                (shake_offset(at.elapsed().as_secs_f32() / SHAKE.as_secs_f32()), true)
             }
             _ => {
                 self.pad.shake = None;
-                0.
+                (0., false)
             }
         };
+        let len = if self.pad.entry.is_empty() && (self.pad.busy || shaking) { self.pad.shown } else { self.pad.entry.len() };
         let note = if wait > 0 { Some(wait_text(wait)) } else { self.pad.note.clone() };
         let dots = h_flex().h(px(24.)).gap(px(14.)).relative().left(px(offset)).children((0..len.max(pin::MIN_LEN)).map(|i| {
             let dot = div().size(px(14.)).rounded_full();
             if i < len { dot.bg(p.text) } else { dot.border_2().border_color(p.faint) }
         }));
-        let key = |id: &'static str, key: Key, cx: &mut Context<Self>| {
+        let key = |id: &'static str, key: Key, tint: Hsla, window: &mut Window, cx: &mut Context<Self>| {
+            let press = press::area(id, Duration::ZERO, tint, window, cx).rounded_full();
             div()
                 .id(id)
+                .relative()
+                .child(press)
                 .size(px(KEY))
                 .flex()
                 .flex_none()
@@ -391,20 +397,20 @@ impl BeeperApp {
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| this.press(key, cx)))
         };
-        let digit = |d: char, cx: &mut Context<Self>| {
+        let digit = |d: char, window: &mut Window, cx: &mut Context<Self>| {
             const IDS: [&str; 10] = ["pin-0", "pin-1", "pin-2", "pin-3", "pin-4", "pin-5", "pin-6", "pin-7", "pin-8", "pin-9"];
-            key(IDS[d as usize - '0' as usize], Key::Digit(d), cx).bg(p.surface).active(|el| el.bg(p.raised)).text_size(fs(28.)).child(d.to_string())
+            key(IDS[d as usize - '0' as usize], Key::Digit(d), p.raised, window, cx).bg(p.surface).text_size(fs(28.)).child(d.to_string())
         };
         let mut keys = v_flex().gap(px(12.));
         for row in [['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9']] {
-            keys = keys.child(h_flex().gap(px(20.)).children(row.map(|d| digit(d, cx))));
+            keys = keys.child(h_flex().gap(px(20.)).children(row.map(|d| digit(d, window, cx))));
         }
-        let done = key("pin-done", Key::Done, cx)
+        let done = key("pin-done", Key::Done, if ready { p.muted } else { p.raised }, window, cx)
             .when(ready, |el| el.bg(p.text).text_color(p.ground))
             .when(!ready, |el| el.bg(p.surface).text_color(p.faint))
             .child(Icon::new(IconName::Check).size_6());
-        let back = key("pin-back", Key::Back, cx).active(|el| el.bg(p.surface)).text_color(p.muted).child(Icon::new(IconName::Delete).size_6());
-        keys = keys.child(h_flex().gap(px(20.)).child(back).child(digit('0', cx)).child(done));
+        let back = key("pin-back", Key::Back, p.surface, window, cx).text_color(p.muted).child(Icon::new(IconName::Delete).size_6());
+        keys = keys.child(h_flex().gap(px(20.)).child(back).child(digit('0', window, cx)).child(done));
         v_flex()
             .items_center()
             .max_w(px(360.))
