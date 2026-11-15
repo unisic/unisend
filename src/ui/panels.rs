@@ -218,6 +218,8 @@ impl BeeperApp {
                 .items_center()
                 .rounded_full()
                 .text_size(fs(14.))
+                .flex_1()
+                .justify_center()
                 .text_color(if on { p.ground } else { p.muted })
                 .when(on, |el| el.bg(p.text))
                 .cursor_pointer()
@@ -225,7 +227,6 @@ impl BeeperApp {
                 .child(label)
         };
         let themes = h_flex()
-            .flex_none()
             .p(px(4.))
             .rounded_full()
             .bg(p.raised)
@@ -268,7 +269,9 @@ impl BeeperApp {
             .gap(px(GAP * 2.))
             .child(section(t!("Appearance"), cx).child(
                 card(cx)
-                    .child(row(t!("Theme"), "", cx).child(themes))
+                    // Under its label, as Text size is: beside it, larger text squeezes the label.
+                    .child(row(t!("Theme"), "", cx))
+                    .child(div().pb(px(8.)).child(themes))
                     .child(row(t!("Chat colour"), &t!("{colour}. Your own messages, on this device.", colour = self.settings.chat_colour.label()), cx))
                     .child(swatches)
                     .children(self.render_look(cx))
