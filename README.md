@@ -42,6 +42,9 @@ Rust targets.
     cd android && ./gradlew assembleDebug
     adb install -r app/build/outputs/apk/debug/app-debug.apk
 
+The GIF picker appears only when the build has a KLIPY key ("Create API Key" on docs.klipy.com):
+`export KLIPY_API_KEY=$(cat ~/.config/murmur/klipy.key)` before `cargo ndk`.
+
 The Java classes in `android/app/src/main/java/dev/gpui/mobile` come from
 gpui-mobile (Apache-2.0, see the README there).
 
