@@ -12,6 +12,44 @@ use chrono::{DateTime, Datelike as _, Local};
 mod pl;
 
 static POLISH: AtomicBool = AtomicBool::new(false);
+/// What `System` resolves to; set once by `init`.
+static SYSTEM_POLISH: AtomicBool = AtomicBool::new(false);
+/// The language the first frames and the cached texts were built in.
+static STARTED_POLISH: AtomicBool = AtomicBool::new(false);
+
+/// The user's choice in Settings; language names are shown in their own language, untranslated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum LanguageChoice {
+    #[default]
+    System,
+    English,
+    Polish,
+}
+
+/// Whether the interface is Polish for this choice, given whether the system language is.
+pub(crate) fn decide(choice: LanguageChoice, system_polish: bool) -> bool {
+    match choice {
+        LanguageChoice::System => system_polish,
+        LanguageChoice::English => false,
+        LanguageChoice::Polish => true,
+    }
+}
+
+/// Applies the choice now; texts already built and stored keep the language they were built in.
+pub(crate) fn set(choice: LanguageChoice) {
+    POLISH.store(decide(choice, SYSTEM_POLISH.load(Ordering::Relaxed)), Ordering::Relaxed);
+}
+
+/// Applies the saved choice before anything is built, and remembers what that built.
+pub(crate) fn start(choice: LanguageChoice) {
+    set(choice);
+    STARTED_POLISH.store(polish(), Ordering::Relaxed);
+}
+
+/// The language differs from the one at start-up, so stored texts are still in the old one.
+pub(crate) fn changed_since_start() -> bool {
+    polish() != STARTED_POLISH.load(Ordering::Relaxed)
+}
 
 /// `t!("Reply")` is the text in the current language; `t!("Seen by {who}", who = x)` fills in
 /// the named placeholders and returns a `String`.
@@ -56,6 +94,7 @@ pub(crate) fn init(android_language: Option<String>) {
             ["LC_ALL", "LC_MESSAGES", "LANG"].into_iter().map(|k| std::env::var(k).ok()).collect::<Vec<_>>().as_slice(),
         ),
     };
+    SYSTEM_POLISH.store(polish, Ordering::Relaxed);
     POLISH.store(polish, Ordering::Relaxed);
 }
 

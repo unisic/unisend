@@ -6,6 +6,7 @@ use gpui_kit::component::switch::Switch;
 
 use super::*;
 use crate::applock::{Goal, LockMode};
+use crate::i18n::LanguageChoice;
 use crate::{ChatColour, ThemeChoice};
 
 /// A settings row, and the widest a settings page grows.
@@ -68,6 +69,27 @@ impl BeeperApp {
         self.settings.save(&self.dir);
         cx.set_global(theme);
         crate::sync_theme(Some(window), cx);
+        cx.notify();
+    }
+
+    fn set_language(&mut self, language: LanguageChoice, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.language = language;
+        self.settings.save(&self.dir);
+        crate::i18n::set(language);
+        // Placeholders are set once when an input is created, so they are set again here.
+        let fields = [
+            (&self.cookie_paste, t!("Paste cookies or a cURL command")),
+            (&self.email, t!("you@example.com")),
+            (&self.recovery, t!("Recovery code")),
+            (&self.composer, t!("Message")),
+            (&self.search, t!("Search chats")),
+            (&self.find.input, t!("Search this chat")),
+            (&self.emoji_pick.search, t!("Search emoji")),
+        ];
+        for (input, text) in fields {
+            input.update(cx, |input, cx| input.set_placeholder(text, window, cx));
+        }
+        cx.refresh_windows();
         cx.notify();
     }
 
@@ -238,6 +260,32 @@ impl BeeperApp {
             .child(choice(t!("Dark"), ThemeChoice::Dark, cx))
             .child(choice(t!("Light"), ThemeChoice::Light, cx))
             .child(choice(t!("System"), ThemeChoice::System, cx));
+        let language = self.settings.language;
+        let pick = |label: &'static str, value: LanguageChoice, cx: &mut Context<Self>| {
+            let on = language == value;
+            div()
+                .id(label)
+                .h(px(36.))
+                .px(px(GAP))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .text_size(fs(14.))
+                .flex_1()
+                .justify_center()
+                .text_color(if on { p.ground } else { p.muted })
+                .when(on, |el| el.bg(p.text))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| this.set_language(value, window, cx)))
+                .child(label)
+        };
+        let languages = h_flex()
+            .p(px(4.))
+            .rounded_full()
+            .bg(p.raised)
+            .child(pick(t!("System"), LanguageChoice::System, cx))
+            .child(pick("English", LanguageChoice::English, cx))
+            .child(pick("Polski", LanguageChoice::Polish, cx));
         let swatches = h_flex().flex_wrap().gap_x(px(4.)).pb(px(8.)).children(ChatColour::ALL.map(|colour| {
             let on = self.settings.chat_colour == colour;
             let name = t!("Chat colour: {colour}", colour = colour.label());
@@ -277,6 +325,9 @@ impl BeeperApp {
                     // Under its label, as Text size is: beside it, larger text squeezes the label.
                     .child(row(t!("Theme"), "", cx))
                     .child(div().pb(px(8.)).child(themes))
+                    .child(row(t!("Language"), "", cx))
+                    .child(div().pb(px(8.)).child(languages))
+                    .when(crate::i18n::changed_since_start(), |el| el.child(div().pb(px(8.)).text_size(fs(13.)).text_color(p.muted).child(t!("Some texts change after a restart."))))
                     .child(row(t!("Chat colour"), &t!("{colour}. Your own messages, on this device.", colour = self.settings.chat_colour.label()), cx))
                     .child(swatches)
                     .children(self.render_look(cx))

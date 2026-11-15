@@ -101,6 +101,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::init(cx);
     ui::motion::follow_system(cx);
     let mut settings = Settings::load(&dir);
+    i18n::start(settings.language);
     let own = emoji::apply(&mut settings, &dir, cx);
     if !own {
         emoji::use_bundled(&dir, cx);
@@ -244,6 +245,9 @@ fn ink_on(fill: u32) -> u32 {
 pub(crate) struct Settings {
     #[serde(default)]
     pub theme: ThemeChoice,
+    /// Interface language; `System` follows the device.
+    #[serde(default)]
+    pub language: i18n::LanguageChoice,
     /// Read receipts stay private: others do not see what has been read.
     #[serde(default = "Settings::private_by_default")]
     pub incognito: bool,
@@ -280,7 +284,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true })
     }
 
     fn parse(raw: &[u8]) -> Option<Self> {
@@ -1164,5 +1168,15 @@ mod tests {
         settings.save(&dir);
         assert!(!std::fs::read_to_string(dir.join("settings.json")).unwrap().contains("emoji_font"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn language_defaults_to_system_and_decides() {
+        use crate::i18n::{LanguageChoice::*, decide};
+        let old = super::Settings::parse(br#"{"theme":"Light"}"#).unwrap();
+        assert_eq!(old.language, System);
+        assert_eq!(super::Settings::parse(br#"{"language":"Polish"}"#).unwrap().language, Polish);
+        assert!(decide(System, true) && !decide(System, false));
+        assert!(decide(Polish, false) && !decide(English, true));
     }
 }
