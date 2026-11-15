@@ -32,8 +32,10 @@ matrix-sdk = { version = "=0.19.1", default-features = false, features = ["e2e-e
 matrix-sdk-ui = { version = "=0.19.1", default-features = false, features = ["rustls-aws-lc-rs"] }
 # Only for `secret_storage::DecodeError`, which matrix-sdk does not re-export. Already in the tree.
 matrix-sdk-crypto = { version = "=0.19.1", default-features = false }
+# Only for `OpenStoreError`, to tell a store key that does not fit. Already in the tree.
+matrix-sdk-sqlite = { version = "=0.19.1", default-features = false }
 # The message search index (FTS5). Already in the tree through matrix-sdk-sqlite, same bundled SQLite.
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "serialize"] }
 # All already in the tree (cosmic-text): reading and mapping a user's own emoji font.
 fontdb = { version = "0.23", default-features = false }
 memmap2 = "0.9"
@@ -43,6 +45,8 @@ markdown = { version = "1", default-features = false }
 # Already in the tree (rustls through matrix-sdk), same features: the app PIN's salt, PBKDF2 and
 # constant-time comparison.
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
+# Already in the tree (matrix-sdk): the data key is wiped from memory when dropped.
+zeroize = "1"
 # gpui-kit re-exports gpui (gpui-pre 0.3.6) and, on desktop, its platform layer.
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "13c716b687b47f96a677aaf46c8fa341fa7208da", default-features = false, features = ["component", "assets"] }
 

@@ -12,6 +12,7 @@ mod emoji;
 mod i18n;
 mod share;
 mod ui;
+mod vault;
 mod vcard;
 
 use std::path::PathBuf;
