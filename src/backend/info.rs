@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use matrix_sdk::{
     EncryptionState, Room, RoomMemberships,
     room::RoomMemberRole,
-    ruma::{OwnedRoomId, OwnedUserId},
+    ruma::{OwnedRoomId, OwnedUserId, UserId},
 };
 use tokio::sync::mpsc;
 
@@ -73,13 +73,7 @@ pub(super) async fn run(room: Room, ev: mpsc::Sender<Ev>) {
         details.encrypted = room.latest_encryption_state().await.ok().and_then(encrypted);
     }
     if let Some(peer) = &peer {
-        details.identifiers = match room.client().account().fetch_user_profile_of(peer).await {
-            Ok(profile) => identifiers(profile.get("com.beeper.bridge.identifiers")),
-            Err(e) => {
-                log::debug!("profile of the other person: {e}");
-                Vec::new()
-            }
-        };
+        details.identifiers = peer_identifiers(&room, peer).await;
     } else {
         details.members = members(&room).await;
         details.members_loaded = true;
@@ -95,6 +89,51 @@ fn encrypted(state: EncryptionState) -> Option<bool> {
         EncryptionState::Unknown => None,
         state => Some(state.is_encrypted()),
     }
+}
+
+async fn peer_identifiers(room: &Room, peer: &UserId) -> Vec<String> {
+    match room.client().account().fetch_user_profile_of(peer).await {
+        Ok(profile) => identifiers(profile.get("com.beeper.bridge.identifiers")),
+        Err(e) => {
+            log::debug!("profile of the other person: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// How the other person in a one-to-one chat is known on its network; empty in a group.
+pub(super) async fn peer(room: Room, ev: mpsc::Sender<Ev>) {
+    let Some(peer) = other_person(&room).await else { return };
+    let ids = peer_identifiers(&room, &peer).await;
+    let _ = ev.send(Ev::PeerIds(room.room_id().to_owned(), ids)).await;
+}
+
+/// Whether `profile_link` can ever give a link in a chat on `network`, so a profile is worth fetching.
+pub fn links_profiles(network: Option<&str>) -> bool {
+    network.is_some_and(|n| ["instagram", "whatsapp", "telegram", "twitter", "bluesky"].iter().any(|k| n.to_ascii_lowercase().contains(k)) || n == "X")
+}
+
+/// The network app's own page for the other person, as `(app, https link)`: a link its Android app
+/// claims (App Links) and a browser opens otherwise. Formats from the bridges: Instagram
+/// `instagram:<username>` (meta igconnector chatinfo.go), WhatsApp `tel:+<digits>` (whatsapp
+/// userinfo.go), Telegram `telegram:<username>` (telegram userinfo.go), X `twitter:<screen name>`
+/// (twitter chatinfo.go), Bluesky `bluesky:<handle>` (bluesky chatinfo.go). Messenger ghosts carry
+/// none; Signal usernames link only through an encrypted `#eu/` token; LinkedIn gives an opaque URN.
+pub fn profile_link(network: Option<&str>, identifiers: &[String]) -> Option<(&'static str, String)> {
+    // Identifiers come from the other side's profile, so only plain names go into a link.
+    let plain = |s: &str, extra: &[char]| !s.is_empty() && s.len() <= 100 && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(&c));
+    let whatsapp = network.is_some_and(|n| n.to_ascii_lowercase().contains("whatsapp"));
+    identifiers.iter().find_map(|id| {
+        let (kind, value) = id.split_once(':')?;
+        match kind {
+            "instagram" if plain(value, &['.', '_']) => Some(("Instagram", format!("https://www.instagram.com/{value}/"))),
+            "telegram" if plain(value, &['_']) => Some(("Telegram", format!("https://t.me/{value}"))),
+            "twitter" if plain(value, &['_']) => Some(("X", format!("https://x.com/{value}"))),
+            "bluesky" if plain(value, &['.', '-']) => Some(("Bluesky", format!("https://bsky.app/profile/{value}"))),
+            "tel" if whatsapp => value.strip_prefix('+').filter(|d| plain(d, &[]) && d.bytes().all(|b| b.is_ascii_digit())).map(|d| ("WhatsApp", format!("https://wa.me/{d}"))),
+            _ => None,
+        }
+    })
 }
 
 /// The bridge's identifiers, phone numbers first.
@@ -202,6 +241,24 @@ mod tests {
         assert_eq!(identifiers(Some(&v)), ["tel:+48123", "signal:ann.01"]);
         assert!(identifiers(None).is_empty());
         assert!(identifiers(Some(&serde_json::json!("tel:+1"))).is_empty());
+    }
+
+    #[test]
+    fn identifiers_become_profile_links() {
+        let ids = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let link = |network, list: &[&str]| profile_link(Some(network), &ids(list));
+        assert_eq!(link("Instagram", &["instagram:ann.b_1"]), Some(("Instagram", "https://www.instagram.com/ann.b_1/".into())));
+        assert_eq!(link("WhatsApp", &["tel:+48123456789"]), Some(("WhatsApp", "https://wa.me/48123456789".into())));
+        assert_eq!(link("Telegram", &["tel:+48123", "telegram:ann_b"]), Some(("Telegram", "https://t.me/ann_b".into())));
+        assert_eq!(link("X", &["twitter:ann"]), Some(("X", "https://x.com/ann".into())));
+        assert_eq!(link("Bluesky", &["did:plc:abc", "bluesky:ann.bsky.social"]), Some(("Bluesky", "https://bsky.app/profile/ann.bsky.social".into())));
+        // A phone number is a WhatsApp chat only on WhatsApp; Signal and SMS have no such link.
+        assert_eq!(link("Signal", &["tel:+48123", "signal:ann.01"]), None);
+        assert_eq!(link("Telegram", &["tel:+48123"]), None);
+        assert_eq!(link("Instagram", &["instagram:a/../b", "instagram:", "instagram:a?x=1"]), None);
+        assert_eq!(link("WhatsApp", &["tel:48123", "tel:+48 123"]), None);
+        assert_eq!(profile_link(None, &[]), None);
+        assert!(links_profiles(Some("Instagram")) && links_profiles(Some("X")) && !links_profiles(Some("Signal")) && !links_profiles(None));
     }
 
     #[test]

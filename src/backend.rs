@@ -187,6 +187,8 @@ pub enum Cmd {
     Info(OwnedRoomId),
     /// The info screen closed: stop reading history for it.
     InfoClose,
+    /// How the other person in a one-to-one chat is known on its network; answered with `PeerIds`.
+    PeerIds(OwnedRoomId),
     /// Messages matching `query` in one room, or in every room; answered with `Found`.
     Search { room: Option<OwnedRoomId>, query: String },
 }
@@ -253,6 +255,8 @@ pub enum Ev {
     Disappear { room: OwnedRoomId, setting: Disappearing },
     /// A chat's details for its info screen; sent again as more is known.
     Info(OwnedRoomId, Box<info::Details>),
+    /// The answer to `Cmd::PeerIds`; never sent for a group.
+    PeerIds(OwnedRoomId, Vec<String>),
     /// Messages with media, files or links, newest first; `scanned` counts the events read so far.
     InfoItems { room: OwnedRoomId, items: Vec<Msg>, scanned: usize, done: bool },
     /// The answer to `Cmd::Search` for this room and query.
@@ -690,6 +694,8 @@ struct State {
     verify: verify::Verifier,
     /// Gathers what the info screen shows.
     info: Option<AbortOnDrop>,
+    /// Looks up the person behind a chat's sheet; a newer sheet replaces it.
+    peer: Option<AbortOnDrop>,
     /// The account on disk cannot be opened here (key gone, session unreadable), so a sign-in may
     /// replace it; otherwise a sign-in never deletes a session that may still open.
     replaceable: bool,
@@ -711,7 +717,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     let _ = std::fs::remove_file(dir.join("klipy-id"));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
-        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, replaceable: false };
+        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, replaceable: false };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
     let restored = if st.unlock().await { st.restore_retrying().await } else { false };
     if !restored {
@@ -1497,6 +1503,10 @@ impl State {
                 self.info = Some(AbortOnDrop(tokio::spawn(info::run(room, self.ev.clone()))));
             }
             Cmd::InfoClose => self.info = None,
+            Cmd::PeerIds(room_id) => {
+                let room = self.room(&room_id)?;
+                self.peer = Some(AbortOnDrop(tokio::spawn(info::peer(room, self.ev.clone()))));
+            }
             Cmd::Search { room, query } => {
                 let (client, ev) = (self.client()?.clone(), self.ev.clone());
                 tokio::spawn(async move {
@@ -2870,7 +2880,7 @@ pub use location::support as location_support;
 pub use polls::{Place, Poll};
 pub(crate) mod pollnew;
 pub use pollnew::NewPoll;
-pub use info::{Details, MAX_MEMBERS, MAX_SCAN, Role};
+pub use info::{Details, MAX_MEMBERS, MAX_SCAN, Role, links_profiles, profile_link};
 #[cfg(test)]
 pub use info::Member;
 

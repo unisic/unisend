@@ -78,6 +78,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         tasks: Vec::new(),
         verify: verify::Verifier::default(),
         info: None,
+        peer: None,
         replaceable: false,
     };
     (st, Seat { rx, rows: Vec::new() })
