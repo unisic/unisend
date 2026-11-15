@@ -2219,6 +2219,8 @@ impl BeeperApp {
                     )
                     .children(this.selection_mark(m, cx));
                 let row = if this.place.unread.as_ref() == Some(&m.id) { v_flex().w_full().child(Self::unread_line(cx)).child(row) } else { row };
+                // A list lays its items out across its full width, ignoring side padding, so each row keeps the column itself.
+                let row = div().w_full().px(px(column)).child(row);
                 match arriving {
                     // It grows from nothing over the composer, so the messages above move up with it
                     // instead of jumping; the row hangs from the top and rises as the space opens.
@@ -2230,8 +2232,7 @@ impl BeeperApp {
                 }
             }),
         )
-        .size_full()
-        .px(px(column));
+        .size_full();
         // The send button turns between a microphone (nothing typed) and an arrow; desktop has no microphone.
         let mic = self.mic_shown(cx);
         let send_mode = transition(("send", "mode"), if mic { 0. } else { 1. }, motion::exit(), window, cx);
@@ -3667,7 +3668,12 @@ impl BeeperApp {
         let root = v_flex()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if this.pad_keystroke(&event.keystroke.key, cx) || (event.keystroke.key == "escape" && this.go_back(window, cx)) || this.viewer_key(&event.keystroke.key, cx) {
+                let m = &event.keystroke.modifiers;
+                // Nothing binds Tab, so without this a keyboard never reaches a button or its focus ring.
+                if event.keystroke.key == "tab" && !gpui_kit::is_mobile() && !(m.control || m.alt || m.platform) {
+                    if m.shift { window.focus_prev(cx) } else { window.focus_next(cx) }
+                    cx.stop_propagation();
+                } else if this.pad_keystroke(&event.keystroke.key, cx) || (event.keystroke.key == "escape" && this.go_back(window, cx)) || this.viewer_key(&event.keystroke.key, cx) {
                     cx.stop_propagation();
                 }
             }))
