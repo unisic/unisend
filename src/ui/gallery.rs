@@ -888,10 +888,7 @@ mod store {
             let access = env
                 .call_static_method(&class, jni::jni_str!("access"), jni::jni_sig!("(Landroid/app/Activity;)Ljava/lang/String;"), &[JValue::Object(&activity)])
                 .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             Ok(helpers::get_string(env, &access))
         });
         match found.map_err(|e| log::warn!("gallery access: {e}")).as_deref() {
@@ -907,10 +904,7 @@ mod store {
             let class = helpers::find_app_class(env, CLASS)?;
             env.call_static_method(&class, jni::jni_str!("ask"), jni::jni_sig!("(Landroid/app/Activity;)V"), &[JValue::Object(&activity)])
                 .map(|_| ())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })
+                .map_err(|e| crate::java_error(env, e))
         });
         if let Err(e) = asked {
             log::warn!("gallery permission: {e}");
@@ -930,10 +924,7 @@ mod store {
                     &[JValue::Object(&activity), JValue::Long(date), JValue::Long(id), JValue::Int(PAGE as i32)],
                 )
                 .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             Ok((!text.is_null()).then(|| helpers::get_string(env, &text)))
         });
         Some(parse_page(&text.map_err(|e| log::warn!("gallery page: {e}")).ok()??))
@@ -959,10 +950,7 @@ mod store {
                     ],
                 )
                 .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             if bytes.is_null() {
                 return Ok(None);
             }

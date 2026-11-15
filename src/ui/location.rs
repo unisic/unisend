@@ -304,10 +304,7 @@ mod store {
             let word = env
                 .call_static_method(&class, jni::jni_str!("access"), jni::jni_sig!("(Landroid/app/Activity;)Ljava/lang/String;"), &[JValue::Object(&activity)])
                 .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             Ok(helpers::get_string(env, &word))
         });
         match found.map_err(|e| log::warn!("location access: {e}")).as_deref() {
@@ -320,10 +317,7 @@ mod store {
         let asked = helpers::with_env(|env| {
             let activity = helpers::activity(env)?;
             let class = helpers::find_app_class(env, CLASS)?;
-            env.call_static_method(&class, jni::jni_str!("ask"), jni::jni_sig!("(Landroid/app/Activity;)V"), &[JValue::Object(&activity)]).map(|_| ()).map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })
+            env.call_static_method(&class, jni::jni_str!("ask"), jni::jni_sig!("(Landroid/app/Activity;)V"), &[JValue::Object(&activity)]).map(|_| ()).map_err(|e| crate::java_error(env, e))
         });
         if let Err(e) = asked {
             log::warn!("location permission: {e}");
@@ -343,10 +337,7 @@ mod store {
                     &[JValue::Object(&activity), JValue::Long(timeout.as_millis() as i64)],
                 )
                 .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             Ok((!word.is_null()).then(|| helpers::get_string(env, &word)))
         });
         found.map_err(|e| log::warn!("location fix: {e}")).ok()?

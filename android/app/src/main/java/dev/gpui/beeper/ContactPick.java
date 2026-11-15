@@ -9,6 +9,7 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.ContactsContract;
+import android.util.Log;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -24,6 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * is called from Rust over JNI and blocks until the user is done.
  */
 public final class ContactPick extends Activity {
+    private static final String TAG = "Murmur";
     private static final int PICK = 1;
     private static final int ASK = 2;
     private static final long MAX_BYTES = 256 * 1024;
@@ -57,7 +59,7 @@ public final class ContactPick extends Activity {
         try {
             activity.startActivity(intent);
         } catch (ActivityNotFoundException e) {
-            // No contacts app to save it in.
+            Log.w(TAG, "no contacts app to save a contact in", e);
         }
     }
 
@@ -68,6 +70,7 @@ public final class ContactPick extends Activity {
         try {
             startActivityForResult(new Intent(Intent.ACTION_PICK, ContactsContract.Contacts.CONTENT_URI), PICK);
         } catch (ActivityNotFoundException e) {
+            Log.w(TAG, "no contact picker", e);
             finish(null);
         }
     }
@@ -87,6 +90,7 @@ public final class ContactPick extends Activity {
         if (code == ASK && grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED) {
             read();
         } else {
+            Log.w(TAG, "contacts permission refused");
             finish(null);
         }
     }
@@ -101,6 +105,7 @@ public final class ContactPick extends Activity {
                 key = c.getString(1);
             }
         } catch (RuntimeException e) {
+            Log.w(TAG, "picked contact", e);
             finish(null);
             return;
         }
@@ -113,11 +118,13 @@ public final class ContactPick extends Activity {
             finish(in == null ? null : save(name, in));
         } catch (SecurityException e) {
             if (checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+                Log.w(TAG, "contact card", e);
                 finish(null);
             } else {
                 requestPermissions(new String[] {Manifest.permission.READ_CONTACTS}, ASK);
             }
         } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "contact card", e);
             finish(null);
         }
     }

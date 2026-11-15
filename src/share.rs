@@ -144,10 +144,7 @@ mod jni {
             let raw = env
                 .call_static_method(&class, jni::jni_str!("take"), jni::jni_sig!("(Landroid/app/Activity;)Ljava/lang/String;"), &[JValue::Object(&activity)])
                 .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             Ok((!raw.is_null()).then(|| helpers::get_string(env, &raw)))
         })
     }
@@ -165,10 +162,7 @@ mod jni {
                     &[JValue::Object(&activity), JValue::Object(&uri)],
                 )
                 .and_then(|v| v.j())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             Ok(u64::try_from(size).ok())
         })
     }
@@ -185,10 +179,7 @@ mod jni {
                 &[JValue::Object(&activity), JValue::Object(&chats)],
             )
             .map(|_| ())
-            .map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })
+            .map_err(|e| crate::java_error(env, e))
         })
     }
 }

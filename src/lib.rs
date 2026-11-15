@@ -127,6 +127,14 @@ pub(crate) fn sync_theme(window: Option<&mut Window>, cx: &mut App) {
     match cx.try_global::<ThemeChoice>().copied().unwrap_or_default() {
         ThemeChoice::Dark => Theme::change(ThemeMode::Dark, window, cx),
         ThemeChoice::Light => Theme::change(ThemeMode::Light, window, cx),
+        // gpui-mobile answers Dark for the app and Light for a window until the first configuration
+        // change, so Android's night mode is asked for directly.
+        #[cfg(target_os = "android")]
+        ThemeChoice::System => {
+            let night = gpui_mobile::android::jni::query_night_mode_via_jni();
+            Theme::change(if night { ThemeMode::Dark } else { ThemeMode::Light }, window, cx)
+        }
+        #[cfg(not(target_os = "android"))]
         ThemeChoice::System => Theme::sync_system_appearance(window, cx),
     }
     apply_palette(cx);
@@ -569,7 +577,7 @@ pub(crate) fn open_file(cx: &mut gpui_kit::App, path: &std::path::Path, mime: Op
 /// Whether a picture or video can be saved to the gallery: Android 10 and later, and desktops.
 pub(crate) fn can_save() -> bool {
     #[cfg(target_os = "android")]
-    return android_files::can_save().unwrap_or(false);
+    return android_files::can_save().map_err(|e| log::warn!("can save: {e}")).unwrap_or(false);
     #[cfg(not(target_os = "android"))]
     true
 }
@@ -774,6 +782,19 @@ pub(crate) fn web_login(cx: &mut gpui_kit::App, wanted: &bridges::Cookies) -> gp
     }
 }
 
+/// The text of a failed JNI call. A thrown Java exception is caught here, so it is no longer
+/// pending, and named with its message and where it was thrown; `e.to_string()` alone only says
+/// that one was thrown.
+#[cfg(target_os = "android")]
+pub(crate) fn java_error(env: &jni::Env<'_>, e: jni::errors::Error) -> String {
+    match env.exception_catch() {
+        Err(jni::errors::Error::CaughtJavaException { name, msg, stack, .. }) => {
+            format!("{name}: {msg} ({})", stack.lines().next().unwrap_or_default())
+        }
+        _ => e.to_string(),
+    }
+}
+
 /// Calls into `dev.gpui.beeper.Files`, this app's Java helper.
 #[cfg(target_os = "android")]
 mod android_files {
@@ -795,10 +816,7 @@ mod android_files {
                 &[JValue::Object(&activity), JValue::Object(&path), JValue::Object(&mime)],
             )
             .and_then(|v| v.z())
-            .map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })
+            .map_err(|e| crate::java_error(env, e))
         })
     }
 
@@ -814,20 +832,14 @@ mod android_files {
                 &[JValue::Object(&activity), JValue::Object(&url)],
             )
             .and_then(|v| v.z())
-            .map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })
+            .map_err(|e| crate::java_error(env, e))
         })
     }
 
     pub fn can_save() -> Result<bool, String> {
         helpers::with_env(|env| {
             let class = helpers::find_app_class(env, CLASS)?;
-            env.call_static_method(&class, jni::jni_str!("canSave"), jni::jni_sig!("()Z"), &[]).and_then(|v| v.z()).map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })
+            env.call_static_method(&class, jni::jni_str!("canSave"), jni::jni_sig!("()Z"), &[]).and_then(|v| v.z()).map_err(|e| crate::java_error(env, e))
         })
     }
 
@@ -848,10 +860,7 @@ mod android_files {
                 &[JValue::Object(&activity), JValue::Object(&path), JValue::Object(&mime)],
             )
             .and_then(|v| v.z())
-            .map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })
+            .map_err(|e| crate::java_error(env, e))
         })
     }
 
@@ -869,10 +878,7 @@ mod android_files {
                     &[JValue::Object(&activity), JValue::Object(&path), JValue::Object(&name), JValue::Object(&mime)],
                 )
                 .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             Ok((!folder.is_null()).then(|| helpers::get_string(env, &folder)))
         })
     }
@@ -900,10 +906,7 @@ mod android_files {
                     ],
                 )
                 .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             Ok((!cookies.is_null()).then(|| helpers::get_string(env, &cookies)))
         })
     }
@@ -938,10 +941,7 @@ mod android_files {
                 ],
             )
             .map(|_| ())
-            .map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })
+            .map_err(|e| crate::java_error(env, e))
         })
     }
 
@@ -958,10 +958,7 @@ mod android_files {
                     &[JValue::Object(&activity)],
                 )
                 .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             Ok((!chat.is_null()).then(|| helpers::get_string(env, &chat)))
         })
     }
@@ -987,10 +984,7 @@ mod android_files {
                     &values,
                 ),
             };
-            called.map(|_| ()).map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })
+            called.map(|_| ()).map_err(|e| crate::java_error(env, e))
         })
     }
 
@@ -1007,10 +1001,7 @@ mod android_files {
                     &[JValue::Object(&activity), JValue::Object(&uri)],
                 )
                 .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             Ok((!path.is_null()).then(|| helpers::get_string(env, &path)))
         })
     }

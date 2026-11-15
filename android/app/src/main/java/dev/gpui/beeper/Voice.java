@@ -15,6 +15,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.util.Log;
 import java.io.File;
 import java.io.IOException;
 
@@ -23,6 +24,7 @@ import java.io.IOException;
  * the UI thread; every method holds the class lock, so calls from several threads queue up.
  */
 public final class Voice {
+    private static final String TAG = "Murmur";
     /** MAX_RECORDING in src/ui/voice.rs, which stops the recording there. */
     private static final int MAX_MS = 15 * 60 * 1000;
     /** Only for a recording Rust lost track of: a recorder stopped by this limit loses its file. */
@@ -102,6 +104,7 @@ public final class Voice {
             r.prepare();
             r.start();
         } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "start recording", e);
             r.release();
             file.delete();
             return null;
@@ -198,6 +201,7 @@ public final class Voice {
                     p.setDataSource(path);
                     p.prepare();
                 } catch (IOException | RuntimeException e) {
+                    Log.w(TAG, "load voice message", e);
                     p.release();
                     return -1;
                 }
@@ -212,6 +216,7 @@ public final class Voice {
             player.setPlaybackParams(player.getPlaybackParams().setSpeed(speed));
             return length;
         } catch (RuntimeException e) {
+            Log.w(TAG, "play voice message", e);
             stopPlayer();
             return -1;
         }

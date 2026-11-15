@@ -11,6 +11,7 @@ import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.util.Log;
 import androidx.core.content.FileProvider;
 import java.io.File;
 import java.io.FileInputStream;
@@ -22,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** File hand-offs between this app and others. All methods are called from Rust over JNI. */
 public final class Files {
+    private static final String TAG = "Murmur";
     private static final long STALE_MS = 60 * 60 * 1000;
     private static final AtomicInteger PICKS = new AtomicInteger();
 
@@ -94,6 +96,7 @@ public final class Files {
                 os.write(buffer, 0, n);
             }
         } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "save to gallery", e);
             resolver.delete(item, null, null);
             return null;
         }
@@ -160,6 +163,7 @@ public final class Files {
             }
             return out.getAbsolutePath();
         } catch (IOException e) {
+            Log.w(TAG, "copy picked file", e);
             return null;
         }
     }

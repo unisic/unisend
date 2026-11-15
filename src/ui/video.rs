@@ -52,9 +52,6 @@ fn player(path: &str, mime: &str, looped: bool, width: u32, height: u32) -> Resu
             ],
         )
         .and_then(|v| v.z())
-        .map_err(|e| {
-            env.exception_clear();
-            e.to_string()
-        })
+        .map_err(|e| crate::java_error(env, e))
     })
 }

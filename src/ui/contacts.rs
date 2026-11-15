@@ -198,10 +198,7 @@ mod android {
             let path = env
                 .call_static_method(&class, jni::jni_str!("pick"), jni::jni_sig!("(Landroid/app/Activity;)Ljava/lang/String;"), &[JValue::Object(&activity)])
                 .and_then(|v| v.l())
-                .map_err(|e| {
-                    env.exception_clear();
-                    e.to_string()
-                })?;
+                .map_err(|e| crate::java_error(env, e))?;
             Ok((!path.is_null()).then(|| helpers::get_string(env, &path)))
         })
     }
@@ -220,10 +217,7 @@ mod android {
                 &[JValue::Object(&activity), JValue::Object(&name), JValue::Object(&number), JValue::Object(&email)],
             )
             .map(|_| ())
-            .map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })
+            .map_err(|e| crate::java_error(env, e))
         })
     }
 }

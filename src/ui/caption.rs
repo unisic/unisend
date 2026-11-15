@@ -447,10 +447,7 @@ fn video_frame(path: &Path, max: u32) -> Option<Vec<u8>> {
         let bytes = env
             .call_static_method(&class, jni::jni_str!("frame"), jni::jni_sig!("(Ljava/lang/String;I)[B"), &[JValue::Object(&path), JValue::Int(max as i32)])
             .and_then(|v| v.l())
-            .map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })?;
+            .map_err(|e| crate::java_error(env, e))?;
         if bytes.is_null() {
             return Ok(None);
         }

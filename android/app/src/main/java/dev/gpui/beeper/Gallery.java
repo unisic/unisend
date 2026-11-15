@@ -15,6 +15,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
 import android.provider.Settings;
+import android.util.Log;
 import android.util.Size;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -25,6 +26,7 @@ import java.io.InputStream;
  * always off the UI thread.
  */
 public final class Gallery {
+    private static final String TAG = "Murmur";
     private static final int TYPE_IMAGE = 1;
     private static final int TYPE_VIDEO = 3;
 
@@ -110,6 +112,7 @@ public final class Gallery {
                         .append(c.getInt(6)).append('\n');
             }
         } catch (RuntimeException e) {
+            Log.w(TAG, "gallery page", e);
             return null;
         }
         return out.toString();
@@ -156,6 +159,7 @@ public final class Gallery {
             bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out);
             return out.toByteArray();
         } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "gallery thumbnail", e);
             return null;
         } finally {
             if (bitmap != null) {
