@@ -80,7 +80,14 @@ pub(super) struct Place {
     pub restore: Option<String>,
     /// The text last given to the composer, so its change is not taken for the user typing.
     pub restored: Option<String>,
+    /// When the user last scrolled the chat: the day being read floats over it until `PILL_LINGER` after.
+    pub scrolled_at: Option<Instant>,
+    /// A timer to hide the day is running; one at a time.
+    pub pill_timer: bool,
 }
+
+/// How long the floating day stays after scrolling stops.
+const PILL_LINGER: Duration = Duration::from_secs(1);
 
 impl BeeperApp {
     /// A chat opened or closed: the composer shows its draft, or is emptied.
@@ -113,6 +120,34 @@ impl BeeperApp {
 
     /// The list scrolled: the button shows once the newest message is over a screen away.
     pub(super) fn scrolled(&mut self, cx: &mut Context<Self>) {
+        let first = self.place.scrolled_at.is_none_or(|at| at.elapsed() >= PILL_LINGER);
+        self.place.scrolled_at = Some(Instant::now());
+        if first {
+            cx.notify();
+        }
+        if !std::mem::replace(&mut self.place.pill_timer, true) {
+            cx.spawn(async move |this, cx| {
+                let mut wait = PILL_LINGER;
+                loop {
+                    cx.background_executor().timer(wait).await;
+                    let Ok(left) = this.update(cx, |this, cx| {
+                        let left = this.place.scrolled_at.map_or(Duration::ZERO, |at| PILL_LINGER.saturating_sub(at.elapsed()));
+                        if left.is_zero() {
+                            this.place.pill_timer = false;
+                            cx.notify();
+                        }
+                        left
+                    }) else {
+                        return;
+                    };
+                    if left.is_zero() {
+                        return;
+                    }
+                    wait = left;
+                }
+            })
+            .detach();
+        }
         let list = &self.timeline;
         let view = list.viewport_bounds().size.height;
         let far = view > px(0.) && list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y > view;
@@ -148,6 +183,32 @@ impl BeeperApp {
             let end = (from + len).min(self.msgs.len());
             self.place.missed += self.msgs.get(from..end).map_or(0, |rows| rows.iter().filter(|m| m.kind == Kind::Message && !m.own).count());
         }
+    }
+
+    /// The day of the topmost message on screen, floating at the top while the user scrolls.
+    pub(super) fn date_pill(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let present = self.place.scrolled_at.is_some_and(|at| at.elapsed() < PILL_LINGER);
+        let room = self.open.as_ref().map(ToString::to_string).unwrap_or_default();
+        let enter = Transition::new(motion::EXIT).easing(motion::EASE_OUT);
+        let shown = Presence::new(("date-pill", room), present).transition(if present { enter } else { motion::exit() }).sample(window, cx);
+        if !shown.should_render() {
+            return None;
+        }
+        let top = self.timeline.logical_scroll_top().item_ix;
+        let label = day_label(self.msgs.get(top)?.ts);
+        let p = Palette::of(cx);
+        Some(
+            div()
+                .absolute()
+                .top(px(8.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .opacity(shown.progress)
+                .child(div().h(px(24.)).px(px(10.)).flex().items_center().rounded_full().bg(p.raised).text_size(fs(12.)).text_color(p.muted).child(label))
+                .into_any_element(),
+        )
     }
 
     pub(super) fn jump_button(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {

@@ -2068,6 +2068,7 @@ impl BeeperApp {
                     .child(timeline)
                     .child(self.press_tracker(cx))
                     .children(self.jump_button(window, cx))
+                    .children(self.date_pill(window, cx))
                     .children(self.find_results(cx))
                     .when(self.loading && self.msgs.is_empty(), |el| {
                         el.child(
