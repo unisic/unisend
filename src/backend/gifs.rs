@@ -4,7 +4,6 @@
 //! from the URLs KLIPY returns, unchanged, as its integration requirements ask.
 
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -26,7 +25,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
-use super::{Ev, safe_name, write_private};
+use super::{Ev, safe_name};
 use crate::i18n::t;
 
 const KEY: Option<&str> = option_env!("KLIPY_API_KEY");
@@ -179,23 +178,11 @@ impl Gif {
     }
 }
 
-/// A random ID made once per install, so KLIPY can tell its users apart without knowing who they
-/// are. Never derived from the account.
-fn customer_id(dir: &Path) -> &'static str {
+/// A random ID made once per process start and kept only in memory, so KLIPY can tell its users
+/// apart within a run without linking runs, accounts or sign-outs. Never derived from the account.
+fn customer_id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
-    ID.get_or_init(|| {
-        let path = dir.join("klipy-id");
-        if let Ok(id) = std::fs::read_to_string(&path)
-            && !id.trim().is_empty()
-        {
-            return id.trim().to_owned();
-        }
-        let id = TransactionId::new().to_string();
-        if let Err(e) = write_private(&path, id.as_bytes()) {
-            log::warn!("klipy id: {e:#}");
-        }
-        id
-    })
+    ID.get_or_init(|| TransactionId::new().to_string())
 }
 
 fn key() -> Result<&'static str> {
@@ -218,7 +205,7 @@ async fn get(request: reqwest::RequestBuilder, max: usize) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-async fn page(http: &reqwest::Client, dir: &Path, query: &str, page: u32) -> Result<Found> {
+async fn page(http: &reqwest::Client, query: &str, page: u32) -> Result<Found> {
     let key = key()?;
     let query = query.trim();
     let endpoint = if query.is_empty() { "trending" } else { "search" };
@@ -227,7 +214,7 @@ async fn page(http: &reqwest::Client, dir: &Path, query: &str, page: u32) -> Res
         let mut pairs = url.query_pairs_mut();
         pairs.append_pair("page", &page.to_string());
         pairs.append_pair("per_page", &PER_PAGE.to_string());
-        pairs.append_pair("customer_id", customer_id(dir));
+        pairs.append_pair("customer_id", customer_id());
         pairs.append_pair("format_filter", "gif,jpg,mp4");
         if !query.is_empty() {
             pairs.append_pair("q", query);
@@ -241,7 +228,7 @@ async fn page(http: &reqwest::Client, dir: &Path, query: &str, page: u32) -> Res
 
 /// Loads a page and then its previews, as `Ev::Gifs` and one `Ev::GifPreview` each. Page 1 is a new
 /// search and stops whatever the previous one still had in flight.
-pub(super) fn search(http: reqwest::Client, dir: PathBuf, ev: mpsc::Sender<Ev>, query: String, number: u32) {
+pub(super) fn search(http: reqwest::Client, ev: mpsc::Sender<Ev>, query: String, number: u32) {
     if number == 0 || number > MAX_PAGES {
         return;
     }
@@ -250,7 +237,7 @@ pub(super) fn search(http: reqwest::Client, dir: PathBuf, ev: mpsc::Sender<Ev>, 
         tasks.drain(..).for_each(|t| t.abort());
     }
     let task = tokio::spawn(async move {
-        let found = match page(&http, &dir, &query, number).await {
+        let found = match page(&http, &query, number).await {
             Ok(found) => found,
             Err(e) => {
                 log::warn!("gifs: {e:#}");
@@ -337,7 +324,7 @@ fn mark(content: &mut Value, as_file: bool) {
 }
 
 /// Downloads the GIF from KLIPY, sends it to the room and tells KLIPY it was shared.
-pub(super) async fn send(http: &reqwest::Client, dir: &Path, room: &Room, gif: &Gif, query: &str, network: Option<&str>, reply_to: Option<String>) -> Result<()> {
+pub(super) async fn send(http: &reqwest::Client, room: &Room, gif: &Gif, query: &str, network: Option<&str>, reply_to: Option<String>) -> Result<()> {
     let as_file = wants_gif_file(network);
     let sent = if as_file { gif.file_for_meta() } else { &gif.mp4 };
     let (data, still) = tokio::try_join!(get(http.get(&sent.url), MAX_MEDIA), get(http.get(&gif.still.url), MAX_STILL))?;
@@ -356,16 +343,16 @@ pub(super) async fn send(http: &reqwest::Client, dir: &Path, room: &Room, gif: &
         mark(&mut content, as_file);
     }
     room.send_raw("m.room.message", content).await?;
-    shared(http, dir, &gif.slug, query).await;
+    shared(http, &gif.slug, query).await;
     Ok(())
 }
 
 /// KLIPY's share trigger: `q` is the search that found it, empty from trending.
-async fn shared(http: &reqwest::Client, dir: &Path, slug: &str, query: &str) {
+async fn shared(http: &reqwest::Client, slug: &str, query: &str) {
     let done = async {
         let mut url = reqwest::Url::parse(&format!("{API}/{}/gifs/share/", key()?))?;
         url.path_segments_mut().map_err(|()| anyhow!("bad share URL"))?.pop_if_empty().push(slug);
-        let body = serde_json::json!({ "customer_id": customer_id(dir), "q": query.trim() });
+        let body = serde_json::json!({ "customer_id": customer_id(), "q": query.trim() });
         let request = http.post(url).header("content-type", "application/json").body(serde_json::to_vec(&body)?);
         get(request, MAX_JSON).await
     };

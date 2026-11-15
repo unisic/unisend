@@ -1338,7 +1338,7 @@ async fn a_gif_arrives_as_a_marked_mp4_in_an_encrypted_chat() {
     bob.join_room_by_id(room.room_id()).await.unwrap();
 
     let gif = gifs::parse(include_bytes!("klipy-trending.json")).unwrap().gifs.remove(0);
-    gifs::send(&alice.http, &root, &room, &gif, "", None, None).await.unwrap();
+    gifs::send(&alice.http, &room, &gif, "", None, None).await.unwrap();
 
     let mut content = None;
     for _ in 0..20 {

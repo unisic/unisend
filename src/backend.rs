@@ -707,6 +707,8 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         }
     };
     let _ = std::fs::remove_dir_all(media_dir(&dir));
+    // Older builds kept KLIPY's customer ID on disk; it now lives only in memory.
+    let _ = std::fs::remove_file(dir.join("klipy-id"));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
         incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, replaceable: false };
@@ -1431,15 +1433,15 @@ impl State {
                 let (client, ev, dir) = (self.client()?.clone(), self.ev.clone(), media_dir(&self.dir));
                 tokio::spawn(export::run(client, ev, dir, media_generation(), id, media, what));
             }
-            Cmd::GifSearch { query, page } => gifs::search(self.http.clone(), self.dir.clone(), self.ev.clone(), query, page),
+            Cmd::GifSearch { query, page } => gifs::search(self.http.clone(), self.ev.clone(), query, page),
             Cmd::GifStop => gifs::stop(),
             Cmd::SendGif { room, gif, query, reply_to } => {
                 let network = self.rooms.lock().unwrap().get(&room).and_then(|r| r.network.clone());
                 let room = self.room(&room);
-                let (http, dir, ev) = (self.http.clone(), self.dir.clone(), self.ev.clone());
+                let (http, ev) = (self.http.clone(), self.ev.clone());
                 tokio::spawn(async move {
                     let sent = match room {
-                        Ok(room) => gifs::send(&http, &dir, &room, &gif, &query, network.as_deref(), reply_to).await,
+                        Ok(room) => gifs::send(&http, &room, &gif, &query, network.as_deref(), reply_to).await,
                         Err(e) => Err(e),
                     };
                     if let Err(e) = sent {
