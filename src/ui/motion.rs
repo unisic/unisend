@@ -110,6 +110,16 @@ pub(crate) const SETTLE: (Duration, f32) = (Duration::from_millis(300), 1.0);
 /// Throws something off screen at the finger's speed: 350 ms, critically damped.
 #[allow(dead_code, reason = "used by the motion wave that lands next")]
 pub(crate) const THROW: (Duration, f32) = (Duration::from_millis(350), 1.0);
+// Photo viewer and media bubbles.
+/// A picture flying from its bubble to full screen, and back into it.
+pub(crate) const HERO_IN: Duration = Duration::from_millis(260);
+pub(crate) const HERO_OUT: Duration = Duration::from_millis(200);
+/// The full picture fading in over the thumbnail that stood in for it.
+pub(crate) const SHARPEN: Duration = Duration::from_millis(180);
+/// A thumbnail fading into its bubble once it has loaded.
+pub(crate) const THUMB_IN: Duration = Duration::from_millis(150);
+/// A picture pulled up or down returning to rest: like `RELEASE`, with a slight overshoot.
+pub(crate) const RETURN: (Duration, f32) = (Duration::from_millis(300), 0.8);
 
 /// A spring the app steps itself, so a released finger's speed carries into it.
 /// Call `step` and `window.request_animation_frame()` only during render: requesting a frame elsewhere panicked.

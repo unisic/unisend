@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::io::Cursor;
 
 use super::*;
+use super::motion::Glide;
 use crate::backend::Export;
 use crate::i18n::t;
 
@@ -35,6 +36,18 @@ const DISMISS_SPEED: f32 = 800.;
 const EDGE_GIVE: f32 = 0.3;
 /// The bars' height: a row of buttons with room for a label under each icon.
 const ACTIONS_H: f32 = 64.;
+/// Past the edge of a zoomed picture a finger moves it `EDGE_GIVE` of its travel, at most this share of the screen.
+const OVERPAN: f32 = 0.15;
+/// A picture pulled up or down shrinks by this share at most, reached at `SHRINK_AT` of the screen's height.
+const SHRINK: f32 = 0.3;
+const SHRINK_AT: f32 = 0.6;
+/// A pinch below the fitted size stops shrinking here; let go below `PINCH_CLOSE`, the picture closes.
+const PINCH_MIN: f32 = 0.6;
+const PINCH_CLOSE: f32 = 0.8;
+/// The bars follow the picture in, once it has mostly landed.
+const BARS_DELAY: Duration = Duration::from_millis(120);
+/// A notice rises this far as it fades in.
+const NOTE_RISE: f32 = 8.;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct View {
@@ -75,6 +88,142 @@ fn zoomed_about(view: View, at: (f32, f32), scale: f32, screen: (f32, f32), fit:
     clamped(View { scale, off: (at.0 - (at.0 - view.off.0) * k, at.1 - (at.1 - view.off.1) * k) }, screen, fit)
 }
 
+/// A picture's place on screen: its centre and size.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+struct Rect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+impl Rect {
+    fn of(b: Bounds<Pixels>) -> Self {
+        let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+        Self { x: f32::from(b.origin.x) + w / 2., y: f32::from(b.origin.y) + h / 2., w, h }
+    }
+
+    fn lerp(self, to: Self, t: f32) -> Self {
+        let mix = |a: f32, b: f32| a + (b - a) * t;
+        Self { x: mix(self.x, to.x), y: mix(self.y, to.y), w: mix(self.w, to.w), h: mix(self.h, to.h) }
+    }
+}
+
+/// How large a fitted picture pulled `dy` up or down is drawn.
+fn shrink(dy: f32, height: f32) -> f32 {
+    1. - SHRINK * (dy.abs() / (SHRINK_AT * height)).min(1.)
+}
+
+/// Where the picture is drawn: `view`, moved by `drift` and shrunk to `s` about `grab`, the point
+/// the finger took (offsets from the screen's centre), so that point stays under the finger.
+fn placed(view: View, screen: (f32, f32), fit: (f32, f32), drift: (f32, f32), grab: (f32, f32), s: f32) -> Rect {
+    Rect {
+        x: screen.0 / 2. + view.off.0 + drift.0 + grab.0 * (1. - s),
+        y: screen.1 / 2. + view.off.1 + drift.1 + grab.1 * (1. - s),
+        w: fit.0 * view.scale * s,
+        h: fit.1 * view.scale * s,
+    }
+}
+
+/// A zoomed picture's offset along one axis for a finger's `raw` one: 1:1 up to the edge, past it
+/// `EDGE_GIVE` of the travel, at most `OVERPAN` of the screen.
+fn rubber(raw: f32, reach: f32, screen: f32) -> f32 {
+    let over = raw.abs() - reach;
+    if over <= 0. { raw } else { raw.signum() * (reach + (over * EDGE_GIVE).min(screen * OVERPAN)) }
+}
+
+/// The scale drawn for a pinch's `raw` one: past the largest and below the fitted size it meets
+/// resistance, and it never shrinks below `PINCH_MIN`.
+fn resist(raw: f32) -> f32 {
+    if raw > MAX_SCALE {
+        MAX_SCALE * (raw / MAX_SCALE).powf(0.35)
+    } else if raw < 1. {
+        raw.max(0.).sqrt().max(PINCH_MIN)
+    } else {
+        raw
+    }
+}
+
+/// How much of the black backdrop is left behind a picture pinched below its fitted size.
+fn pinch_shade(scale: f32) -> f32 {
+    ((scale - PINCH_MIN) / (1. - PINCH_MIN)).clamp(0., 1.)
+}
+
+/// How far a thrown picture has landed, 0 where it was let go and 1 in its bubble, by the side
+/// that travels furthest.
+fn landed(now: Rect, from: Rect, to: Rect) -> f32 {
+    let (dy, dw) = ((from.y - to.y).abs(), (from.w - to.w).abs());
+    let (at, far) = if dy >= dw { ((now.y - to.y).abs(), dy) } else { ((now.w - to.w).abs(), dw) };
+    if far < 0.5 { 1. } else { (1. - at / far).clamp(0., 1.) }
+}
+
+fn glide((response, damping): (Duration, f32), pos: f32) -> Glide {
+    Glide::new(response, damping, 0.5, pos)
+}
+
+/// The picture's offset from where it rests: a finger's pull on a fitted picture and the spring
+/// after it, or how far a zoomed one is past its edge.
+#[derive(Clone, Copy)]
+struct Drift {
+    x: Glide,
+    y: Glide,
+}
+
+impl Default for Drift {
+    fn default() -> Self {
+        Self { x: glide(motion::SETTLE, 0.), y: glide(motion::SETTLE, 0.) }
+    }
+}
+
+/// The bubble the picture on screen belongs to, as last painted: where it flies back to.
+struct Home {
+    id: String,
+    bounds: Bounds<Pixels>,
+    radius: f32,
+    /// The frame that painted it; bounds from an older one are of a bubble no longer on screen.
+    frame: u64,
+}
+
+/// How the picture leaves.
+#[derive(Default)]
+enum Exit {
+    #[default]
+    Fade,
+    /// A key: gone in the next frame.
+    Instant,
+    /// Back into its bubble.
+    Hero,
+    /// Let go by a finger, at its speed.
+    Throw(Box<Throw>),
+}
+
+/// A picture let go of on its way out: into its bubble when that is on screen, else off the
+/// screen while it fades.
+struct Throw {
+    /// Centre x, y, width, height.
+    rect: [Glide; 4],
+    from: Rect,
+    /// How much backdrop there was when the finger let go.
+    shade: f32,
+    at: Instant,
+    home: bool,
+}
+
+/// A finger on a zoomed picture: where it would have it without the edges, and its recent path.
+struct Pan {
+    raw: (f32, f32),
+    xs: VecDeque<(Instant, f32)>,
+    ys: VecDeque<(Instant, f32)>,
+}
+
+/// Two fingers: the scale they have pinched to since they landed, unlimited, and the view and
+/// midpoint then.
+struct Pinch {
+    raw: f32,
+    from: View,
+    at: (f32, f32),
+}
+
 #[derive(Default)]
 pub(super) struct Zoom {
     view: Option<View>,
@@ -93,12 +242,28 @@ pub(super) struct Zoom {
     epoch: u64,
     /// A finger moving the fitted picture.
     pull: Option<Pull>,
-    /// Where the springs drew the picture last frame, so a finger can catch it mid-flight.
-    at: (f32, f32),
-    /// A sideways offset drawn for one frame without travel: where the picture just turned to sits.
-    pin: Option<f32>,
-    /// Where a picture flung away keeps moving while it fades.
-    fall: f32,
+    drift: Drift,
+    /// Where the finger took a fitted picture it pulls, from the screen's centre.
+    grip: (f32, f32),
+    pan: Option<Pan>,
+    /// When the last step of a zoomed picture's fling arrived, while the fling coasts on.
+    coast: Option<Instant>,
+    pinch: Option<Pinch>,
+    /// Counts rendered frames, to tell a bubble painted in the last one.
+    frame: u64,
+    home: Option<Home>,
+    /// It flew out of its bubble.
+    hero: bool,
+    exit: Exit,
+    /// The message whose bubble the picture is drawn over, which leaves its thumbnail out.
+    covers: Option<String>,
+    /// The picture has been drawn in its bubble for the last time; the next frame lets it go.
+    landed: bool,
+    /// What was drawn last frame, where a finger lets go from.
+    drawn: Rect,
+    shade: f32,
+    /// The last notice, which stays while it fades out.
+    note_text: SharedString,
     /// The bars are hidden.
     bare: bool,
     /// The pictures beside the one on screen, loaded or on their way: at most one each side.
@@ -229,6 +394,33 @@ impl Zoom {
     fn zoomed_in(&self) -> bool {
         self.target().scale > 1.01
     }
+
+    /// `id`'s bubble, when the frame numbered `frame` painted it.
+    fn home_at(&self, id: &str, frame: u64) -> Option<&Home> {
+        self.home.as_ref().filter(|h| h.id == id && h.frame == frame)
+    }
+
+    /// `id`'s bubble, when the last frame painted it.
+    fn home_of(&self, id: &str) -> Option<&Home> {
+        self.home_at(id, self.frame)
+    }
+
+    /// A bubble's picture was painted at `bounds`; kept when it is the one followed.
+    pub(super) fn seen(&mut self, id: &str, bounds: Bounds<Pixels>, radius: f32) {
+        if let Some(home) = self.home.as_mut().filter(|h| h.id == id) {
+            (home.bounds, home.radius, home.frame) = (bounds, radius, self.frame);
+        }
+    }
+
+    /// A press on a bubble's picture, which a tap may open from.
+    pub(super) fn pressed(&mut self, id: &str, bounds: Bounds<Pixels>, radius: f32) {
+        self.home = Some(Home { id: id.to_owned(), bounds, radius, frame: self.frame });
+    }
+
+    /// Whether the viewer draws over `id`'s bubble, which then leaves its own picture out.
+    pub(super) fn covers(&self, id: &str) -> bool {
+        self.covers.as_deref() == Some(id)
+    }
 }
 
 fn dimensions(image: &Image) -> Option<(f32, f32)> {
@@ -239,7 +431,10 @@ fn dimensions(image: &Image) -> Option<(f32, f32)> {
 impl BeeperApp {
     pub(super) fn open_zoom(&mut self, cx: &mut Context<Self>) {
         self.drop_near(cx);
-        self.zoom = Zoom { serial: self.zoom.serial + 1, ..Zoom::default() };
+        let (frame, home) = (self.zoom.frame, self.zoom.home.take());
+        self.zoom = Zoom { serial: self.zoom.serial + 1, frame, home, ..Zoom::default() };
+        // Out of its bubble only when that was on screen in the last frame, with a picture to fly.
+        self.zoom.hero = !cx.reduce_motion() && self.viewer.as_ref().is_some_and(|(id, _)| self.thumbs.contains_key(id) && self.zoom.home_of(id).is_some());
         self.fill_near(cx);
     }
 
@@ -314,6 +509,8 @@ impl BeeperApp {
         let Some(was) = self.viewer.take() else { return false };
         let had = self.zoom.near.iter().position(|(id, _)| *id == to).map(|ix| self.zoom.near.remove(ix).1);
         self.zoom.near.push(was);
+        // Its bubble is followed from the next frame that paints it.
+        self.zoom.home = Some(Home { id: to.clone(), bounds: Bounds::default(), radius: 0., frame: u64::MAX });
         self.viewer = Some((to.clone(), had.clone().flatten()));
         if had.is_none()
             && let Some(media) = self.msgs.iter().find(|m| m.id == to).and_then(|m| m.media.clone())
@@ -341,7 +538,7 @@ impl BeeperApp {
             return false;
         }
         if self.turn(key == "right", cx) {
-            self.zoom.pin = Some(0.);
+            self.zoom.drift.x.set(0.);
         }
         true
     }
@@ -349,17 +546,61 @@ impl BeeperApp {
     /// Reply or Forward from the viewer: closes it, then does what the message's menu does.
     fn viewer_act(&mut self, act: menu::Act, window: &mut Window, cx: &mut Context<Self>) {
         let Some((id, _)) = self.viewer.clone() else { return };
-        self.close_viewer(cx);
+        self.dismiss_viewer(true, cx);
         self.act(&id, act, window, cx);
     }
 
-    /// Follows a finger on a fitted picture; on release it turns, closes or springs back.
-    fn viewer_pull(&mut self, phase: TouchPhase, dx: f32, dy: f32, cx: &mut Context<Self>) {
+    /// Closes the picture from a button or Android's back: back into its bubble when that is on
+    /// screen, else fading. A key closes it at once.
+    pub(super) fn dismiss_viewer(&mut self, animate: bool, cx: &mut Context<Self>) {
+        let Some((id, full)) = &self.viewer else { return };
+        let hero = self.zoom.home_of(id).is_some() && (full.is_some() || self.thumbs.contains_key(id));
+        self.zoom.exit = if !animate || cx.reduce_motion() {
+            Exit::Instant
+        } else if hero {
+            Exit::Hero
+        } else {
+            Exit::Fade
+        };
+        if !matches!(self.zoom.exit, Exit::Hero) {
+            // No frame may come to show the thumbnail again.
+            self.zoom.covers = None;
+        }
+        self.close_viewer(cx);
+    }
+
+    /// A finger let go of the picture to close it, at `vel` px/s: it lands in its bubble when that
+    /// is on screen, else it moves on toward `dir` (up, down or nowhere: -1, 1, 0) while it fades.
+    fn throw_away(&mut self, vel: f32, dir: f32, cx: &mut Context<Self>) {
+        let Some((id, _)) = &self.viewer else { return };
+        if cx.reduce_motion() {
+            self.zoom.exit = Exit::Instant;
+            self.zoom.covers = None;
+            return self.close_viewer(cx);
+        }
+        let (from, now) = (self.zoom.drawn, Instant::now());
+        let home = self.zoom.home_of(id).map(|h| Rect::of(h.bounds));
+        let to = home.unwrap_or(Rect { y: self.zoom.screen.1 / 2. + dir * (self.zoom.screen.1 + from.h) / 2., ..from });
+        let mut rect = [from.x, from.y, from.w, from.h].map(|v| glide(motion::THROW, v));
+        for (g, (target, v)) in rect.iter_mut().zip([(to.x, 0.), (to.y, vel), (to.w, 0.), (to.h, 0.)]) {
+            g.release(target, v, now);
+        }
+        self.zoom.exit = Exit::Throw(Box::new(Throw { rect, from, shade: self.zoom.shade, at: now, home: home.is_some() }));
+        self.close_viewer(cx);
+    }
+
+    /// Follows a finger on a fitted picture from `at`, where it landed; on release it turns,
+    /// closes or springs back, carrying the finger's speed.
+    fn viewer_pull(&mut self, phase: TouchPhase, at: Point<Pixels>, dx: f32, dy: f32, cx: &mut Context<Self>) {
         let now = Instant::now();
         match phase {
             TouchPhase::Started => {
                 self.zoom.pull = Some(Pull { across: None, offset: 0., samples: VecDeque::new() });
                 self.zoom.tap = None;
+                // A finger catching a picture on its way back keeps the point it shrinks about.
+                if !self.zoom.drift.y.running() {
+                    self.zoom.grip = (f32::from(at.x) - self.zoom.screen.0 / 2., f32::from(at.y) - self.zoom.screen.1 / 2.);
+                }
                 self.pull_by(dx, dy, now);
             }
             TouchPhase::Moved => self.pull_by(dx, dy, now),
@@ -374,27 +615,37 @@ impl BeeperApp {
                     Some(true) => {
                         let drawn = give(pull.offset, older.is_some(), newer.is_some());
                         let turn = settle(drawn, speed, width, older.is_some(), newer.is_some());
-                        if turn != Turn::Stay && self.turn(turn == Turn::Newer, cx) {
+                        let (from, vel) = if turn != Turn::Stay && self.turn(turn == Turn::Newer, cx) {
                             let page = width + PAGE_GAP;
-                            self.zoom.pin = Some(if turn == Turn::Newer { drawn + page } else { drawn - page });
-                        } else if pull.offset > 0. && older.is_none() {
-                            self.reached_oldest(cx);
-                        }
+                            (if turn == Turn::Newer { drawn + page } else { drawn - page }, speed)
+                        } else {
+                            if pull.offset > 0. && older.is_none() {
+                                self.reached_oldest(cx);
+                            }
+                            (drawn, if drawn == pull.offset { speed } else { speed * EDGE_GIVE })
+                        };
+                        self.zoom.drift.x = glide(motion::SETTLE, from);
+                        self.zoom.drift.x.release(0., vel, now);
                     }
-                    Some(false) if dismisses(pull.offset, speed, height) => {
-                        self.zoom.fall = pull.offset + pull.offset.signum() * height * 0.25;
-                        self.close_viewer(cx);
+                    Some(false) if dismisses(pull.offset, speed, height) => self.throw_away(speed, pull.offset.signum(), cx),
+                    Some(false) => {
+                        self.zoom.drift.y = glide(motion::RETURN, pull.offset);
+                        self.zoom.drift.y.release(0., speed, now);
                     }
-                    _ => {}
+                    None => {}
                 }
             }
-            TouchPhase::Cancelled => self.zoom.pull = None,
+            TouchPhase::Cancelled => {
+                self.zoom.pull = None;
+                self.zoom.drift.x.release(0., 0., now);
+                self.zoom.drift.y.release(0., 0., now);
+            }
         }
         cx.notify();
     }
 
     fn pull_by(&mut self, dx: f32, dy: f32, now: Instant) {
-        let at = self.zoom.at;
+        let at = (self.zoom.drift.x.pos, self.zoom.drift.y.pos);
         let Some(pull) = &mut self.zoom.pull else { return };
         if pull.across.is_none() && (dx != 0. || dy != 0.) {
             let across = dx.abs() > dy.abs();
@@ -520,28 +771,139 @@ impl BeeperApp {
             self.zoom.zoom_by(e.position, (dy * WHEEL_ZOOM).exp(), reduce);
         } else if self.zoom.pull.is_some() || (e.touch_phase == TouchPhase::Started && !self.zoom.zoomed_in()) {
             // A wheel and the glide after a fling have no start, so neither turns nor closes.
-            return self.viewer_pull(e.touch_phase, dx, dy, cx);
+            return self.viewer_pull(e.touch_phase, e.position, dx, dy, cx);
         } else if self.zoom.zoomed_in() {
-            self.zoom.pan(dx, dy, reduce);
+            self.viewer_pan(e.touch_phase, dx, dy, reduce);
         } else {
             return;
         }
         cx.notify();
     }
 
+    /// Moves a zoomed picture. A finger past an edge meets resistance and springs back on release
+    /// with its speed; a fling that reaches an edge hands its speed to the same spring. GPUI sends
+    /// a fling's steps after the finger's `Ended`, as `Moved` with no `Started`, then an `Ended`.
+    /// A wheel stops at the edge.
+    fn viewer_pan(&mut self, phase: TouchPhase, dx: f32, dy: f32, reduce: bool) {
+        let now = Instant::now();
+        match phase {
+            TouchPhase::Started => {
+                let view = self.zoom.grab(reduce);
+                let raw = (view.off.0 + self.zoom.drift.x.pos, view.off.1 + self.zoom.drift.y.pos);
+                self.zoom.pan = Some(Pan { raw, xs: VecDeque::new(), ys: VecDeque::new() });
+                self.zoom.coast = None;
+                self.pan_by(dx, dy, now);
+            }
+            TouchPhase::Moved if self.zoom.pan.is_some() => self.pan_by(dx, dy, now),
+            TouchPhase::Moved => match self.zoom.coast {
+                Some(last) => self.coast_by(dx, dy, last, now),
+                None => self.zoom.pan(dx, dy, reduce),
+            },
+            TouchPhase::Ended if self.zoom.pan.is_some() => {
+                self.pan_by(dx, dy, now);
+                let Some(pan) = self.zoom.pan.take() else { return };
+                let speed = (super::gallery::speed(&pan.xs), super::gallery::speed(&pan.ys));
+                for (g, v) in [(&mut self.zoom.drift.x, speed.0), (&mut self.zoom.drift.y, speed.1)] {
+                    if g.pos != 0. {
+                        *g = glide(motion::SETTLE, g.pos);
+                        // Past the edge the picture moved a share of the finger's speed.
+                        g.release(0., v * EDGE_GIVE, now);
+                    }
+                }
+                self.zoom.coast = Some(now);
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.zoom.pan = None;
+                self.zoom.coast = None;
+                // A bounce already under way keeps its speed.
+                for g in [&mut self.zoom.drift.x, &mut self.zoom.drift.y] {
+                    if !g.running() && g.pos != 0. {
+                        g.release(0., 0., now);
+                    }
+                }
+            }
+        }
+    }
+
+    fn pan_by(&mut self, dx: f32, dy: f32, now: Instant) {
+        let (screen, fit) = (self.zoom.screen, self.zoom.fit);
+        let Some(pan) = &mut self.zoom.pan else { return };
+        pan.raw = (pan.raw.0 + dx, pan.raw.1 + dy);
+        for (samples, at) in [(&mut pan.xs, pan.raw.0), (&mut pan.ys, pan.raw.1)] {
+            samples.push_back((now, at));
+            if samples.len() > 6 {
+                samples.pop_front();
+            }
+        }
+        let raw = pan.raw;
+        let view = self.zoom.target();
+        let (rx, ry) = reach(view.scale, screen, fit);
+        let off = (raw.0.clamp(-rx, rx), raw.1.clamp(-ry, ry));
+        self.zoom.view = Some(View { off, ..view });
+        self.zoom.drift.x.hold(rubber(raw.0, rx, screen.0) - off.0);
+        self.zoom.drift.y.hold(rubber(raw.1, ry, screen.1) - off.1);
+    }
+
+    /// One step of a fling after the finger lifted, `last` being when the previous one came.
+    fn coast_by(&mut self, dx: f32, dy: f32, last: Instant, now: Instant) {
+        let dt = now.saturating_duration_since(last).as_secs_f32().max(0.001);
+        let mut view = self.zoom.target();
+        let (rx, ry) = reach(view.scale, self.zoom.screen, self.zoom.fit);
+        for (g, off, d, r) in [(&mut self.zoom.drift.x, &mut view.off.0, dx, rx), (&mut self.zoom.drift.y, &mut view.off.1, dy, ry)] {
+            // An axis already springing back has left the fling.
+            if g.running() {
+                continue;
+            }
+            let next = *off + d;
+            *off = next.clamp(-r, r);
+            if next.abs() > r {
+                *g = glide(motion::SETTLE, 0.);
+                g.release(0., d / dt, now);
+            }
+        }
+        self.zoom.view = Some(view);
+        self.zoom.coast = Some(now);
+    }
+
     fn viewer_pinch(&mut self, e: &PinchEvent, cx: &mut Context<Self>) {
         let reduce = cx.reduce_motion();
+        let at = (f32::from(e.position.x) - self.zoom.screen.0 / 2., f32::from(e.position.y) - self.zoom.screen.1 / 2.);
         match e.phase {
             TouchPhase::Started => {
                 self.zoom.pinching = true;
-                self.zoom.pull = None;
-                self.zoom.grab(reduce);
+                (self.zoom.pull, self.zoom.pan, self.zoom.coast) = (None, None, None);
+                let mut from = self.zoom.grab(reduce);
+                // Where a finger or a spring had moved it, the pinch takes it from.
+                from.off = (from.off.0 + self.zoom.drift.x.pos, from.off.1 + self.zoom.drift.y.pos);
+                self.zoom.drift = Drift::default();
+                self.zoom.view = Some(from);
+                self.zoom.pinch = Some(Pinch { raw: from.scale, from, at });
             }
-            TouchPhase::Moved => {
+            TouchPhase::Moved => match &mut self.zoom.pinch {
+                Some(pinch) => {
+                    pinch.raw *= 1. + e.delta;
+                    let scale = resist(pinch.raw);
+                    let k = scale / pinch.from.scale;
+                    // The picture point that was under the fingers' midpoint stays under it as it moves.
+                    let off = (at.0 - (pinch.at.0 - pinch.from.off.0) * k, at.1 - (pinch.at.1 - pinch.from.off.1) * k);
+                    self.zoom.view = Some(View { scale, off });
+                }
                 // A trackpad pinch has no start.
-                self.zoom.zoom_by(e.position, 1. + e.delta, reduce);
+                None => self.zoom.zoom_by(e.position, 1. + e.delta, reduce),
+            },
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.zoom.pinching = false;
+                if self.zoom.pinch.take().is_some() {
+                    let view = self.zoom.target();
+                    self.zoom.tap = None;
+                    if e.phase == TouchPhase::Ended && view.scale < PINCH_CLOSE {
+                        return self.throw_away(0., 0., cx);
+                    }
+                    let to = if view.scale > MAX_SCALE { zoomed_about(view, at, MAX_SCALE, self.zoom.screen, self.zoom.fit) } else { clamped(view, self.zoom.screen, self.zoom.fit) };
+                    self.zoom.view = Some(to);
+                    self.zoom.glide = Some((view, Instant::now()));
+                }
             }
-            TouchPhase::Ended | TouchPhase::Cancelled => self.zoom.pinching = false,
         }
         // A pinch is not a tap; the lift of the last finger must not close the picture.
         self.zoom.tap = None;
@@ -563,30 +925,87 @@ impl BeeperApp {
         }
     }
 
-    /// A picture full-screen: fades in, and fades out quicker without taking taps while it does.
-    /// No zoom from the thumbnail: GPUI cannot scale an element.
+    /// A picture full-screen. It flies out of its bubble and back into it when the bubble is on
+    /// screen, else it fades; while it leaves it still takes every tap, so none reaches the chat.
+    /// GPUI cannot scale an element, so the flight moves and sizes the picture's own box.
     pub(super) fn render_viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let frame = self.zoom.frame;
+        self.zoom.frame += 1;
         let live = self.viewer.is_some();
         if live {
             if let Some((_, Some(image))) = self.viewer_last.take() {
                 image.remove_asset(cx);
             }
         } else if self.viewer_last.is_none() {
+            self.zoom.covers = None;
             return None;
         }
-        let shown = Presence::new("viewer", live).transition(if live { motion::enter() } else { motion::exit() }).sample(window, cx);
-        if !shown.should_render() {
-            if let Some((_, Some(image))) = self.viewer_last.take() {
-                image.remove_asset(cx);
-            }
-            return None;
-        }
-        let p = Palette::of(cx);
-        let (top, bottom) = crate::insets();
+        let reduce = cx.reduce_motion();
+        let now = Instant::now();
         let (id, full) = self.viewer.as_ref().or(self.viewer_last.as_ref())?;
-        let id = id.clone();
+        let (id, full) = (id.clone(), full.clone());
+        let home = self.zoom.home_at(&id, frame).map(|h| (Rect::of(h.bounds), h.radius));
+
+        let hero = if live { self.zoom.hero } else { matches!(self.zoom.exit, Exit::Hero) } && home.is_some();
+        // A thrown picture is moved by its springs; anything else by the viewer's presence.
+        let (p, done, throw) = match &mut self.zoom.exit {
+            Exit::Throw(throw) if !live => {
+                if let (true, Some((to, _))) = (throw.home, home) {
+                    // The bubble moved: the chat scrolled under the picture.
+                    for (g, target) in throw.rect.iter_mut().zip([to.x, to.y, to.w, to.h]) {
+                        g.retarget(target);
+                    }
+                }
+                let [x, y, w, h] = throw.rect.each_mut().map(|g| {
+                    if reduce {
+                        g.set(g.target());
+                    }
+                    g.step(now)
+                });
+                let rect = Rect { x, y, w, h };
+                let target = Rect { x: throw.rect[0].target(), y: throw.rect[1].target(), w: throw.rect[2].target(), h: throw.rect[3].target() };
+                let (p, done) = if throw.home {
+                    (landed(rect, throw.from, target), throw.rect.iter().all(|g| !g.running()))
+                } else {
+                    let t = now.saturating_duration_since(throw.at).as_secs_f32() / motion::EXIT.as_secs_f32();
+                    (motion::ease_out(t.min(1.)), reduce || t >= 1.)
+                };
+                (p, done, Some((rect, throw.shade, throw.home)))
+            }
+            exit => {
+                let motion = match (live, exit) {
+                    (true, _) if hero => Transition::new(motion::HERO_IN).easing(motion::EASE_OUT),
+                    (true, _) => motion::enter(),
+                    (false, Exit::Hero) => Transition::new(motion::HERO_OUT).easing(motion::EASE_OUT),
+                    (false, Exit::Instant) => Transition::new(Duration::ZERO),
+                    (false, _) => motion::exit(),
+                };
+                let shown = Presence::new("viewer", live).transition(motion).sample(window, cx);
+                (shown.progress, !shown.should_render(), None)
+            }
+        };
+        let lands = hero || throw.is_some_and(|(_, _, home)| home);
+        if done {
+            if !lands || self.zoom.landed {
+                if let Some((_, Some(image))) = self.viewer_last.take() {
+                    image.remove_asset(cx);
+                }
+                (self.zoom.covers, self.zoom.landed, self.zoom.exit) = (None, false, Exit::Fade);
+                return None;
+            }
+            // Drawn in its bubble once more while the bubble's own picture comes back next frame.
+            self.zoom.landed = true;
+            window.request_animation_frame();
+        } else if throw.is_some() {
+            window.request_animation_frame();
+        }
+        self.zoom.covers = (live || (lands && !done)).then(|| id.clone());
+
+        let palette = Palette::of(cx);
+        let (top, bottom) = crate::insets();
+        let thumb = self.thumbs.get(&id).cloned();
         // The thumbnail stands in until the full picture arrives.
-        let picture = full.clone().or_else(|| self.thumbs.get(&id).cloned());
+        let picture = full.clone().or_else(|| thumb.clone());
         if live && !self.focus.is_focused(window) {
             // Left and Right reach the app, not the text field under the picture.
             window.focus(&self.focus, cx);
@@ -601,38 +1020,69 @@ impl BeeperApp {
         }
         self.zoom.screen = screen;
         self.zoom.fit = fitted(screen, self.zoom.dims.map(|(_, d)| d));
-        let (view, gliding) = self.zoom.shown(cx.reduce_motion());
+        let (view, gliding) = self.zoom.shown(reduce);
         if gliding {
             window.request_animation_frame();
         } else if self.zoom.glide.is_some() {
             self.zoom.glide = None;
         }
-        let (w, h) = (screen.0 * view.scale, screen.1 * view.scale);
 
         let (older, newer) = if live { self.neighbours() } else { (None, None) };
         // History paged in while the picture is open brings a neighbour that is not asked for yet.
         if [&older, &newer].into_iter().flatten().any(|n| self.zoom.near.iter().all(|(k, _)| k != n)) {
             self.fill_near(cx);
         }
-        // The finger's pull, 1:1; after it, a spring back to rest, to the picture turned to, or on
-        // past the edge while a flung picture fades.
-        let pull = if live { self.zoom.pull.as_ref().and_then(|pull| pull.across.map(|across| (across, pull.offset))) } else { None };
-        let across = pull.filter(|(across, _)| *across).map(|(_, offset)| give(offset, older.is_some(), newer.is_some()));
-        let down = pull.filter(|(across, _)| !across).map(|(_, offset)| offset);
-        let serial = SharedString::from(format!("viewer-{}", self.zoom.serial));
-        let x = match self.zoom.pin.take() {
-            Some(pin) => {
-                window.request_animation_frame();
-                spring((serial.clone(), "x"), pin, motion::RELEASE.with_travel(false), window, cx)
+        // The finger's pull, 1:1; after it, a spring back to rest or to the picture turned to.
+        if live && let Some(pull) = &self.zoom.pull {
+            match pull.across {
+                Some(true) => self.zoom.drift.x.hold(give(pull.offset, older.is_some(), newer.is_some())),
+                Some(false) => self.zoom.drift.y.hold(pull.offset),
+                None => {}
             }
-            None => spring((serial.clone(), "x"), across.unwrap_or(0.), motion::RELEASE.with_travel(across.is_none()), window, cx),
+        }
+        let [x, y] = [&mut self.zoom.drift.x, &mut self.zoom.drift.y].map(|g| {
+            if reduce {
+                g.set(g.target());
+            }
+            g.step(now)
+        });
+        if self.zoom.drift.x.running() || self.zoom.drift.y.running() {
+            window.request_animation_frame();
+        }
+        // Fitted, a pull up or down shrinks the picture and uncovers the chat; zoomed, the drift is
+        // how far it is past an edge.
+        let fitted_now = !self.zoom.zoomed_in();
+        let s = if fitted_now { shrink(y, screen.1) } else { 1. };
+        let fade = if fitted_now { (y.abs() / (screen.1 * 0.4)).min(1.) } else { 0. };
+        let rest = placed(view, screen, self.zoom.fit, (x, y), self.zoom.grip, s);
+        let shade = (1. - fade) * pinch_shade(view.scale);
+        // Where the picture is, its corners, the backdrop behind it, and the whole viewer's opacity.
+        let (rect, radius, backdrop, opacity) = match (throw, home) {
+            (Some((rect, from, true)), Some((_, r))) => (rect, r * p, from * (1. - p), 1.),
+            (Some((rect, from, _)), _) => (rect, 0., from, 1. - p),
+            (None, Some((thumb_rect, r))) if hero => (thumb_rect.lerp(rest, p), r * (1. - p), shade * p, 1.),
+            (None, _) => (rest, 0., shade, p),
         };
-        let y = spring((serial.clone(), "y"), if live { down.unwrap_or(0.) } else { self.zoom.fall }, motion::RELEASE.with_travel(down.is_none()), window, cx);
-        self.zoom.at = (x, y);
-        let fade = (y.abs() / (screen.1 * 0.4)).min(1.);
+        (self.zoom.drawn, self.zoom.shade) = (rect, backdrop);
+
+        let serial = SharedString::from(format!("viewer-{}", self.zoom.serial));
         let bars = transition((serial.clone(), "bars"), if self.zoom.bare { 0. } else { 1. }, if self.zoom.bare { motion::exit() } else { motion::enter() }, window, cx);
-        let chrome = bars * (1. - (fade * 3.).min(1.));
+        let bars_in = Presence::new((serial.clone(), "bars-in"), true).transition(motion::enter().delay(BARS_DELAY)).sample(window, cx).progress;
+        let leaving = if throw.is_some() { 0. } else if hero { p } else { 1. };
+        let chrome = bars * bars_in * leaving * (1. - (fade * 3.).min(1.));
         let interactive = live && !self.zoom.bare;
+        let sharp = transition(
+            (SharedString::from(format!("viewer-{}-{id}", self.zoom.serial)), "sharp"),
+            if full.is_some() { 1. } else { 0. },
+            Transition::new(motion::SHARPEN).easing(motion::EASE_OUT),
+            window,
+            cx,
+        );
+        if let Some((text, _)) = &self.zoom.note {
+            self.zoom.note_text = text.clone();
+        }
+        let noting = self.zoom.note.is_some();
+        let note = Presence::new((serial.clone(), "note"), noting).transition(if noting { motion::enter() } else { motion::exit() }).sample(window, cx);
 
         let page = screen.0 + PAGE_GAP;
         let side = |near: &Option<String>, shift: f32| -> Option<AnyElement> {
@@ -640,7 +1090,7 @@ impl BeeperApp {
             let image = self.zoom.near.iter().find(|(k, _)| k == near).and_then(|(_, image)| image.clone()).or_else(|| self.thumbs.get(near).cloned())?;
             Some(img(image).absolute().left(px(x + shift)).top_0().w(px(screen.0)).h(px(screen.1)).object_fit(ObjectFit::Contain).into_any_element())
         };
-        let sides: Vec<AnyElement> = if x.abs() > 0.5 { [side(&older, -page), side(&newer, page)].into_iter().flatten().collect() } else { Vec::new() };
+        let sides: Vec<AnyElement> = if fitted_now && x.abs() > 0.5 { [side(&older, -page), side(&newer, page)].into_iter().flatten().collect() } else { Vec::new() };
 
         let m = self.msgs.iter().find(|m| m.id == id);
         let who = m.map(|m| if m.own { t!("You").to_owned() } else { m.sender.clone() });
@@ -695,7 +1145,7 @@ impl BeeperApp {
                     .when(interactive, |el| {
                         el.on_click(cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
-                            this.close_viewer(cx);
+                            this.dismiss_viewer(true, cx);
                         }))
                     }),
             )
@@ -747,11 +1197,19 @@ impl BeeperApp {
             .right_0()
             .bottom_0()
             .gap(px(12.))
-            .children(self.zoom.note.as_ref().map(|(text, _)| {
-                div().flex().justify_center().px(px(GUTTER)).child(
-                    div().max_w(px(screen.0 - 2. * GUTTER)).px(px(GAP)).py(px(10.)).rounded(px(RADIUS)).bg(p.raised).text_color(p.text).text_size(fs(14.)).child(text.clone()),
-                )
-            }))
+            .when(note.should_render(), |el| {
+                el.child(div().relative().top(px(NOTE_RISE * (1. - note.progress))).opacity(note.progress).flex().justify_center().px(px(GUTTER)).child(
+                    div()
+                        .max_w(px(screen.0 - 2. * GUTTER))
+                        .px(px(GAP))
+                        .py(px(10.))
+                        .rounded(px(RADIUS))
+                        .bg(palette.raised)
+                        .text_color(palette.text)
+                        .text_size(fs(14.))
+                        .child(self.zoom.note_text.clone()),
+                ))
+            })
             .child(
                 v_flex()
                     .pt(px(8.))
@@ -763,6 +1221,28 @@ impl BeeperApp {
                     .child(actions),
             );
 
+        // A sticker keeps its own shape; a photo's box has its shape once it lands, and in between
+        // `Cover` crops it as the bubble does.
+        let sticker = m.and_then(|m| m.media.as_ref()).is_some_and(|media| media.kind == MediaKind::Sticker);
+        let cover = !sticker && self.zoom.dims.is_some();
+        let layer = |image: Arc<Image>, alpha: f32| {
+            img(image)
+                .absolute()
+                .left(px(rect.x - rect.w / 2.))
+                .top(px(rect.y - rect.h / 2.))
+                .w(px(rect.w))
+                .h(px(rect.h))
+                .rounded(px(if sticker { 0. } else { radius }))
+                .object_fit(if cover { ObjectFit::Cover } else { ObjectFit::Contain })
+                .opacity(alpha)
+                .into_any_element()
+        };
+        // The full picture fades in over the thumbnail when it arrives after opening.
+        let layers: Vec<AnyElement> = match (full, thumb) {
+            (Some(full), Some(thumb)) if sharp < 1. => vec![layer(thumb, 1.), layer(full, sharp)],
+            (Some(image), _) | (None, Some(image)) => vec![layer(image, 1.)],
+            (None, None) => Vec::new(),
+        };
         Some(
             div()
                 .id("viewer")
@@ -770,11 +1250,13 @@ impl BeeperApp {
                 .inset_0()
                 .overflow_hidden()
                 .text_color(gpui_kit::white())
-                .opacity(shown.progress)
-                .child(div().absolute().inset_0().bg(gpui_kit::black()).opacity(1. - fade))
+                .opacity(opacity)
+                .child(div().absolute().inset_0().bg(gpui_kit::black()).opacity(backdrop))
+                // Until the picture is gone, through every way out: a tap meant for it must not
+                // reach the chat, whose back arrow sits under the close arrow.
+                .occlude()
                 .when(live, |el| {
-                    el.occlude()
-                        .on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.viewer_tap(e.position(), cx)))
+                    el.on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.viewer_tap(e.position(), cx)))
                         .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.viewer_wheel(e, cx)))
                         .on_pinch(cx.listener(|this, e: &PinchEvent, _, cx| this.viewer_pinch(e, cx)))
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, _| {
@@ -785,19 +1267,8 @@ impl BeeperApp {
                         .on_mouse_up(MouseButton::Left, cx.listener(|this, _: &MouseUpEvent, _, _| this.zoom.mouse = None))
                 })
                 .children(sides)
-                .map(|el| match picture {
-                    Some(image) => el.child(
-                        img(image)
-                            .absolute()
-                            .left(px((screen.0 - w) / 2. + view.off.0 + x))
-                            .top(px((screen.1 - h) / 2. + view.off.1 + y))
-                            .w(px(w))
-                            .h(px(h))
-                            .object_fit(ObjectFit::Contain),
-                    ),
-                    None if live => el.child(div().absolute().inset_0().flex().items_center().justify_center().child(t!("Loading…"))),
-                    None => el,
-                })
+                .children(layers)
+                .when(live && picture.is_none(), |el| el.child(div().absolute().inset_0().flex().items_center().justify_center().child(t!("Loading…"))))
                 .when(chrome > 0., |el| el.child(top_bar))
                 .child(bottom_bar)
                 .into_any_element(),
@@ -807,7 +1278,10 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{EDGE_GIVE, FIT, MAX_SCALE, Turn, View, beside, clamped, dismisses, fitted, give, pictures, reach, settle, zoomed_about};
+    use super::{
+        EDGE_GIVE, FIT, MAX_SCALE, OVERPAN, PINCH_MIN, Rect, Turn, View, beside, clamped, dismisses, fitted, give, landed, pictures, pinch_shade, placed, reach, resist, rubber, settle, shrink,
+        zoomed_about,
+    };
     use crate::backend::MediaKind;
 
     const PHONE: (f32, f32) = (400., 900.);
@@ -897,5 +1371,67 @@ mod tests {
         assert!(!dismisses(60., 100., height), "a short slow pull springs back");
         assert!(dismisses(40., 1200., height), "a flick closes");
         assert!(!dismisses(40., -1200., height), "a flick back toward rest does not");
+    }
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    #[test]
+    fn the_flight_from_the_bubble_passes_through_every_rect_between() {
+        let (a, b) = (Rect { x: 10., y: 20., w: 100., h: 50. }, Rect { x: 200., y: 450., w: 400., h: 300. });
+        assert_eq!(a.lerp(b, 0.), a);
+        assert_eq!(a.lerp(b, 1.), b);
+        assert_eq!(a.lerp(b, 0.5), Rect { x: 105., y: 235., w: 250., h: 175. });
+    }
+
+    #[test]
+    fn a_pulled_picture_shrinks_to_seventy_percent_about_the_finger() {
+        let h = PHONE.1;
+        assert_eq!(shrink(0., h), 1.);
+        assert!(near(shrink(0.15 * h, h), 0.925), "at the closing threshold");
+        assert!(near(shrink(-2. * h, h), 0.7), "no smaller, up or down");
+        // The point the finger took stays under it: grab (100, 200) from the centre, pulled 90 down.
+        let (grab, dy) = ((100., 200.), 90.);
+        let s = shrink(dy, h);
+        let r = placed(FIT, PHONE, PHONE, (0., dy), grab, s);
+        let finger = (PHONE.0 / 2. + grab.0, PHONE.1 / 2. + grab.1 + dy);
+        // The picture point under the finger, as a share of the picture from its centre, is unchanged.
+        assert!(near((finger.0 - r.x) / r.w, grab.0 / PHONE.0));
+        assert!(near((finger.1 - r.y) / r.h, grab.1 / PHONE.1));
+        assert!(near(r.w, PHONE.0 * s));
+    }
+
+    #[test]
+    fn past_a_zoomed_edge_the_picture_gives_a_little_and_no_more() {
+        assert_eq!(rubber(50., 100., 400.), 50.);
+        assert_eq!(rubber(-100., 100., 400.), -100.);
+        assert!(near(rubber(150., 100., 400.), 100. + 50. * EDGE_GIVE));
+        assert!(near(rubber(-1000., 100., 400.), -(100. + 400. * OVERPAN)), "capped at a share of the screen");
+    }
+
+    #[test]
+    fn a_pinch_past_the_limits_meets_resistance() {
+        assert_eq!(resist(3.), 3.);
+        assert!(near(resist(MAX_SCALE * 2.), MAX_SCALE * 2f32.powf(0.35)));
+        assert!(resist(MAX_SCALE * 2.) < MAX_SCALE * 1.3);
+        assert!(near(resist(0.64), 0.8));
+        assert_eq!(resist(0.1), PINCH_MIN, "never smaller");
+        assert_eq!(pinch_shade(1.2), 1.);
+        assert!(near(pinch_shade(0.8), 0.5));
+        assert_eq!(pinch_shade(PINCH_MIN), 0.);
+    }
+
+    #[test]
+    fn a_thrown_picture_lands_by_its_longest_travel() {
+        let from = Rect { x: 200., y: 600., w: 400., h: 300. };
+        let to = Rect { x: 300., y: 200., w: 120., h: 90. };
+        assert_eq!(landed(from, from, to), 0.);
+        assert_eq!(landed(to, from, to), 1.);
+        assert!(near(landed(Rect { y: 400., ..from }, from, to), 0.5));
+        assert_eq!(landed(Rect { y: 900., ..from }, from, to), 0., "flung away from its bubble first");
+        // Level with its bubble: the size tells how far it is.
+        let level = Rect { y: 600., ..to };
+        assert!(near(landed(Rect { w: 260., ..from }, from, level), 0.5));
     }
 }
