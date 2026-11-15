@@ -436,6 +436,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("This account has been deactivated.", "To konto zostało dezaktywowane."),
     ("This account has no cross-signing keys yet, so another device cannot vouch for this one", "To konto nie ma jeszcze kluczy podpisywania krzyżowego, więc inne urządzenie nie może poręczyć za to"),
     ("This address is not encrypted. Use https.", "Ten adres nie jest szyfrowany. Użyj https."),
+    ("This chat does not take that reaction", "Ten czat nie obsługuje takiej reakcji"),
     ("This chat does not take that timer", "Ten czat nie obsługuje takiego czasu"),
     ("This chat does not take this change from Murmur.", "Tego czatu nie można tak zmienić z Murmura."),
     ("This chat's bridge does not take this change from Murmur. Change it in {network}.", "Mostek tego czatu nie przyjmuje tej zmiany z Murmura. Zmień to w {network}."),

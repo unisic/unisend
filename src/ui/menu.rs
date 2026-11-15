@@ -7,6 +7,7 @@
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::backend::Features;
 use crate::i18n::t;
 
 /// The six reactions offered first, Signal's defaults in its order.
@@ -170,6 +171,20 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
     out
 }
 
+/// What the chat's network takes of `acts`: Reply, React, an edit and a deletion for everyone,
+/// the last two only within their time on the network.
+fn taken(mut acts: Vec<Act>, m: &Msg, caps: &Features) -> Vec<Act> {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    acts.retain(|act| match act {
+        Act::Reply => caps.reply >= 1,
+        Act::React => caps.reaction >= 1,
+        Act::Edit => caps.editable(m.ts, now),
+        Act::DeleteForEveryone => caps.deletable(m.ts, now),
+        _ => true,
+    });
+    acts
+}
+
 /// Forward, Select and the two deletions, for a message that reached the server.
 fn more_acts(m: &Msg) -> Vec<Act> {
     if !m.id.starts_with('$') {
@@ -182,12 +197,21 @@ fn more_acts(m: &Msg) -> Vec<Act> {
     out
 }
 
-/// The reactions in the bar: the six, then the user's own reaction when it is none of them, as
-/// Signal puts an applied reaction that is not in its strip in the last place.
-fn bar_keys(m: &Msg) -> Vec<String> {
-    let mut keys: Vec<String> = QUICK_REACTIONS.iter().map(|k| (*k).to_owned()).collect();
-    keys.extend(m.reactions.iter().find(|r| r.own && !QUICK_REACTIONS.iter().any(|k| same_emoji(k, &r.key))).map(|r| r.key.clone()));
+/// The reactions in the bar: the six the chat takes (where it takes none of them, the first six
+/// it takes), then the user's own reaction when it is none of them, as Signal puts an applied
+/// reaction that is not in its strip in the last place.
+fn bar_keys(m: &Msg, caps: &Features) -> Vec<String> {
+    let mut keys: Vec<String> = QUICK_REACTIONS.iter().filter(|k| caps.reacts_with(k)).map(|k| (*k).to_owned()).collect();
+    if keys.is_empty() {
+        keys = caps.allowed_reactions.iter().flatten().take(QUICK_REACTIONS.len()).cloned().collect();
+    }
+    keys.extend(m.reactions.iter().find(|r| r.own && !keys.iter().any(|k| same_emoji(k, &r.key))).map(|r| r.key.clone()));
     keys
+}
+
+/// The bar ends with a + for every other emoji, unless the chat takes only what the bar shows.
+fn more_offered(keys: &[String], caps: &Features) -> bool {
+    caps.allowed_reactions.as_ref().is_none_or(|list| list.iter().any(|a| !keys.iter().any(|k| same_emoji(k, a))))
 }
 
 /// One emoji with or without the emoji presentation selector: clients send "\u{2764}" and
@@ -419,7 +443,8 @@ impl BeeperApp {
             cx.notify();
             return;
         }
-        let chosen = m.scrub.zip(self.msgs.iter().find(|msg| msg.id == m.id)).map(|(n, msg)| (msg.id.clone(), bar_keys(msg).get(n).cloned()));
+        let (scrub, menu_id) = (m.scrub, m.id.clone());
+        let chosen = scrub.zip(self.msgs.iter().find(|msg| msg.id == menu_id)).map(|(n, msg)| (msg.id.clone(), bar_keys(msg, self.caps()).get(n).cloned()));
         match chosen {
             Some((id, Some(key))) => self.toggle_reaction(&id, &key, cx),
             Some((id, None)) => {
@@ -576,11 +601,13 @@ impl BeeperApp {
             .when(m.own, |el| el.flex_row_reverse())
             .opacity(if open { 1. } else { 0. })
             .group_hover("message", |el| el.opacity(1.))
-            .when(sent, |el| {
+            .when(sent && self.caps().reaction >= 1, |el| {
                 el.child(button("react", IconName::Heart).on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
                     this.open_menu(react.clone(), MenuKind::Picker, e.position(), None, false, cx)
                 })))
-                .child(button("reply", IconName::Reply).on_click(cx.listener(move |this, _, window, cx| {
+            })
+            .when(sent && self.caps().reply >= 1, |el| {
+                el.child(button("reply", IconName::Reply).on_click(cx.listener(move |this, _, window, cx| {
                     this.start_compose(Compose::Reply(reply.clone()), window, cx)
                 })))
             })
@@ -676,9 +703,11 @@ impl BeeperApp {
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
         let id = m.id.clone();
-        let keys = bar_keys(m);
-        let sent = id.starts_with('$');
-        let acts = acts(m, MenuKind::Touch, false);
+        let caps = self.caps();
+        let keys = bar_keys(m, caps);
+        let more = more_offered(&keys, caps);
+        let reacts = id.starts_with('$') && caps.reaction >= 1;
+        let acts = taken(acts(m, MenuKind::Touch, false), m, caps);
         let mine: Vec<bool> = keys.iter().map(|k| m.reactions.iter().any(|r| r.own && same_emoji(&r.key, k))).collect();
         let b = menu.bubble;
         let bubble = Bounds { origin: point(f32::from(b.origin.x), f32::from(b.origin.y)), size: size(f32::from(b.size.width), f32::from(b.size.height)) };
@@ -688,7 +717,7 @@ impl BeeperApp {
             bubble,
             f32::from(menu.at.y),
             m.own,
-            sent.then_some(keys.len() + 1),
+            reacts.then_some(keys.len() + more as usize),
             ROW_H * acts.len() as f32 + 16.,
         );
         let menu = self.menu.as_mut()?;
@@ -699,7 +728,7 @@ impl BeeperApp {
         let v_list = menu.reveal(now, 150., 200., decelerate);
         let rise = |n: f32| if still { 0. } else { EMOJI_RISE * (1. - menu.reveal(now, 100. + 10. * n, 200., decelerate)) };
         let bar = placed.bar.map(|(x, y, _)| {
-            let more = self.more_reactions(&id, 1., cx).opacity(menu.reveal(now, 100. + 10. * keys.len() as f32, 200., decelerate));
+            let more = more.then(|| self.more_reactions(&id, 1., cx).opacity(menu.reveal(now, 100. + 10. * keys.len() as f32, 200., decelerate)));
             let slots = keys.iter().enumerate().map(|(n, key)| {
                 let (id, label, key) = (id.clone(), key.clone(), key.clone());
                 let grown = if still { 0. } else { menu.grown(n, now) };
@@ -734,7 +763,7 @@ impl BeeperApp {
                         .bg(p.lifted.opacity(menu.reveal(now, 100., 200., decelerate)))
                         .when(open, |el| el.occlude())
                         .children(slots)
-                        .child(more),
+                        .children(more),
                 ),
             )
             .with_priority(OVER_LIFTED)
@@ -783,8 +812,9 @@ impl BeeperApp {
         let view = window.viewport_size();
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
-        let (id, keys) = (m.id.clone(), bar_keys(m));
-        let w = (keys.len() + 1) as f32 * PICK + 2. * PICK_PAD_X;
+        let (id, keys) = (m.id.clone(), bar_keys(m, self.caps()));
+        let more = more_offered(&keys, self.caps());
+        let w = (keys.len() + more as usize) as f32 * PICK + 2. * PICK_PAD_X;
         let h = PICK + 2. * PICK_PAD_Y;
         let (top, bottom) = crate::insets();
         let at = (f32::from(menu.at.x), f32::from(menu.at.y));
@@ -833,7 +863,7 @@ impl BeeperApp {
                 .opacity(if still { 1. } else { ease_out_expo(phase(t, 0., 400.)) })
                 .occlude()
                 .children(buttons)
-                .child(self.more_reactions(&id, PICK / TAP, cx)),
+                .when(more, |el| el.child(self.more_reactions(&id, PICK / TAP, cx))),
         );
         Some(self.barrier(picker.into_any_element(), cx))
     }
@@ -846,7 +876,7 @@ impl BeeperApp {
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
         let id = m.id.clone();
-        let acts = acts(m, MenuKind::List, narrow);
+        let acts = taken(acts(m, MenuKind::List, narrow), m, self.caps());
         let h = POINTER_ROW_H * acts.len() as f32 + 12.;
         let (top, bottom) = crate::insets();
         let (ax, ay) = (f32::from(menu.at.x), f32::from(menu.at.y));
@@ -907,7 +937,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, BAR_H, Delivery, Kind, MenuKind, Msg, OVERLAY_GAP, Placement, TAP, acts, ease_out_expo, place, same_emoji, slot_at};
+    use super::{Act, BAR_H, Delivery, Features, Kind, MenuKind, Msg, OVERLAY_GAP, Placement, TAP, acts, bar_keys, ease_out_expo, more_offered, place, same_emoji, slot_at, taken};
     use gpui_kit::{Bounds, point, size};
 
     #[test]
@@ -925,6 +955,35 @@ mod tests {
         let want = [Act::Retry, Act::Copy("hi".to_owned()), Act::Delete];
         assert_eq!(acts(&failed, MenuKind::Touch, false), want);
         assert_eq!(acts(&failed, MenuKind::List, true), want);
+    }
+
+    #[test]
+    fn the_chat_features_drop_what_the_network_does_not_take() {
+        let mut m = Msg::bare("$1".to_owned(), Kind::Message, "@me:x".try_into().unwrap());
+        (m.own, m.body, m.ts) = (true, "hi".to_owned(), 1);
+        let all = acts(&m, MenuKind::List, true);
+        assert_eq!(taken(all.clone(), &m, &Features::ALL), all);
+        // An old message on WhatsApp: no edit past 15 minutes, no deletion past two days.
+        let wa = Features { edit_max_age: Some(900), delete_max_age: Some(172_800), ..Features::ALL };
+        let left = taken(all.clone(), &m, &wa);
+        assert!(left.contains(&Act::Reply) && left.contains(&Act::React) && left.contains(&Act::DeleteForMe));
+        assert!(!left.contains(&Act::Edit) && !left.contains(&Act::DeleteForEveryone));
+        let none = Features { reply: 0, reaction: -2, ..Features::ALL };
+        let left = taken(all, &m, &none);
+        assert!(!left.contains(&Act::Reply) && !left.contains(&Act::React) && left.contains(&Act::Edit));
+    }
+
+    #[test]
+    fn the_bar_offers_only_allowed_reactions() {
+        let m = Msg::bare("$1".to_owned(), Kind::Message, "@me:x".try_into().unwrap());
+        assert_eq!(bar_keys(&m, &Features::ALL).len(), 6);
+        assert!(more_offered(&bar_keys(&m, &Features::ALL), &Features::ALL));
+        let two = Features { allowed_reactions: Some(vec!["\u{1F44D}".to_owned(), "\u{1F525}".to_owned()]), ..Features::ALL };
+        assert_eq!(bar_keys(&m, &two), ["\u{1F44D}"]);
+        assert!(more_offered(&bar_keys(&m, &two), &two), "the fire is only behind the +");
+        let fire = Features { allowed_reactions: Some(vec!["\u{1F525}".to_owned()]), ..Features::ALL };
+        assert_eq!(bar_keys(&m, &fire), ["\u{1F525}"]);
+        assert!(!more_offered(&bar_keys(&m, &fire), &fire));
     }
 
     #[test]

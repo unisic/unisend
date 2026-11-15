@@ -7,7 +7,7 @@ use std::time::Duration;
 use super::cards;
 use super::sheet::{self, SheetMotion};
 use super::*;
-use crate::backend::{Place, location_support};
+use crate::backend::{LocationSupport as Support, Place, location_support};
 use crate::i18n::t;
 
 /// How long to wait for a fix before giving up.
@@ -192,7 +192,11 @@ impl BeeperApp {
         let (_, bottom) = crate::insets();
         let state = self.location.state.clone();
         let network = self.open.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id)).and_then(|r| r.network.clone());
-        let support = network.as_deref().and_then(location_support);
+        // The bridge's word decides; the guess by name is only for a bridge that publishes none.
+        let support = network.as_deref().and_then(location_support).and_then(|s| match self.published() {
+            Some(caps) => (caps.location == 1).then_some(Support { block: false, ..s }),
+            None => Some(s),
+        });
         let blocked = support.as_ref().is_some_and(|s| s.block);
 
         let button = |id: &'static str, label: &'static str, strong: bool| {
