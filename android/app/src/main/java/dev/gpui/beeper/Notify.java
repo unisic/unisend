@@ -95,7 +95,6 @@ public final class Notify {
         channels(context);
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         for (StatusBarNotification shown : manager.getActiveNotifications()) {
-            Notification n = shown.getNotification();
             String chat = shown.getTag();
             if (chat == null && shown.getId() == SyncService.NOTICE) {
                 manager.notify(SyncService.NOTICE, SyncService.notice(context));
@@ -104,11 +103,18 @@ public final class Notify {
             if (chat == null || shown.getId() != 0 || chat.equals(SUMMARY)) {
                 continue;
             }
-            NotificationCompat.MessagingStyle style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n);
-            if (style != null) {
-                post(context, manager, chat, text(n, Notification.EXTRA_TITLE), n.getChannelId(), cached(chat), style,
-                        text(n, Notification.EXTRA_TEXT), n.when, false);
-            }
+            repost(context, manager, shown);
+        }
+        summarize(context, manager, null, false);
+    }
+
+    /** Posts a chat's notification again, quietly, from what Android is showing. */
+    private static void repost(Context context, NotificationManager manager, StatusBarNotification shown) {
+        Notification n = shown.getNotification();
+        NotificationCompat.MessagingStyle style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n);
+        if (style != null) {
+            post(context, manager, shown.getTag(), text(n, Notification.EXTRA_TITLE), n.getChannelId(), cached(shown.getTag()), style,
+                    text(n, Notification.EXTRA_TEXT), n.when, false);
         }
     }
 
@@ -219,13 +225,12 @@ public final class Notify {
         channels(context);
         Bitmap picture = icon.isEmpty() ? cached(chat) : load(chat, icon);
         NotificationManager manager = context.getSystemService(NotificationManager.class);
-        if (active(manager, chat) == null) {
-            // A conversation notification needs a shortcut to the chat that exists when it is posted.
-            try {
-                ShortcutManagerCompat.pushDynamicShortcut(context, Share.shortcut(context, chat, name, picture, 0));
-            } catch (IllegalStateException | IllegalArgumentException e) {
-                Log.w("Notify", "conversation shortcut", e);
-            }
+        // A conversation notification needs its chat's shortcut at every post, and Share.publish may
+        // have replaced it since the last one; Android's guidance is a push per message anyway.
+        try {
+            ShortcutManagerCompat.pushDynamicShortcut(context, Share.shortcut(context, chat, name, picture, 0));
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            Log.w("Notify", "conversation shortcut", e);
         }
         // In a one-to-one chat the picture is the sender's; in a group it is the chat's.
         Person person = new Person.Builder().setName(sender).setKey(sender).build();
@@ -244,6 +249,7 @@ public final class Notify {
     }
 
     /** Takes the chat's notification away, because it was read. */
+        summarize(context, manager, chat, true);
     public static void clear(Activity activity, String chat) {
         Context context = activity.getApplicationContext();
         NotificationManager manager = context.getSystemService(NotificationManager.class);
@@ -349,19 +355,23 @@ public final class Notify {
             builder.setLargeIcon(picture);
         }
         manager.notify(chat, 0, builder.build());
-        summarize(context, manager, chat, true);
     }
 
     /**
-     * The line the chats fold under when two or more are waiting (Android hides it while there is
-     * one). It stays while any chat is, because Android cancels a summary's chats with it; it goes
-     * when the last chat does.
+     * The line the chats fold under while two or more are waiting. A lone chat has none, so its own
+     * notification, with its buttons, is the one in the shade. Android cancels a summary's chats
+     * with it, so when a chat goes and leaves one, that one is posted again on its own. {@code chat}
+     * was just posted ({@code includes}) or taken away, and may still be listed; null for neither.
      */
     private static void summarize(Context context, NotificationManager manager, String chat, boolean includes) {
         int chats = includes ? 1 : 0;
         for (StatusBarNotification shown : manager.getActiveNotifications()) {
-            if (shown.getId() == 0 && shown.getTag() != null && !shown.getTag().equals(chat)
-                    && !shown.getTag().equals(SUMMARY) && GROUP.equals(shown.getNotification().getGroup())) {
+            if (shown.getId() != 0 || shown.getTag() == null || shown.getTag().equals(chat)) {
+                continue;
+            }
+            if (shown.getTag().equals(SUMMARY)) {
+                summarized = true;
+            } else if (GROUP.equals(shown.getNotification().getGroup())) {
                 chats++;
             }
         }
@@ -388,16 +398,27 @@ public final class Notify {
     }
 
     /** What a secure lock screen shows instead: the app and that something came, not from whom. */
+        boolean summarized = false;
+        StatusBarNotification other = null;
     private static Notification locked(Context context, String channel) {
         return new NotificationCompat.Builder(context, channel)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
                 .setContentTitle(context.getString(R.string.app_name))
+                other = shown;
                 .setContentText(context.getString(R.string.new_message))
                 .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                 .build();
     }
 
     private static Intent receiver(Context context, String action, String chat) {
+        if (chats == 1 && !summarized) {
+            return;
+        }
+        if (chats == 1 && !includes) {
+            manager.cancel(SUMMARY, 0);
+            repost(context, manager, other);
+            return;
+        }
         return new Intent(context, NotifyReceiver.class).setAction(action).putExtra(EXTRA_CHAT, chat);
     }
 
