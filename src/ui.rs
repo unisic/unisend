@@ -330,6 +330,9 @@ pub struct BeeperApp {
     rooms_scroll: UniformListScrollHandle,
     /// Kept here so the settings return to where they were after the lock keypad replaces them.
     settings_scroll: ScrollHandle,
+    /// The pages open under the settings list, deepest last: a category, then a choice in it.
+    settings_pages: Vec<panels::Page>,
+    page_scroll: ScrollHandle,
     /// Room avatars; `None` while loading or when the room has none. One entry per room at most.
     avatars: HashMap<OwnedRoomId, Option<Arc<Image>>>,
     /// Pictures of the people writing in the open chat; `None` while loading or when they have
@@ -565,6 +568,8 @@ impl BeeperApp {
             timeline,
             rooms_scroll: UniformListScrollHandle::new(),
             settings_scroll: ScrollHandle::new(),
+            settings_pages: Vec::new(),
+            page_scroll: ScrollHandle::new(),
             drafts,
             place: navigate::Place::default(),
             avatars: HashMap::new(),
@@ -1450,6 +1455,10 @@ impl BeeperApp {
 
     fn set_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         if tab == self.tab() {
+            if tab == Tab::Settings && !self.settings_pages.is_empty() {
+                self.settings_pages.clear();
+                cx.notify();
+            }
             if tab == Tab::Chats && !self.searching {
                 self.to_top = Some((Instant::now(), f32::from(self.rooms_scroll.0.borrow().base_handle.offset().y)));
                 cx.notify();

@@ -178,9 +178,19 @@ impl BeeperApp {
         cx.notify();
     }
 
+    /// Whether this device is verified, for the settings list.
+    pub(super) fn devices_summary(&self) -> SharedString {
+        match &self.verify.devices {
+            Some(d) if d.this_verified => t!("This device is verified").into(),
+            Some(_) => t!("This device is not verified").into(),
+            None if self.verify.loading => t!("Loading your devices").into(),
+            None => SharedString::default(),
+        }
+    }
+
     pub(super) fn render_devices(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
-        let section = panels::section(t!("Devices"), cx);
+        let section = v_flex().gap(px(GAP * 2.));
         let Some(devices) = self.verify.devices.clone() else {
             let line = match (&self.verify.failed, self.verify.loading) {
                 (Some(e), _) => e.clone(),

@@ -27,12 +27,55 @@ pub(super) enum Panel {
     NewChat,
 }
 
+/// A page under Settings: a category of its list, or the choices of one setting in a category.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Page {
+    Appearance,
+    Chats,
+    Notifications,
+    Privacy,
+    Devices,
+    Account,
+    Updates,
+    Emoji,
+    Receipts,
+    SwipeLeft,
+    SwipeRight,
+    Lock,
+    LockAfter,
+}
+
+impl Page {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Appearance => t!("Appearance"),
+            Self::Chats => t!("Chats"),
+            Self::Notifications => t!("Notifications"),
+            Self::Privacy => t!("Privacy and security"),
+            Self::Devices => t!("Devices"),
+            Self::Account => t!("Account"),
+            Self::Updates => t!("Updates"),
+            Self::Emoji => "Emoji",
+            Self::Receipts => t!("Message status"),
+            Self::SwipeLeft => t!("Swipe left"),
+            Self::SwipeRight => t!("Swipe right"),
+            Self::Lock => t!("App lock"),
+            Self::LockAfter => t!("Auto-lock"),
+        }
+    }
+
+    fn id(self) -> ElementId {
+        ("settings-page", self as usize).into()
+    }
+}
+
 impl BeeperApp {
     pub(super) fn open_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
         if panel == Panel::Networks && self.beeper {
             self.working = self.send(Cmd::Networks, cx);
         }
         if panel == Panel::Settings {
+            self.settings_pages.clear();
             self.load_devices(cx);
         }
         self.panel = Some(panel);
@@ -42,6 +85,11 @@ impl BeeperApp {
     /// One level up: a login leads back to the networks, a destination back to the chats.
     pub(super) fn back(&mut self, cx: &mut Context<Self>) {
         if self.cancel_change(cx) {
+            return;
+        }
+        if self.panel == Some(Panel::Settings) && self.settings_pages.pop().is_some() {
+            self.page_scroll.set_offset(Point::default());
+            cx.notify();
             return;
         }
         let group = self.panel == Some(Panel::NewChat) && self.new_chat_back(cx);
@@ -72,39 +120,6 @@ impl BeeperApp {
         cx.set_global(theme);
         crate::sync_theme(Some(window), cx);
         cx.notify();
-    }
-
-    /// One pill per choice, under its label, as the lock timeouts are; a tap saves it.
-    fn choices<T: Copy + PartialEq + 'static>(&self, id: &'static str, all: impl IntoIterator<Item = T>, current: T, label: fn(T) -> &'static str, set: fn(&mut crate::Settings, T), cx: &mut Context<Self>) -> Div {
-        let p = Palette::of(cx);
-        h_flex().flex_wrap().gap(px(4.)).pb(px(8.)).children(all.into_iter().enumerate().map(|(ix, choice)| {
-            let on = current == choice;
-            div()
-                .id((id, ix))
-                .h(px(36.))
-                .px(px(GAP))
-                .flex()
-                .items_center()
-                .rounded_full()
-                .text_size(fs(14.))
-                .text_color(if on { p.ground } else { p.muted })
-                .bg(if on { p.text } else { p.raised })
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    set(&mut this.settings, choice);
-                    this.settings.save(&this.dir);
-                    cx.notify();
-                }))
-                .child(label(choice))
-        }))
-    }
-
-    fn swipe_choices(&self, left: bool, cx: &mut Context<Self>) -> Div {
-        if left {
-            self.choices("swipe-left", SwipeAction::ALL, self.settings.swipe_left, SwipeAction::label, |s, a| s.swipe_left = a, cx)
-        } else {
-            self.choices("swipe-right", SwipeAction::ALL, self.settings.swipe_right, SwipeAction::label, |s, a| s.swipe_right = a, cx)
-        }
     }
 
     fn set_language(&mut self, language: LanguageChoice, window: &mut Window, cx: &mut Context<Self>) {
@@ -267,13 +282,17 @@ impl BeeperApp {
         let (title, body) = match panel {
             Panel::NewChat => return self.render_new_chat(narrow, window, cx),
             Panel::Settings if self.pad_page() => (t!("App lock"), self.render_lock_change(window, cx)),
-            Panel::Settings => (t!("Settings"), self.render_settings(window, cx).into_any_element()),
+            Panel::Settings => match self.settings_pages.last().copied() {
+                None => (t!("Settings"), self.render_settings(cx).into_any_element()),
+                Some(page) => (page.title(), self.render_page(page, window, cx)),
+            },
             Panel::Networks => (t!("Networks"), self.render_networks(cx).into_any_element()),
             Panel::Add => (t!("Add an account"), self.render_add(cx).into_any_element()),
             Panel::Login => (t!("Sign in"), self.render_login_step(window, cx).into_any_element()),
         };
         // The destinations are reached from the navigation; only what lies under them leads back.
-        let deep = matches!(panel, Panel::Add | Panel::Login) || (panel == Panel::Settings && self.pad_page());
+        let paged = panel == Panel::Settings && !self.settings_pages.is_empty();
+        let deep = matches!(panel, Panel::Add | Panel::Login) || (panel == Panel::Settings && self.pad_page()) || paged;
         let edge = if narrow { GUTTER } else { GUTTER + 6. };
         v_flex()
             .size_full()
@@ -281,89 +300,164 @@ impl BeeperApp {
                 header()
                     .when(deep, |el| el.child(round_button("panel-back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
                     .when(!deep, |el| el.pl(px(edge)))
-                    .child(screen_title(title)),
+                    // A long translation ends in an ellipsis rather than past the screen edge.
+                    .child(screen_title(title).min_w_0().truncate()),
             )
             .child(
-                div().id("panel-body").flex_1().min_h_0().overflow_y_scroll().when(panel == Panel::Settings && !deep, |el| el.track_scroll(&self.settings_scroll)).child(
+                div()
+                    .id("panel-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .when(panel == Panel::Settings && !deep, |el| el.track_scroll(&self.settings_scroll))
+                    .when(paged && !self.pad_page(), |el| el.track_scroll(&self.page_scroll))
+                    .child(
                     v_flex().w_full().max_w(px(PANEL_W)).px(px(edge)).pt(px(8.)).pb(px(GAP * 2.)).gap(px(GAP * 2.)).child(body),
                 ),
             )
             .into_any_element()
     }
 
-    fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The settings list: one row per category, each with what is set in it now.
+    fn render_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
-        let theme = self.settings.theme;
-        let seg = press::Segments::new("themes", window, cx);
-        let chosen = [ThemeChoice::Dark, ThemeChoice::Light, ThemeChoice::System].iter().position(|&t| t == theme).unwrap_or(0);
-        let slider = seg.pill("themes-pill", chosen, p.text, window, cx);
+        let s = &self.settings;
+        let theme = match s.theme {
+            ThemeChoice::Dark => t!("Dark theme"),
+            ThemeChoice::Light => t!("Light theme"),
+            ThemeChoice::System => t!("System theme"),
+        };
+        let look = t!("{theme}, text {size}%", theme = theme, size = s.text_size.percent());
+        let chats = t!("Message status: {style}", style = s.receipts.label());
+        let notices = if s.stay_connected { t!("Arrive while Unisend is closed") } else { t!("Only while Unisend is open") };
+        let privacy = match s.lock.mode {
+            _ if self.unencrypted => t!("Data on this device is not encrypted"),
+            LockMode::Off => t!("App lock off"),
+            LockMode::Phone => t!("Unlocked with the phone lock"),
+            LockMode::Pin => t!("Unlocked with the app PIN"),
+        };
+        let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
+        let updates = self.updates_summary();
+        let category = |page: Page, icon: IconName, summary: SharedString, cx: &mut Context<Self>| {
+            link(page.id(), page.title(), summary, Some(icon), Some(IconName::ChevronRight), cx).on_click(cx.listener(move |this, _, _, cx| this.open_page(page, cx)))
+        };
+        v_flex()
+            .gap(px(GAP * 2.))
+            .child(
+                card(cx)
+                    .child(category(Page::Appearance, IconName::Palette, look.into(), cx))
+                    .child(category(Page::Chats, IconName::MessageCircle, chats.into(), cx))
+                    .when(cfg!(target_os = "android"), |el| el.child(category(Page::Notifications, IconName::Bell, notices.into(), cx))),
+            )
+            .child(
+                card(cx)
+                    .child(category(Page::Privacy, IconName::Shield, privacy.into(), cx))
+                    .child(category(Page::Devices, IconName::MonitorSmartphone, self.devices_summary(), cx)),
+            )
+            .child(
+                card(cx)
+                    .child(category(Page::Account, IconName::User, user.into(), cx))
+                    .when_some(updates, |el, summary| el.child(category(Page::Updates, IconName::Download, summary.into(), cx))),
+            )
+            .child(
+                card(cx).child(
+                    h_flex()
+                        .min_h(px(ROW_H))
+                        .py(px(8.))
+                        .gap(px(GAP))
+                        .child(Icon::new(IconName::Info).size_5().flex_none().text_color(p.brand))
+                        .child(
+                            v_flex()
+                                .child(div().text_size(fs(16.)).line_height(fs(22.)).child("Unisend"))
+                                .child(div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.muted).child(t!("Version {version}", version = env!("CARGO_PKG_VERSION")))),
+                        ),
+                ),
+            )
+    }
+
+    fn open_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        // Two levels at most, and a second tap that lands before the page is drawn opens nothing.
+        if self.settings_pages.len() < 2 && self.settings_pages.last() != Some(&page) {
+            self.settings_pages.push(page);
+            self.page_scroll.set_offset(Point::default());
+        }
+        cx.notify();
+    }
+
+    fn render_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let s = &self.settings;
+        match page {
+            Page::Appearance => self.render_appearance(window, cx),
+            Page::Chats => self.render_chats(window, cx),
+            Page::Notifications => self.render_notifications(cx),
+            Page::Privacy => self.render_privacy(cx),
+            Page::Devices => self.render_devices(cx).into_any_element(),
+            Page::Account => self.render_account(cx),
+            Page::Updates => self.render_updates(cx).map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
+            Page::Emoji => self.render_emoji(cx),
+            Page::Receipts => pick("receipts", ReceiptStyle::ALL, s.receipts, ReceiptStyle::label, |s, style| s.receipts = style, cx),
+            Page::SwipeLeft => pick("swipe-left", SwipeAction::ALL, s.swipe_left, SwipeAction::label, |s, a| s.swipe_left = a, cx),
+            Page::SwipeRight => pick("swipe-right", SwipeAction::ALL, s.swipe_right, SwipeAction::label, |s, a| s.swipe_right = a, cx),
+            Page::Lock => self.render_lock_modes(cx),
+            Page::LockAfter => {
+                let after = s.lock.timeout_secs();
+                card(cx)
+                    .children(crate::applock::TIMEOUTS.map(|(secs, label)| {
+                        let on = after == secs;
+                        option(SharedString::from(format!("lock-after-{secs}")), crate::i18n::tr(label), "", on, cx)
+                            .when(!on, |el| el.on_click(cx.listener(move |this, _, _, cx| this.set_lock(None, Some(secs), None, cx))))
+                    }))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// Two or three short choices side by side, the chosen one under a pill that slides to it.
+    fn segmented<T: Copy + PartialEq + 'static>(
+        id: &'static str,
+        pill: &'static str,
+        options: &[(T, &'static str)],
+        current: T,
+        set: fn(&mut Self, T, &mut Window, &mut Context<Self>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = Palette::of(cx);
+        let seg = press::Segments::new(id, window, cx);
+        let chosen = options.iter().position(|&(value, _)| value == current).unwrap_or(0);
+        let slider = seg.pill(pill, chosen, p.text, window, cx);
         let measured = slider.is_some();
-        let choice = |ix: usize, label: &'static str, value: ThemeChoice, cx: &mut Context<Self>| {
-            let on = theme == value;
+        h_flex().p(px(4.)).rounded_full().bg(p.raised).relative().child(seg.container()).children(slider).children(options.iter().enumerate().map(|(ix, &(value, label))| {
+            let on = ix == chosen;
             div()
-                .id(label)
+                .id((id, ix))
                 .relative()
                 .h(px(36.))
                 .px(px(GAP))
                 .flex()
+                .flex_1()
                 .items_center()
+                .justify_center()
                 .rounded_full()
                 .text_size(fs(14.))
-                .flex_1()
-                .justify_center()
                 .text_color(if on { p.ground } else { p.muted })
                 .when(on && !measured, |el| el.bg(p.text))
+                .role(Role::RadioButton)
+                .aria_label(label)
+                .aria_toggled(on.into())
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, window, cx| this.set_theme(value, window, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| set(this, value, window, cx)))
                 .child(seg.probe(ix))
                 .child(label)
-        };
-        let themes = h_flex()
-            .p(px(4.))
-            .rounded_full()
-            .bg(p.raised)
-            .relative()
-            .child(seg.container())
-            .children(slider)
-            .child(choice(0, t!("Dark"), ThemeChoice::Dark, cx))
-            .child(choice(1, t!("Light"), ThemeChoice::Light, cx))
-            .child(choice(2, t!("System"), ThemeChoice::System, cx));
-        let language = self.settings.language;
-        let lang_seg = press::Segments::new("languages", window, cx);
-        let lang_ix = [LanguageChoice::System, LanguageChoice::English, LanguageChoice::Polish].iter().position(|&l| l == language).unwrap_or(0);
-        let lang_slider = lang_seg.pill("languages-pill", lang_ix, p.text, window, cx);
-        let lang_measured = lang_slider.is_some();
-        let pick = |ix: usize, label: &'static str, value: LanguageChoice, cx: &mut Context<Self>| {
-            let on = language == value;
-            div()
-                // Not the label: "System" is also a theme option's id in the same card.
-                .id(("language", ix))
-                .relative()
-                .h(px(36.))
-                .px(px(GAP))
-                .flex()
-                .items_center()
-                .rounded_full()
-                .text_size(fs(14.))
-                .flex_1()
-                .justify_center()
-                .text_color(if on { p.ground } else { p.muted })
-                .when(on && !lang_measured, |el| el.bg(p.text))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, window, cx| this.set_language(value, window, cx)))
-                .child(lang_seg.probe(ix))
-                .child(label)
-        };
-        let languages = h_flex()
-            .p(px(4.))
-            .rounded_full()
-            .bg(p.raised)
-            .relative()
-            .child(lang_seg.container())
-            .children(lang_slider)
-            .child(pick(0, t!("System"), LanguageChoice::System, cx))
-            .child(pick(1, "English", LanguageChoice::English, cx))
-            .child(pick(2, "Polski", LanguageChoice::Polish, cx));
+        }))
+    }
+
+    fn render_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let themes = [(ThemeChoice::Dark, t!("Dark")), (ThemeChoice::Light, t!("Light")), (ThemeChoice::System, t!("System"))];
+        let themes = Self::segmented("themes", "themes-pill", &themes, self.settings.theme, Self::set_theme, window, cx);
+        let languages = [(LanguageChoice::System, t!("System")), (LanguageChoice::English, "English"), (LanguageChoice::Polish, "Polski")];
+        let languages = Self::segmented("languages", "languages-pill", &languages, self.settings.language, Self::set_language, window, cx);
         let swatches = h_flex().flex_wrap().gap_x(px(4.)).pb(px(8.)).children(ChatColour::ALL.map(|colour| {
             let on = self.settings.chat_colour == colour;
             let name = t!("Chat colour: {colour}", colour = colour.label());
@@ -374,6 +468,9 @@ impl BeeperApp {
                 .flex()
                 .items_center()
                 .justify_center()
+                .role(Role::RadioButton)
+                .aria_label(name)
+                .aria_toggled(on.into())
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| this.set_chat_colour(colour, window, cx)))
                 .child(
@@ -386,6 +483,91 @@ impl BeeperApp {
                         .child(div().size_full().rounded_full().bg(fill)),
                 )
         }));
+        v_flex()
+            .gap(px(GAP * 2.))
+            .child(
+                card(cx)
+                    // Under their labels: beside them, larger text squeezes the label.
+                    .child(row(t!("Theme"), "", cx))
+                    .child(div().pb(px(8.)).child(themes))
+                    .child(row(t!("Language"), "", cx))
+                    .child(div().pb(px(8.)).child(languages)),
+            )
+            .child(card(cx).child(row(t!("Chat colour"), &t!("{colour}. Your own messages, on this device.", colour = self.settings.chat_colour.label()), cx)).child(swatches))
+            .child(card(cx).children(self.render_look(cx)))
+            .when(crate::emoji::SUPPORTED, |el| {
+                el.child(card(cx).child(
+                    link("emoji", "Emoji", self.emoji_value().into(), None, Some(IconName::ChevronRight), cx).on_click(cx.listener(|this, _, _, cx| this.open_page(Page::Emoji, cx))),
+                ))
+            })
+            .into_any_element()
+    }
+
+    fn render_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let s = &self.settings;
+        let (receipts, left, right) = (s.receipts.label(), s.swipe_left.label(), s.swipe_right.label());
+        let incoming = IncomingStatus::ALL.map(|when| (when, when.label()));
+        let incoming = Self::segmented("incoming", "incoming-pill", &incoming, s.incoming, |this, when, _, cx| {
+            this.settings.incoming = when;
+            this.settings.save(&this.dir);
+            cx.notify();
+        }, window, cx);
+        let choice = |page: Page, value: &'static str, cx: &mut Context<Self>| {
+            link(page.id(), page.title(), value.into(), None, Some(IconName::ChevronRight), cx).on_click(cx.listener(move |this, _, _, cx| this.open_page(page, cx)))
+        };
+        v_flex()
+            .gap(px(GAP * 2.))
+            .child(
+                card(cx)
+                    .child(choice(Page::Receipts, receipts, cx))
+                    .child(row(t!("Status of received messages"), t!("Whether you have read them, and whether their sender can see that."), cx))
+                    .child(div().pb(px(8.)).child(incoming)),
+            )
+            .child(section(t!("Chat list"), cx).child(card(cx).child(choice(Page::SwipeLeft, left, cx)).child(choice(Page::SwipeRight, right, cx))))
+            .into_any_element()
+    }
+
+    fn render_notifications(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let weak = cx.entity().downgrade();
+        let stay = Switch::new("stay-connected").checked(self.settings.stay_connected).on_click(move |on, _, cx| {
+            let _ = weak.update(cx, |this, cx| this.set_stay_connected(*on, cx));
+        });
+        let android = |id: &'static str, label: &'static str, detail: &'static str, open: fn(), cx: &mut Context<Self>| {
+            link(id, label, detail.into(), None, Some(IconName::ExternalLink), cx).on_click(move |_, _, _| open())
+        };
+        v_flex()
+            .gap(px(GAP * 2.))
+            .child(card(cx).child(android(
+                "notification-settings",
+                t!("Sounds and importance"),
+                t!("Direct messages, group chats and mentions each have their own."),
+                crate::notification_settings,
+                cx,
+            )))
+            .child(
+                v_flex()
+                    .gap(px(8.))
+                    .child(card(cx).child(row(t!("Stay connected in the background"), "", cx).child(stay)))
+                    .child(footnote(t!("On: notifications arrive while Unisend is closed, under a quiet system notice. Off: no notice, messages arrive only while Unisend is open."), cx)),
+            )
+            .when(self.settings.stay_connected, |el| {
+                el.child(card(cx).child(android(
+                    "connection-settings",
+                    t!("Hide the connection notice"),
+                    t!("Opens Android settings for this notice only. Messages keep arriving."),
+                    crate::connection_notice_settings,
+                    cx,
+                )))
+            })
+            .into_any_element()
+    }
+
+    /// Incognito and the keyboard, then the app lock and screen security. Desktop has the app PIN
+    /// only, asked at start, and no screen security.
+    fn render_privacy(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let android = cfg!(target_os = "android");
+        let lock = self.settings.lock.clone();
         let weak = cx.entity().downgrade();
         let incognito = Switch::new("incognito").checked(self.settings.incognito).on_click(move |on, _, cx| {
             let _ = weak.update(cx, |this, cx| this.set_incognito(*on, cx));
@@ -395,161 +577,92 @@ impl BeeperApp {
             let _ = weak.update(cx, |this, cx| this.set_incognito_keyboard(*on, cx));
         });
         let weak = cx.entity().downgrade();
-        let stay = Switch::new("stay-connected").checked(self.settings.stay_connected).on_click(move |on, _, cx| {
-            let _ = weak.update(cx, |this, cx| this.set_stay_connected(*on, cx));
-        });
-        let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
-        let security = self.render_security(cx);
-        let updates = self.render_updates(cx);
-        v_flex()
-            .gap(px(GAP * 2.))
-            .child(section(t!("Appearance"), cx).child(
-                card(cx)
-                    // Under its label, as Text size is: beside it, larger text squeezes the label.
-                    .child(row(t!("Theme"), "", cx))
-                    .child(div().pb(px(8.)).child(themes))
-                    .child(row(t!("Language"), "", cx))
-                    .child(div().pb(px(8.)).child(languages))
-                    .child(row(t!("Chat colour"), &t!("{colour}. Your own messages, on this device.", colour = self.settings.chat_colour.label()), cx))
-                    .child(swatches)
-                    .children(self.render_look(cx))
-                    .children(self.render_emoji(cx))
-                    .child(row(t!("Message status"), "", cx))
-                    .child(self.choices("receipts", ReceiptStyle::ALL, self.settings.receipts, ReceiptStyle::label, |s, style| s.receipts = style, cx))
-                    .child(row(t!("Status of received messages"), t!("Whether you have read them, and whether their sender can see that."), cx))
-                    .child(self.choices("incoming", IncomingStatus::ALL, self.settings.incoming, IncomingStatus::label, |s, when| s.incoming = when, cx)),
-            ))
-            .child(section(t!("Chat list"), cx).child(
-                card(cx)
-                    .child(row(t!("Swipe left"), "", cx))
-                    .child(self.swipe_choices(true, cx))
-                    .child(row(t!("Swipe right"), "", cx))
-                    .child(self.swipe_choices(false, cx)),
-            ))
-            .when(cfg!(target_os = "android"), |el| {
-                el.child(section(t!("Notifications"), cx).child(card(cx).child(
-                    row(t!("Sounds and importance"), t!("Direct messages, group chats and mentions each have their own."), cx).child(
-                        h_flex()
-                            .id("notification-settings")
-                            .h(px(TAP))
-                            .px(px(GAP))
-                            .rounded_full()
-                            .bg(Palette::of(cx).raised)
-                            .cursor_pointer()
-                            .on_click(|_, _, _| crate::notification_settings())
-                            .child(t!("Change")),
-                    ),
-                ).child(
-                    row(t!("Stay connected in the background"), t!("On: notifications arrive while Unisend is closed, under a quiet system notice. Off: no notice, messages arrive only while Unisend is open."), cx).child(stay),
-                ).when(self.settings.stay_connected, |el| {
-                    el.child(
-                        row(t!("Hide the connection notice"), t!("Opens Android settings for this notice only. Messages keep arriving."), cx).child(
-                            h_flex()
-                                .id("connection-settings")
-                                .h(px(TAP))
-                                .px(px(GAP))
-                                .rounded_full()
-                                .bg(Palette::of(cx).raised)
-                                .cursor_pointer()
-                                .on_click(|_, _, _| crate::connection_notice_settings())
-                                .child(t!("Change")),
-                        ),
-                    )
-                })))
-            })
-            .child(section(t!("Privacy"), cx).child(card(cx).child(
-                row(t!("Incognito"), t!("Others do not see that you have read their messages."), cx).child(incognito),
-            ).when(cfg!(target_os = "android"), |el| {
-                el.child(row(t!("Incognito keyboard"), t!("The keyboard learns nothing from what you type. Off: better suggestions and voice typing."), cx).child(keyboard))
-            })))
-            .child(security)
-            .child(self.render_devices(cx))
-            .children(updates)
-            .child(
-                section(t!("Account"), cx).child(
-                    card(cx).child(row(if self.beeper { "Beeper" } else { "Matrix" }, &user, cx)).child(
-                        h_flex()
-                            .id("sign-out")
-                            .min_h(px(ROW_H))
-                            .text_size(fs(16.))
-                            .text_color(p.negative)
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                crate::background(false);
-                                this.panel = None;
-                                this.send(Cmd::SignOut, cx);
-                            }))
-                            .child(t!("Sign out")),
-                    ),
-                ),
-            )
-            .child(div().text_size(fs(12.)).text_color(p.faint).child(concat!("Unisend ", env!("CARGO_PKG_VERSION"))))
-    }
-
-    /// The app lock with its timeout, and screen security. Desktop has the app PIN only, asked at
-    /// start, and no screen security.
-    fn render_security(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let p = Palette::of(cx);
-        let lock = self.settings.lock.clone();
-        let android = cfg!(target_os = "android");
-        let phone = android && crate::applock::available();
-        let choice = |id: &'static str, label: &'static str, detail: &'static str, mode: LockMode, enabled: bool, cx: &mut Context<Self>| {
-            let on = lock.mode == mode;
-            row(label, detail, cx)
-                .id(id)
-                .when(!enabled, |el| el.text_color(p.faint))
-                .when(enabled && !on, |el| el.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.change_lock(Goal::Mode(mode), cx))))
-                .when(on, |el| el.child(Icon::new(IconName::Check).size_5()))
-        };
-        let weak = cx.entity().downgrade();
-        let secure_switch = Switch::new("screen-security").checked(lock.secure).on_click(move |on, _, cx| {
+        let secure = Switch::new("screen-security").checked(lock.secure).on_click(move |on, _, cx| {
             let _ = weak.update(cx, |this, cx| this.set_lock(None, None, Some(*on), cx));
         });
-        let timeouts = h_flex().flex_wrap().gap(px(4.)).pb(px(8.)).children(crate::applock::TIMEOUTS.map(|(secs, label)| {
-            let on = lock.timeout_secs() == secs;
-            div()
-                .id(SharedString::from(format!("lock-after-{secs}")))
-                .h(px(36.))
-                .px(px(GAP))
-                .flex()
-                .items_center()
-                .rounded_full()
-                .text_size(fs(14.))
-                .text_color(if on { p.ground } else { p.muted })
-                .bg(if on { p.text } else { p.raised })
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.set_lock(None, Some(secs), None, cx)))
-                .child(crate::i18n::tr(label))
-        }));
+        let after = crate::applock::TIMEOUTS.iter().find(|&&(secs, _)| secs == lock.timeout_secs()).map_or("", |&(_, label)| crate::i18n::tr(label));
+        let choice = |page: Page, value: &'static str, cx: &mut Context<Self>| {
+            link(page.id(), page.title(), value.into(), None, Some(IconName::ChevronRight), cx).on_click(cx.listener(move |this, _, _, cx| this.open_page(page, cx)))
+        };
+        v_flex()
+            .gap(px(GAP * 2.))
+            .child(
+                card(cx)
+                    .child(row(t!("Incognito"), t!("Others do not see that you have read their messages."), cx).child(incognito))
+                    .when(android, |el| el.child(row(t!("Incognito keyboard"), t!("The keyboard learns nothing from what you type. Off: better suggestions and voice typing."), cx).child(keyboard))),
+            )
+            .child(
+                section(t!("Security"), cx).child(
+                    card(cx)
+                        .child(choice(Page::Lock, lock_label(lock.mode), cx))
+                        .when(lock.mode == LockMode::Pin, |el| {
+                            el.child(
+                                link("lock-change-pin", t!("Change PIN"), SharedString::default(), None, Some(IconName::ChevronRight), cx)
+                                    .on_click(cx.listener(|this, _, _, cx| this.change_lock(Goal::ChangePin, cx))),
+                            )
+                        })
+                        .when(android && lock.mode != LockMode::Off, |el| el.child(choice(Page::LockAfter, after, cx)))
+                        .when(android, |el| el.child(row(t!("Screen security"), t!("Blocks screenshots and hides the app in the recent apps list."), cx).child(secure))),
+                ),
+            )
+            .when(self.unencrypted, |el| {
+                el.child(
+                    v_flex()
+                        .gap(px(8.))
+                        .child(card(cx).child(row(t!("Data on this device is not encrypted"), "", cx).text_color(p.warning)))
+                        .child(footnote(t!("Signed in before Unisend encrypted its data. Sign out and in again to encrypt it; keep your recovery key to bring back message history."), cx)),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_lock_modes(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let mode = self.settings.lock.mode;
+        let android = cfg!(target_os = "android");
+        let phone = android && crate::applock::available();
+        let choice = |id: &'static str, value: LockMode, detail: &'static str, enabled: bool, cx: &mut Context<Self>| {
+            let on = mode == value;
+            option(id, lock_label(value), detail, on, cx)
+                .when(!enabled, |el| el.text_color(Palette::of(cx).faint))
+                .when(enabled && !on, |el| el.on_click(cx.listener(move |this, _, _, cx| this.change_lock(Goal::Mode(value), cx))))
+        };
         let pin_detail = if android { t!("4 to 8 digits, set only for Unisend.") } else { t!("4 to 8 digits, asked when Unisend starts.") };
         let phone_detail =
             if phone { t!("Fingerprint, face or the phone's PIN, pattern or password.") } else { t!("Set a PIN, pattern or password in the phone's settings first.") };
-        section(t!("Security"), cx).child(
-            card(cx)
-                .child(row(t!("App lock"), t!("Asked for when Unisend opens."), cx))
-                .child(choice("lock-off", t!("Off|app lock"), "", LockMode::Off, true, cx))
-                .when(android, |el| el.child(choice("lock-phone", t!("Phone lock"), phone_detail, LockMode::Phone, phone || lock.mode == LockMode::Phone, cx)))
-                .child(choice("lock-pin", t!("App PIN"), pin_detail, LockMode::Pin, true, cx))
-                .when(lock.mode == LockMode::Pin, |el| {
-                    el.child(
-                        row(t!("Change PIN"), "", cx)
-                            .id("lock-change-pin")
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| this.change_lock(Goal::ChangePin, cx)))
-                            .child(Icon::new(IconName::ChevronRight).size_5().text_color(p.faint)),
-                    )
-                })
-                .when(android && lock.mode != LockMode::Off, |el| el.child(row(t!("Lock after leaving the app"), "", cx)).child(timeouts))
-                .when(android, |el| el.child(row(t!("Screen security"), t!("Blocks screenshots and hides the app in the recent apps list."), cx).child(secure_switch)))
-                .when(self.unencrypted, |el| {
-                    el.child(row(
-                        t!("Data on this device is not encrypted"),
-                        t!("Signed in before Unisend encrypted its data. Sign out and in again to encrypt it; keep your recovery key to bring back message history."),
-                        cx,
-                    ))
-                }),
-        )
-        .into_any_element()
+        v_flex()
+            .gap(px(8.))
+            .child(
+                card(cx)
+                    .child(choice("lock-off", LockMode::Off, "", true, cx))
+                    .when(android, |el| el.child(choice("lock-phone", LockMode::Phone, phone_detail, phone || mode == LockMode::Phone, cx)))
+                    .child(choice("lock-pin", LockMode::Pin, pin_detail, true, cx)),
+            )
+            .child(footnote(t!("Asked for when Unisend opens."), cx))
+            .into_any_element()
+    }
+
+    fn render_account(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
+        v_flex()
+            .gap(px(GAP * 2.))
+            .child(card(cx).child(row(if self.beeper { "Beeper" } else { "Matrix" }, &user, cx)))
+            .child(card(cx).child(
+                h_flex()
+                    .id("sign-out")
+                    .min_h(px(ROW_H))
+                    .text_size(fs(16.))
+                    .text_color(p.negative)
+                    .role(Role::Button)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        crate::background(false);
+                        this.panel = None;
+                        this.send(Cmd::SignOut, cx);
+                    }))
+                    .child(t!("Sign out")),
+            ))
+            .into_any_element()
     }
 
     fn render_networks(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -776,6 +889,79 @@ pub(super) fn card(cx: &App) -> Div {
     v_flex().px(px(GAP)).py(px(4.)).rounded(px(RADIUS)).bg(Palette::of(cx).surface)
 }
 
+/// What a setting's control needs explained at more length, under its card.
+pub(super) fn footnote(text: &str, cx: &App) -> Div {
+    div().px(px(GAP)).text_size(fs(13.)).line_height(fs(18.)).text_color(Palette::of(cx).muted).child(text.to_owned())
+}
+
+/// A row that leads somewhere, as a whole: its name, the value set now under it, and where it goes.
+pub(super) fn link(id: impl Into<ElementId>, label: &'static str, value: SharedString, icon: Option<IconName>, trail: Option<IconName>, cx: &App) -> Stateful<Div> {
+    let p = Palette::of(cx);
+    h_flex()
+        .id(id)
+        .min_h(px(ROW_H))
+        .py(px(8.))
+        // The pressed fill reaches past the text, inside the card's padding.
+        .mx(px(-8.))
+        .px(px(8.))
+        .gap(px(GAP))
+        .rounded(px(12.))
+        .role(Role::Button)
+        .aria_label(label)
+        .when(!value.is_empty(), |el| el.aria_value(value.clone()))
+        .cursor_pointer()
+        .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.raised)))
+        .active(|el| el.bg(p.raised))
+        .children(icon.map(|icon| Icon::new(icon).size_5().flex_none().text_color(p.brand)))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_size(fs(16.)).line_height(fs(22.)).child(label))
+                .when(!value.is_empty(), |el| el.child(div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.muted).line_clamp(2).child(value))),
+        )
+        .children(trail.map(|icon| Icon::new(icon).size_4().flex_none().text_color(p.faint)))
+}
+
+/// One answer among a setting's choices, checked when it is the one set.
+fn option(id: impl Into<ElementId>, label: &str, detail: &str, on: bool, cx: &App) -> Stateful<Div> {
+    let p = Palette::of(cx);
+    row(label, detail, cx)
+        .id(id)
+        .mx(px(-8.))
+        .px(px(8.))
+        .rounded(px(12.))
+        .role(Role::RadioButton)
+        .aria_label(label.to_owned())
+        .aria_toggled(on.into())
+        .when(!on, |el| el.cursor_pointer().when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.raised))).active(|el| el.bg(p.raised)))
+        .when(on, |el| el.child(Icon::new(IconName::Check).size_5().flex_none().text_color(p.text)))
+}
+
+/// A list of a setting's choices; a tap saves the one tapped.
+fn pick<T: Copy + PartialEq + 'static>(id: &'static str, all: impl IntoIterator<Item = T>, current: T, label: fn(T) -> &'static str, set: fn(&mut crate::Settings, T), cx: &mut Context<BeeperApp>) -> AnyElement {
+    card(cx)
+        .children(all.into_iter().enumerate().map(|(ix, choice)| {
+            let on = current == choice;
+            option((id, ix), label(choice), "", on, cx).when(!on, |el| {
+                el.on_click(cx.listener(move |this, _, _, cx| {
+                    set(&mut this.settings, choice);
+                    this.settings.save(&this.dir);
+                    cx.notify();
+                }))
+            })
+        }))
+        .into_any_element()
+}
+
+fn lock_label(mode: LockMode) -> &'static str {
+    match mode {
+        LockMode::Off => t!("Off|app lock"),
+        LockMode::Phone => t!("Phone lock"),
+        LockMode::Pin => t!("App PIN"),
+    }
+}
+
 /// A setting: what it is, a line about it, and its control after it.
 pub(super) fn row(label: &str, detail: &str, cx: &App) -> Div {
     let p = Palette::of(cx);
@@ -808,53 +994,51 @@ fn qr_image(data: &str) -> Option<Arc<Image>> {
 pub(super) struct EmojiChoice {
     /// A font was chosen or dropped since start: fonts cannot be swapped live.
     pending: bool,
-    open: bool,
     copying: bool,
     error: Option<String>,
 }
 
 impl BeeperApp {
-    fn render_emoji(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if !crate::emoji::SUPPORTED {
-            return None;
-        }
-        let p = Palette::of(cx);
-        let chosen = self.settings.emoji_font.as_deref();
-        let name = chosen.unwrap_or(t!("System|emoji"));
-        let detail = match () {
+    /// The font's name, or what is happening to it.
+    fn emoji_value(&self) -> String {
+        let name = self.settings.emoji_font.as_deref().unwrap_or(t!("System|emoji"));
+        match () {
             _ if self.emoji.copying => t!("Copying the font…").to_owned(),
             _ if self.emoji.pending => t!("{name}. Applies after restart.", name = name),
             _ => name.to_owned(),
-        };
-        let change = h_flex()
-            .id("emoji-change")
-            .h(px(TAP))
-            .px(px(GAP))
-            .rounded_full()
-            .bg(p.raised)
-            .when(!self.emoji.copying, |el| {
-                el.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
-                    this.emoji.open = !this.emoji.open;
-                    cx.notify();
-                }))
-            })
-            .child(t!("Change"));
-        let option = |id: &'static str, label: &'static str| h_flex().id(id).min_h(px(ROW_H)).text_size(fs(16.)).cursor_pointer().child(label);
-        Some(
-            v_flex()
-                .child(row("Emoji", &detail, cx).child(change))
-                .when_some(self.emoji.error.clone(), |el, error| el.child(div().pb(px(8.)).text_size(fs(13.)).text_color(p.negative).child(error)))
-                .when(self.emoji.open, |el| {
-                    el.child(option("emoji-file", t!("Choose font file…")).on_click(cx.listener(|this, _, _, cx| this.choose_emoji_font(cx))))
-                        .when(chosen.is_some(), |el| {
-                            el.child(option("emoji-system", t!("Use system emoji")).on_click(cx.listener(|this, _, _, cx| this.use_system_emoji(cx))))
-                        })
-                }),
-        )
+        }
+    }
+
+    fn render_emoji(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let chosen = self.settings.emoji_font.clone();
+        let free = !self.emoji.copying;
+        let options = card(cx)
+            .child(
+                option("emoji-system", t!("System|emoji"), "", chosen.is_none(), cx)
+                    .when(chosen.is_some() && free, |el| el.on_click(cx.listener(|this, _, _, cx| this.use_system_emoji(cx)))),
+            )
+            .children(chosen.map(|family| option("emoji-own", &family, "", true, cx)));
+        v_flex()
+            .gap(px(GAP * 2.))
+            .child(
+                v_flex()
+                    .gap(px(8.))
+                    .child(options)
+                    .when_some(self.emoji.error.clone(), |el, error| el.child(div().px(px(GAP)).text_size(fs(13.)).text_color(p.negative).child(error)))
+                    .when(self.emoji.copying || self.emoji.pending, |el| el.child(footnote(&self.emoji_value(), cx))),
+            )
+            .child(
+                card(cx).child(
+                    link("emoji-file", t!("Choose font file…"), SharedString::default(), Some(IconName::File), None, cx)
+                        .when(!free, |el| el.text_color(p.faint))
+                        .when(free, |el| el.on_click(cx.listener(|this, _, _, cx| this.choose_emoji_font(cx)))),
+                ),
+            )
+            .into_any_element()
     }
 
     fn choose_emoji_font(&mut self, cx: &mut Context<Self>) {
-        self.emoji.open = false;
         let picked = crate::pick_file(cx);
         let dir = self.dir.clone();
         cx.spawn(async move |this, cx| {
@@ -891,7 +1075,6 @@ impl BeeperApp {
         self.settings.emoji_font = None;
         self.settings.save(&self.dir);
         self.emoji.pending = true;
-        self.emoji.open = false;
         self.emoji.error = None;
         cx.notify();
     }
