@@ -8,6 +8,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+use super::motion::Glide;
 use super::*;
 use crate::backend::forward::{MAX_CHATS, MAX_MESSAGES};
 use crate::i18n::{t, tn};
@@ -573,8 +574,8 @@ impl BeeperApp {
         if live {
             self.fwd.toast_last = self.fwd.toast.clone();
         }
-        let key = self.fwd.toast_last.as_ref().map_or(0, |t| t.epoch);
-        let shown = Presence::new((("toast", key as usize), String::new()), live).transition(if live { motion::enter() } else { motion::exit() }).sample(window, cx);
+        // One presence for every toast: a replacement changes the words, not the card.
+        let shown = Presence::new("toast", live).transition(if live { motion::enter() } else { motion::exit() }).sample(window, cx);
         if !shown.should_render() {
             self.fwd.toast_last = None;
             return None;
@@ -583,12 +584,57 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let (_, bottom) = crate::insets();
         let v = shown.progress;
+        let drag = window.use_keyed_state("toast-drag", cx, |_, _| ToastDrag::new());
+        let now = Instant::now();
+        let (dy, running) = drag.update(cx, |d, _| {
+            if live && d.epoch != toast.epoch {
+                *d = ToastDrag { epoch: toast.epoch, ..ToastDrag::new() };
+            }
+            (d.glide.step(now), d.glide.running())
+        });
+        if running {
+            window.request_animation_frame();
+        }
+        let weak = cx.entity().downgrade();
+        let probe = canvas(
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            move |_, hitbox, window, _| {
+                let (drag, weak) = (drag.clone(), weak.clone());
+                window.on_mouse_event(move |e: &TouchDragEvent, phase, window, cx| {
+                    if !phase.bubble() {
+                        return;
+                    }
+                    if e.phase == TouchPhase::Started {
+                        if window.default_prevented() || !hitbox.is_hovered(window) {
+                            return;
+                        }
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }
+                    let still = cx.reduce_motion();
+                    let now = Instant::now();
+                    let dismissed = drag.update(cx, |d, cx| {
+                        let out = d.touch(e.phase, f32::from(e.position.y - e.start_position.y), now, still);
+                        cx.notify();
+                        out
+                    });
+                    if dismissed {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.fwd.toast = None;
+                            cx.notify();
+                        });
+                    }
+                });
+            },
+        )
+        .absolute()
+        .inset_0();
         Some(
             div()
                 .absolute()
                 .left_0()
                 .right_0()
-                .bottom(px(bottom + 80. - 8. * (1. - v)))
+                .bottom(px(bottom + 80. - 8. * (1. - v) - dy))
                 .flex()
                 .justify_center()
                 .px(px(GUTTER))
@@ -604,7 +650,19 @@ impl BeeperApp {
                         .rounded_full()
                         .bg(p.raised)
                         .text_size(fs(14.))
-                        .child(toast.text.clone())
+                        .child(
+                            div()
+                                .relative()
+                                .h(px(TAP))
+                                .flex()
+                                .items_center()
+                                .child(div().child(toast.text.clone()).with_animation(
+                                    ("toast-text", toast.epoch as usize),
+                                    Animation::new(motion::EXIT).with_easing(motion::ease_out),
+                                    |el, t| el.opacity(t),
+                                ))
+                                .child(probe),
+                        )
                         .when(toast.undo.is_some() && live, |el| {
                             el.child(
                                 div()
@@ -627,9 +685,81 @@ impl BeeperApp {
     }
 }
 
+/// Past this far down, or this fast, a let-go toast is dismissed.
+const TOAST_DISMISS_PX: f32 = 22.;
+const TOAST_DISMISS_PX_S: f32 = 300.;
+/// Where a dismissed toast is thrown to, below its place.
+const TOAST_THROW_PX: f32 = 200.;
+
+/// A toast followed by a finger sliding it down, and what it does when let go.
+struct ToastDrag {
+    glide: Glide,
+    epoch: u64,
+    held: bool,
+    last: Option<(f32, Instant)>,
+    vel: f32,
+}
+
+impl ToastDrag {
+    fn new() -> Self {
+        Self { glide: Glide::new(motion::SETTLE.0, motion::SETTLE.1, 0.5, 0.), epoch: 0, held: false, last: None, vel: 0. }
+    }
+
+    /// Feeds one touch phase (`dy` from where it started); true when the toast was thrown away.
+    fn touch(&mut self, phase: TouchPhase, dy: f32, now: Instant, still: bool) -> bool {
+        match phase {
+            TouchPhase::Started => {
+                self.held = true;
+                self.last = Some((0., now));
+                self.vel = 0.;
+                self.glide.hold(0.);
+            }
+            TouchPhase::Moved if self.held => {
+                if let Some((y, at)) = self.last.filter(|(_, at)| now > *at) {
+                    let inst = (dy - y) / now.duration_since(at).as_secs_f32();
+                    self.vel = 0.6 * inst + 0.4 * self.vel;
+                }
+                self.last = Some((dy, now));
+                self.glide.hold(dy.max(0.));
+            }
+            TouchPhase::Ended if self.held => {
+                self.held = false;
+                // A finger that rested before lifting carries no speed.
+                let v = if self.last.is_some_and(|(_, at)| now.duration_since(at).as_millis() > 100) { 0. } else { self.vel };
+                if thrown(self.glide.pos, v) {
+                    return self.release(TOAST_THROW_PX.max(self.glide.pos), v, now, still, true);
+                }
+                self.release(0., v, now, still, false);
+            }
+            TouchPhase::Cancelled if self.held => {
+                self.held = false;
+                self.release(0., 0., now, still, false);
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn release(&mut self, to: f32, v: f32, now: Instant, still: bool, gone: bool) -> bool {
+        if still {
+            self.glide.set(to);
+        } else if gone {
+            self.glide = Glide::new(motion::THROW.0, motion::THROW.1, 0.5, self.glide.pos);
+            self.glide.release(to, v, now);
+        } else {
+            self.glide.release(to, v, now);
+        }
+        gone
+    }
+}
+
+fn thrown(y: f32, v: f32) -> bool {
+    y > TOAST_DISMISS_PX || v > TOAST_DISMISS_PX_S
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Hidden;
+    use super::{Hidden, thrown};
 
     #[test]
     fn hidden_messages_are_kept_per_account_and_the_oldest_go_first() {
@@ -646,5 +776,13 @@ mod tests {
         a.remove(&["$2".to_owned()]);
         assert!(!a.contains("$2"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_toast_is_dismissed_by_distance_or_speed() {
+        assert!(!thrown(10., 100.));
+        assert!(thrown(23., 0.));
+        assert!(thrown(2., 301.));
+        assert!(!thrown(0., -900.));
     }
 }
