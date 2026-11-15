@@ -136,6 +136,14 @@ pub(super) struct Look {
     pub(super) dim: Entity<SliderState>,
     importing: bool,
     error: Option<String>,
+    /// A sideways pan on the dim slider: where it began and how far it has moved, in px.
+    slide: Option<(f32, f32)>,
+}
+
+/// Where a pan that began at `start` and moved `moved` puts the finger along a track at `left`,
+/// as a share of its `width`; `None` before the track has been laid out.
+fn pan_share(start: f32, moved: f32, left: f32, width: f32) -> Option<f32> {
+    (width > 0.).then(|| ((start + moved - left) / width).clamp(0., 1.))
 }
 
 impl Look {
@@ -147,7 +155,7 @@ impl Look {
             .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)));
         let dim = f32::from(settings.wallpaper_dim.clamp(DIM_MIN, DIM_MAX));
         let dim = cx.new(|_| SliderState::new().min(f32::from(DIM_MIN)).max(f32::from(DIM_MAX)).step(5.).default_value(dim));
-        Self { photo, dim, importing: false, error: None }
+        Self { photo, dim, importing: false, error: None, slide: None }
     }
 }
 
@@ -207,6 +215,36 @@ impl BeeperApp {
             self.settings.save(&self.dir);
         }
         cx.notify();
+    }
+
+    /// A finger never makes mouse moves (it pans), so the slider's own drag never starts on a
+    /// phone: a sideways pan over it is turned into the positions a mouse drag would give.
+    fn dim_pan(&mut self, e: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let d = e.delta.pixel_delta(px(20.));
+        let (dx, sideways) = (f32::from(d.x), d.y.is_zero() && !d.x.is_zero());
+        match (e.touch_phase, self.look.slide.as_mut()) {
+            // The recognizer locks a pan to one axis, so a sideways one has no vertical part.
+            (TouchPhase::Started, _) if sideways => self.look.slide = Some((f32::from(e.position.x), dx)),
+            (TouchPhase::Started, _) => self.look.slide = None,
+            (_, Some(slide)) => slide.1 += dx,
+            (_, None) => return,
+        }
+        cx.stop_propagation();
+        let Some((start, moved)) = self.look.slide else { return };
+        let ended = matches!(e.touch_phase, TouchPhase::Ended | TouchPhase::Cancelled);
+        self.look.dim.update(cx, |s, cx| {
+            let track = s.bounds();
+            if let Some(share) = pan_share(start, moved, f32::from(track.left()), f32::from(track.size.width)) {
+                let at = point(track.left() + track.size.width * share, track.center().y);
+                s.update_value_by_position(Axis::Horizontal, at, false, window, cx);
+            }
+            if ended {
+                s.handle_release(cx);
+            }
+        });
+        if ended {
+            self.look.slide = None;
+        }
     }
 
     fn choose_photo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -340,7 +378,10 @@ impl BeeperApp {
         ];
         if self.settings.wallpaper == Wallpaper::Photo && self.look.photo.is_some() {
             rows.push(row(t!("Dim photo"), "", cx).into_any_element());
-            rows.push(div().pb(px(12.)).px(px(4.)).child(Slider::new(&self.look.dim)).into_any_element());
+            let slider = div().pb(px(12.)).px(px(4.)).child(Slider::new(&self.look.dim));
+            // The row does not move during a sideways pan, so every step of it lands here.
+            let slider = slider.when(cfg!(target_os = "android"), |el| el.on_scroll_wheel(cx.listener(Self::dim_pan)));
+            rows.push(slider.into_any_element());
         }
         if let Some(e) = &self.look.error {
             rows.push(div().pb(px(8.)).text_size(fs(13.)).text_color(p.negative).child(e.clone()).into_any_element());
@@ -351,7 +392,16 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAKE, DIM_MIN, PHOTO, TextSize, import};
+    use super::{BAKE, DIM_MIN, PHOTO, TextSize, import, pan_share};
+
+    #[test]
+    fn pan_maps_the_finger_onto_the_track() {
+        assert_eq!(pan_share(150., 0., 100., 200.), Some(0.25));
+        assert_eq!(pan_share(150., 50., 100., 200.), Some(0.5));
+        assert_eq!(pan_share(150., -80., 100., 200.), Some(0.));
+        assert_eq!(pan_share(150., 400., 100., 200.), Some(1.));
+        assert_eq!(pan_share(150., 10., 0., 0.), None);
+    }
 
     #[test]
     fn five_steps_from_85_to_130() {
