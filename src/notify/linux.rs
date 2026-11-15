@@ -102,6 +102,13 @@ fn on_signal(msg: &zbus::Message) {
                 event(Event::Act(Target::Id(id), act));
             }
         }
+        // Sent just before ActionInvoked for the same click: lets the raise that follows pass
+        // KWin's focus stealing prevention.
+        Some("ActivationToken") => {
+            if let Ok((_id, token)) = body.deserialize::<(u32, String)>() {
+                gpui_linux::set_next_activation_token(token);
+            }
+        }
         Some("NotificationReplied") => {
             if let Ok((id, text)) = body.deserialize::<(u32, String)>() {
                 event(Event::Replied(Target::Id(id), text));
