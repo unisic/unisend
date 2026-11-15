@@ -235,6 +235,8 @@ pub(super) struct Zoom {
     tap: Option<(Instant, Point<Pixels>)>,
     /// Screen and picture size of the last frame, which the handlers work with.
     screen: (f32, f32),
+    /// Where the screen starts in the window, whose coordinates pointer positions are in.
+    origin: Point<Pixels>,
     fit: (f32, f32),
     dims: Option<(u64, (f32, f32))>,
     working: Option<Export>,
@@ -358,9 +360,15 @@ impl Zoom {
         self.view = Some(clamped(view, self.screen, self.fit));
     }
 
+    /// A pointer position from the screen's centre.
+    fn centred(&self, at: Point<Pixels>) -> (f32, f32) {
+        let at = at - self.origin;
+        (f32::from(at.x) - self.screen.0 / 2., f32::from(at.y) - self.screen.1 / 2.)
+    }
+
     fn zoom_by(&mut self, at: Point<Pixels>, factor: f32, reduce_motion: bool) {
         let now = self.grab(reduce_motion);
-        let at = (f32::from(at.x) - self.screen.0 / 2., f32::from(at.y) - self.screen.1 / 2.);
+        let at = self.centred(at);
         self.view = Some(zoomed_about(now, at, now.scale * factor, self.screen, self.fit));
     }
 
@@ -383,8 +391,7 @@ impl Zoom {
         let to = if from.scale > 1.05 {
             FIT
         } else {
-            let centred = (f32::from(at.x) - self.screen.0 / 2., f32::from(at.y) - self.screen.1 / 2.);
-            zoomed_about(from, centred, DOUBLE_TAP_SCALE, self.screen, self.fit)
+            zoomed_about(from, self.centred(at), DOUBLE_TAP_SCALE, self.screen, self.fit)
         };
         self.view = Some(to);
         self.glide = Some((from, now));
@@ -867,7 +874,7 @@ impl BeeperApp {
 
     fn viewer_pinch(&mut self, e: &PinchEvent, cx: &mut Context<Self>) {
         let reduce = cx.reduce_motion();
-        let at = (f32::from(e.position.x) - self.zoom.screen.0 / 2., f32::from(e.position.y) - self.zoom.screen.1 / 2.);
+        let at = self.zoom.centred(e.position);
         match e.phase {
             TouchPhase::Started => {
                 self.zoom.pinching = true;
@@ -1011,7 +1018,7 @@ impl BeeperApp {
             window.focus(&self.focus, cx);
         }
 
-        let size = window.viewport_size();
+        let size = frame::viewport(window);
         let screen = (f32::from(size.width), f32::from(size.height));
         if let Some(image) = &picture
             && self.zoom.dims.as_ref().is_none_or(|(known, _)| *known != image.id)
@@ -1019,6 +1026,7 @@ impl BeeperApp {
             self.zoom.dims = dimensions(image).map(|d| (image.id, d));
         }
         self.zoom.screen = screen;
+        self.zoom.origin = frame::origin(window);
         self.zoom.fit = fitted(screen, self.zoom.dims.map(|(_, d)| d));
         let (view, gliding) = self.zoom.shown(reduce);
         if gliding {

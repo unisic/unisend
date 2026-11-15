@@ -586,6 +586,9 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("📍 Location: {place}", "📍 Lokalizacja: {place}"),
     ("📷 Photo", "📷 Zdjęcie"),
     ("🖼 Sticker", "🖼 Naklejka"),
+    ("Maximise", "Maksymalizuj"),
+    ("Minimise", "Minimalizuj"),
+    ("Restore", "Przywróć"),
     // The settings list and its pages.
     ("App lock off", "Blokada aplikacji wyłączona"),
     ("Auto-lock", "Autoblokada"),

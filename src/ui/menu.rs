@@ -706,7 +706,7 @@ impl BeeperApp {
     fn render_overlay(&mut self, now: Instant, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = Palette::of(cx);
         let still = cx.reduce_motion();
-        let view = window.viewport_size();
+        let view = frame::viewport(window);
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
         let id = m.id.clone();
@@ -716,13 +716,13 @@ impl BeeperApp {
         let reacts = id.starts_with('$') && caps.reaction >= 1;
         let acts = taken(acts(m, MenuKind::Touch, false), m, caps);
         let mine: Vec<bool> = keys.iter().map(|k| m.reactions.iter().any(|r| r.own && same_emoji(&r.key, k))).collect();
-        let b = menu.bubble;
+        let b = Bounds { origin: frame::local(window, menu.bubble.origin), size: menu.bubble.size };
         let bubble = Bounds { origin: point(f32::from(b.origin.x), f32::from(b.origin.y)), size: size(f32::from(b.size.width), f32::from(b.size.height)) };
         let placed = place(
             size(f32::from(view.width), f32::from(view.height)),
             crate::insets(),
             bubble,
-            f32::from(menu.at.y),
+            f32::from(frame::local(window, menu.at).y),
             m.own,
             reacts.then_some(keys.len() + more as usize),
             ROW_H * acts.len() as f32 + 16.,
@@ -816,7 +816,7 @@ impl BeeperApp {
     fn render_picker(&mut self, now: Instant, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = Palette::of(cx);
         let still = cx.reduce_motion();
-        let view = window.viewport_size();
+        let view = frame::viewport(window);
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
         let (id, keys) = (m.id.clone(), bar_keys(m, self.caps()));
@@ -824,7 +824,8 @@ impl BeeperApp {
         let w = (keys.len() + more as usize) as f32 * PICK + 2. * PICK_PAD_X;
         let h = PICK + 2. * PICK_PAD_Y;
         let (top, bottom) = crate::insets();
-        let at = (f32::from(menu.at.x), f32::from(menu.at.y));
+        let at = frame::local(window, menu.at);
+        let at = (f32::from(at.x), f32::from(at.y));
         let x = (at.0 - w / 2.).clamp(GUTTER, (f32::from(view.width) - w - GUTTER).max(GUTTER));
         let above = at.1 - SIDE_BUTTON / 2. - PICK_OFFSET - h;
         let y = if above >= top + GUTTER { above } else { (at.1 + SIDE_BUTTON / 2. + PICK_OFFSET).min(f32::from(view.height) - bottom - h) };
@@ -878,7 +879,7 @@ impl BeeperApp {
     /// Signal Desktop's message menu, at the pointer.
     fn render_list(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = Palette::of(cx);
-        let view = window.viewport_size();
+        let view = frame::viewport(window);
         let narrow = view.width < px(NARROW);
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
@@ -886,7 +887,8 @@ impl BeeperApp {
         let acts = taken(acts(m, MenuKind::List, narrow), m, self.caps());
         let h = POINTER_ROW_H * acts.len() as f32 + 12.;
         let (top, bottom) = crate::insets();
-        let (ax, ay) = (f32::from(menu.at.x), f32::from(menu.at.y));
+        let at = frame::local(window, menu.at);
+        let (ax, ay) = (f32::from(at.x), f32::from(at.y));
         let (vw, vh) = (f32::from(view.width), f32::from(view.height));
         let w = f32::from(fs(POINTER_LIST_W));
         let x = if ax + w <= vw - GUTTER { ax } else { ax - w };

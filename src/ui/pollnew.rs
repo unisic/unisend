@@ -105,7 +105,7 @@ impl BeeperApp {
         let f = self.poll_form.fields.as_ref()?;
         let p = Palette::of(cx);
         let (top, bottom) = crate::insets();
-        let y = f32::from(window.viewport_size().height) * (1. - shown.progress);
+        let y = f32::from(frame::viewport(window).height) * (1. - shown.progress);
         let label = |text: &'static str| div().px(px(GUTTER)).pt(px(14.)).pb(px(6.)).text_size(fs(14.)).text_color(p.faint).child(text);
         let n = f.options.len();
         let rows = f.options.iter().enumerate().map(|(i, (input, _))| {

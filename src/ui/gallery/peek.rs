@@ -266,7 +266,7 @@ impl BeeperApp {
             self.drop_peek(cx);
         }
         let p = Palette::of(cx);
-        let view = window.viewport_size();
+        let view = frame::viewport(window);
         let (top, bottom) = crate::insets();
         let g = &mut self.gallery;
         let peek = g.peek.as_mut()?;

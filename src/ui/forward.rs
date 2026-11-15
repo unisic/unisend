@@ -435,7 +435,7 @@ impl BeeperApp {
         let live = frame.live;
         let p = Palette::of(cx);
         let (top, bottom) = crate::insets();
-        let height = ((f32::from(window.viewport_size().height) - top) * 0.85).round();
+        let height = ((f32::from(frame::viewport(window).height) - top) * 0.85).round();
         let n = self.fwd.picker_last.as_ref().map_or(0, |(_, ids)| ids.len());
         let query = self.fwd.search.read(cx).value().trim().to_lowercase();
         let mut found: Vec<&RoomSummary> = self.rooms.iter().filter(|r| query.is_empty() || r.name.to_lowercase().contains(&query)).collect();

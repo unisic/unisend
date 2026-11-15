@@ -8,6 +8,7 @@ use chrono::{Datelike as _, Local, TimeZone as _};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Sizable as _,
+    scroll::ScrollableElement as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -28,6 +29,7 @@ mod cards;
 mod emojipick;
 mod contacts;
 mod forward;
+mod frame;
 mod disappear;
 mod gallery;
 mod heart;
@@ -88,6 +90,8 @@ const NAV_W: f32 = 210.;
 const LIST_W: f32 = 384.;
 /// Widest a message and a sheet grow on a wide window.
 const BUBBLE_W: f32 = 560.;
+/// Widest the conversation runs on a wide window; beyond it the pane keeps an even margin.
+const THREAD_W: f32 = 920.;
 /// Widest a link's preview grows inside a message, and the tallest its picture is shown.
 const LINK_W: f32 = 300.;
 const LINK_PICTURE_H: f32 = 240.;
@@ -984,7 +988,7 @@ impl BeeperApp {
     /// Escape, which is also Android's back gesture: undoes the innermost thing on screen.
     /// Returns whether there was anything to undo.
     fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let narrow = window.viewport_size().width < px(NARROW);
+        let narrow = frame::viewport(window).width < px(NARROW);
         if self.verify_back(cx) {
             return true;
         }
@@ -1156,10 +1160,12 @@ impl BeeperApp {
                 canvas(
                     |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                     move |bounds, hitbox, window, cx| {
-                        let _ = weak.update(cx, |this, _| this.zoom.seen(&id, bounds, radius));
+                        // The viewer is laid out in the app's area, not the window.
+                        let home = Bounds { origin: frame::local(window, bounds.origin), size: bounds.size };
+                        let _ = weak.update(cx, |this, _| this.zoom.seen(&id, home, radius));
                         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
                             if phase.bubble() && e.button == MouseButton::Left && hitbox.is_hovered(window) {
-                                let _ = weak.update(cx, |this, _| this.zoom.pressed(&id, bounds, radius));
+                                let _ = weak.update(cx, |this, _| this.zoom.pressed(&id, home, radius));
                             }
                         });
                     },
@@ -1726,7 +1732,11 @@ impl BeeperApp {
         } else if fade.is_some() {
             window.request_animation_frame();
         }
-        let list = div().size_full().when_some(fade.filter(|t| *t < 1.), |el, t| el.opacity(motion::ease_out(t))).child(list);
+        let list = div()
+            .size_full()
+            .when_some(fade.filter(|t| *t < 1.), |el, t| el.opacity(motion::ease_out(t)))
+            .child(list)
+            .when(!gpui_kit::is_mobile(), |el| el.vertical_scrollbar(&self.rooms_scroll));
 
         let archive = self.view == View::Archive;
         let has_query = !self.search.read(cx).value().trim().is_empty();
@@ -1832,6 +1842,8 @@ impl BeeperApp {
         let dm = room.is_some_and(|r| r.dm);
         // The newest message, when it is the user's: the one whose way to the others is told.
         self.tail = self.msgs.iter().rposition(|m| m.kind == Kind::Message && !self.is_hidden(&m.id)).filter(|&ix| self.msgs[ix].own);
+        // A wide pane keeps the conversation to a column a glance can cross, as desktop chat apps do.
+        let column = if narrow { 0. } else { ((f32::from(frame::viewport(window).width) - NAV_W - LIST_W - self.info_aside(window) - THREAD_W) / 2.).max(0.) };
         let timeline = list(
             self.timeline.clone(),
             cx.processor(move |this, ix: usize, window, cx| {
@@ -1853,7 +1865,7 @@ impl BeeperApp {
                     return this.render_line(ix, cx);
                 }
                 // What a bubble has inside: its share of the row, less its padding and a mention's bar.
-                let row = f32::from(window.viewport_size().width) - 2. * GUTTER - this.info_aside(window);
+                let row = f32::from(frame::viewport(window).width) - 2. * GUTTER - this.info_aside(window);
                 // Wide, the pane beside the lists also holds a face and the hover buttons.
                 let room = if narrow { row * BUBBLE_SHARE } else { BUBBLE_W.min(row - NAV_W - LIST_W - SENDER - 8. - SIDE_ROOM).max(TAP * 4.) } - 2. * GAP - 9.;
                 // A picture sits in its bubble with a thin margin, concentric with it; alone, it is the bubble.
@@ -2186,7 +2198,8 @@ impl BeeperApp {
                 }
             }),
         )
-        .size_full();
+        .size_full()
+        .px(px(column));
         // The send button turns between a microphone (nothing typed) and an arrow; desktop has no microphone.
         let mic = self.mic_shown(cx);
         let send_mode = transition(("send", "mode"), if mic { 0. } else { 1. }, motion::exit(), window, cx);
@@ -2237,6 +2250,7 @@ impl BeeperApp {
                     .min_h_0()
                     .children(self.wallpaper_layer(0., cx))
                     .child(timeline)
+                    .when(!gpui_kit::is_mobile(), |el| el.vertical_scrollbar(&self.timeline))
                     .child(self.press_tracker(cx))
                     .child(self.bubble_release(cx))
                     .children(self.jump_button(window, cx))
@@ -2262,79 +2276,83 @@ impl BeeperApp {
                         )
                     }),
             )
-            .children(self.render_typing(window, cx))
-            .children(self.render_compose_strip(window, cx))
-            .children(self.render_mentions(cx))
-            .when(self.uploads > 0, |el| {
-                el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(fs(12.)).text_color(p.faint).child(t!("Sending attachment…")))
-            })
             .child(
-                h_flex()
-                    .items_end()
-                    .gap(px(6.))
-                    // The paperclip's own padding stands in for the rest of the left margin.
-                    .pl(px(GUTTER - 10.))
-                    .pr(px(GUTTER))
-                    .py(px(8.))
-                    .child(round_button("attach", IconName::Paperclip, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| this.attach(cx))))
+                v_flex()
+                    .px(px(column))
+                    .children(self.render_typing(window, cx))
+                    .children(self.render_compose_strip(window, cx))
+                    .children(self.render_mentions(cx))
+                    .when(self.uploads > 0, |el| {
+                        el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(fs(12.)).text_color(p.faint).child(t!("Sending attachment…")))
+                    })
                     .child(
-                        round_button("emoji", IconName::FaceSlightlySmiling, cx)
-                            .text_color(if self.emoji_open == Some(emojipick::Target::Composer) { p.text } else { p.muted })
-                            .on_click(cx.listener(|this, _, window, cx| this.toggle_emoji_panel(window, cx))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h(px(TAP))
-                            .px(px(6.))
-                            .flex()
-                            .items_center()
-                            .rounded(px(TAP / 2.))
-                            .bg(p.surface)
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                // The field is already focused, so only a press tells that the keyboard is wanted back.
-                                if this.emoji_open == Some(emojipick::Target::Composer) {
-                                    this.close_emoji(cx);
-                                    crate::show_keyboard(Keyboard::Text);
-                                }
-                            }))
-                            .text_size(fs(16.))
-                            .map(|el| self.mention_keys(el, cx))
-                            .child(Input::new(&self.composer).appearance(false).large().token(|t, _, cx| mentions::token(t, cx)))
-                            .child(crate::ime::marks(&self.composer)),
-                    )
-                    .child(
-                        div()
-                            .id("send")
-                            .size(px(TAP))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(p.text)
-                            .text_color(p.ground)
-                            .cursor_pointer()
-                            .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
-                            .active(|el| el.bg(p.muted))
-                            .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
-                            .relative()
-                            .children([(IconName::ArrowUp, send_mode), (IconName::Mic, 1. - send_mode)].into_iter().filter(|(_, v)| *v > 0.).map(|(icon, v)| {
-                                let scale = 0.5 + 0.5 * v;
+                        h_flex()
+                            .items_end()
+                            .gap(px(6.))
+                            // The paperclip's own padding stands in for the rest of the left margin.
+                            .pl(px(GUTTER - 10.))
+                            .pr(px(GUTTER))
+                            .py(px(8.))
+                            .child(round_button("attach", IconName::Paperclip, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| this.attach(cx))))
+                            .child(
+                                round_button("emoji", IconName::FaceSlightlySmiling, cx)
+                                    .text_color(if self.emoji_open == Some(emojipick::Target::Composer) { p.text } else { p.muted })
+                                    .on_click(cx.listener(|this, _, window, cx| this.toggle_emoji_panel(window, cx))),
+                            )
+                            .child(
                                 div()
-                                    .absolute()
-                                    .inset_0()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h(px(TAP))
+                                    .px(px(6.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(TAP / 2.))
+                                    .bg(p.surface)
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                        // The field is already focused, so only a press tells that the keyboard is wanted back.
+                                        if this.emoji_open == Some(emojipick::Target::Composer) {
+                                            this.close_emoji(cx);
+                                            crate::show_keyboard(Keyboard::Text);
+                                        }
+                                    }))
+                                    .text_size(fs(16.))
+                                    .map(|el| self.mention_keys(el, cx))
+                                    .child(Input::new(&self.composer).appearance(false).large().token(|t, _, cx| mentions::token(t, cx)))
+                                    .child(crate::ime::marks(&self.composer)),
+                            )
+                            .child(
+                                div()
+                                    .id("send")
+                                    .size(px(TAP))
+                                    .flex_none()
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .opacity(v)
-                                    .child(Icon::new(icon).size_5().transform(Transformation::scale(size(scale, scale))))
-                            }))
-                            .when(mic && send_mode < 0.5, |el| el.child(self.mic_touch(cx))),
-                    )
-                    .relative()
-                    .children(self.render_recorder(window, cx)),
+                                    .rounded_full()
+                                    .bg(p.text)
+                                    .text_color(p.ground)
+                                    .cursor_pointer()
+                                    .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
+                                    .active(|el| el.bg(p.muted))
+                                    .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
+                                    .relative()
+                                    .children([(IconName::ArrowUp, send_mode), (IconName::Mic, 1. - send_mode)].into_iter().filter(|(_, v)| *v > 0.).map(|(icon, v)| {
+                                        let scale = 0.5 + 0.5 * v;
+                                        div()
+                                            .absolute()
+                                            .inset_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .opacity(v)
+                                            .child(Icon::new(icon).size_5().transform(Transformation::scale(size(scale, scale))))
+                                    }))
+                                    .when(mic && send_mode < 0.5, |el| el.child(self.mic_touch(cx))),
+                            )
+                            .relative()
+                            .children(self.render_recorder(window, cx)),
+                    ),
             )
             .children(self.render_emoji_panel(window, cx))
     }
@@ -3589,6 +3607,13 @@ fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperA
 
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let screen = self.render_screen(window, cx);
+        frame::wrap(screen, window, cx)
+    }
+}
+
+impl BeeperApp {
+    fn render_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         if self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked() {
             return self.render_lock(window, cx);
@@ -3624,7 +3649,7 @@ impl Render for BeeperApp {
             Screen::Email | Screen::Code => root.child(self.render_login(cx)).into_any_element(),
             Screen::Matrix => root.child(self.render_matrix_login(cx)).into_any_element(),
             Screen::Main => {
-                let narrow = window.viewport_size().width < px(NARROW);
+                let narrow = frame::viewport(window).width < px(NARROW);
                 let panel = self.panel.map(|panel| self.render_panel(panel, narrow, window, cx));
                 let body = if narrow {
                     let deep_panel = matches!(self.panel, Some(Panel::Add | Panel::Login | Panel::NewChat));
@@ -3668,7 +3693,7 @@ impl Render for BeeperApp {
                     } else {
                         self.slide.last_panel.map(|last| self.render_panel(last, true, window, cx))
                     };
-                    let g = slide::layers(v, f32::from(window.viewport_size().width), cx.reduce_motion());
+                    let g = slide::layers(v, f32::from(frame::viewport(window).width), cx.reduce_motion());
                     let under = if over.is_none() || v < 1. {
                         if deep_panel && let Some(base) = self.slide.base {
                             panel_base = Some(self.render_panel(base, true, window, cx));
@@ -3718,7 +3743,8 @@ impl Render for BeeperApp {
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .child(div().w(px(LIST_W)).flex_none().h_full().child(self.render_rooms(window, cx)))
+                            // The one line between the panes, so the list and the conversation read as two.
+                            .child(div().w(px(LIST_W)).flex_none().h_full().border_r_1().border_color(p.rule).child(self.render_rooms(window, cx)))
                             .child(div().flex_1().min_w_0().h_full().child(if self.info_open() && !beside {
                                 self.render_info(false, window, cx)
                             } else if self.open.is_some() {

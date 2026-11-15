@@ -602,7 +602,7 @@ impl BeeperApp {
         let frame = self.gallery.sheet.sample(self.gallery.open, window, cx)?;
         let live = frame.live;
         let p = Palette::of(cx);
-        let view = window.viewport_size();
+        let view = frame::viewport(window);
         let (view_w, view_h) = (f32::from(view.width), f32::from(view.height));
         let (top, bottom) = crate::insets();
         let width = view_w.min(SHEET_W);

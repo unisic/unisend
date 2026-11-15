@@ -212,7 +212,7 @@ impl BeeperApp {
         let (title, body, act) = last.read(cx).clone()?;
         let v = shown.progress;
         let p = Palette::of(cx);
-        let width = DIALOG_W.min(f32::from(window.viewport_size().width) - 2. * GUTTER);
+        let width = DIALOG_W.min(f32::from(frame::viewport(window).width) - 2. * GUTTER);
         let button = |id: &'static str, label: &'static str, bg: Hsla, ink: Hsla| {
             div()
                 .id(id)
