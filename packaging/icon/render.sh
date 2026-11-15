@@ -1,6 +1,6 @@
 #!/bin/sh
-# Regenerates every raster icon. The master is murmuration.py, which writes the SVGs rendered here.
-# Needs ImageMagick 7 built with librsvg, and python3 with numpy.
+# Regenerates every icon. The master is unisend.py, which writes the SVGs rendered here and the
+# Android vector drawables copied here. Needs ImageMagick 7 built with librsvg, and python3.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root="$here/../.."
@@ -8,14 +8,14 @@ res="$root/android/app/src/main/res"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 svg="$tmp/svg"
-python3 "$here/murmuration.py" "$svg"
+python3 "$here/unisend.py" "$svg"
 
 # Renders an SVG at high density, then downsamples, so small sizes stay sharp.
 png() { magick -density 1200 -background none "$1" -resize "$2x$2" -strip "PNG32:$3"; }
-# The desktop tile in its optical size: fewer, larger birds up to 192 px, the fine flock above.
-tile() { if [ "$1" -le 192 ]; then echo "$svg/icon-small.svg"; else echo "$svg/icon.svg"; fi; }
+# The desktop tile in its optical size: the grid-fitted mark with the wider gap up to 48 px.
+tile() { if [ "$1" -le 48 ]; then echo "$svg/icon-small.svg"; else echo "$svg/icon.svg"; fi; }
 
-for s in 48 128 256 512; do
+for s in 16 24 32 48 64 128 256 512; do
     mkdir -p "$root/packaging/linux/icons/hicolor/${s}x${s}/apps"
     png "$(tile "$s")" "$s" "$root/packaging/linux/icons/hicolor/${s}x${s}/apps/dev.gpui.beeper.png"
 done
@@ -39,7 +39,7 @@ PY
 
 # ImageMagick cannot write ICNS; the container is a header plus PNG chunks keyed by OSType.
 for s in 16 32 64 128 256 512 1024; do png "$(tile "$s")" "$s" "$tmp/icns-$s.png"; done
-python3 - "$tmp" "$root/packaging/macos/Murmur.icns" <<'PY'
+python3 - "$tmp" "$root/packaging/macos/Unisend.icns" <<'PY'
 import struct, sys
 tmp, out = sys.argv[1], sys.argv[2]
 types = [("icp4", 16), ("icp5", 32), ("icp6", 64), ("ic07", 128), ("ic08", 256), ("ic09", 512),
@@ -51,18 +51,17 @@ for ostype, size in types:
 open(out, "wb").write(b"icns" + struct.pack(">I", 8 + len(body)) + body)
 PY
 
-# density:legacy icon (48 dp):adaptive layer (108 dp), in px
-for d in mdpi:48:108 hdpi:72:162 xhdpi:96:216 xxhdpi:144:324 xxxhdpi:192:432; do
-    n=${d%%:*}; a=${d##*:}; s=${d#*:}; s=${s%:*}; h=$((s / 2))
-    png "$svg/icon-small.svg" "$s" "$res/mipmap-$n/ic_launcher.png"
-    # The circle inscribed in the tile clears its rounded corners, so masking the tile is enough.
-    magick -density 1200 -background none "$svg/icon-small.svg" -resize "${s}x${s}" \
+# The adaptive layers and the splash are vector drawables: sharp at every density and launcher size.
+cp "$svg"/*.xml "$res/drawable/"
+
+# Legacy launcher icon (48 dp) per density, in px. With minSdk 26 the adaptive icon always wins;
+# these only serve whatever asks for the bitmap directly.
+for d in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+    n=${d%%:*}; s=${d#*:}; h=$((s / 2))
+    png "$(tile "$s")" "$s" "$res/mipmap-$n/ic_launcher.png"
+    # The circle inscribed in the tile clears its rounded corners and the full mark (not the small
+    # one, whose tail reaches past it), so masking the tile is enough.
+    magick -density 1200 -background none "$svg/icon.svg" -resize "${s}x${s}" \
         \( -size "${s}x${s}" xc:black -fill white -draw "circle $h,$h $h,0" \) \
         -alpha off -compose CopyOpacity -composite -strip "PNG32:$res/mipmap-$n/ic_launcher_round.png"
-    # Thousands of birds are too heavy for a vector drawable: adaptive layers and splash are
-    # bitmaps at each density's size of the 108 dp layer.
-    mkdir -p "$res/drawable-$n"
-    png "$svg/foreground.svg" "$a" "$res/drawable-$n/ic_launcher_foreground.png"
-    png "$svg/monochrome.svg" "$a" "$res/drawable-$n/ic_launcher_monochrome.png"
-    png "$svg/splash.svg" "$a" "$res/drawable-$n/splash_icon.png"
 done

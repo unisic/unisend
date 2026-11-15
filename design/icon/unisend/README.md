@@ -1,6 +1,22 @@
 # Unisend icon candidates
 
-Three candidates for the Unisend app icon. Nothing here is wired into the app yet. `make.py` writes
+## Shipped: B, refined
+
+The owner chose B. Its master is now `packaging/icon/unisend.py`; `packaging/icon/render.sh` writes
+every shipped file from it, and `final.py` here draws `final.png` from those files. Changes from the
+candidate below, same idea and colours:
+
+- Drawn at 0.84 instead of 0.86 and nudged 1 unit right and 0.5 up, which also balances the tail's
+  weight: mark radius 30.8 of 33, about 2 units clear of the safe circle under any launcher mask.
+- Gap 3.5 units instead of 3, so it stays open on a 96 px launcher icon.
+- `icon-small.svg` for desktop sizes 16 to 48 px and the mdpi legacy icon: the U redrawn on a 16 px
+  grid, arms 3 px, a 1 px gap on a whole pixel column (2 px at 32, 3 px at 48), and a one-point tail,
+  so the two halves stay apart where the fine gap would blur shut.
+- The Android adaptive layers and the splash are vector drawables instead of bitmaps.
+
+`candidate-*/` and `make.py` below are the record of the choice and still draw the original B.
+
+Three candidates for the Unisend app icon. `make.py` writes
 every file below; run `python3 design/icon/unisend/make.py` (needs ImageMagick 7 with its librsvg
 delegate, which this machine has as RSVG 2.63.2, plus Pillow and numpy). It fails if a mark leaves
 the 66-unit safe circle.
