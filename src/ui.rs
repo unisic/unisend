@@ -99,6 +99,11 @@ const ROW_PRESS_DELAY: std::time::Duration = std::time::Duration::from_millis(10
 const SENDER: f32 = 28.;
 /// How far a message is swiped sideways to reply to it.
 const SWIPE_REPLY: f32 = 56.;
+/// A swipe this far that is still moving this fast (px/s) at release replies too.
+const SWIPE_FLICK: f32 = 24.;
+const SWIPE_SPEED: f32 = 500.;
+/// How far a pan goes before it is known to be a swipe or a scroll; until then nothing moves.
+const SWIPE_SLOP: f32 = 10.;
 /// Above the compose strip's tallest: its margin, padding and a quote with a picture.
 const STRIP_H: f32 = 80.;
 /// How far a message's reactions reach up over its bubble.
@@ -120,6 +125,8 @@ const MAX_THUMBS: usize = 60;
 const MAX_FACES: usize = 64;
 /// Messages that can be arriving at once; more in one go is a page of history, not news.
 const MAX_ARRIVALS: usize = 3;
+/// Link and quote pictures fading in at once, at most.
+const MAX_THUMB_FADES: usize = 60;
 /// Pages of older messages loaded to find a quoted one before giving up.
 const SEEK_PAGES: u8 = 5;
 
@@ -217,6 +224,8 @@ pub struct BeeperApp {
     msgs: Vec<Msg>,
     /// Who is writing in the open conversation.
     typing: Vec<String>,
+    /// What the typing line said last, drawn while it leaves.
+    typing_last: SharedString,
     /// When the others were last told that the user is writing.
     typing_sent: Option<std::time::Instant>,
     /// Row of the newest message, when it is the user's own.
@@ -224,6 +233,8 @@ pub struct BeeperApp {
     /// Inline thumbnails by event ID, oldest first in `thumb_order`.
     thumbs: HashMap<String, Arc<Image>>,
     thumb_order: VecDeque<String>,
+    /// When a link's or a quote's picture landed, while it fades in; at most `MAX_THUMB_FADES`.
+    thumb_at: HashMap<String, Instant>,
     /// Messages whose thumbnail was requested.
     asked: HashSet<String>,
     /// Image shown full-screen; the picture arrives after the overlay opens.
@@ -237,13 +248,17 @@ pub struct BeeperApp {
     /// A mouse button held on a message, on its way to being a long press.
     press: Option<menu::Press>,
     /// A horizontal pan in progress over a message, with how far it has travelled.
-    swipe: Option<(String, f32)>,
+    swipe: Option<Swipe>,
     /// The message a finger let go of, springing back into place since then.
     swipe_back: Option<(String, Instant)>,
-    /// Messages that just arrived at the end of the open chat, at most `MAX_ARRIVALS`.
-    arrivals: VecDeque<(String, Instant)>,
+    /// Messages that just arrived at the end of the open chat, at most `2 * MAX_ARRIVALS`.
+    arrivals: VecDeque<Arrival>,
     /// When the open chat was opened: what arrives in its first moments is history, not news.
     opened_at: Option<Instant>,
+    /// A finger resting on a message's bubble, before it is a long press.
+    bubble_press: Option<BubblePress>,
+    /// The state last said under the user's newest message, and since when.
+    status_last: Option<(String, String, Instant)>,
     /// The message a quote led to, tinted for a moment; the tint's clock starts when it is drawn.
     flash: Option<(String, Option<Instant>)>,
     /// A message being looked for among older ones, with how many more pages it may load.
@@ -256,6 +271,8 @@ pub struct BeeperApp {
     strip_last: Option<(Option<IconName>, SharedString, Quote)>,
     /// Bumped when the strip must go at once (Escape), so it does not play its exit.
     strip_epoch: usize,
+    /// The strip closes because its message was sent: it shrinks on the new message's clock.
+    strip_sent: bool,
     /// The chat whose actions are showing.
     chat_sheet: Option<OwnedRoomId>,
     /// The attach sheet's photos and videos.
@@ -466,9 +483,11 @@ impl BeeperApp {
             open: None,
             msgs: Vec::new(),
             typing: Vec::new(),
+            typing_last: SharedString::default(),
             typing_sent: None,
             tail: None,
             thumbs: HashMap::new(),
+            thumb_at: HashMap::new(),
             thumb_order: VecDeque::new(),
             asked: HashSet::new(),
             viewer: None,
@@ -486,6 +505,9 @@ impl BeeperApp {
             fresh_reaction: None,
             heart_pop: None,
             strip_last: None,
+            strip_sent: false,
+            bubble_press: None,
+            status_last: None,
             strip_epoch: 0,
             chat_sheet: None,
             gallery: gallery::Gallery::default(),
@@ -615,6 +637,11 @@ impl BeeperApp {
                 // Late answers for a chat that was closed meanwhile are dropped.
                 if let (true, Some(format)) = (self.asked.contains(&id), image_format(&bytes)) {
                     self.thumbs.insert(id.clone(), Arc::new(Image::from_bytes(format, bytes)));
+                    // A fade is over in `ENTER`; only those still running are kept.
+                    self.thumb_at.retain(|_, at| at.elapsed() < motion::ENTER);
+                    if (id.ends_with("#link") || id.ends_with("#quote")) && self.thumb_at.len() < MAX_THUMB_FADES {
+                        self.thumb_at.insert(id.clone(), Instant::now());
+                    }
                     self.thumb_order.push_back(id);
                     while self.thumb_order.len() > MAX_THUMBS {
                         let Some(old) = self.thumb_order.pop_front() else { break };
@@ -675,10 +702,14 @@ impl BeeperApp {
                 for diff in diffs {
                     if let Diff::Set { index, value } = &diff
                         && let Some(old) = self.msgs.get(*index)
-                        && let Some(arrival) = self.arrivals.iter_mut().find(|(id, _)| *id == old.id)
                     {
                         // The user's message reached the server: its transaction ID became the event's.
-                        arrival.0 = value.id.clone();
+                        if let Some(arrival) = self.arrivals.iter_mut().find(|a| a.id == old.id) {
+                            arrival.id = value.id.clone();
+                        }
+                        if let Some((on, _, _)) = self.status_last.as_mut().filter(|(on, _, _)| *on == old.id) {
+                            *on = value.id.clone();
+                        }
                     }
                     let len_before = self.msgs.len();
                     match crate::backend::apply(&mut self.msgs, diff) {
@@ -697,8 +728,9 @@ impl BeeperApp {
                 let open_for = self.opened_at.map_or(Duration::ZERO, |at| at.elapsed());
                 let now = Instant::now();
                 for (len_before, new, ids) in ends {
-                    if arrived(len_before, appended, open_for) {
-                        self.arrivals.extend(ids.into_iter().map(|id| (id, now)));
+                    // Scrolled up, the user does not see the end: nothing there moves.
+                    if arrived(len_before, appended, open_for) && !self.place.away {
+                        self.arrivals.extend(ids.into_iter().map(|id| Arrival { id, at: now, height: None, since: None }));
                     }
                     self.count_missed(len_before, new);
                 }
@@ -707,7 +739,7 @@ impl BeeperApp {
                     let id = id.clone();
                     self.reveal(&id, cx);
                 }
-                self.arrivals.retain(|(_, at)| now.duration_since(*at) < Duration::from_secs(1));
+                self.arrivals.retain(|a| now.duration_since(a.at) < Duration::from_secs(1));
                 while self.arrivals.len() > 2 * MAX_ARRIVALS {
                     self.arrivals.pop_front();
                 }
@@ -878,6 +910,7 @@ impl BeeperApp {
         };
         let mentions = self.picked_mentions(cx);
         if self.send(Cmd::Send { room: room.clone(), body, reply_to, edit, mentions }, cx) {
+            self.strip_sent = matches!(self.compose, Compose::Reply(_));
             self.compose = Compose::New;
             self.jump_to_newest(cx);
             // `set_value` emits no change, so the draft would outlive the message it became.
@@ -1256,12 +1289,14 @@ impl BeeperApp {
         self.typing.clear();
         self.asked.clear();
         self.thumb_order.clear();
+        self.thumb_at.clear();
         for (_, image) in self.thumbs.drain() {
             image.remove_asset(cx);
         }
         self.close_viewer(cx);
         self.fetching.clear();
         (self.swipe, self.swipe_back, self.flash, self.seek, self.fresh_reaction, self.strip_last) = (None, None, None, None, None, None);
+        (self.bubble_press, self.status_last) = (None, None);
         self.arrivals.clear();
         for (_, image) in self.faces.drain() {
             if let Some(image) = image {
@@ -1711,6 +1746,12 @@ impl BeeperApp {
                 this.want_thumb(ix);
                 this.want_card(ix);
                 let flash = this.flash_level(ix, window, cx);
+                let (link_fade, quote_fade) = if this.thumb_at.is_empty() {
+                    (None, None)
+                } else {
+                    (this.thumb_level(&link_key(&this.msgs[ix].id), window, cx), this.thumb_level(&quote_key(&this.msgs[ix].id), window, cx))
+                };
+                let pressed = this.press_level(&this.msgs[ix].id.clone(), window, cx);
                 let reaction_since = this.reaction_since(ix);
                 let m = &this.msgs[ix];
                 if m.kind != Kind::Message {
@@ -1757,7 +1798,7 @@ impl BeeperApp {
                 // A pointer's menu marks its message; the touch overlay lifts it instead.
                 let picked = this.menu.as_ref().is_some_and(|menu| menu.id == m.id && menu.kind != MenuKind::Touch);
                 let quote = m.reply.as_ref().map(|quote| {
-                    let thumb = this.thumbs.get(&quote_key(&m.id)).cloned();
+                    let thumb = this.thumbs.get(&quote_key(&m.id)).cloned().map(|image| (image, quote_fade.unwrap_or(1.)));
                     let target = quote.id.clone();
                     let inset = quote_inset(quote, None, inside_of(m, p), thumb).id(SharedString::from(format!("{}-quote", m.id))).mx(px(8. - pad_x)).mt(px(8. - pad_y));
                     match quote.state {
@@ -1774,7 +1815,7 @@ impl BeeperApp {
                 let (id, held) = (m.id.clone(), m.id.clone());
                 // The finger's pan, followed 1:1 with resistance past the reply point; once it has let
                 // go, a spring brings the message back.
-                let dragged = this.swipe.as_ref().filter(|(on, _)| *on == m.id).map(|(_, far)| rubber(*far));
+                let dragged = this.swipe.as_ref().filter(|s| s.id == m.id && s.lock == Some(true)).map(|s| rubber(s.far));
                 let springing = this.swipe_back.as_ref().is_some_and(|(on, at)| *on == m.id && at.elapsed() < Duration::from_millis(600));
                 let swiped = if dragged.is_some() || springing {
                     let release = motion::RELEASE.with_travel(dragged.is_none());
@@ -1789,7 +1830,8 @@ impl BeeperApp {
                 } else {
                     1.
                 };
-                let arriving = this.arrivals.iter().find(|(id, _)| *id == m.id).and_then(|&(_, at)| fresh(at, motion::ENTER, window, cx));
+                // The next message joining this one's run takes its time line; the line shrinks as it arrives.
+                let shrink = next.filter(|n| !last && state.is_none() && joined(m, n)).and_then(|n| this.arrival_level(&n.id, cx));
                 // What is drawn inside the bubble: an own one may carry a colour of the user's choosing.
                 let inside = inside_of(m, p);
                 let ink = HighlightStyle { color: Some(inside.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
@@ -1802,6 +1844,7 @@ impl BeeperApp {
                 marks.sort_by_key(|(r, _)| r.start);
                 // The preview its sender attached to a link; a touch opens the link.
                 let link_card = m.link.as_ref().filter(|_| !m.deleted).map(|link| {
+                    let link_shown = link_fade.unwrap_or(1.);
                     let url = link.url.clone();
                     let width = room.min(LINK_W);
                     let picture = link.image.as_ref().map(|image| {
@@ -1810,7 +1853,7 @@ impl BeeperApp {
                         // picture drawn to cover its box is not clipped by it.
                         let height = (width * h.max(1) as f32 / w.max(1) as f32).clamp(60., LINK_PICTURE_H);
                         div().w_full().h(px(height)).overflow_hidden().map(|el| match this.thumbs.get(&link_key(&m.id)) {
-                            Some(thumb) => el.child(img(thumb.clone()).size_full().rounded_t(px(12.)).object_fit(ObjectFit::Cover)),
+                            Some(thumb) => el.child(img(thumb.clone()).size_full().rounded_t(px(12.)).object_fit(ObjectFit::Cover).opacity(link_shown)),
                             None => el,
                         })
                     });
@@ -1840,7 +1883,7 @@ impl BeeperApp {
                                 }),
                         )
                 });
-                let poll_card = m.poll.as_ref().filter(|_| !m.deleted).map(|poll| cards::poll(m, poll, this.user.as_ref(), room, inside, window, cx));
+                let poll_card = m.poll.as_ref().filter(|_| !m.deleted).map(|poll| cards::poll(m, poll, this.user.as_ref(), room, inside, pressed.and_then(|(part, level)| Some((part?, level))), window, cx));
                 let place_card = m.place.as_ref().filter(|_| !m.deleted).map(|place| cards::place(m, place, room, inside, cx));
                 let bubble = v_flex()
                     .id(SharedString::from(m.id.clone()))
@@ -1865,6 +1908,10 @@ impl BeeperApp {
                     // Where a quote led: the tint sits under the content and fades.
                     .when_some(flash, |el, level| {
                         el.relative().child(corners(div().absolute().inset_0(), m.own, top_r, bottom_r).bg(inside.text.opacity(0.16 * level)))
+                    })
+                    // A finger resting on it, before the long press lifts it.
+                    .when_some(pressed.filter(|(part, _)| part.is_none()), |el, (_, level)| {
+                        el.relative().child(corners(div().absolute().inset_0(), m.own, top_r, bottom_r).bg(inside.text.opacity(0.08 * level)))
                     })
                     .children(quote)
                     .children(attachment)
@@ -1918,15 +1965,16 @@ impl BeeperApp {
                 if faces && last {
                     this.want_face(ix);
                 }
+                let arriving = this.arriving(ix, window, cx);
+                let state_level = state.as_ref().and_then(|(text, _)| this.status_level(ix, text, window, cx));
                 let m = &this.msgs[ix];
                 let side = if faces { px(SENDER + 8.) } else { px(0.) };
-                // Arriving: the user's own message rises from the composer, another's settles in.
-                let rise = if m.own { 12. } else { 8. };
-                v_flex()
+                let row = v_flex()
                     .group("message")
                     .w_full()
                     .relative()
-                    .when_some(arriving, |el, v| el.top(px(rise * (1. - v))).opacity(v))
+                    // The user's own message is already known; another's fades in as it rises.
+                    .when_some(arriving.filter(|_| !m.own), |el, (v, _)| el.opacity(v))
                     .px(px(GUTTER))
                     .pt(if first { px(GAP) } else { px(3.) })
                     .when(faces && first, |el| {
@@ -1990,32 +2038,46 @@ impl BeeperApp {
                             .pl(side)
                             .map(|el| if m.own { el.items_end() } else { el.items_start() })
                             .children(reactions)
-                            .when(last || state.is_some(), |el| {
+                            .when(last || state.is_some() || shrink.is_some(), |el| {
                                 let failed = state.as_ref().is_some_and(|(_, failed)| *failed);
-                                let text = match (state, last) {
-                                    (Some((state, _)), true) => format!("{} \u{b7} {state}", clock(m.ts)),
-                                    (Some((state, _)), false) => state,
-                                    (None, _) => clock(m.ts),
+                                // A new state fades in where the old one was; the time stays.
+                                let (time, said) = match (state, last) {
+                                    (Some((state, _)), true) => (Some(format!("{} \u{b7} ", clock(m.ts))), Some(state)),
+                                    (Some((state, _)), false) => (None, Some(state)),
+                                    (None, _) => (Some(clock(m.ts)), None),
                                 };
                                 let ink = if failed { p.negative } else { this.on_wallpaper(p.faint, cx) };
                                 el.child(
                                     h_flex()
                                         .gap(px(3.))
+                                        // A little over its padding and one line at GPUI's default 1.618 leading, so it starts unclipped.
+                                        .when_some(shrink, |el, v| el.max_h((px(4.) + fs(20.)) * (1. - v)).overflow_hidden().opacity(1. - v))
                                         .px(px(GAP))
                                         .pt(px(4.))
                                         .text_size(fs(12.))
                                         .font_features(tabular())
                                         .text_color(ink)
                                         .when(this.disappears(ix), |el| el.child(Icon::new(IconName::Timer).size_3().text_color(ink)))
-                                        .child(text),
+                                        .child(h_flex().children(time).children(said.map(|said| div().when_some(state_level, |el, v| el.opacity(v)).child(said)))),
                                 )
                             }),
                     )
-                    .children(this.selection_mark(m, cx))
-                    .into_any_element()
+                    .children(this.selection_mark(m, cx));
+                match arriving {
+                    // It grows from nothing over the composer, so the messages above move up with it
+                    // instead of jumping; the row hangs from the top and rises as the space opens.
+                    Some((v, Some(height))) => {
+                        let probe = this.arrival_probe(m.id.clone(), cx);
+                        div().w_full().overflow_hidden().h(px(height * v)).child(row.flex_none().child(probe)).into_any_element()
+                    }
+                    _ => row.into_any_element(),
+                }
             }),
         )
         .size_full();
+        // The send button turns between a microphone (nothing typed) and an arrow; desktop has no microphone.
+        let mic = self.mic_shown(cx);
+        let send_mode = transition(("send", "mode"), if mic { 0. } else { 1. }, motion::exit(), window, cx);
 
         v_flex()
             .size_full()
@@ -2064,7 +2126,9 @@ impl BeeperApp {
                     .children(self.wallpaper_layer(0., cx))
                     .child(timeline)
                     .child(self.press_tracker(cx))
-                    .children(self.jump_button(cx))
+                    .child(self.bubble_release(cx))
+                    .children(self.jump_button(window, cx))
+                    .children(self.date_pill(window, cx))
                     .children(self.find_results(cx))
                     .when(self.loading && self.msgs.is_empty(), |el| {
                         el.child(
@@ -2086,36 +2150,7 @@ impl BeeperApp {
                         )
                     }),
             )
-            .when(!self.typing.is_empty(), |el| {
-                let names: Vec<&str> = self.typing.iter().map(String::as_str).collect();
-                let (who, many) = people(&names);
-                let line = if many { t!("{who} are typing…", who = who) } else { t!("{who} is typing…", who = who) };
-                let faint = p.faint;
-                // An activity indicator may loop; at 24 frames a second it costs little while it lasts.
-                let pulse = Animation::new(Duration::from_millis(1200)).repeat().with_max_fps(24.);
-                let dots = h_flex().gap(px(3.)).with_animation("typing-dots", pulse, move |el, t| {
-                    el.children((0..3).map(|n| {
-                        let phase = (t - n as f32 * 0.2).rem_euclid(1.);
-                        let level = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
-                        div().size(px(4.)).rounded_full().bg(faint).opacity(0.3 + 0.7 * level)
-                    }))
-                });
-                el.child(
-                    h_flex()
-                        .px(px(GUTTER + GAP))
-                        .pt(px(6.))
-                        .gap(px(6.))
-                        .text_size(fs(12.))
-                        .text_color(faint)
-                        .child(dots)
-                        .child(line)
-                        .with_animation(
-                            SharedString::from(format!("typing-{}", names.join(","))),
-                            Animation::new(Duration::from_millis(150)).with_easing(motion::ease_out),
-                            |el, t| el.opacity(t),
-                        ),
-                )
-            })
+            .children(self.render_typing(window, cx))
             .children(self.render_compose_strip(window, cx))
             .children(self.render_mentions(cx))
             .when(self.uploads > 0, |el| {
@@ -2171,8 +2206,19 @@ impl BeeperApp {
                             .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
                             .active(|el| el.bg(p.muted))
                             .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
-                            .child(Icon::new(if self.mic_shown(cx) { IconName::Mic } else { IconName::ArrowUp }).size_5())
-                            .when(self.mic_shown(cx), |el| el.relative().child(self.mic_touch(cx))),
+                            .relative()
+                            .children([(IconName::ArrowUp, send_mode), (IconName::Mic, 1. - send_mode)].into_iter().filter(|(_, v)| *v > 0.).map(|(icon, v)| {
+                                let scale = 0.5 + 0.5 * v;
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .opacity(v)
+                                    .child(Icon::new(icon).size_5().transform(Transformation::scale(size(scale, scale))))
+                            }))
+                            .when(mic && send_mode < 0.5, |el| el.child(self.mic_touch(cx))),
                     )
                     .relative()
                     .children(self.render_recorder(window, cx)),
@@ -2338,6 +2384,171 @@ impl BeeperApp {
     }
 
     /// The emoji the user just gave this message and when its badge was first drawn, once it is.
+    /// How far message `ix` has arrived: eased progress and the height its row grows to, while it
+    /// grows. Its first frame has no height yet: it is drawn at none and measured. With less motion
+    /// nothing grows and only another's message fades in, over `EXIT`.
+    fn arriving(&mut self, ix: usize, window: &mut Window, cx: &App) -> Option<(f32, Option<f32>)> {
+        let m = &self.msgs[ix];
+        let still = cx.reduce_motion();
+        if still && m.own {
+            return None;
+        }
+        let arrival = self.arrivals.iter_mut().find(|a| a.id == m.id)?;
+        if !still && arrival.height.is_none() {
+            // Never measured (not laid out, say): drawn as it is rather than kept at no height.
+            if arrival.at.elapsed() > Duration::from_millis(500) {
+                return None;
+            }
+            window.request_animation_frame();
+            return Some((0., Some(0.)));
+        }
+        let since = *arrival.since.get_or_insert_with(Instant::now);
+        let length = if still { motion::EXIT } else { motion::ENTER };
+        let t = since.elapsed().as_secs_f32() / length.as_secs_f32();
+        if t >= 1. {
+            return None;
+        }
+        window.request_animation_frame();
+        Some(if still { (t, None) } else { (motion::ease_out(t), arrival.height) })
+    }
+
+    /// How far message `id` has grown in, read without starting its clock: 0 until it has.
+    fn arrival_level(&self, id: &str, cx: &App) -> Option<f32> {
+        let arrival = self.arrivals.iter().find(|a| a.id == id).filter(|_| !cx.reduce_motion())?;
+        let Some(since) = arrival.since else { return Some(0.) };
+        let t = since.elapsed().as_secs_f32() / motion::ENTER.as_secs_f32();
+        (t < 1.).then(|| motion::ease_out(t))
+    }
+
+    /// How far the newest own message's state (Sending, Sent, Seen) has faded in since it last
+    /// changed; the first state seen for a message is shown as it is.
+    fn status_level(&mut self, ix: usize, text: &str, window: &mut Window, cx: &App) -> Option<f32> {
+        let id = &self.msgs[ix].id;
+        match &mut self.status_last {
+            Some((on, said, at)) if on == id => {
+                if said != text {
+                    (*said, *at) = (text.to_owned(), Instant::now());
+                }
+                fresh(*at, motion::EXIT, window, cx)
+            }
+            last => {
+                // A long-past change: nothing to fade.
+                *last = Some((id.clone(), text.to_owned(), Instant::now().checked_sub(motion::EXIT).unwrap_or_else(Instant::now)));
+                None
+            }
+        }
+    }
+
+    /// How far the link or quote picture under `key` has faded in since it landed; None once it has.
+    fn thumb_level(&mut self, key: &str, window: &mut Window, cx: &App) -> Option<f32> {
+        let at = *self.thumb_at.get(key)?;
+        let level = fresh(at, motion::ENTER, window, cx);
+        if level.is_none() {
+            self.thumb_at.remove(key);
+        }
+        level
+    }
+
+    fn bubble_pressed(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.menu_open() || self.fwd.selecting() {
+            return;
+        }
+        let since = Instant::now();
+        self.bubble_press = Some(BubblePress { id, part: None, since, released: None });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ROW_PRESS_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.bubble_press.as_ref().is_some_and(|b| b.since == since && b.released.is_none()) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The finger that pressed message `id` is on its answer `n`; the bubble's own probe saw it first.
+    pub(super) fn part_pressed(&mut self, id: &str, n: usize) {
+        if let Some(press) = self.bubble_press.as_mut().filter(|b| b.id == id && b.released.is_none()) {
+            press.part = Some(n);
+        }
+    }
+
+    /// Ends a bubble's press: the finger lifted (a tap), started scrolling, or let go of a long press.
+    fn bubble_release(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let weak = cx.entity().downgrade();
+        let release = move |cx: &mut App| {
+            let _ = weak.update(cx, |this, cx| this.bubble_released(cx));
+        };
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let scroll = release.clone();
+                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        scroll(cx);
+                    }
+                });
+                let up = release.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        up(cx);
+                    }
+                });
+                window.on_mouse_event(move |e: &LongPressEvent, phase, _, cx| {
+                    if phase.bubble() && matches!(e.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        release(cx);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
+    /// The press ended: a tint already shown fades, one not yet shown never comes.
+    fn bubble_released(&mut self, cx: &mut Context<Self>) {
+        let Some(press) = self.bubble_press.as_mut().filter(|b| b.released.is_none()) else { return };
+        if press.since.elapsed() < ROW_PRESS_DELAY {
+            self.bubble_press = None;
+        } else {
+            press.released = Some(Instant::now());
+        }
+        cx.notify();
+    }
+
+    /// How strongly message `id`'s bubble shows a press: at once in full, then fading over `EXIT`.
+    /// Also says which of its poll's answers, if any, holds the press.
+    fn press_level(&mut self, id: &str, window: &mut Window, cx: &App) -> Option<(Option<usize>, f32)> {
+        let press = self.bubble_press.as_ref().filter(|b| b.id == id)?;
+        let part = press.part;
+        let Some(released) = press.released else { return (press.since.elapsed() >= ROW_PRESS_DELAY).then_some((part, 1.)) };
+        let t = released.elapsed().as_secs_f32() / motion::EXIT.as_secs_f32();
+        if t >= 1. || cx.reduce_motion() {
+            self.bubble_press = None;
+            return None;
+        }
+        window.request_animation_frame();
+        Some((part, 1. - motion::ease_out(t)))
+    }
+
+    /// Measures an arriving row as it is laid out, for the next frame to grow it to.
+    fn arrival_probe(&self, id: String, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let weak = cx.entity().downgrade();
+        canvas(
+            move |bounds, _, cx| {
+                let height = f32::from(bounds.size.height);
+                let _ = weak.update(cx, |this, _| {
+                    if let Some(arrival) = this.arrivals.iter_mut().find(|a| a.id == id) {
+                        arrival.height = Some(height);
+                    }
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+    }
+
     fn reaction_since(&mut self, ix: usize) -> Option<(String, Instant)> {
         let (id, key, since) = self.fresh_reaction.as_mut()?;
         let m = &self.msgs[ix];
@@ -2384,19 +2595,24 @@ impl BeeperApp {
             return;
         }
         let delta = event.delta.pixel_delta(px(20.));
-        let before = self.swipe.as_ref().map(|(_, far)| *far);
-        let held = self.swipe.as_ref().map(|(on, _)| on.clone());
-        let reply = swipe_step(&mut self.swipe, id, f32::from(delta.x), f32::from(delta.y), event.touch_phase);
-        if let (Some(held), None) = (held, &self.swipe) {
-            self.swipe_back = Some((held, Instant::now()));
+        let far = |swipe: &Option<Swipe>| swipe.as_ref().filter(|s| s.lock == Some(true)).map(|s| s.far);
+        let before = far(&self.swipe);
+        let reply = swipe_step(&mut self.swipe, id, f32::from(delta.x), f32::from(delta.y), event.touch_phase, Instant::now());
+        let after = far(&self.swipe);
+        // Following the finger sideways, the pan is the message's: the list must not scroll with it.
+        if after.is_some() {
+            cx.stop_propagation();
+        }
+        if let (Some(_), None) = (before, after) {
+            self.swipe_back = Some((id.to_owned(), Instant::now()));
         }
         #[cfg(target_os = "android")]
-        if before.is_some_and(|far| far < SWIPE_REPLY) && self.swipe.as_ref().is_some_and(|(_, far)| *far >= SWIPE_REPLY) {
+        if before.is_some_and(|far| far < SWIPE_REPLY) && after.is_some_and(|far| far >= SWIPE_REPLY) {
             motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Light);
         }
         if let Some(target) = reply {
             self.start_compose(Compose::Reply(target), window, cx);
-        } else if before != self.swipe.as_ref().map(|(_, far)| *far) {
+        } else if before != after {
             cx.notify();
         }
     }
@@ -2440,6 +2656,46 @@ impl BeeperApp {
         Some(self.sheet(&self.chat_motion, frame, 0, title, rows, |this| &mut this.chat_motion, window, cx))
     }
 
+    /// Who is writing, over the composer. It grows from nothing and shrinks back, so the messages
+    /// above it move with it instead of jumping; a second writer joining only changes the words.
+    fn render_typing(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let p = Palette::of(cx);
+        let present = !self.typing.is_empty();
+        if present {
+            let names: Vec<&str> = self.typing.iter().map(String::as_str).collect();
+            let (who, many) = people(&names);
+            self.typing_last = if many { t!("{who} are typing…", who = who) } else { t!("{who} is typing…", who = who) }.into();
+        }
+        let room = self.open.as_ref().map(ToString::to_string).unwrap_or_default();
+        let shown = Presence::new(("typing", room), present).transition(if present { motion::enter() } else { motion::exit() }).sample(window, cx);
+        if !shown.should_render() {
+            return None;
+        }
+        let (v, faint) = (shown.progress, p.faint);
+        // An activity indicator may loop; at 24 frames a second it costs little while it lasts.
+        let pulse = Animation::new(Duration::from_millis(1200)).repeat().with_max_fps(24.);
+        let dots = h_flex().gap(px(3.)).with_animation("typing-dots", pulse, move |el, t| {
+            el.children((0..3).map(|n| {
+                let phase = (t - n as f32 * 0.2).rem_euclid(1.);
+                let level = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
+                div().size(px(4.)).rounded_full().bg(faint).opacity(0.3 + 0.7 * level)
+            }))
+        });
+        Some(
+            div().flex_none().overflow_hidden().h((px(6.) + fs(16.)) * v).opacity(v).child(
+                h_flex()
+                    .px(px(GUTTER + GAP))
+                    .pt(px(6.))
+                    .gap(px(6.))
+                    .text_size(fs(12.))
+                    .line_height(fs(16.))
+                    .text_color(faint)
+                    .child(dots)
+                    .child(self.typing_last.clone()),
+            ),
+        )
+    }
+
     /// What the composer is replying to or editing, with a way out. It opens and closes over the
     /// composer rather than pushing the chat at once; Escape takes it away at once.
     fn render_compose_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -2462,17 +2718,21 @@ impl BeeperApp {
         let present = current.is_some();
         if current.is_some() {
             self.strip_last = current;
+            self.strip_sent = false;
         }
         let room = self.open.as_ref().map(ToString::to_string).unwrap_or_default();
+        // Closed by sending, it shrinks as the message grows in, on the same curve and length, so
+        // the two add up to one movement.
         let shown = Presence::new((("compose-strip", self.strip_epoch), room), present)
-            .transition(if present { motion::enter() } else { motion::exit() })
+            .transition(if present || self.strip_sent { motion::enter() } else { motion::exit() })
             .sample(window, cx);
         if !shown.should_render() {
             self.strip_last = None;
+            self.strip_sent = false;
             return None;
         }
         let (icon, title, quote) = self.strip_last.clone()?;
-        let thumb = self.thumbs.get(&quote.id).cloned();
+        let thumb = self.thumbs.get(&quote.id).cloned().map(|image| (image, 1.));
         let leaving = shown.phase == PresencePhase::Exiting;
         let v = shown.progress;
         Some(
@@ -2756,7 +3016,8 @@ fn inside_of(m: &Msg, p: Palette) -> Palette {
 /// A quoted message: who wrote it and what it says, behind a bar that tells it from a link's card.
 /// `heading` takes the place of the sender (the compose strip's "Replying to"), with one line of
 /// text under it. `inside` is the palette of what it sits in.
-fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, inside: Palette, thumb: Option<Arc<Image>>) -> Stateful<Div> {
+/// `thumb` is the quoted picture with how far it has faded in.
+fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, inside: Palette, thumb: Option<(Arc<Image>, f32)>) -> Stateful<Div> {
     let line = |size: f32, height: f32| div().text_size(fs(size)).line_height(fs(height));
     let lines = if heading.is_some() { 1 } else { 2 };
     let top = match heading {
@@ -2806,7 +3067,10 @@ fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, ins
             .overflow_hidden()
             .when(!sticker, |el| el.rounded(px(6.)))
             .map(|el| match thumb {
-                Some(image) => el.child(img(image).size_full().when(!sticker, |el| el.rounded(px(6.))).object_fit(if sticker { ObjectFit::Contain } else { ObjectFit::Cover })),
+                Some((image, shown)) => el
+                    // The placeholder's ground stays under the picture while it fades in.
+                    .when(shown < 1. && !sticker, |el| el.bg(inside.text.opacity(0.07)))
+                    .child(img(image).size_full().when(!sticker, |el| el.rounded(px(6.))).object_fit(if sticker { ObjectFit::Contain } else { ObjectFit::Cover }).opacity(shown)),
                 None => el.flex().items_center().justify_center().bg(inside.text.opacity(0.07)).text_color(inside.faint).child(
                     Icon::new(match media.kind {
                         MediaKind::Video => IconName::Video,
@@ -2870,6 +3134,25 @@ fn arrived(len_before: usize, appended_in_batch: usize, open_for: Duration) -> b
     len_before > 0 && appended_in_batch <= MAX_ARRIVALS && open_for >= Duration::from_millis(500)
 }
 
+/// A finger on a message's bubble: when it landed, and when the press ended (it then fades).
+struct BubblePress {
+    id: String,
+    /// A poll's answer under the finger, which then shows the press instead of the whole bubble.
+    part: Option<usize>,
+    since: Instant,
+    released: Option<Instant>,
+}
+
+/// A message that just arrived at the end of the open chat.
+struct Arrival {
+    id: String,
+    at: Instant,
+    /// Its row's height, measured the frame after it was first drawn with none.
+    height: Option<f32>,
+    /// When it began to grow: the first frame its height was known.
+    since: Option<Instant>,
+}
+
 /// Eased progress of a motion that began at `since`, asking for the next frame while it lasts;
 /// `None` once it is over, or at once when the system asks for less motion. A clock kept by the
 /// app rather than by the element, so a row scrolled away and back does not replay it.
@@ -2914,20 +3197,59 @@ fn urls(text: &str) -> Vec<std::ops::Range<usize>> {
     out
 }
 
-/// Advances a sideways pan over a message by one event; gives the message to reply to when the
-/// pan has just ended far enough. Only a pan that begins on a message counts, so a mouse wheel and
-/// the glide after a fling (neither has a start) never reply.
-fn swipe_step(swipe: &mut Option<(String, f32)>, id: &str, dx: f32, dy: f32, phase: TouchPhase) -> Option<String> {
-    let sideways = if dx.abs() > dy.abs() { dx } else { 0. };
+/// A pan that began on a message, from its first event until the finger lifts.
+struct Swipe {
+    id: String,
+    /// The whole pan so far, both ways: it decides the axis once past `SWIPE_SLOP`.
+    moved: (f32, f32),
+    /// Undecided, then whether the message follows the finger or the pan is not a swipe at all.
+    lock: Option<bool>,
+    /// How far right the message has been pulled.
+    far: f32,
+    /// The last few (time, far) pairs, for the speed at release.
+    samples: VecDeque<(Instant, f32)>,
+}
+
+/// Advances a pan over a message by one event; gives the message to reply to when the pan has just
+/// ended far enough, or short of that but flicked. Nothing moves until the pan is `SWIPE_SLOP` long;
+/// then it follows only a pan mostly to the right, and any other is ignored until the finger lifts.
+/// Only a pan that begins on a message counts, so a mouse wheel and the glide after a fling (neither
+/// has a start) never reply.
+fn swipe_step(swipe: &mut Option<Swipe>, id: &str, dx: f32, dy: f32, phase: TouchPhase, now: Instant) -> Option<String> {
     match phase {
-        TouchPhase::Started => *swipe = Some((id.to_owned(), sideways.max(0.))),
-        TouchPhase::Moved => {
-            if let Some((_, far)) = swipe {
-                *far = (*far + sideways).max(0.);
-            }
+        TouchPhase::Started => *swipe = Some(Swipe { id: id.to_owned(), moved: (0., 0.), lock: None, far: 0., samples: VecDeque::new() }),
+        TouchPhase::Moved => {}
+        TouchPhase::Ended => {
+            let s = swipe.take().filter(|s| s.lock == Some(true))?;
+            let mut samples = s.samples;
+            samples.push_back((now, s.far));
+            let flicked = s.far >= SWIPE_FLICK && gallery::speed(&samples) >= SWIPE_SPEED;
+            return (s.far >= SWIPE_REPLY || flicked).then_some(s.id);
         }
-        TouchPhase::Ended => return swipe.take().filter(|(_, far)| *far >= SWIPE_REPLY).map(|(id, _)| id),
-        TouchPhase::Cancelled => *swipe = None,
+        TouchPhase::Cancelled => {
+            *swipe = None;
+            return None;
+        }
+    }
+    let s = swipe.as_mut()?;
+    match s.lock {
+        None => {
+            s.moved = (s.moved.0 + dx, s.moved.1 + dy);
+            let (x, y) = s.moved;
+            if x.hypot(y) < SWIPE_SLOP {
+                return None;
+            }
+            let sideways = x > 0. && x.abs() > 1.5 * y.abs();
+            s.lock = Some(sideways);
+            // The message catches up with the finger instead of losing the slop.
+            s.far = if sideways { x } else { 0. };
+        }
+        Some(true) => s.far = (s.far + dx).max(0.),
+        Some(false) => return None,
+    }
+    s.samples.push_back((now, s.far));
+    if s.samples.len() > 4 {
+        s.samples.pop_front();
     }
     None
 }
@@ -3343,18 +3665,41 @@ mod tests {
         }
     }
 
+    /// Feeds `(dx, dy, phase)` events 8 ms apart, or `gap` apart, and returns the reply.
+    fn pan(events: &[(f32, f32, gpui_kit::TouchPhase)], gap: Duration) -> Option<String> {
+        let (t0, mut swipe) = (std::time::Instant::now(), None);
+        events.iter().zip(1..).find_map(|(&(dx, dy, phase), n)| swipe_step(&mut swipe, "$m", dx, dy, phase, t0 + gap * n))
+    }
+
     #[test]
     fn only_a_pan_to_the_right_that_began_on_a_message_replies() {
-        let run = |events: &[(f32, f32, gpui_kit::TouchPhase)]| {
-            let mut swipe = None;
-            events.iter().find_map(|&(dx, dy, phase)| swipe_step(&mut swipe, "$m", dx, dy, phase))
-        };
+        let slow = Duration::from_millis(200);
         let far = SWIPE_REPLY / 2. + 1.;
-        assert_eq!(run(&[(0., 0., Started), (far, 1., Moved), (far, 0., Moved), (0., 0., Ended)]).as_deref(), Some("$m"));
-        assert_eq!(run(&[(0., 0., Started), (-far, 0., Moved), (-far, 2., Moved), (0., 0., Ended)]), None, "only to the right");
-        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (0., 0., Ended)]), None, "too short");
-        assert_eq!(run(&[(0., 0., Started), (2., 300., Moved), (1., 300., Moved), (0., 0., Ended)]), None, "scrolling the chat");
-        assert_eq!(run(&[(far, 0., Moved), (far, 0., Moved), (0., 0., Ended)]), None, "a wheel has no start");
-        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (far, 0., Moved), (0., 0., Cancelled), (0., 0., Ended)]), None);
+        assert_eq!(pan(&[(0., 0., Started), (far, 1., Moved), (far, 0., Moved), (0., 0., Ended)], slow).as_deref(), Some("$m"));
+        assert_eq!(pan(&[(0., 0., Started), (-far, 0., Moved), (-far, 2., Moved), (0., 0., Ended)], slow), None, "only to the right");
+        assert_eq!(pan(&[(0., 0., Started), (far, 0., Moved), (0., 0., Ended)], slow), None, "too short");
+        assert_eq!(pan(&[(0., 0., Started), (2., 300., Moved), (1., 300., Moved), (0., 0., Ended)], slow), None, "scrolling the chat");
+        assert_eq!(pan(&[(far, 0., Moved), (far, 0., Moved), (0., 0., Ended)], slow), None, "a wheel has no start");
+        assert_eq!(pan(&[(0., 0., Started), (far, 0., Moved), (far, 0., Moved), (0., 0., Cancelled), (0., 0., Ended)], slow), None);
+    }
+
+    #[test]
+    fn a_pan_decides_its_axis_once() {
+        let slow = Duration::from_millis(200);
+        // Mostly down at first: a scroll, however far right it goes after.
+        assert_eq!(pan(&[(0., 0., Started), (4., 12., Moved), (80., 0., Moved), (0., 0., Ended)], slow), None);
+        // Right, but not 1.5 times more than down.
+        assert_eq!(pan(&[(0., 0., Started), (12., 9., Moved), (80., 0., Moved), (0., 0., Ended)], slow), None);
+        // Under the slop nothing is decided; the pan that follows decides.
+        assert_eq!(pan(&[(0., 0., Started), (3., 3., Moved), (70., 2., Moved), (0., 0., Ended)], slow).as_deref(), Some("$m"));
+    }
+
+    #[test]
+    fn a_short_flick_replies_and_a_pause_before_letting_go_does_not() {
+        let quick = Duration::from_millis(8);
+        assert_eq!(pan(&[(0., 0., Started), (15., 0., Moved), (15., 0., Moved), (0., 0., Ended)], quick).as_deref(), Some("$m"));
+        assert_eq!(pan(&[(0., 0., Started), (10., 0., Moved), (5., 0., Moved), (0., 0., Ended)], quick), None, "too short to flick");
+        let paused = [(0., 0., Started), (15., 0., Moved), (15., 0., Moved), (0., 0., Moved), (0., 0., Moved), (0., 0., Moved), (0., 0., Moved), (0., 0., Ended)];
+        assert_eq!(pan(&paused, Duration::from_millis(40)), None);
     }
 }

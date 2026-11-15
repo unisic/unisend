@@ -68,6 +68,12 @@ pub(crate) fn exit() -> Transition {
 /// Something a finger let go of, returning to rest: quick, with a slight overshoot.
 pub(crate) const RELEASE: Spring = Spring::new(Duration::from_millis(300)).with_damping(0.8).with_epsilon(0.5);
 
+// Chat timeline and composer.
+/// The heart's fade when the system asks for less motion: no pop, only this.
+pub(crate) const HEART_STILL: Duration = Duration::from_millis(300);
+/// The recorder's level ring: critically damped, so its speed carries across the 100 ms level ticks.
+pub(crate) const LEVEL: Spring = Spring::new(Duration::from_millis(200)).with_epsilon(0.005);
+
 #[cfg(target_os = "android")]
 pub(crate) fn haptic(feedback: gpui_mobile::packages::vibration::HapticFeedback) {
     if let Err(e) = gpui_mobile::packages::vibration::haptic_feedback(feedback) {

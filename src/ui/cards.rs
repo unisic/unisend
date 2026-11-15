@@ -19,8 +19,29 @@ impl BeeperApp {
     }
 }
 
-/// `width` is what a bubble has for its content.
-pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p: Palette, window: &mut Window, cx: &mut Context<BeeperApp>) -> AnyElement {
+/// Tells the bubble's press which answer the finger landed on.
+fn answer_touch(id: String, n: usize, cx: &mut Context<BeeperApp>) -> impl IntoElement + use<> {
+    let weak = cx.entity().downgrade();
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let visible = window.content_mask().bounds;
+            window.on_mouse_event(move |e: &TouchDragEvent, phase, _, cx| {
+                let at = e.start_position;
+                if phase.bubble() && e.phase == TouchPhase::Started && bounds.contains(&at) && visible.contains(&at) {
+                    let _ = weak.update(cx, |this, _| this.part_pressed(&id, n));
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
+/// `width` is what a bubble has for its content; `pressed` is the answer a finger rests on, and how
+/// strongly it shows.
+#[allow(clippy::too_many_arguments, reason = "the parts of one card, read once")]
+pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p: Palette, pressed: Option<(usize, f32)>, window: &mut Window, cx: &mut Context<BeeperApp>) -> AnyElement {
     let (counts, voters) = poll.tally();
     let mine = me.map_or(&[][..], |me| poll.choice(me.as_str()));
     let open = poll.ended.is_none();
@@ -41,8 +62,11 @@ pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p
                     cx.stop_propagation();
                     this.vote(&target, &id, cx);
                 }))
+                .child(answer_touch(m.id.clone(), n, cx))
             })
             .child(div().absolute().top_0().left_0().h_full().w(relative(share)).bg(if chosen { p.text.opacity(0.3) } else { p.lifted }))
+            // `.active` never shows for a touch, which reaches the app only as it lifts.
+            .when_some(pressed.filter(|(on, _)| *on == n), |el, (_, level)| el.child(div().absolute().inset_0().rounded(px(12.)).bg(p.text.opacity(0.08 * level))))
             .child(
                 h_flex()
                     .relative()

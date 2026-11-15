@@ -54,6 +54,17 @@ pub(super) struct Voice {
     composer_empty: bool,
     /// Tells a stale answer from the recorder or player from the current one.
     epoch: u64,
+    /// What the held recorder drew last, drawn again while it leaves; not its levels.
+    shown: Option<Shown>,
+}
+
+#[derive(Clone, Copy)]
+struct Shown {
+    drag: (f32, f32),
+    ring: f32,
+    elapsed: Duration,
+    /// Slid away rather than sent: the row keeps going left as it fades.
+    thrown: bool,
 }
 
 struct Rec {
@@ -74,6 +85,8 @@ enum RecState {
     Locked,
     /// Stopping, then waiting to be sent or thrown away.
     Stopped(Option<Duration>),
+    /// Stopping, to be sent as soon as it has stopped; nothing is drawn for it.
+    Sending,
 }
 
 struct Play {
@@ -166,6 +179,7 @@ impl BeeperApp {
         self.voice.epoch += 1;
         let epoch = self.voice.epoch;
         self.voice.rec = Some(Rec { epoch, started: Instant::now(), state: RecState::Holding, path: None, levels: Vec::new(), drag: (0., 0.), lifted: false });
+        self.voice.shown = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let path = run(native::start).await.flatten();
@@ -197,7 +211,7 @@ impl BeeperApp {
                 cx.background_executor().timer(TICK).await;
                 let Some(amplitude) = run(native::level).await else { return };
                 let going = this.update(cx, |this, cx| {
-                    let Some(rec) = this.voice.rec.as_mut().filter(|r| r.epoch == epoch && !matches!(r.state, RecState::Stopped(_))) else {
+                    let Some(rec) = this.voice.rec.as_mut().filter(|r| r.epoch == epoch && !matches!(r.state, RecState::Stopped(_) | RecState::Sending)) else {
                         return false;
                     };
                     if rec.levels.len() < MAX_LEVELS {
@@ -239,6 +253,8 @@ impl BeeperApp {
             rec.lifted = true;
         } else if rec.started.elapsed() < MIN_HOLD {
             self.cancel_recording(cx);
+            // The hint takes the bar's place: nothing leaves.
+            self.voice.shown = None;
             self.show_hint(cx);
         } else {
             self.stop_recording(true, cx);
@@ -263,8 +279,9 @@ impl BeeperApp {
 
     /// Ends the recording; `send` sends it, otherwise it waits to be listened to.
     fn stop_recording(&mut self, send: bool, cx: &mut Context<Self>) {
-        let Some(rec) = self.voice.rec.as_mut().filter(|r| r.path.is_some() && !matches!(r.state, RecState::Stopped(_))) else { return };
-        rec.state = RecState::Stopped(None);
+        let Some(rec) = self.voice.rec.as_mut().filter(|r| r.path.is_some() && !matches!(r.state, RecState::Stopped(_) | RecState::Sending)) else { return };
+        // Sending, the review panel is not shown for the moment the recorder takes to stop.
+        rec.state = if send { RecState::Sending } else { RecState::Stopped(None) };
         let (epoch, path) = (rec.epoch, rec.path.clone());
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -322,6 +339,9 @@ impl BeeperApp {
         let Some(rec) = self.voice.rec.take() else { return };
         if self.voice.play.as_ref().is_some_and(|p| p.id == DRAFT) {
             self.stop_player();
+        }
+        if let Some(shown) = self.voice.shown.as_mut().filter(|_| rec.state == RecState::Holding) {
+            (shown.drag, shown.thrown) = (rec.drag, true);
         }
         match (rec.state, rec.path) {
             (RecState::Stopped(Some(_)), Some(path)) => post(move || native::delete(&path)),
@@ -611,10 +631,16 @@ impl BeeperApp {
     }
 
     /// Laid over the composer while recording, after a refusal, or after a tap on the microphone.
-    pub(super) fn render_recorder(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_recorder(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = Palette::of(cx);
+        let present = self.voice.rec.as_ref().is_some_and(|r| r.state != RecState::Sending);
+        let presence = Presence::new("recorder", present).transition(if present { motion::enter() } else { motion::exit() }).sample(window, cx);
         let bar = || h_flex().absolute().inset_0().occlude().bg(p.ground).items_center().gap(px(6.)).pl(px(GUTTER - 10.)).pr(px(GUTTER));
-        let Some(rec) = &self.voice.rec else {
+        let Some(rec) = self.voice.rec.as_ref().filter(|_| present) else {
+            match self.voice.shown.filter(|_| presence.should_render()) {
+                Some(shown) => return Some(self.held(shown, None, presence.progress, window, cx)),
+                None => self.voice.shown = None,
+            }
             if self.voice.denied {
                 return Some(
                     bar()
@@ -648,76 +674,20 @@ impl BeeperApp {
             _ if rec.path.is_none() => Duration::ZERO,
             _ => rec.started.elapsed().min(MAX_RECORDING),
         };
-        let dot = div().size(px(8.)).flex_none().rounded_full().bg(p.negative).with_animation(
-            "rec-dot",
-            Animation::new(Duration::from_millis(1000)).repeat().with_max_fps(24.),
-            |el, t| el.opacity(0.4 + 0.6 * (0.5 + 0.5 * (t * std::f32::consts::TAU).cos())),
-        );
-        let clock = h_flex().gap(px(8.)).pl(px(10.)).flex_none().text_size(fs(16.)).font_features(tabular()).child(dot).child(length(elapsed));
-        let send = |id: &'static str| {
-            div()
-                .id(id)
-                .size(px(TAP))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(p.text)
-                .text_color(p.ground)
-                .cursor_pointer()
-                .active(|el| el.bg(p.muted))
-        };
+        if rec.state == RecState::Holding {
+            let (drag, level) = (rec.drag, rec.levels.last().copied().unwrap_or(0.));
+            let ring = spring(("voice", "level"), level, motion::LEVEL, window, cx);
+            let shown = Shown { drag, ring, elapsed, thrown: false };
+            self.voice.shown = Some(shown);
+            return Some(self.held(shown, Some(drag), presence.progress, window, cx));
+        }
+        // Only the held recorder plays its exit; the locked one and the review panel go at once.
+        self.voice.shown = None;
+        let rec = self.voice.rec.as_ref()?;
+        let send = |id: &'static str| send_button(id, p);
+        let clock = clock(elapsed, p);
         let el = match rec.state {
-            RecState::Holding => {
-                let (dx, dy) = rec.drag;
-                let level = transition(("voice", "level"), rec.levels.last().copied().unwrap_or(0.), Transition::new(TICK), window, cx);
-                let ring = TAP + 40. * level;
-                let lock_shown = 1. + dy / LOCK_Y;
-                bar()
-                    .child(clock)
-                    .child(
-                        h_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .justify_center()
-                            .gap(px(4.))
-                            .relative()
-                            .left(px(dx))
-                            .opacity(1. + dx / CANCEL_X)
-                            .text_size(fs(14.))
-                            .text_color(p.faint)
-                            .child(Icon::new(IconName::ChevronLeft).size_4())
-                            .child(t!("Slide to cancel")),
-                    )
-                    .child(
-                        div()
-                            .size(px(TAP))
-                            .flex_none()
-                            .relative()
-                            .left(px(dx))
-                            .top(px(dy))
-                            .child(div().absolute().size(px(ring)).left(px((TAP - ring) / 2.)).top(px((TAP - ring) / 2.)).rounded_full().bg(p.text.opacity(0.18)))
-                            .child(send("rec-mic").absolute().inset_0().child(Icon::new(IconName::Mic).size_5())),
-                    )
-                    // The lock waits above the button; it brightens as the finger nears.
-                    .child(
-                        v_flex()
-                            .absolute()
-                            .right(px(GUTTER + 4.))
-                            .bottom(px(TAP + 20.))
-                            .w(px(TAP - 8.))
-                            .py(px(10.))
-                            .gap(px(4.))
-                            .items_center()
-                            .rounded_full()
-                            .bg(p.surface)
-                            .text_color(p.muted)
-                            .child(Icon::new(IconName::Lock).size_4().opacity(0.6 + 0.4 * (1. - lock_shown)))
-                            .child(Icon::new(IconName::ChevronUp).size_4()),
-                    )
-                    .into_any_element()
-            }
+            RecState::Holding | RecState::Sending => return None,
             RecState::Locked | RecState::Stopped(_) => {
                 let stopped = matches!(rec.state, RecState::Stopped(_));
                 let draft = self.voice.play.as_ref().filter(|p| p.id == DRAFT);
@@ -756,6 +726,100 @@ impl BeeperApp {
         };
         Some(el)
     }
+
+    /// The recorder while the finger holds the microphone, and while it leaves after letting go
+    /// (`held` None): the microphone follows the finger 1:1, then springs home. `v` is the bar's presence.
+    fn held(&self, shown: Shown, held: Option<(f32, f32)>, v: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let live = held.is_some();
+        let (dx, dy) = held.unwrap_or((0., 0.));
+        let mic_x = spring(("voice", "mic-x"), dx, motion::RELEASE.with_travel(!live), window, cx);
+        let mic_y = spring(("voice", "mic-y"), dy, motion::RELEASE.with_travel(!live), window, cx);
+        // Arriving, the clock and the hint slide in from the right; slid away, the hint keeps going left.
+        let enter = if live { 16. * (1. - v) } else { 0. };
+        let gone = if shown.thrown { -40. * (1. - v) } else { 0. };
+        let ring = TAP + 40. * shown.ring;
+        let lock_shown = 1. + dy / LOCK_Y;
+        h_flex()
+            .absolute()
+            .inset_0()
+            // Leaving, it takes no input: the composer under it is already back.
+            .when(live, |el| el.occlude())
+            .bg(p.ground)
+            .items_center()
+            .gap(px(6.))
+            .pl(px(GUTTER - 10.))
+            .pr(px(GUTTER))
+            .opacity(v)
+            .child(clock(shown.elapsed, p).relative().left(px(enter)))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .justify_center()
+                    .gap(px(4.))
+                    .relative()
+                    .left(px(shown.drag.0 + enter + gone))
+                    .opacity((1. + shown.drag.0 / CANCEL_X).max(0.))
+                    .text_size(fs(14.))
+                    .text_color(p.faint)
+                    .child(Icon::new(IconName::ChevronLeft).size_4())
+                    .child(t!("Slide to cancel")),
+            )
+            .child(
+                div()
+                    .size(px(TAP))
+                    .flex_none()
+                    .relative()
+                    .left(px(mic_x))
+                    .top(px(mic_y))
+                    .child(div().absolute().size(px(ring)).left(px((TAP - ring) / 2.)).top(px((TAP - ring) / 2.)).rounded_full().bg(p.text.opacity(0.18)))
+                    .child(send_button("rec-mic", p).absolute().inset_0().child(Icon::new(IconName::Mic).size_5())),
+            )
+            // The lock waits above the button; it brightens as the finger nears.
+            .when(live, |el| {
+                el.child(
+                    v_flex()
+                        .absolute()
+                        .right(px(GUTTER + 4.))
+                        .bottom(px(TAP + 20.))
+                        .w(px(TAP - 8.))
+                        .py(px(10.))
+                        .gap(px(4.))
+                        .items_center()
+                        .rounded_full()
+                        .bg(p.surface)
+                        .text_color(p.muted)
+                        .child(Icon::new(IconName::Lock).size_4().opacity(0.6 + 0.4 * (1. - lock_shown)))
+                        .child(Icon::new(IconName::ChevronUp).size_4()),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+fn clock(elapsed: Duration, p: Palette) -> Div {
+    let dot = div().size(px(8.)).flex_none().rounded_full().bg(p.negative).with_animation(
+        "rec-dot",
+        Animation::new(Duration::from_millis(1000)).repeat().with_max_fps(24.),
+        |el, t| el.opacity(0.4 + 0.6 * (0.5 + 0.5 * (t * std::f32::consts::TAU).cos())),
+    );
+    h_flex().gap(px(8.)).pl(px(10.)).flex_none().text_size(fs(16.)).font_features(tabular()).child(dot).child(length(elapsed))
+}
+
+fn send_button(id: &'static str, p: Palette) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(TAP))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(p.text)
+        .text_color(p.ground)
+        .cursor_pointer()
+        .active(|el| el.bg(p.muted))
 }
 
 fn play_button(playing: bool, waiting: bool, p: Palette) -> Stateful<Div> {
