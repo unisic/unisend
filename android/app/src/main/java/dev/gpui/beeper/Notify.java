@@ -38,7 +38,7 @@ import java.util.Map;
  * over JNI; {@link NotifyReceiver} calls the ones taking a Context.
  *
  * <p>A chat has one notification, a conversation: the newest messages, who wrote each, the chat's
- * picture, and a reply box and a mark-as-read button that work without opening the app. The
+ * picture, and a reply box, a mark-as-read button and a mute button that work without opening the app. The
  * conversation is not kept anywhere else: a new message reads it back from the notification
  * Android is showing, so a dismissed chat starts afresh.
  */
@@ -50,6 +50,7 @@ public final class Notify {
     static final String EXTRA_CHAT = "chat";
     static final String ACTION_REPLY = "dev.gpui.beeper.REPLY";
     static final String ACTION_READ = "dev.gpui.beeper.READ";
+    static final String ACTION_MUTE = "dev.gpui.beeper.MUTE";
     static final String KEY_REPLY = "reply";
     private static final String GROUP = "dev.gpui.beeper.MESSAGES";
     private static final String SUMMARY = "summary";
@@ -76,6 +77,8 @@ public final class Notify {
     private static native boolean nativeReply(String chat, String text);
 
     private static native void nativeRead(String chat);
+
+    private static native boolean nativeMute(String chat);
 
     static void channels(Context context) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
@@ -246,10 +249,10 @@ public final class Notify {
                 && MENTIONS.equals(active(manager, chat).getNotification().getChannelId()));
         String channel = mentioned ? MENTIONS : group ? GROUPS : MESSAGES;
         post(context, manager, chat, name, channel, picture, style, text, time, alert);
+        summarize(context, manager, chat, true);
     }
 
     /** Takes the chat's notification away, because it was read. */
-        summarize(context, manager, chat, true);
     public static void clear(Activity activity, String chat) {
         Context context = activity.getApplicationContext();
         NotificationManager manager = context.getSystemService(NotificationManager.class);
@@ -265,18 +268,21 @@ public final class Notify {
         } catch (UnsatisfiedLinkError e) {
             // The app's process was gone and this one was started for the receiver alone.
         }
+        // Updating the notification is what stops its reply box from spinning.
+        append(context, chat, sent ? text : context.getString(R.string.reply_not_sent), sent);
+    }
+
+    /** Adds a line to the chat's notification, quietly: the user's own when {@code mine}, else the app's. */
+    private static void append(Context context, String chat, CharSequence text, boolean mine) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         NotificationCompat.MessagingStyle old = conversation(manager, chat);
         StatusBarNotification shown = active(manager, chat);
         if (old == null || shown == null) {
             return;
         }
-        // Updating the notification is what stops its reply box from spinning.
         long now = System.currentTimeMillis();
-        NotificationCompat.MessagingStyle.Message line = sent
-                ? new NotificationCompat.MessagingStyle.Message(text, now, old.getUser())
-                : new NotificationCompat.MessagingStyle.Message(context.getString(R.string.reply_not_sent), now,
-                        new Person.Builder().setName("Murmur").setKey("beeper").build());
+        NotificationCompat.MessagingStyle.Message line = new NotificationCompat.MessagingStyle.Message(text, now,
+                mine ? old.getUser() : new Person.Builder().setName("Murmur").setKey("beeper").build());
         NotificationCompat.MessagingStyle style = extend(context, old, old.getConversationTitle() == null ? null
                 : old.getConversationTitle().toString(), old.isGroupConversation(), line);
         Bundle extras = shown.getNotification().extras;
@@ -291,6 +297,23 @@ public final class Notify {
             nativeRead(chat);
         } catch (UnsatisfiedLinkError e) {
             // Without the app running the chat stays unread; the notification still goes away.
+        }
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        manager.cancel(chat, 0);
+        summarize(context, manager, chat, false);
+    }
+
+    /** Mutes the chat from its notification, as the chat list's Mute does. */
+    static void mute(Context context, String chat) {
+        boolean muted = false;
+        try {
+            muted = nativeMute(chat);
+        } catch (UnsatisfiedLinkError e) {
+            // The app's process was gone and this one was started for the receiver alone.
+        }
+        if (!muted) {
+            append(context, chat, context.getString(R.string.mute_failed), false);
+            return;
         }
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         manager.cancel(chat, 0);
@@ -325,6 +348,8 @@ public final class Notify {
                 PendingIntent.FLAG_MUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         PendingIntent read = PendingIntent.getBroadcast(context, code, receiver(context, ACTION_READ, chat),
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        PendingIntent mute = PendingIntent.getBroadcast(context, code, receiver(context, ACTION_MUTE, chat),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channel)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
@@ -350,6 +375,10 @@ public final class Notify {
                 .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_menu_view, context.getString(R.string.mark_read), read)
                         .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
                         .setShowsUserInterface(false)
+                        .build())
+                .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_lock_silent_mode, context.getString(R.string.mute), mute)
+                        .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MUTE)
+                        .setShowsUserInterface(false)
                         .build());
         if (picture != null) {
             builder.setLargeIcon(picture);
@@ -365,6 +394,8 @@ public final class Notify {
      */
     private static void summarize(Context context, NotificationManager manager, String chat, boolean includes) {
         int chats = includes ? 1 : 0;
+        boolean summarized = false;
+        StatusBarNotification other = null;
         for (StatusBarNotification shown : manager.getActiveNotifications()) {
             if (shown.getId() != 0 || shown.getTag() == null || shown.getTag().equals(chat)) {
                 continue;
@@ -373,10 +404,19 @@ public final class Notify {
                 summarized = true;
             } else if (GROUP.equals(shown.getNotification().getGroup())) {
                 chats++;
+                other = shown;
             }
         }
         if (chats == 0) {
             manager.cancel(SUMMARY, 0);
+            return;
+        }
+        if (chats == 1 && !summarized) {
+            return;
+        }
+        if (chats == 1 && !includes) {
+            manager.cancel(SUMMARY, 0);
+            repost(context, manager, other);
             return;
         }
         PendingIntent open = PendingIntent.getActivity(context, 0, new Intent(context, activityClass(context))
@@ -398,27 +438,16 @@ public final class Notify {
     }
 
     /** What a secure lock screen shows instead: the app and that something came, not from whom. */
-        boolean summarized = false;
-        StatusBarNotification other = null;
     private static Notification locked(Context context, String channel) {
         return new NotificationCompat.Builder(context, channel)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
                 .setContentTitle(context.getString(R.string.app_name))
-                other = shown;
                 .setContentText(context.getString(R.string.new_message))
                 .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                 .build();
     }
 
     private static Intent receiver(Context context, String action, String chat) {
-        if (chats == 1 && !summarized) {
-            return;
-        }
-        if (chats == 1 && !includes) {
-            manager.cancel(SUMMARY, 0);
-            repost(context, manager, other);
-            return;
-        }
         return new Intent(context, NotifyReceiver.class).setAction(action).putExtra(EXTRA_CHAT, chat);
     }
 

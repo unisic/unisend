@@ -632,6 +632,14 @@ pub(crate) fn read_from_notification(chat: &str) {
     }
 }
 
+/// Mutes a chat from its notification. False when the app is not signed in.
+#[cfg(target_os = "android")]
+pub(crate) fn mute_from_notification(chat: &str) -> bool {
+    log::debug!("notification: mute");
+    let Ok(room) = OwnedRoomId::try_from(chat) else { return false };
+    COMMANDS.get().is_some_and(|tx| tx.try_send(Cmd::Chat(room, ChatAction::Mute(true))).is_ok())
+}
+
 /// Stack of the backend's threads. Opening a chat polls deep matrix-sdk futures whose debug-build
 /// frames outgrow the default 2 MiB; only the pages actually touched cost memory.
 const BACKEND_STACK: usize = 8 << 20;
