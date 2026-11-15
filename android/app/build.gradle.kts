@@ -35,6 +35,12 @@ android {
     lint {
         checkReleaseBuilds = false
     }
+
+    // The dependency block is encrypted for Google Play alone; this app is not shipped there.
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
 }
 
 dependencies {
