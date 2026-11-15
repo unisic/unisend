@@ -94,6 +94,11 @@ const ROW_PRESS_DELAY: std::time::Duration = std::time::Duration::from_millis(10
 const SENDER: f32 = 28.;
 /// How far a message is swiped sideways to reply to it.
 const SWIPE_REPLY: f32 = 56.;
+/// A swipe this far that is still moving this fast (px/s) at release replies too.
+const SWIPE_FLICK: f32 = 24.;
+const SWIPE_SPEED: f32 = 500.;
+/// How far a pan goes before it is known to be a swipe or a scroll; until then nothing moves.
+const SWIPE_SLOP: f32 = 10.;
 /// Above the compose strip's tallest: its margin, padding and a quote with a picture.
 const STRIP_H: f32 = 80.;
 /// How far a message's reactions reach up over its bubble.
@@ -234,7 +239,7 @@ pub struct BeeperApp {
     /// A mouse button held on a message, on its way to being a long press.
     press: Option<menu::Press>,
     /// A horizontal pan in progress over a message, with how far it has travelled.
-    swipe: Option<(String, f32)>,
+    swipe: Option<Swipe>,
     /// The message a finger let go of, springing back into place since then.
     swipe_back: Option<(String, Instant)>,
     /// Messages that just arrived at the end of the open chat, at most `2 * MAX_ARRIVALS`.
@@ -1719,7 +1724,7 @@ impl BeeperApp {
                 let (id, held) = (m.id.clone(), m.id.clone());
                 // The finger's pan, followed 1:1 with resistance past the reply point; once it has let
                 // go, a spring brings the message back.
-                let dragged = this.swipe.as_ref().filter(|(on, _)| *on == m.id).map(|(_, far)| rubber(*far));
+                let dragged = this.swipe.as_ref().filter(|s| s.id == m.id && s.lock == Some(true)).map(|s| rubber(s.far));
                 let springing = this.swipe_back.as_ref().is_some_and(|(on, at)| *on == m.id && at.elapsed() < Duration::from_millis(600));
                 let swiped = if dragged.is_some() || springing {
                     let release = motion::RELEASE.with_travel(dragged.is_none());
@@ -2343,19 +2348,24 @@ impl BeeperApp {
             return;
         }
         let delta = event.delta.pixel_delta(px(20.));
-        let before = self.swipe.as_ref().map(|(_, far)| *far);
-        let held = self.swipe.as_ref().map(|(on, _)| on.clone());
-        let reply = swipe_step(&mut self.swipe, id, f32::from(delta.x), f32::from(delta.y), event.touch_phase);
-        if let (Some(held), None) = (held, &self.swipe) {
-            self.swipe_back = Some((held, Instant::now()));
+        let far = |swipe: &Option<Swipe>| swipe.as_ref().filter(|s| s.lock == Some(true)).map(|s| s.far);
+        let before = far(&self.swipe);
+        let reply = swipe_step(&mut self.swipe, id, f32::from(delta.x), f32::from(delta.y), event.touch_phase, Instant::now());
+        let after = far(&self.swipe);
+        // Following the finger sideways, the pan is the message's: the list must not scroll with it.
+        if after.is_some() {
+            cx.stop_propagation();
+        }
+        if let (Some(_), None) = (before, after) {
+            self.swipe_back = Some((id.to_owned(), Instant::now()));
         }
         #[cfg(target_os = "android")]
-        if before.is_some_and(|far| far < SWIPE_REPLY) && self.swipe.as_ref().is_some_and(|(_, far)| *far >= SWIPE_REPLY) {
+        if before.is_some_and(|far| far < SWIPE_REPLY) && after.is_some_and(|far| far >= SWIPE_REPLY) {
             motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Light);
         }
         if let Some(target) = reply {
             self.start_compose(Compose::Reply(target), window, cx);
-        } else if before != self.swipe.as_ref().map(|(_, far)| *far) {
+        } else if before != after {
             cx.notify();
         }
     }
@@ -2901,20 +2911,59 @@ fn urls(text: &str) -> Vec<std::ops::Range<usize>> {
     out
 }
 
-/// Advances a sideways pan over a message by one event; gives the message to reply to when the
-/// pan has just ended far enough. Only a pan that begins on a message counts, so a mouse wheel and
-/// the glide after a fling (neither has a start) never reply.
-fn swipe_step(swipe: &mut Option<(String, f32)>, id: &str, dx: f32, dy: f32, phase: TouchPhase) -> Option<String> {
-    let sideways = if dx.abs() > dy.abs() { dx } else { 0. };
+/// A pan that began on a message, from its first event until the finger lifts.
+struct Swipe {
+    id: String,
+    /// The whole pan so far, both ways: it decides the axis once past `SWIPE_SLOP`.
+    moved: (f32, f32),
+    /// Undecided, then whether the message follows the finger or the pan is not a swipe at all.
+    lock: Option<bool>,
+    /// How far right the message has been pulled.
+    far: f32,
+    /// The last few (time, far) pairs, for the speed at release.
+    samples: VecDeque<(Instant, f32)>,
+}
+
+/// Advances a pan over a message by one event; gives the message to reply to when the pan has just
+/// ended far enough, or short of that but flicked. Nothing moves until the pan is `SWIPE_SLOP` long;
+/// then it follows only a pan mostly to the right, and any other is ignored until the finger lifts.
+/// Only a pan that begins on a message counts, so a mouse wheel and the glide after a fling (neither
+/// has a start) never reply.
+fn swipe_step(swipe: &mut Option<Swipe>, id: &str, dx: f32, dy: f32, phase: TouchPhase, now: Instant) -> Option<String> {
     match phase {
-        TouchPhase::Started => *swipe = Some((id.to_owned(), sideways.max(0.))),
-        TouchPhase::Moved => {
-            if let Some((_, far)) = swipe {
-                *far = (*far + sideways).max(0.);
-            }
+        TouchPhase::Started => *swipe = Some(Swipe { id: id.to_owned(), moved: (0., 0.), lock: None, far: 0., samples: VecDeque::new() }),
+        TouchPhase::Moved => {}
+        TouchPhase::Ended => {
+            let s = swipe.take().filter(|s| s.lock == Some(true))?;
+            let mut samples = s.samples;
+            samples.push_back((now, s.far));
+            let flicked = s.far >= SWIPE_FLICK && gallery::speed(&samples) >= SWIPE_SPEED;
+            return (s.far >= SWIPE_REPLY || flicked).then_some(s.id);
         }
-        TouchPhase::Ended => return swipe.take().filter(|(_, far)| *far >= SWIPE_REPLY).map(|(id, _)| id),
-        TouchPhase::Cancelled => *swipe = None,
+        TouchPhase::Cancelled => {
+            *swipe = None;
+            return None;
+        }
+    }
+    let s = swipe.as_mut()?;
+    match s.lock {
+        None => {
+            s.moved = (s.moved.0 + dx, s.moved.1 + dy);
+            let (x, y) = s.moved;
+            if x.hypot(y) < SWIPE_SLOP {
+                return None;
+            }
+            let sideways = x > 0. && x.abs() > 1.5 * y.abs();
+            s.lock = Some(sideways);
+            // The message catches up with the finger instead of losing the slop.
+            s.far = if sideways { x } else { 0. };
+        }
+        Some(true) => s.far = (s.far + dx).max(0.),
+        Some(false) => return None,
+    }
+    s.samples.push_back((now, s.far));
+    if s.samples.len() > 4 {
+        s.samples.pop_front();
     }
     None
 }
@@ -3223,18 +3272,41 @@ mod tests {
         }
     }
 
+    /// Feeds `(dx, dy, phase)` events 8 ms apart, or `gap` apart, and returns the reply.
+    fn pan(events: &[(f32, f32, gpui_kit::TouchPhase)], gap: Duration) -> Option<String> {
+        let (t0, mut swipe) = (std::time::Instant::now(), None);
+        events.iter().zip(1..).find_map(|(&(dx, dy, phase), n)| swipe_step(&mut swipe, "$m", dx, dy, phase, t0 + gap * n))
+    }
+
     #[test]
     fn only_a_pan_to_the_right_that_began_on_a_message_replies() {
-        let run = |events: &[(f32, f32, gpui_kit::TouchPhase)]| {
-            let mut swipe = None;
-            events.iter().find_map(|&(dx, dy, phase)| swipe_step(&mut swipe, "$m", dx, dy, phase))
-        };
+        let slow = Duration::from_millis(200);
         let far = SWIPE_REPLY / 2. + 1.;
-        assert_eq!(run(&[(0., 0., Started), (far, 1., Moved), (far, 0., Moved), (0., 0., Ended)]).as_deref(), Some("$m"));
-        assert_eq!(run(&[(0., 0., Started), (-far, 0., Moved), (-far, 2., Moved), (0., 0., Ended)]), None, "only to the right");
-        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (0., 0., Ended)]), None, "too short");
-        assert_eq!(run(&[(0., 0., Started), (2., 300., Moved), (1., 300., Moved), (0., 0., Ended)]), None, "scrolling the chat");
-        assert_eq!(run(&[(far, 0., Moved), (far, 0., Moved), (0., 0., Ended)]), None, "a wheel has no start");
-        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (far, 0., Moved), (0., 0., Cancelled), (0., 0., Ended)]), None);
+        assert_eq!(pan(&[(0., 0., Started), (far, 1., Moved), (far, 0., Moved), (0., 0., Ended)], slow).as_deref(), Some("$m"));
+        assert_eq!(pan(&[(0., 0., Started), (-far, 0., Moved), (-far, 2., Moved), (0., 0., Ended)], slow), None, "only to the right");
+        assert_eq!(pan(&[(0., 0., Started), (far, 0., Moved), (0., 0., Ended)], slow), None, "too short");
+        assert_eq!(pan(&[(0., 0., Started), (2., 300., Moved), (1., 300., Moved), (0., 0., Ended)], slow), None, "scrolling the chat");
+        assert_eq!(pan(&[(far, 0., Moved), (far, 0., Moved), (0., 0., Ended)], slow), None, "a wheel has no start");
+        assert_eq!(pan(&[(0., 0., Started), (far, 0., Moved), (far, 0., Moved), (0., 0., Cancelled), (0., 0., Ended)], slow), None);
+    }
+
+    #[test]
+    fn a_pan_decides_its_axis_once() {
+        let slow = Duration::from_millis(200);
+        // Mostly down at first: a scroll, however far right it goes after.
+        assert_eq!(pan(&[(0., 0., Started), (4., 12., Moved), (80., 0., Moved), (0., 0., Ended)], slow), None);
+        // Right, but not 1.5 times more than down.
+        assert_eq!(pan(&[(0., 0., Started), (12., 9., Moved), (80., 0., Moved), (0., 0., Ended)], slow), None);
+        // Under the slop nothing is decided; the pan that follows decides.
+        assert_eq!(pan(&[(0., 0., Started), (3., 3., Moved), (70., 2., Moved), (0., 0., Ended)], slow).as_deref(), Some("$m"));
+    }
+
+    #[test]
+    fn a_short_flick_replies_and_a_pause_before_letting_go_does_not() {
+        let quick = Duration::from_millis(8);
+        assert_eq!(pan(&[(0., 0., Started), (15., 0., Moved), (15., 0., Moved), (0., 0., Ended)], quick).as_deref(), Some("$m"));
+        assert_eq!(pan(&[(0., 0., Started), (10., 0., Moved), (5., 0., Moved), (0., 0., Ended)], quick), None, "too short to flick");
+        let paused = [(0., 0., Started), (15., 0., Moved), (15., 0., Moved), (0., 0., Moved), (0., 0., Moved), (0., 0., Moved), (0., 0., Moved), (0., 0., Ended)];
+        assert_eq!(pan(&paused, Duration::from_millis(40)), None);
     }
 }
