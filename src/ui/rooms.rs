@@ -188,9 +188,25 @@ impl BeeperApp {
     }
 
     pub(super) fn render_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let c = self.people.confirm.as_ref().filter(|c| c.delete.is_some())?;
+        let live = self.people.confirm.as_ref().is_some_and(|c| c.delete.is_some());
+        let shown = Presence::new("leave-dialog", live).transition(if live { motion::enter() } else { motion::exit() }).sample(window, cx);
+        // The words outlive the confirmation so the dialog can fade out showing what it asked.
+        let last = window.use_keyed_state("leave-dialog-last", cx, |_, _| None::<(String, String, &'static str)>);
+        if let Some(c) = self.people.confirm.as_ref().filter(|c| c.delete.is_some()) {
+            let words = wording(c);
+            if last.read(cx).as_ref() != Some(&words) {
+                last.update(cx, |l, _| *l = Some(words));
+            }
+        }
+        if !shown.should_render() {
+            if last.read(cx).is_some() {
+                last.update(cx, |l, _| *l = None);
+            }
+            return None;
+        }
+        let (title, body, act) = last.read(cx).clone()?;
+        let v = shown.progress;
         let p = Palette::of(cx);
-        let (title, body, act) = wording(c);
         let width = DIALOG_W.min(f32::from(window.viewport_size().width) - 2. * GUTTER);
         let button = |id: &'static str, label: &'static str, bg: Hsla, ink: Hsla| {
             div()
@@ -224,14 +240,15 @@ impl BeeperApp {
                     .pt(px(6.))
                     .gap(px(8.))
                     .justify_end()
-                    .child(button("leave-cancel", t!("Cancel"), p.lifted, p.text).on_click(cx.listener(|this, _, _, cx| {
-                        this.close_confirm(cx);
-                    })))
-                    .child(button("leave-confirm", act, p.negative, gpui_kit::white()).on_click(cx.listener(|this, _, _, cx| this.leave(cx)))),
+                    .child(button("leave-cancel", t!("Cancel"), p.lifted, p.text).when(live, |el| {
+                        el.on_click(cx.listener(|this, _, _, cx| {
+                            this.close_confirm(cx);
+                        }))
+                    }))
+                    .child(button("leave-confirm", act, p.negative, gpui_kit::white()).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.leave(cx))))),
             )
-            .with_animation("leave-dialog-in", Animation::new(motion::ENTER).with_easing(motion::ease_out), |el, t| {
-                el.opacity(t).top(px(8. * (1. - t)))
-            });
+            .opacity(v)
+            .top(px(8. * (1. - v)));
         Some(
             div()
                 .id("leave-scrim")
@@ -240,11 +257,13 @@ impl BeeperApp {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui_kit::black().opacity(0.6))
+                .bg(gpui_kit::black().opacity(0.6 * v))
                 .occlude()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.close_confirm(cx);
-                }))
+                .when(live, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| {
+                        this.close_confirm(cx);
+                    }))
+                })
                 .child(dialog)
                 .into_any_element(),
         )
