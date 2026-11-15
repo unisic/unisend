@@ -1155,7 +1155,7 @@ pub(crate) fn insets() -> (f32, f32) {
     (0., 0.)
 }
 
-/// Entry points the Java side of notifications calls: the reply box and the mark-as-read button.
+/// Entry points the Java side of notifications calls: the reply box and the mark-as-read and mute buttons.
 #[cfg(target_os = "android")]
 mod from_java {
     use std::ffi::c_void;
@@ -1188,6 +1188,14 @@ mod from_java {
         if let Ok(chat) = with_env(|env| Ok(text(env, chat))) {
             crate::backend::read_from_notification(&chat);
         }
+    }
+
+    /// # Safety
+    /// Called by the JVM with a valid string reference.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_beeper_Notify_nativeMute(_env: *mut c_void, _class: *mut c_void, chat: *mut c_void) -> u8 {
+        let Ok(chat) = with_env(|env| Ok(text(env, chat))) else { return 0 };
+        u8::from(crate::backend::mute_from_notification(&chat))
     }
 }
 

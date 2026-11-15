@@ -7,7 +7,7 @@ import android.content.pm.ApplicationInfo;
 import android.os.Bundle;
 import androidx.core.app.RemoteInput;
 
-/** The reply box and the mark-as-read button of a message notification. */
+/** The reply box and the mark-as-read and mute buttons of a message notification. */
 public final class NotifyReceiver extends BroadcastReceiver {
     /**
      * Debug builds only, from {@code adb shell run-as dev.gpui.beeper am broadcast
@@ -41,6 +41,8 @@ public final class NotifyReceiver extends BroadcastReceiver {
             }
         } else if (intent.getAction().equals(Notify.ACTION_READ)) {
             Notify.read(context, chat);
+        } else if (intent.getAction().equals(Notify.ACTION_MUTE)) {
+            Notify.mute(context, chat);
         } else if (intent.getAction().equals(Notify.ACTION_REPLY)) {
             Bundle typed = RemoteInput.getResultsFromIntent(intent);
             CharSequence text = typed == null ? null : typed.getCharSequence(Notify.KEY_REPLY);

@@ -38,7 +38,7 @@ import java.util.Map;
  * over JNI; {@link NotifyReceiver} calls the ones taking a Context.
  *
  * <p>A chat has one notification, a conversation: the newest messages, who wrote each, the chat's
- * picture, and a reply box and a mark-as-read button that work without opening the app. The
+ * picture, and a reply box, a mark-as-read button and a mute button that work without opening the app. The
  * conversation is not kept anywhere else: a new message reads it back from the notification
  * Android is showing, so a dismissed chat starts afresh.
  */
@@ -50,6 +50,7 @@ public final class Notify {
     static final String EXTRA_CHAT = "chat";
     static final String ACTION_REPLY = "dev.gpui.beeper.REPLY";
     static final String ACTION_READ = "dev.gpui.beeper.READ";
+    static final String ACTION_MUTE = "dev.gpui.beeper.MUTE";
     static final String KEY_REPLY = "reply";
     private static final String GROUP = "dev.gpui.beeper.MESSAGES";
     private static final String SUMMARY = "summary";
@@ -77,6 +78,8 @@ public final class Notify {
 
     private static native void nativeRead(String chat);
 
+    private static native boolean nativeMute(String chat);
+
     static void channels(Context context) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         manager.createNotificationChannel(channel(MESSAGES, context.getString(R.string.channel_direct), NotificationManager.IMPORTANCE_HIGH));
@@ -95,7 +98,6 @@ public final class Notify {
         channels(context);
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         for (StatusBarNotification shown : manager.getActiveNotifications()) {
-            Notification n = shown.getNotification();
             String chat = shown.getTag();
             if (chat == null && shown.getId() == SyncService.NOTICE) {
                 manager.notify(SyncService.NOTICE, SyncService.notice(context));
@@ -104,11 +106,18 @@ public final class Notify {
             if (chat == null || shown.getId() != 0 || chat.equals(SUMMARY)) {
                 continue;
             }
-            NotificationCompat.MessagingStyle style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n);
-            if (style != null) {
-                post(context, manager, chat, text(n, Notification.EXTRA_TITLE), n.getChannelId(), cached(chat), style,
-                        text(n, Notification.EXTRA_TEXT), n.when, false);
-            }
+            repost(context, manager, shown);
+        }
+        summarize(context, manager, null, false);
+    }
+
+    /** Posts a chat's notification again, quietly, from what Android is showing. */
+    private static void repost(Context context, NotificationManager manager, StatusBarNotification shown) {
+        Notification n = shown.getNotification();
+        NotificationCompat.MessagingStyle style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n);
+        if (style != null) {
+            post(context, manager, shown.getTag(), text(n, Notification.EXTRA_TITLE), n.getChannelId(), cached(shown.getTag()), style,
+                    text(n, Notification.EXTRA_TEXT), n.when, false);
         }
     }
 
@@ -219,13 +228,12 @@ public final class Notify {
         channels(context);
         Bitmap picture = icon.isEmpty() ? cached(chat) : load(chat, icon);
         NotificationManager manager = context.getSystemService(NotificationManager.class);
-        if (active(manager, chat) == null) {
-            // A conversation notification needs a shortcut to the chat that exists when it is posted.
-            try {
-                ShortcutManagerCompat.pushDynamicShortcut(context, Share.shortcut(context, chat, name, picture, 0));
-            } catch (IllegalStateException | IllegalArgumentException e) {
-                Log.w("Notify", "conversation shortcut", e);
-            }
+        // A conversation notification needs its chat's shortcut at every post, and Share.publish may
+        // have replaced it since the last one; Android's guidance is a push per message anyway.
+        try {
+            ShortcutManagerCompat.pushDynamicShortcut(context, Share.shortcut(context, chat, name, picture, 0));
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            Log.w("Notify", "conversation shortcut", e);
         }
         // In a one-to-one chat the picture is the sender's; in a group it is the chat's.
         Person person = new Person.Builder().setName(sender).setKey(sender).build();
@@ -241,6 +249,7 @@ public final class Notify {
                 && MENTIONS.equals(active(manager, chat).getNotification().getChannelId()));
         String channel = mentioned ? MENTIONS : group ? GROUPS : MESSAGES;
         post(context, manager, chat, name, channel, picture, style, text, time, alert);
+        summarize(context, manager, chat, true);
     }
 
     /** Takes the chat's notification away, because it was read. */
@@ -259,18 +268,21 @@ public final class Notify {
         } catch (UnsatisfiedLinkError e) {
             // The app's process was gone and this one was started for the receiver alone.
         }
+        // Updating the notification is what stops its reply box from spinning.
+        append(context, chat, sent ? text : context.getString(R.string.reply_not_sent), sent);
+    }
+
+    /** Adds a line to the chat's notification, quietly: the user's own when {@code mine}, else the app's. */
+    private static void append(Context context, String chat, CharSequence text, boolean mine) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         NotificationCompat.MessagingStyle old = conversation(manager, chat);
         StatusBarNotification shown = active(manager, chat);
         if (old == null || shown == null) {
             return;
         }
-        // Updating the notification is what stops its reply box from spinning.
         long now = System.currentTimeMillis();
-        NotificationCompat.MessagingStyle.Message line = sent
-                ? new NotificationCompat.MessagingStyle.Message(text, now, old.getUser())
-                : new NotificationCompat.MessagingStyle.Message(context.getString(R.string.reply_not_sent), now,
-                        new Person.Builder().setName("Murmur").setKey("beeper").build());
+        NotificationCompat.MessagingStyle.Message line = new NotificationCompat.MessagingStyle.Message(text, now,
+                mine ? old.getUser() : new Person.Builder().setName("Murmur").setKey("beeper").build());
         NotificationCompat.MessagingStyle style = extend(context, old, old.getConversationTitle() == null ? null
                 : old.getConversationTitle().toString(), old.isGroupConversation(), line);
         Bundle extras = shown.getNotification().extras;
@@ -285,6 +297,23 @@ public final class Notify {
             nativeRead(chat);
         } catch (UnsatisfiedLinkError e) {
             // Without the app running the chat stays unread; the notification still goes away.
+        }
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        manager.cancel(chat, 0);
+        summarize(context, manager, chat, false);
+    }
+
+    /** Mutes the chat from its notification, as the chat list's Mute does. */
+    static void mute(Context context, String chat) {
+        boolean muted = false;
+        try {
+            muted = nativeMute(chat);
+        } catch (UnsatisfiedLinkError e) {
+            // The app's process was gone and this one was started for the receiver alone.
+        }
+        if (!muted) {
+            append(context, chat, context.getString(R.string.mute_failed), false);
+            return;
         }
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         manager.cancel(chat, 0);
@@ -319,6 +348,8 @@ public final class Notify {
                 PendingIntent.FLAG_MUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         PendingIntent read = PendingIntent.getBroadcast(context, code, receiver(context, ACTION_READ, chat),
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        PendingIntent mute = PendingIntent.getBroadcast(context, code, receiver(context, ACTION_MUTE, chat),
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channel)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
@@ -344,29 +375,48 @@ public final class Notify {
                 .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_menu_view, context.getString(R.string.mark_read), read)
                         .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
                         .setShowsUserInterface(false)
+                        .build())
+                .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_lock_silent_mode, context.getString(R.string.mute), mute)
+                        .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MUTE)
+                        .setShowsUserInterface(false)
                         .build());
         if (picture != null) {
             builder.setLargeIcon(picture);
         }
         manager.notify(chat, 0, builder.build());
-        summarize(context, manager, chat, true);
     }
 
     /**
-     * The line the chats fold under when two or more are waiting (Android hides it while there is
-     * one). It stays while any chat is, because Android cancels a summary's chats with it; it goes
-     * when the last chat does.
+     * The line the chats fold under while two or more are waiting. A lone chat has none, so its own
+     * notification, with its buttons, is the one in the shade. Android cancels a summary's chats
+     * with it, so when a chat goes and leaves one, that one is posted again on its own. {@code chat}
+     * was just posted ({@code includes}) or taken away, and may still be listed; null for neither.
      */
     private static void summarize(Context context, NotificationManager manager, String chat, boolean includes) {
         int chats = includes ? 1 : 0;
+        boolean summarized = false;
+        StatusBarNotification other = null;
         for (StatusBarNotification shown : manager.getActiveNotifications()) {
-            if (shown.getId() == 0 && shown.getTag() != null && !shown.getTag().equals(chat)
-                    && !shown.getTag().equals(SUMMARY) && GROUP.equals(shown.getNotification().getGroup())) {
+            if (shown.getId() != 0 || shown.getTag() == null || shown.getTag().equals(chat)) {
+                continue;
+            }
+            if (shown.getTag().equals(SUMMARY)) {
+                summarized = true;
+            } else if (GROUP.equals(shown.getNotification().getGroup())) {
                 chats++;
+                other = shown;
             }
         }
         if (chats == 0) {
             manager.cancel(SUMMARY, 0);
+            return;
+        }
+        if (chats == 1 && !summarized) {
+            return;
+        }
+        if (chats == 1 && !includes) {
+            manager.cancel(SUMMARY, 0);
+            repost(context, manager, other);
             return;
         }
         PendingIntent open = PendingIntent.getActivity(context, 0, new Intent(context, activityClass(context))

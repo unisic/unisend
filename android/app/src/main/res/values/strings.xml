@@ -6,6 +6,7 @@
     <string name="reply">Reply</string>
     <string name="mark_read">Mark as read</string>
     <string name="reply_not_sent">Not sent. Open Murmur and try again.</string>
+    <string name="mute_failed">Not muted. Open Murmur and try again.</string>
     <string name="channel_direct">Direct messages</string>
     <string name="channel_groups">Group chats</string>
     <string name="channel_mentions">Mentions</string>
