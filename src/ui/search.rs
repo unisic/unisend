@@ -9,7 +9,7 @@ use crate::i18n::t;
 const JUMP_PAGES: u8 = 50;
 
 pub(super) struct Find {
-    input: Entity<InputState>,
+    pub(super) input: Entity<InputState>,
     /// The bar over the open chat is showing.
     pub(super) open: bool,
     /// Its results cover the conversation; hidden after a jump until the field is touched again.
