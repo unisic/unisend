@@ -107,7 +107,6 @@ impl BeeperApp {
             self.reveal_within(&id, JUMP_PAGES, cx);
             return;
         }
-        self.nav = Some((Instant::now(), true));
         self.open_room(room, cx);
         // Looked for as the rows arrive, in place of the first unread one.
         self.place.seek_unread = false;

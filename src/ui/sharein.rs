@@ -211,9 +211,6 @@ impl BeeperApp {
 
     fn enter_chat(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
         self.panel = None;
-        if self.open.as_ref() != Some(&room) {
-            self.nav = Some((Instant::now(), true));
-        }
         self.open_room(room, cx);
     }
 

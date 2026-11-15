@@ -38,6 +38,8 @@ mod navigate;
 pub(crate) mod motion;
 mod panels;
 mod pinpad;
+mod press;
+mod slide;
 mod pollnew;
 mod rich;
 mod search;
@@ -268,8 +270,16 @@ pub struct BeeperApp {
     contacts: contacts::State,
     /// The chat whose sheet is still falling after it closed.
     sheet_last: Option<OwnedRoomId>,
-    /// The phone's last move between the chat list and a chat: when, and whether it went in.
-    nav: Option<(std::time::Instant, bool)>,
+    /// A phone's stacked screens: a chat or deep panel pushed over the list.
+    slide: slide::Slide,
+    /// Rows displaced or arriving as a new message reorders the chat list.
+    fly: slide::Fly,
+    /// A finger on the chat list, since when; reordering waits for it to lift.
+    finger: Option<Instant>,
+    /// The chat list scrolling to its top: when it started and where from.
+    to_top: Option<(Instant, f32)>,
+    /// The chat list's first rows arrived: it fades in over the skeleton.
+    list_in: Option<Instant>,
     /// The picture still fading out after the viewer closed.
     viewer_last: Option<(String, Option<Arc<Image>>)>,
     zoom: viewer::Zoom,
@@ -278,8 +288,6 @@ pub struct BeeperApp {
     picker_hover: Option<usize>,
     emoji_pick: emojipick::Picker,
     emoji_open: Option<emojipick::Target>,
-    /// A finger resting on a chat row, and since when; the row shows it after a tap's time.
-    row_press: Option<(OwnedRoomId, std::time::Instant)>,
     compose: Compose,
     more: bool,
     loading: bool,
@@ -483,14 +491,17 @@ impl BeeperApp {
             attaching: false,
             contacts: contacts::State::default(),
             sheet_last: None,
-            nav: None,
+            slide: slide::Slide::default(),
+            fly: slide::Fly::default(),
+            finger: None,
+            to_top: None,
+            list_in: None,
             viewer_last: None,
             zoom: viewer::Zoom::default(),
             find,
             picker_hover: None,
             emoji_pick,
             emoji_open: None,
-            row_press: None,
             faces: HashMap::new(),
             compose: Compose::New,
             more: false,
@@ -623,11 +634,20 @@ impl BeeperApp {
                 self.next_attach(cx);
             }
             Ev::Rooms(changed) => {
+                let calm = !slide::Fly::quiet(changed.len()) && !cx.reduce_motion() && !self.rooms.is_empty() && self.list_at_top() && !self.finger_down();
+                let before = calm.then(|| slide::snapshot(&self.shown, &self.rooms));
+                let first = self.rooms.is_empty();
                 let mut by_id: HashMap<_, _> = self.rooms.drain(..).map(|r| (r.id.clone(), r)).collect();
                 by_id.extend(changed.into_iter().map(|r| (r.id.clone(), r)));
                 self.rooms = by_id.into_values().collect();
                 self.rooms.sort_unstable_by_key(|r| (!r.pinned, std::cmp::Reverse(r.ts)));
                 self.refilter(cx);
+                if first && !self.rooms.is_empty() {
+                    self.list_in = Some(Instant::now());
+                }
+                if let Some(change) = before.and_then(|b| slide::reorder(&b, &slide::snapshot(&self.shown, &self.rooms))) {
+                    self.fly.start(change, ROOM_ROW_H);
+                }
                 self.publish_share_targets();
             }
             Ev::RoomGone(id) => {
@@ -767,6 +787,15 @@ impl BeeperApp {
         cx.notify();
     }
 
+    fn list_at_top(&self) -> bool {
+        self.rooms_scroll.0.borrow().base_handle.offset().y >= px(-1.)
+    }
+
+    /// A touch counts as lifted after a few seconds even if its end was never seen.
+    fn finger_down(&self) -> bool {
+        self.finger.is_some_and(|at| at.elapsed() < Duration::from_secs(3))
+    }
+
     fn refilter(&mut self, cx: &mut Context<Self>) {
         let query = self.search.read(cx).value().trim().to_lowercase();
         let passes = |r: &RoomSummary| {
@@ -899,15 +928,20 @@ impl BeeperApp {
             self.strip_epoch += 1;
             self.start_compose(Compose::New, window, cx);
         } else if self.panel.is_some() {
+            self.slide.jump = !cfg!(target_os = "android");
             self.back(cx);
         } else if self.find.open {
             self.close_find(window, cx);
         } else if self.searching {
             self.set_searching(false, window, cx);
         } else if narrow && self.open.is_some() {
-            self.nav = Some((std::time::Instant::now(), false));
-            self.close_room(cx);
-            cx.notify();
+            if cfg!(target_os = "android") {
+                self.pop_room(cx);
+            } else {
+                self.slide.jump = true;
+                self.close_room(cx);
+                cx.notify();
+            }
         } else {
             return false;
         }
@@ -1149,9 +1183,7 @@ impl BeeperApp {
             Ok(id) => {
                 self.panel = None;
                 self.chat_sheet = None;
-                if self.open.as_ref() != Some(&id) {
-                    self.nav = Some((std::time::Instant::now(), true));
-                }
+                self.slide.jump = true;
                 self.open_room(id, cx);
                 cx.notify();
             }
@@ -1160,6 +1192,7 @@ impl BeeperApp {
     }
 
     fn open_room(&mut self, id: OwnedRoomId, cx: &mut Context<Self>) {
+        self.slide.leaving = None;
         if self.open.as_ref() == Some(&id) {
             return;
         }
@@ -1172,6 +1205,7 @@ impl BeeperApp {
     }
 
     fn close_room(&mut self, cx: &mut Context<Self>) {
+        self.slide.leaving = None;
         self.emoji_open = None;
         self.close_gallery(cx);
         self.close_gifs(cx);
@@ -1283,6 +1317,10 @@ impl BeeperApp {
 
     fn set_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         if tab == self.tab() {
+            if tab == Tab::Chats && !self.searching {
+                self.to_top = Some((Instant::now(), f32::from(self.rooms_scroll.0.borrow().base_handle.offset().y)));
+                cx.notify();
+            }
             return;
         }
         if self.searching {
@@ -1321,19 +1359,21 @@ impl BeeperApp {
     }
 
     /// The destinations: a bar under a phone's screen, a column beside a wide window's.
-    fn render_nav(&mut self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_nav(&mut self, narrow: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         let current = self.tab();
         let items = TABS.map(|(tab, label, icon)| {
             let ink = if tab == current { p.text } else { p.faint };
+            let press = press::area(label, Duration::ZERO, p.surface, window, cx).when(!narrow, |el| el.rounded(px(RADIUS)));
             div()
                 .id(label)
+                .relative()
                 .flex()
                 .items_center()
                 .text_color(ink)
                 .cursor_pointer()
-                .active(|el| el.bg(p.surface))
                 .on_click(cx.listener(move |this, _, window, cx| this.set_tab(tab, window, cx)))
+                .child(press)
                 .map(|el| {
                     if narrow {
                         el.flex_1().h_full().flex_col().justify_center().gap(px(4.)).text_size(fs(12.))
@@ -1362,73 +1402,29 @@ impl BeeperApp {
         }
     }
 
-    /// Where a finger lands on a chat row. A touch reaches the app as a click only when it lifts,
-    /// so the row learns of the press from the touch itself; it shows it after `ROW_PRESS_DELAY`,
-    /// so a finger that starts scrolling the list never lights a row up.
-    fn row_touch(&self, room: OwnedRoomId, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// Watches fingers on the chat list: reordering waits for them, and tapping the Chats tab
+    /// scrolls over a list the user has taken hold of only until they do.
+    fn list_touch(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let weak = cx.entity().downgrade();
-        canvas(
-            |_, _, _| {},
-            move |bounds, _, window, _| {
-                let visible = window.content_mask().bounds;
-                window.on_mouse_event(move |e: &TouchDragEvent, phase, _, cx| {
-                    let at = e.start_position;
-                    if phase.bubble() && e.phase == TouchPhase::Started && bounds.contains(&at) && visible.contains(&at) {
-                        let _ = weak.update(cx, |this, cx| this.row_pressed(room.clone(), cx));
-                    }
-                });
-            },
-        )
-        .absolute()
-        .inset_0()
-    }
-
-    fn row_pressed(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
-        if self.chat_sheet.is_some() || self.menu_open() || self.viewer.is_some() {
-            return;
-        }
-        let at = std::time::Instant::now();
-        self.row_press = Some((room, at));
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(ROW_PRESS_DELAY).await;
-            let _ = this.update(cx, |this, cx| {
-                if this.row_press.as_ref().is_some_and(|(_, since)| *since == at) {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Ends a chat row's press: the finger lifted (a tap), started scrolling, or let go of a long
-    /// press.
-    fn row_release(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let weak = cx.entity().downgrade();
-        let release = move |cx: &mut App| {
-            let _ = weak.update(cx, |this, cx| {
-                if this.row_press.take().is_some() {
-                    cx.notify();
-                }
-            });
-        };
         canvas(
             |_, _, _| {},
             move |_, _, window, _| {
-                let scroll = release.clone();
-                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
-                    if phase.bubble() {
-                        scroll(cx);
+                let down = weak.clone();
+                window.on_mouse_event(move |e: &TouchDragEvent, phase, _, cx| {
+                    if phase.bubble() && e.phase == TouchPhase::Started {
+                        let _ = down.update(cx, |this, _| this.finger = Some(Instant::now()));
                     }
                 });
-                let up = release.clone();
+                let up = weak.clone();
                 window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
                     if phase.bubble() {
-                        up(cx);
+                        let _ = up.update(cx, |this, _| this.finger = None);
                     }
                 });
-                window.on_mouse_event(move |e: &LongPressEvent, phase, _, cx| {
-                    if phase.bubble() && matches!(e.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                        release(cx);
+                let scroll = weak.clone();
+                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        let _ = scroll.update(cx, |this, _| this.to_top = None);
                     }
                 });
             },
@@ -1437,12 +1433,12 @@ impl BeeperApp {
         .size_0()
     }
 
-    fn render_rooms(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_rooms(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         let list = uniform_list(
             "rooms",
             self.shown.len() + self.message_rows(),
-            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+            cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 let chats = this.shown.len();
                 this.fetch_rows(range.start.min(chats)..range.end.min(chats));
                 range
@@ -1450,10 +1446,16 @@ impl BeeperApp {
                         if ix >= chats {
                             return this.message_row(ix - chats, cx);
                         }
+                        let id = this.rooms[this.shown[ix]].id.clone();
+                        let (dy, alpha) = this.fly.of(&id, window);
+                        let key: ElementId = SharedString::from(id.to_string()).into();
+                        // Lit while open, or while its sheet is; it fades back once it is neither.
+                        let lit = this.open.as_ref() == Some(&id) || this.chat_sheet.as_ref() == Some(&id);
+                        let lit_fade = if lit { Transition::new(Duration::ZERO) } else { Transition::new(motion::ROW_FADE).easing(motion::EASE_OUT) };
+                        let lit_alpha = transition(ElementId::NamedChild(Arc::new(key.clone()), "lit".into()), if lit { 1.0f32 } else { 0. }, lit_fade, window, cx);
+                        let press = press::area(key.clone(), ROW_PRESS_DELAY, p.raised, window, cx);
                         let room = &this.rooms[this.shown[ix]];
-                        let selected = this.open.as_ref() == Some(&room.id);
-                        let held = this.row_press.as_ref().is_some_and(|(id, at)| id == &room.id && at.elapsed() >= ROW_PRESS_DELAY);
-                        let id = room.id.clone();
+                        let selected = this.open.as_ref() == Some(&id);
                         let unread = room.is_unread();
                         let mark = |icon: IconName| Icon::new(icon).size_3p5().flex_none().text_color(p.faint);
                         // Nothing readable to preview: an undecrypted message says no more than "Message".
@@ -1464,23 +1466,19 @@ impl BeeperApp {
                             (None, time) => time,
                         };
                         h_flex()
-                            .id(SharedString::from(room.id.to_string()))
+                            .id(key)
                             .w_full()
                             .h(px(ROOM_ROW_H))
                             .px(px(GUTTER))
                             .gap(px(GAP))
                             .relative()
+                            .top(px(dy))
+                            .when(alpha < 1., |el| el.opacity(alpha))
                             .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(if selected { p.raised } else { p.surface })))
-                            .when(selected || held, |el| el.bg(p.raised))
-                            .active(|el| el.bg(p.raised))
                             .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.open.as_ref() != Some(&id) {
-                                    this.nav = Some((std::time::Instant::now(), true));
-                                }
-                                this.open_room(id.clone(), cx)
-                            }))
-                            .child(this.row_touch(room.id.clone(), cx))
+                            .on_click(cx.listener(move |this, _, _, cx| this.open_room(id.clone(), cx)))
+                            .child(div().absolute().inset_0().bg(p.raised).opacity(lit_alpha))
+                            .child(press)
                             .child(avatar(&room.name, this.avatars.get(&room.id), AVATAR, cx))
                             .child(
                                 v_flex()
@@ -1547,12 +1545,29 @@ impl BeeperApp {
         )
         .track_scroll(&self.rooms_scroll)
         .size_full();
+        if let Some((at, from)) = self.to_top {
+            let t = at.elapsed().as_secs_f32() / motion::SCROLL_TOP.as_secs_f32();
+            let y = if cx.reduce_motion() || t >= 1. { 0. } else { from * (1. - motion::ease_out(t)) };
+            if y == 0. {
+                self.to_top = None;
+            } else {
+                window.request_animation_frame();
+            }
+            let handle = self.rooms_scroll.0.borrow().base_handle.clone();
+            handle.set_offset(point(handle.offset().x, px(y)));
+        }
+        let fade = self.list_in.map(|at| at.elapsed().as_secs_f32() / motion::ENTER.as_secs_f32());
+        if fade.is_some_and(|t| t >= 1.) {
+            self.list_in = None;
+        } else if fade.is_some() {
+            window.request_animation_frame();
+        }
+        let list = div().size_full().when_some(fade.filter(|t| *t < 1.), |el, t| el.opacity(motion::ease_out(t))).child(list);
 
         let archive = self.view == View::Archive;
         let has_query = !self.search.read(cx).value().trim().is_empty();
-        let empty = if self.rooms.is_empty() {
-            t!("Syncing chats…")
-        } else if has_query {
+        let syncing = self.rooms.is_empty() && !has_query;
+        let empty = if has_query {
             t!("No chat or message matches")
         } else if self.only_unread {
             t!("Nothing unread")
@@ -1586,37 +1601,47 @@ impl BeeperApp {
                 })))
         };
         let waiting = self.rooms.iter().filter(|r| !r.archived && !r.low_priority && r.is_unread()).count();
-        let filters = [
+        let seg = press::Segments::new("filters", window, cx);
+        let chips = [
             (t!("All"), View::Inbox, false, 0),
             (t!("Unread"), View::Inbox, true, waiting),
             (t!("Low priority"), View::LowPriority, false, 0),
-        ]
-        .map(|(label, view, only_unread, count)| {
-            let on = self.view == view && self.only_unread == only_unread;
+        ];
+        let chosen = chips.iter().position(|&(_, view, only_unread, _)| self.view == view && self.only_unread == only_unread);
+        let slider = chosen.and_then(|ix| seg.pill("filters-pill", ix, p.raised, window, cx));
+        let measured = slider.is_some();
+        let filters = chips.into_iter().enumerate().map(|(ix, (label, view, only_unread, count))| {
+            let on = chosen == Some(ix);
+            let press = (!on).then(|| press::area(label, Duration::ZERO, p.surface, window, cx).rounded_full());
             // The pill is slimmer than what a finger needs; the target around it is not.
-            h_flex().id(label).group(label).h(px(TAP)).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.set_filter(view, only_unread, cx))).child(
+            h_flex().id(label).h(px(TAP)).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.set_filter(view, only_unread, cx))).child(
                 h_flex()
                     .id("pill")
-                    .when(!on, |el| el.group_active(label, |el| el.bg(p.surface)))
+                    .relative()
                     .h(px(36.))
                     .px(px(GAP))
                     .gap(px(6.))
                     .rounded_full()
                     .text_size(fs(14.))
                     .text_color(if on { p.text } else { p.muted })
-                    .when(on, |el| el.bg(p.raised))
+                    .when(on && !measured, |el| el.bg(p.raised))
+                    .child(seg.probe(ix))
+                    .children(press)
                     .child(label)
                     .when(count > 0, |el| el.child(div().text_color(p.faint).font_features(tabular()).child(count.to_string()))),
             )
         });
+        let filters = h_flex().flex_none().relative().px(px(GUTTER)).pb(px(4.)).gap(px(4.)).child(seg.container()).children(slider).children(filters);
         v_flex()
             .size_full()
             .child(h_flex().flex_none().h(px(BAR_H)).pl(px(GUTTER)).pr(px(if self.searching { GUTTER } else { GUTTER - 10. })).child(top))
             .when(!archive && !self.searching, |el| {
-                el.child(h_flex().flex_none().px(px(GUTTER)).pb(px(4.)).gap(px(4.)).children(filters))
+                el.child(filters)
             })
-            .child(self.row_release(cx))
-            .child(div().flex_1().min_h_0().child(if self.shown.is_empty() && self.message_rows() == 0 {
+            .child(self.list_touch(cx))
+            .child(div().flex_1().min_h_0().child(if syncing {
+                skeleton(p).into_any_element()
+            } else if self.shown.is_empty() && self.message_rows() == 0 {
                 div().px(px(GUTTER)).py(px(GAP)).text_size(fs(14.)).text_color(p.faint).child(empty).into_any_element()
             } else {
                 list.into_any_element()
@@ -1962,11 +1987,7 @@ impl BeeperApp {
                 header()
                     .when(self.find.open, |el| el.hidden())
                     .when(narrow, |el| {
-                        el.child(round_button("back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| {
-                            this.nav = Some((std::time::Instant::now(), false));
-                            this.close_room(cx);
-                            cx.notify();
-                        })))
+                        el.child(round_button("back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.pop_room(cx))))
                     })
                     .when(!narrow, |el| el.pl(px(GUTTER)))
                     .child(
@@ -2351,7 +2372,7 @@ impl BeeperApp {
             .into_iter()
             .map(|(label, icon, action)| {
                 let id = id.clone();
-                let row = sheet_row(label, icon, label, p.text, cx);
+                let row = sheet_row(label, icon, label, p.text, window, cx);
                 if !live {
                     return row;
                 }
@@ -2825,8 +2846,27 @@ fn swipe_step(swipe: &mut Option<(String, f32)>, id: &str, dx: f32, dy: f32, pha
     None
 }
 
+/// What the chat list shows until its first rows arrive: still, so it costs no frames.
+fn skeleton(p: Palette) -> Div {
+    let bar = |w: f32, h: f32| div().w(relative(w)).h(px(h)).rounded_full().bg(p.surface);
+    v_flex().size_full().children((0..8).map(|_| {
+        h_flex()
+            .h(px(ROOM_ROW_H))
+            .px(px(GUTTER))
+            .gap(px(GAP))
+            .child(div().size(px(AVATAR)).flex_none().rounded_full().bg(p.surface))
+            .child(v_flex().flex_1().gap(px(10.)).child(bar(0.45, 14.)).child(bar(0.75, 12.)))
+    }))
+}
+
 /// One action in a sheet.
-fn sheet_row(id: &'static str, icon: IconName, label: &'static str, ink: Hsla, cx: &App) -> Stateful<Div> {
+fn sheet_row(id: &'static str, icon: IconName, label: &'static str, ink: Hsla, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+    let press = press::area(id, Duration::ZERO, Palette::of(cx).raised, window, cx);
+    sheet_row_idle(id, icon, label, ink, cx).relative().child(press)
+}
+
+/// A sheet action drawn where there is no window to read touches in: it shows only a mouse's press.
+fn sheet_row_idle(id: &'static str, icon: IconName, label: &'static str, ink: Hsla, cx: &App) -> Stateful<Div> {
     let p = Palette::of(cx);
     h_flex()
         .id(id)
@@ -2998,33 +3038,91 @@ impl Render for BeeperApp {
                 let narrow = window.viewport_size().width < px(NARROW);
                 let panel = self.panel.map(|panel| self.render_panel(panel, narrow, window, cx));
                 let body = if narrow {
-                    // One thing at a time; the destinations stay in reach wherever they lead.
-                    let deep = self.open.is_some() || self.searching || matches!(self.panel, Some(Panel::Add | Panel::Login | Panel::NewChat));
-                    // Android's shared-axis move: a chat comes in from the right, the list returns
-                    // from the left, each 32 px with a fade. The screen it replaces is already gone.
-                    let shift = self.nav.filter(|&(_, push)| panel.is_none() && push == self.open.is_some()).and_then(|(at, push)| {
-                        let t = at.elapsed().as_secs_f32() / motion::PUSH.as_secs_f32();
-                        (t < 1. && !cx.reduce_motion()).then(|| (motion::ease_out(t), if push { 32. } else { -32. }))
-                    });
-                    let shift = shift.or_else(|| self.info_slide(cx).filter(|_| panel.is_none() && self.open.is_some()));
+                    let deep_panel = matches!(self.panel, Some(Panel::Add | Panel::Login | Panel::NewChat));
+                    match self.panel {
+                        Some(base @ (Panel::Settings | Panel::Networks)) => self.slide.base = Some(base),
+                        None => self.slide.base = None,
+                        Some(_) => {}
+                    }
+                    let in_chat = self.panel.is_none() && self.open.is_some();
+                    if deep_panel {
+                        self.slide.last_panel = self.panel;
+                    } else if in_chat {
+                        self.slide.last_panel = None;
+                    }
+                    let wanted = deep_panel || (in_chat && self.slide.leaving.is_none());
+                    let has_over = deep_panel || in_chat || self.slide.last_panel.is_some();
+                    self.slide.jump |= !has_over;
+                    let v = self.slide.value(wanted, window, cx);
+                    if !wanted && v == 0. {
+                        self.slide.last_panel = None;
+                    }
+                    // Android's shared-axis move inside a chat: its info page comes in from the right.
+                    let shift = self.info_slide(cx).filter(|_| in_chat);
                     if shift.is_some() {
                         window.request_animation_frame();
                     }
-                    let screen = if let Some(panel) = panel {
-                        panel
-                    } else if self.info_open() {
-                        self.render_info(false, window, cx)
-                    } else if self.open.is_some() {
-                        self.render_chat(true, window, cx).into_any_element()
+                    let (mut panel_over, mut panel_base) = (None, None);
+                    if let Some(el) = panel {
+                        if deep_panel {
+                            panel_over = Some(el);
+                        } else {
+                            panel_base = Some(el);
+                        }
+                    }
+                    let over = if !(wanted || v > 0.) {
+                        None
+                    } else if panel_over.is_some() {
+                        panel_over
+                    } else if in_chat {
+                        Some(if self.info_open() { self.render_info(false, window, cx) } else { self.render_chat(true, window, cx).into_any_element() })
+                    } else if let Some(last) = self.slide.last_panel {
+                        Some(self.render_panel(last, true, window, cx))
                     } else {
-                        self.render_rooms(cx).into_any_element()
+                        None
                     };
-                    v_flex()
+                    let g = slide::layers(v, f32::from(window.viewport_size().width), cx.reduce_motion());
+                    let under = if over.is_none() || v < 1. {
+                        if deep_panel && let Some(base) = self.slide.base {
+                            panel_base = Some(self.render_panel(base, true, window, cx));
+                        }
+                        let screen = panel_base.unwrap_or_else(|| self.render_rooms(window, cx).into_any_element());
+                        Some(
+                            div().absolute().inset_0().child(
+                                v_flex()
+                                    .size_full()
+                                    .relative()
+                                    .left(px(g.under_x))
+                                    .child(div().flex_1().min_h_0().child(screen))
+                                    .when(!self.searching, |el| el.child(self.render_nav(true, window, cx)))
+                                    .when(over.is_some() && v > 0., |el| el.child(div().absolute().inset_0().occlude().bg(p.ground).opacity(g.veil))),
+                            ),
+                        )
+                    } else {
+                        None
+                    };
+                    let leaving = self.slide.leaving.is_some();
+                    div()
+                        .relative()
                         .size_full()
-                        .child(div().flex_1().min_h_0().when_some(shift, |el, (v, far)| el.relative().left(px(far * (1. - v))).opacity(v)).child(screen))
-                        .when(!deep, |el| el.child(self.render_nav(true, cx)))
+                        .children(under)
+                        .when_some(over, |el, screen| {
+                            el.child(
+                                div().absolute().inset_0().child(
+                                    div()
+                                        .size_full()
+                                        .relative()
+                                        .left(px(g.over_x))
+                                        .opacity(g.over_alpha)
+                                        .bg(p.ground)
+                                        .child(div().size_full().when_some(shift, |el, (v, far)| el.relative().left(px(far * (1. - v))).opacity(v)).child(screen))
+                                        .when(leaving, |el| el.child(div().absolute().inset_0().occlude())),
+                                ),
+                            )
+                        })
                         .into_any_element()
                 } else {
+                    self.slide.jump = false;
                     let beside = Self::info_beside(window);
                     let main = if let Some(panel) = panel {
                         div().flex_1().min_w_0().h_full().child(panel).into_any_element()
@@ -3033,7 +3131,7 @@ impl Render for BeeperApp {
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .child(div().w(px(LIST_W)).flex_none().h_full().child(self.render_rooms(cx)))
+                            .child(div().w(px(LIST_W)).flex_none().h_full().child(self.render_rooms(window, cx)))
                             .child(div().flex_1().min_w_0().h_full().child(if self.info_open() && !beside {
                                 self.render_info(false, window, cx)
                             } else if self.open.is_some() {
@@ -3053,7 +3151,7 @@ impl Render for BeeperApp {
                             .when(self.info_open() && beside, |el| el.child(div().w(px(info::INFO_W)).flex_none().h_full().child(self.render_info(true, window, cx))))
                             .into_any_element()
                     };
-                    h_flex().size_full().child(self.render_nav(false, cx)).child(main).into_any_element()
+                    h_flex().size_full().child(self.render_nav(false, window, cx)).child(main).into_any_element()
                 };
                 let body = self.render_share(window, cx).unwrap_or(body);
                 let viewer = self.render_viewer(window, cx);
