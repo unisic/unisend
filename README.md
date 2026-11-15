@@ -1,21 +1,21 @@
 # Unisend
 
-Unisend (crate and binary `beeper-gpui`) is a chat client for Beeper accounts, in
-Rust: [GPUI](https://www.gpui.rs) via gpui-kit for the UI, gpui-mobile for
-Android, matrix-sdk against `matrix.beeper.com`.
+Unisend is a Matrix chat client written in Rust, for Linux, Windows, macOS and Android. The UI is
+[GPUI](https://www.gpui.rs) through gpui-kit (gpui-mobile on Android); the protocol, end-to-end
+encryption and key backup come from matrix-sdk. The crate and binary are still named `beeper-gpui`.
 
-Login uses Beeper's email-code flow (`api.beeper.com/user/login`, same as
-`bbctl`), then Matrix JWT login. Any other Matrix homeserver that offers
-`m.login.password` works too ("Use another Matrix server"); single sign-on, OIDC
-and registration do not yet. On other servers the Networks page says that chat
-networks are a Beeper feature. Encrypted history is unlocked with the account's
-recovery code.
+Accounts: any Matrix homeserver that offers password login (`m.login.password`). Single sign-on,
+OIDC and registration are not supported yet. Beeper accounts work as well, through Beeper's
+email-code sign-in (`api.beeper.com/user/login`, then Matrix JWT login on `matrix.beeper.com`);
+chats from other networks (WhatsApp, Signal, Messenger and the rest) arrive through Beeper's
+bridges, so the Networks page needs a Beeper account. Encrypted history is unlocked with the
+account's recovery code; Settings > Devices shows it on a device that has it, to copy to another.
 
 Emoji: on Linux and Android, Settings > Emoji can use a colour emoji font file of your own (sbix,
 CBDT or COLRv0, up to 300 MB; applies after a restart); the app ships no such font, so use one you
 are licensed to use on that device. macOS draws with the system's emoji.
 
-What works and what Beeper has that this does not yet: [docs/parity.md](docs/parity.md).
+What works and what is still missing: [docs/parity.md](docs/parity.md).
 
 ## Desktop (Linux)
 
@@ -56,8 +56,18 @@ section. `scripts/release.sh` builds a release signed with a key from the enviro
 `update.json`; a GitHub release can serve it at the stable
 `https://github.com/<owner>/<repo>/releases/latest/download/update.json`, any static host works.
 
-The Java classes in `android/app/src/main/java/dev/gpui/mobile` come from
-gpui-mobile (Apache-2.0, see the README there).
+### Java in a Rust app
+
+Everything the app does is Rust: the UI, Matrix, encryption, storage. Java is there only where
+Android accepts nothing else: some platform parts exist only as Java classes to extend or
+register (the Activity, the keyboard's `InputConnection`, a foreground `Service`, the receiver of
+notification buttons, the share sheet), and Rust reaches the rest of the Android API over JNI
+through small Java helpers. `android/app/src/main/java/dev/gpui/mobile` comes from gpui-mobile
+(Apache-2.0, see the README there, which names the files changed here);
+`android/app/src/main/java/dev/gpui/beeper` holds this app's Android ends: notifications and the
+background connection, sharing, files and the gallery, camera, voice messages, video playback,
+location, contacts, app lock, the Keystore-wrapped data key, network sign-in, updates and the
+per-app language.
 
 ## Tests
 

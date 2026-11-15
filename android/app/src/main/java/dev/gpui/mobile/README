@@ -1,4 +1,8 @@
-Copied unmodified from gpui-mobile (https://github.com/itsbalamurali/gpui-mobile,
+Copied from gpui-mobile (https://github.com/itsbalamurali/gpui-mobile,
 rev 5fd54f4554263ae06753e90472c7f2e2ff5d7495, example/android/gradle), used under
 Apache-2.0 (LICENSE-APACHE). gpui-mobile looks these classes up by name over JNI,
 so package and class names must stay as they are.
+
+Changed here: GpuiActivity.java, GpuiClipboard.java, GpuiInputActivity.java (the
+keyboard connection, most of it rewritten) and GpuiMediaSession.java. The others
+are as upstream.
