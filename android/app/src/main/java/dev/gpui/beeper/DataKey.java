@@ -4,7 +4,7 @@ import android.os.Build;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyPermanentlyInvalidatedException;
 import android.security.keystore.KeyProperties;
-import android.security.keystore.StrongBoxUnavailableException;
+import android.util.Log;
 
 import java.nio.ByteBuffer;
 import java.security.GeneralSecurityException;
@@ -21,28 +21,30 @@ import javax.crypto.spec.GCMParameterSpec;
  * Wraps the store key that Rust generates (src/vault.rs) with an AES-256-GCM key that never leaves
  * the Android Keystore: StrongBox when the phone has one, the TEE otherwise. The key asks for no
  * user authentication and no unlocked screen, so sync in the background works on a locked phone.
- * A blob is the 12-byte IV followed by the ciphertext and its tag. Rust sorts the exceptions:
- * KeyPermanentlyInvalidatedException, UnrecoverableKeyException and AEADBadTagException mean the
- * data is lost, anything else is worth another try.
+ * A blob is the 12-byte IV followed by the ciphertext and its tag. Only {@link Lost} means the data
+ * is gone for good (no key under the alias, a key invalidated, a blob the key does not open); Rust
+ * signs out on it and retries on any other exception.
  */
 public final class DataKey {
+    private static final String TAG = "DataKey";
     private static final String ALIAS = "murmur-data";
     private static final String STORE = "AndroidKeyStore";
     private static final String MODE = "AES/GCM/NoPadding";
     private static final int IV = 12;
     private static final int TAG_BITS = 128;
 
+    /** The wrapping key or the blob is gone for good, so is what the blob wrapped. */
+    public static final class Lost extends Exception {
+        Lost(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     private DataKey() {}
 
-    /** Called once per sign-in; a key that is gone or invalidated is replaced, its data is gone already. */
+    /** Called once per sign-in; a key that is invalidated is replaced, its data is gone already. */
     public static synchronized byte[] wrap(byte[] plain) throws Exception {
-        SecretKey key;
-        try {
-            key = existing();
-        } catch (UnrecoverableKeyException e) {
-            keyStore().deleteEntry(ALIAS);
-            key = null;
-        }
+        SecretKey key = existing();
         if (key == null) key = create();
         Cipher cipher = Cipher.getInstance(MODE);
         try {
@@ -58,11 +60,20 @@ public final class DataKey {
 
     public static synchronized byte[] unwrap(byte[] blob) throws Exception {
         SecretKey key = existing();
-        if (key == null) throw new UnrecoverableKeyException("no key " + ALIAS);
-        if (blob.length < IV) throw new AEADBadTagException("short blob");
+        if (key == null) throw new Lost("no key " + ALIAS, null);
+        if (blob.length < IV) throw new Lost("short blob", null);
         Cipher cipher = Cipher.getInstance(MODE);
-        cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, blob, 0, IV));
-        return cipher.doFinal(blob, IV, blob.length - IV);
+        try {
+            cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, blob, 0, IV));
+        } catch (KeyPermanentlyInvalidatedException e) {
+            throw new Lost("key invalidated", e);
+        }
+        try {
+            return cipher.doFinal(blob, IV, blob.length - IV);
+        } catch (AEADBadTagException e) {
+            // keystore2 throws this only for KM_ERROR_VERIFICATION_FAILED: the blob is not this key's.
+            throw new Lost("blob does not authenticate", e);
+        }
     }
 
     private static KeyStore keyStore() throws Exception {
@@ -71,16 +82,34 @@ public final class DataKey {
         return store;
     }
 
+    /** The key, or null when the alias holds none. */
     private static SecretKey existing() throws Exception {
-        return (SecretKey) keyStore().getKey(ALIAS, null);
+        try {
+            return (SecretKey) keyStore().getKey(ALIAS, null);
+        } catch (UnrecoverableKeyException e) {
+            // keystore2 returns null for KEY_NOT_FOUND and wraps every other getKeyEntry failure in
+            // this, a busy or restarted keystore daemon included, so it is not a lost key.
+            throw new GeneralSecurityException(e.getMessage() + describe(e.getCause()), e);
+        }
+    }
+
+    /** The Keystore's error code behind a failure, for the log; it never holds key material. */
+    private static String describe(Throwable cause) {
+        if (cause == null) return "";
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && cause instanceof android.security.KeyStoreException) {
+            android.security.KeyStoreException e = (android.security.KeyStoreException) cause;
+            return " (code " + e.getNumericErrorCode() + (e.isTransientFailure() ? ", transient)" : ")");
+        }
+        return " (" + cause.getClass().getName() + ")";
     }
 
     private static SecretKey create() throws GeneralSecurityException {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             try {
                 return generate(true);
-            } catch (StrongBoxUnavailableException e) {
-                // No secure element on this phone; the TEE holds the key instead.
+            } catch (GeneralSecurityException | RuntimeException e) {
+                // StrongBox missing, busy or refusing this spec; the TEE holds the key instead.
+                Log.w(TAG, "StrongBox key failed: " + e.getClass().getName());
             }
         }
         return generate(false);

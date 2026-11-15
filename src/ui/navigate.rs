@@ -15,20 +15,51 @@ pub(super) struct Drafts {
     seal: crate::vault::Seal,
     items: Vec<(OwnedRoomId, String)>,
     dirty: bool,
+    /// The stored drafts were read, or there are none: only then may the file be written over.
+    loaded: bool,
 }
 
 impl Drafts {
     pub(super) fn load(dir: &std::path::Path, seal: crate::vault::Seal) -> Self {
-        use crate::vault::DRAFTS;
-        let stored: Vec<(String, String)> = seal.read(dir, DRAFTS).ok().and_then(|raw| serde_json::from_slice(&raw).ok()).unwrap_or_default();
-        let mut drafts = Self { dir: dir.to_owned(), seal, items: Vec::new(), dirty: false };
+        let mut drafts = Self { dir: dir.to_owned(), seal, items: Vec::new(), dirty: false, loaded: false };
+        drafts.merge();
+        drafts
+    }
+
+    /// Adds the stored drafts of chats without one in memory, as older ones. False when the file
+    /// could not be read for a reason that may pass, or holds a newer format: it is kept then.
+    fn merge(&mut self) -> bool {
+        use crate::vault::{Broken, DRAFTS, broken};
+        let stored: Vec<(String, String)> = match self.seal.read(&self.dir, DRAFTS) {
+            Ok(raw) => serde_json::from_slice(&raw).unwrap_or_else(|e| {
+                log::warn!("drafts.json: {e}");
+                Vec::new()
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            // Damaged, or sealed with another key: nothing in it can be read again.
+            Err(e) if matches!(broken(&e), Some(Broken::Short | Broken::Tag)) => {
+                log::warn!("{e}");
+                Vec::new()
+            }
+            Err(e) => {
+                log::warn!("{e}");
+                return false;
+            }
+        };
+        let mut older = Self { dir: PathBuf::new(), seal: crate::vault::Seal::Plain, items: Vec::new(), dirty: false, loaded: true };
         for (room, text) in stored {
-            if let Ok(room) = OwnedRoomId::try_from(room) {
-                drafts.set(&room, &text);
+            if let Ok(room) = OwnedRoomId::try_from(room)
+                && self.get(&room).is_none()
+            {
+                older.set(&room, &text);
             }
         }
-        drafts.dirty = false;
-        drafts
+        older.items.append(&mut self.items);
+        let over = older.items.len().saturating_sub(MAX_DRAFTS);
+        older.items.drain(..over);
+        self.items = older.items;
+        self.loaded = true;
+        true
     }
 
     pub(super) fn get(&self, room: &OwnedRoomId) -> Option<&str> {
@@ -57,9 +88,12 @@ impl Drafts {
     }
 
     pub(super) fn save(&mut self) {
-        if !std::mem::take(&mut self.dirty) {
+        // Drafts that could not be read yet are merged in first, never written over; until then
+        // the change stays unsaved and the next save tries again.
+        if !self.dirty || !self.loaded && !self.merge() {
             return;
         }
+        self.dirty = false;
         let written = serde_json::to_vec(&self.items).map_err(std::io::Error::other).and_then(|raw| self.seal.write(&self.dir, crate::vault::DRAFTS, &raw));
         if let Err(e) = written {
             log::warn!("drafts.json: {e}");
@@ -286,7 +320,7 @@ mod tests {
     }
 
     fn drafts() -> Drafts {
-        Drafts { dir: PathBuf::new(), seal: Seal::Plain, items: Vec::new(), dirty: false }
+        Drafts { dir: PathBuf::new(), seal: Seal::Plain, items: Vec::new(), dirty: false, loaded: true }
     }
 
     #[test]
@@ -314,6 +348,7 @@ mod tests {
     fn survives_a_restart() {
         let dir = std::env::temp_dir().join(format!("murmur-drafts-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(crate::vault::SESSION), b"{}").unwrap();
         let mut d = Drafts::load(&dir, Seal::Plain);
         d.set(&room(7), "unsent");
         d.save();
@@ -324,6 +359,39 @@ mod tests {
         d.save();
         assert!(!std::fs::read(dir.join("drafts.enc")).unwrap().windows(6).any(|w| w == b"secret"));
         assert_eq!(Drafts::load(&dir, sealed).get(&room(8)), Some("secret plan"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unread_drafts_are_never_written_over() {
+        let dir = std::env::temp_dir().join(format!("murmur-drafts-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(crate::vault::SESSION), b"{}").unwrap();
+        let sealed = Seal::Sealed(std::sync::Arc::new(zeroize::Zeroizing::new([9; crate::vault::KEY_LEN])));
+        let mut d = Drafts::load(&dir, sealed.clone());
+        d.set(&room(1), "kept");
+        d.save();
+        let stored = std::fs::read(dir.join("drafts.enc")).unwrap();
+        // A read error that may pass: the change waits, the file stays as it was.
+        std::fs::rename(dir.join("drafts.enc"), dir.join("aside")).unwrap();
+        std::fs::create_dir(dir.join("drafts.enc")).unwrap();
+        let mut d = Drafts::load(&dir, sealed.clone());
+        d.set(&room(2), "new");
+        d.save();
+        assert!(dir.join("drafts.enc").is_dir() && d.dirty);
+        // Readable again: the next save keeps both.
+        std::fs::remove_dir(dir.join("drafts.enc")).unwrap();
+        std::fs::rename(dir.join("aside"), dir.join("drafts.enc")).unwrap();
+        assert_eq!(std::fs::read(dir.join("drafts.enc")).unwrap(), stored);
+        d.save();
+        let again = Drafts::load(&dir, sealed.clone());
+        assert_eq!((again.get(&room(1)), again.get(&room(2))), (Some("kept"), Some("new")));
+        // Signed out meanwhile: a late save does not bring the file back.
+        crate::vault::wipe(&dir);
+        d.set(&room(3), "late");
+        d.save();
+        assert!(!dir.join("drafts.enc").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
