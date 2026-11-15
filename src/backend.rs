@@ -1164,17 +1164,12 @@ impl State {
             }
             Cmd::Fetch(id, media) => {
                 let client = self.client()?.clone();
-                let (ev, dir) = (self.ev.clone(), media_dir(&self.dir));
+                let (ev, dir, generation) = (self.ev.clone(), media_dir(&self.dir), media_generation());
                 tokio::spawn(async move {
                     let saved = async {
                         let request = MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File };
                         let bytes = client.media().get_media_content(&request, false).await?;
-                        // One directory per event keeps the file's own name without collisions.
-                        let folder = dir.join(safe_name(&id));
-                        std::fs::create_dir_all(&folder)?;
-                        let path = folder.join(safe_name(&media.name));
-                        write_private(&path, &bytes)?;
-                        anyhow::Ok(path)
+                        save_media(&dir, generation, &id, &media.name, &bytes)
                     };
                     let path = match saved.await {
                         Ok(path) => Some(path),
@@ -1236,8 +1231,10 @@ impl State {
                 });
             }
             Cmd::SignOut => {
+                // Waited for, so the sync loop cannot write the chat list after the wipe below.
                 for task in self.tasks.drain(..) {
                     task.abort();
+                    let _ = task.await;
                 }
                 self.verify.stop();
                 if let Some(client) = self.client.take() {
@@ -1367,7 +1364,7 @@ impl State {
             Cmd::People(ask) => rooms::handle(self.client()?.clone(), self.api().ok(), self.rooms.clone(), self.ev.clone(), ask),
             Cmd::Export(id, media, what) => {
                 let (client, ev, dir) = (self.client()?.clone(), self.ev.clone(), media_dir(&self.dir));
-                tokio::spawn(export::run(client, ev, dir, id, media, what));
+                tokio::spawn(export::run(client, ev, dir, media_generation(), id, media, what));
             }
             Cmd::GifSearch { query, page } => gifs::search(self.http.clone(), self.dir.clone(), self.ev.clone(), query, page),
             Cmd::GifStop => gifs::stop(),
@@ -1538,7 +1535,11 @@ fn preview(m: &Msg, dm: bool) -> String {
 fn wipe_account(dir: &Path) {
     vault::wipe(dir);
     let _ = std::fs::remove_file(rooms_lang_path(dir));
-    let _ = std::fs::remove_dir_all(media_dir(dir));
+    {
+        let mut generation = MEDIA.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *generation += 1;
+        let _ = std::fs::remove_dir_all(media_dir(dir));
+    }
     let _ = std::fs::remove_dir_all(dir.join("notify"));
     search::wipe(dir);
 }
@@ -1560,9 +1561,64 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Files downloaded to be opened by other apps. Emptied at startup, so it holds one session's worth.
+/// Files downloaded to be opened by other apps, decrypted. Emptied at startup and sign-out, and
+/// each event's folder goes `MEDIA_TTL` after it was written.
 fn media_dir(dir: &Path) -> PathBuf {
     dir.join("media")
+}
+
+/// How long a downloaded attachment stays: long enough for the app it went to, or a voice note or
+/// video being played, to read it (an open file outlives its deletion), short enough that the sync
+/// service keeping the process alive for days does not keep the plain copies with it.
+const MEDIA_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Moved on by `wipe_account`, under this lock, so a download that finishes after a sign-out
+/// writes nothing.
+static MEDIA: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+
+fn media_generation() -> u64 {
+    *MEDIA.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Writes a downloaded attachment, one directory per event so it keeps its own name, unless the
+/// account it was asked for is gone.
+fn save_media(dir: &Path, generation: u64, id: &str, name: &str, bytes: &[u8]) -> Result<PathBuf> {
+    let current = MEDIA.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *current != generation {
+        return Err(anyhow!(t!("Not signed in")));
+    }
+    sweep_media(dir, MEDIA_TTL);
+    let folder = dir.join(safe_name(id));
+    std::fs::create_dir_all(&folder)?;
+    let path = folder.join(safe_name(name));
+    write_private(&path, bytes)?;
+    Ok(path)
+}
+
+/// Deletes the event folders under `dir` written more than `ttl` ago. One directory listing and a
+/// stat per folder (a few dozen at most).
+fn sweep_media(dir: &Path, ttl: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|at| at.elapsed().is_ok_and(|age| age > ttl));
+        if old {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Sweeps `dir` every half `MEDIA_TTL` for the life of the backend, also when nothing is fetched.
+async fn sweep_media_every(dir: PathBuf) {
+    let mut tick = tokio::time::interval(MEDIA_TTL / 2);
+    loop {
+        tick.tick().await;
+        let dir = dir.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _held = MEDIA.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            sweep_media(&dir, MEDIA_TTL);
+        })
+        .await;
+    }
 }
 
 /// A file name with nothing that could leave its directory.
