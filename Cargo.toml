@@ -54,6 +54,15 @@ gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "13c716b687b4
 env_logger = "0.11"
 dirs = "6"
 
+# Desktop notifications over the session bus; same version and features GPUI already builds.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.19", default-features = false, features = ["async-io"] }
+
+# Toasts; the versions GPUI already builds on Windows.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "Foundation_Collections", "UI_Notifications"] }
+windows-registry = "0.6"
+
 [target.'cfg(target_os = "android")'.dependencies]
 gpui-mobile = { git = "https://github.com/itsbalamurali/gpui-mobile", rev = "5fd54f4554263ae06753e90472c7f2e2ff5d7495", default-features = false, features = ["clipboard", "file_selector", "vibration"] }
 # Same version as gpui-mobile: calls into this app's own Java helper.

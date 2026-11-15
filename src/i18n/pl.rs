@@ -306,6 +306,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Start one with +.", "Zacznij nowy przyciskiem +."),
     ("Nothing was recorded", "Nic nie nagrano"),
     ("Notifications", "Powiadomienia"),
+    ("Not muted", "Nie wyciszono"),
+    ("Open", "Otwórz"),
     ("Objects", "Przedmioty"),
     ("Off", "Wyłączone"),
     ("Off|app lock", "Wyłączona"),
