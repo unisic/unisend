@@ -124,7 +124,12 @@ fn plurals() -> &'static HashMap<&'static str, [&'static str; 3]> {
 /// The text for `en` in the current language; English when Polish has no entry. A key may end in
 /// `|context` to tell apart two meanings of one English word ("Archive|verb"); English drops it.
 pub(crate) fn tr(en: &'static str) -> &'static str {
-    if polish()
+    tr_in(en, polish())
+}
+
+/// `tr` for a language given rather than the current one.
+pub(crate) fn tr_in(en: &'static str, polish: bool) -> &'static str {
+    if polish
         && let Some(pl) = table().get(en)
     {
         return pl;

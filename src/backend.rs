@@ -70,7 +70,7 @@ use tokio::sync::mpsc;
 
 use crate::beeper;
 use crate::bridges::{self, Flow, Network, Step};
-use crate::i18n::t;
+use crate::i18n::{n_, t, tr_in};
 
 const CHANNEL_CAP: usize = 64;
 const PAGE: u16 = 40;
@@ -132,6 +132,8 @@ pub enum Cmd {
     SignOut,
     /// Re-read the latest message of rooms whose preview is missing or undecryptable.
     Previews(Vec<OwnedRoomId>),
+    /// The interface language changed: previews and the open chat's rows are built again in it.
+    Relabel,
     /// `reply_to` and `edit` are event IDs; an edit replaces that message's text. `mentions` are
     /// the people picked from the mention list, as (name, user).
     Send { room: OwnedRoomId, body: String, reply_to: Option<String>, edit: Option<String>, mentions: Vec<(String, OwnedUserId)> },
@@ -1265,6 +1267,16 @@ impl State {
                     });
                 }
             }
+            Cmd::Relabel => {
+                if let Some(open) = &self.open {
+                    open.relabel.notify_one();
+                }
+                let changed = relabel_rooms(&mut self.rooms.lock().unwrap(), crate::i18n::polish());
+                if !changed.is_empty() {
+                    UNSAVED_PROBES.store(true, std::sync::atomic::Ordering::Relaxed);
+                    self.emit(Ev::Rooms(changed)).await;
+                }
+            }
             Cmd::Send { room, body, reply_to, edit, mentions } => {
                 let text = mentions::content(&body, &mentions);
                 match self.open.as_ref().filter(|open| open.room == room) {
@@ -1534,6 +1546,82 @@ fn preview(m: &Msg, dm: bool) -> String {
     text.replace('\n', " ")
 }
 
+/// How the app's own words sit in a preview's summary.
+#[derive(Clone, Copy)]
+enum Fit {
+    /// Alone, or before ": " and a caption.
+    Label,
+    /// Before the sender's text, such as a poll's question.
+    Prefix,
+    /// The whole summary.
+    Whole,
+}
+
+/// What `preview` writes in the interface language, by English key.
+const PREVIEW_TEXTS: [(&str, Fit); 9] = [
+    (n_!("📷 Photo"), Fit::Label),
+    (n_!("🖼 Sticker"), Fit::Label),
+    (n_!("🎬 Video"), Fit::Label),
+    (n_!("🎤 Voice Note"), Fit::Label),
+    (n_!("🎵 Audio"), Fit::Label),
+    (n_!("📍 Location"), Fit::Label),
+    (n_!("📊 Poll: {question}"), Fit::Prefix),
+    (n_!("Unable to decrypt this message yet"), Fit::Whole),
+    (n_!("Message deleted"), Fit::Whole),
+];
+
+/// A preview written in either language, in the given one: the app's own words (the "You" prefix,
+/// a media label, a placeholder) are swapped, the sender's name and text stay. No IO.
+fn relabel(preview: &str, polish: bool) -> String {
+    let langs = [false, true];
+    let mut out = String::with_capacity(preview.len() + 8);
+    let mut rest = preview;
+    if let Some(after) = langs.iter().find_map(|&l| rest.strip_prefix(tr_in(n_!("You"), l))?.strip_prefix(": ")) {
+        out.push_str(tr_in(n_!("You"), polish));
+        out.push_str(": ");
+        rest = after;
+    }
+    // The summary starts the preview or follows a sender's name and ": ", which a name may also hold.
+    let starts = std::iter::once(0).chain(rest.match_indices(": ").map(|(at, _)| at + 2));
+    for start in starts {
+        let summary = &rest[start..];
+        for (key, fit) in PREVIEW_TEXTS {
+            let words = |l| tr_in(key, l).split('{').next().unwrap_or_default();
+            let found = langs.iter().find_map(|&l| {
+                let tail = summary.strip_prefix(words(l))?;
+                let fits = match fit {
+                    Fit::Label => tail.is_empty() || tail.starts_with(": "),
+                    Fit::Prefix => true,
+                    Fit::Whole => tail.is_empty(),
+                };
+                fits.then_some(tail)
+            });
+            if let Some(tail) = found {
+                out.push_str(&rest[..start]);
+                out.push_str(words(polish));
+                out.push_str(tail);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Every cached preview in the given language; returns the summaries that changed.
+fn relabel_rooms(rooms: &mut HashMap<OwnedRoomId, RoomSummary>, polish: bool) -> Vec<RoomSummary> {
+    let mut changed = Vec::new();
+    for r in rooms.values_mut() {
+        let Some(old) = &r.preview else { continue };
+        let new = relabel(old, polish);
+        if &new != old {
+            r.preview = Some(new);
+            changed.push(r.clone());
+        }
+    }
+    changed
+}
+
 /// Everything this account left on the device: store, key, session, caches, downloads, index.
 fn wipe_account(dir: &Path) {
     vault::wipe(dir);
@@ -1780,9 +1868,9 @@ fn rooms_lang() -> &'static str {
 
 fn load_rooms(dir: &Path, seal: &Seal) -> Option<HashMap<OwnedRoomId, RoomSummary>> {
     let mut rooms: HashMap<OwnedRoomId, RoomSummary> = serde_json::from_slice(&seal.read(dir, ROOMS).inspect_err(|e| if e.kind() != std::io::ErrorKind::NotFound { log::warn!("{e}") }).ok()?).ok()?;
-    // Previews are text in the interface language: after a switch, each chat's is read again.
+    // Previews are text in the interface language, written again after a switch.
     if std::fs::read_to_string(rooms_lang_path(dir)).unwrap_or_else(|_| "en".into()) != rooms_lang() {
-        rooms.values_mut().for_each(|r| r.dated = false);
+        relabel_rooms(&mut rooms, crate::i18n::polish());
     }
     Some(rooms)
 }

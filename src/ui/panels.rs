@@ -75,7 +75,16 @@ impl BeeperApp {
     fn set_language(&mut self, language: LanguageChoice, window: &mut Window, cx: &mut Context<Self>) {
         self.settings.language = language;
         self.settings.save(&self.dir);
+        let before = crate::i18n::polish();
         crate::i18n::set(language);
+        if crate::i18n::polish() != before {
+            self.relabel(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Builds again what was made in the previous language: placeholders, previews, the open chat's rows.
+    fn relabel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Placeholders are set once when an input is created, so they are set again here.
         let fields = [
             (&self.cookie_paste, t!("Paste cookies or a cURL command")),
@@ -89,8 +98,8 @@ impl BeeperApp {
         for (input, text) in fields {
             input.update(cx, |input, cx| input.set_placeholder(text, window, cx));
         }
+        self.send(Cmd::Relabel, cx);
         cx.refresh_windows();
-        cx.notify();
     }
 
     fn set_chat_colour(&mut self, colour: ChatColour, window: &mut Window, cx: &mut Context<Self>) {

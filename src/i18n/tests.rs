@@ -139,3 +139,10 @@ fn polish_keeps_the_placeholders() {
         }
     }
 }
+
+#[test]
+fn tr_in_ignores_the_current_language() {
+    assert_eq!(tr_in("You", true), "Ty");
+    assert_eq!(tr_in("You", false), "You");
+    assert_eq!(tr_in("Archive|verb", false), "Archive");
+}

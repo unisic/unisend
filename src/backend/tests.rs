@@ -1644,3 +1644,42 @@ async fn encrypted_messages_are_found_with_edits_and_deletions() {
     alice.handle(Cmd::SignOut).await.unwrap();
     assert!(!index.exists());
 }
+
+#[test]
+fn previews_are_relabelled_in_the_current_language() {
+    let pl = |p: &str| relabel(p, true);
+    let en = |p: &str| relabel(p, false);
+    assert_eq!(pl("You: 📷 Photo: at the lake"), "Ty: 📷 Zdjęcie: at the lake");
+    assert_eq!(en("Ty: 📷 Zdjęcie: at the lake"), "You: 📷 Photo: at the lake");
+    assert_eq!(pl("Ania: 🎤 Voice Note"), "Ania: 🎤 Wiadomość głosowa");
+    assert_eq!(pl("Re: work: 🎬 Video"), "Re: work: 🎬 Film", "a name may hold \": \"");
+    assert_eq!(pl("📍 Location: Kraków"), "📍 Lokalizacja: Kraków");
+    assert_eq!(en("📊 Ankieta: Pizza?"), "📊 Poll: Pizza?");
+    assert_eq!(en("Ola: Nie można jeszcze odszyfrować tej wiadomości"), "Ola: Unable to decrypt this message yet");
+    assert_eq!(pl("You: Message deleted"), "Ty: Wiadomość usunięta");
+    assert_eq!(pl("📷 Photo"), "📷 Zdjęcie", "already relabelled ones stay");
+    assert_eq!(pl("📷 Zdjęcie"), "📷 Zdjęcie");
+    // What people wrote stays as written.
+    assert_eq!(pl("Message deleted by mistake"), "Message deleted by mistake");
+    assert_eq!(pl("📷 Photographer wanted"), "📷 Photographer wanted");
+    assert_eq!(pl("Your turn: 📎 notes.pdf"), "Your turn: 📎 notes.pdf");
+    assert_eq!(en("Zażółć gęślą jaźń"), "Zażółć gęślą jaźń");
+}
+
+#[test]
+fn cached_previews_in_another_language_are_relabelled_on_load() {
+    let dir = std::env::temp_dir().join(format!("murmur-rooms-lang-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let rooms = serde_json::json!({
+        "!a:x": { "id": "!a:x", "name": "A", "preview": "Ty: 📷 Zdjęcie", "ts": 5, "dated": true },
+        "!b:x": { "id": "!b:x", "name": "B", "preview": null, "ts": 0, "dated": true },
+    });
+    Seal::Plain.write(&dir, ROOMS, &serde_json::to_vec(&rooms).unwrap()).unwrap();
+    std::fs::write(rooms_lang_path(&dir), "pl").unwrap();
+    // Tests run in English.
+    let loaded = load_rooms(&dir, &Seal::Plain).unwrap();
+    let a = &loaded[<&RoomId>::try_from("!a:x").unwrap()];
+    assert_eq!(a.preview.as_deref(), Some("You: 📷 Photo"));
+    assert!(a.dated, "relabelled locally, not looked up again");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
