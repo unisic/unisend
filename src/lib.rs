@@ -498,9 +498,12 @@ fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Libraries log only warnings: matrix-sdk's info lines name rooms, users and servers.
+const LOG_FILTER: &str = "warn,beeper_gpui=info";
+
 #[cfg(not(target_os = "android"))]
 pub fn run_desktop() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,beeper_gpui=info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(LOG_FILTER)).init();
     i18n::init(None);
     let dir = std::env::var_os("BEEPER_GPUI_DATA_DIR")
         .map(PathBuf::from)
@@ -533,7 +536,10 @@ fn android_main(app: android_activity::AndroidApp) {
         std::process::exit(0);
     }
     android_logger::init_once(
-        android_logger::Config::default().with_max_level(log::LevelFilter::Info).with_tag("beeper-gpui"),
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_filter(android_logger::FilterBuilder::new().parse(LOG_FILTER).build())
+            .with_tag("beeper-gpui"),
     );
     jni::install_panic_hook();
     i18n::init(Some(app.config().language().unwrap_or_default()));
@@ -612,8 +618,8 @@ pub(crate) fn open_file(cx: &mut gpui_kit::App, path: &std::path::Path, mime: Op
         let _ = cx;
         match android_files::view(&path.to_string_lossy(), mime.unwrap_or("*/*")) {
             Ok(true) => {}
-            Ok(false) => log::warn!("no app opens {}", path.display()),
-            Err(e) => log::warn!("open {}: {e}", path.display()),
+            Ok(false) => log::warn!("no app opens this file"),
+            Err(e) => log::warn!("open file: {e}"),
         }
     }
 }
@@ -636,8 +642,8 @@ pub(crate) fn share_file(path: &std::path::Path, mime: Option<&str>) {
     #[cfg(target_os = "android")]
     match android_files::share(&path.to_string_lossy(), mime.unwrap_or("*/*")) {
         Ok(true) => {}
-        Ok(false) => log::warn!("no app takes {}", path.display()),
-        Err(e) => log::warn!("share {}: {e}", path.display()),
+        Ok(false) => log::warn!("no app takes this file"),
+        Err(e) => log::warn!("share file: {e}"),
     }
     #[cfg(not(target_os = "android"))]
     let _ = (path, mime);
@@ -1164,6 +1170,16 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn logs_keep_libraries_at_warnings_and_this_app_at_info() {
+        use log::{Level, Log as _, Metadata};
+        let logger = env_logger::Builder::new().parse_filters(super::LOG_FILTER).build();
+        let on = |target: &str, level: Level| logger.enabled(&Metadata::builder().target(target).level(level).build());
+        assert!(!on("matrix_sdk::sync", Level::Info));
+        assert!(on("matrix_sdk::sync", Level::Warn));
+        assert!(on("beeper_gpui::backend", Level::Info));
+        assert!(!on("beeper_gpui::backend", Level::Debug));
+    }
     /// An icon the UI names but the build does not embed draws as nothing, with only a log line.
     #[test]
     fn every_icon_the_ui_uses_is_embedded() {

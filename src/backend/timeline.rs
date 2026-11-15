@@ -240,7 +240,7 @@ async fn fetch_keys(room: &Room, sessions: impl IntoIterator<Item = String>) {
     let sessions: BTreeSet<String> = sessions.into_iter().collect();
     for session in sessions.iter().take(MAX_KEY_FETCHES) {
         if let Err(e) = backups.download_room_key(room.room_id(), session).await {
-            log::warn!("backup key for {}: {e}", room.room_id());
+            log::warn!("backup key: {e}");
             break;
         }
     }

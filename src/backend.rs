@@ -613,7 +613,7 @@ static COMMANDS: std::sync::OnceLock<mpsc::Sender<Cmd>> = std::sync::OnceLock::n
 /// Sends a message from a notification's reply box. False when the app is not signed in.
 #[cfg(target_os = "android")]
 pub(crate) fn reply(chat: &str, body: &str) -> bool {
-    log::info!("notification: reply to {chat}");
+    log::debug!("notification: reply");
     let (body, Ok(room)) = (body.trim(), OwnedRoomId::try_from(chat)) else { return false };
     !body.is_empty() && COMMANDS.get().is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None, mentions: Vec::new() }).is_ok())
 }
@@ -621,7 +621,7 @@ pub(crate) fn reply(chat: &str, body: &str) -> bool {
 /// Marks a chat read from its notification.
 #[cfg(target_os = "android")]
 pub(crate) fn read_from_notification(chat: &str) {
-    log::info!("notification: mark {chat} read");
+    log::debug!("notification: mark read");
     if let (Some(tx), Ok(room)) = (COMMANDS.get(), OwnedRoomId::try_from(chat)) {
         let _ = tx.try_send(Cmd::Chat(room, ChatAction::Unread(false)));
     }
@@ -967,7 +967,7 @@ impl State {
         self.rooms.lock().unwrap().clear();
         let store = self.dir.join("store");
         if store.exists() {
-            log::warn!("removing orphaned store at {}", store.display());
+            log::warn!("removing orphaned store");
             std::fs::remove_dir_all(&store)?;
         }
         wipe_account(&self.dir);
@@ -1011,7 +1011,7 @@ impl State {
         // The SDK retries a silent host for minutes; someone waiting at the form should hear sooner.
         let discovery = self.client_builder().server_name_or_homeserver_url(&server).build();
         let client = tokio::time::timeout(Duration::from_secs(30), discovery).await.map_err(|_| not_reached())?.map_err(|e| {
-            log::warn!("homeserver discovery for {server}: {e}");
+            log::warn!("homeserver discovery: {e}");
             match unreachable(&e) {
                 true => not_reached(),
                 false => anyhow!(t!("No Matrix server found at {server}.", server = server)),
@@ -1458,7 +1458,7 @@ impl State {
                 tokio::spawn(async move {
                     match mentions::members(&room, &own).await {
                         Ok(list) => drop(ev.send(Ev::Members { room: room_id, list }).await),
-                        Err(e) => log::warn!("members of {room_id}: {e:#}"),
+                        Err(e) => log::warn!("members: {e:#}"),
                     }
                 });
             }
@@ -1578,7 +1578,7 @@ async fn messages(room: &Room, from: Option<&str>, limit: u16) -> Result<Message
         match backups.download_room_key(room.room_id(), session).await {
             Ok(f) => found |= f,
             Err(e) => {
-                log::warn!("backup key for {}: {e}", room.room_id());
+                log::warn!("backup key: {e}");
                 break;
             }
         }

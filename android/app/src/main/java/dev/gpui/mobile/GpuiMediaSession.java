@@ -124,7 +124,7 @@ public class GpuiMediaSession {
                 .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
 
         sSession.setMetadata(builder.build());
-        Log.i(TAG, "Metadata updated: " + title + " by " + artist + " (" + durationMs + "ms)");
+        Log.i(TAG, "Metadata updated");
     }
 
     /**
