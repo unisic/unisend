@@ -1,6 +1,6 @@
 //! The app PIN. Only a salted PBKDF2-HMAC-SHA256 of it is kept, in the app's private data
 //! directory, together with the run of wrong tries, so killing the app does not reset the wait.
-//! It keeps someone holding the unlocked phone out of Murmur; it does not stand up to someone who
+//! It keeps someone holding the unlocked phone out of Unisend; it does not stand up to someone who
 //! can read the app's files (root, a forensic copy): four to eight digits are quickly guessed
 //! offline, however slow the hash.
 
@@ -163,7 +163,7 @@ mod tests {
     use super::*;
 
     fn dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("murmur-pin-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("unisend-pin-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn survives_a_restart() {
-        let dir = std::env::temp_dir().join(format!("murmur-drafts-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("unisend-drafts-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(crate::vault::SESSION), b"{}").unwrap();
         let mut d = Drafts::load(&dir, Seal::Plain);
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn unread_drafts_are_never_written_over() {
-        let dir = std::env::temp_dir().join(format!("murmur-drafts-keep-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("unisend-drafts-keep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(crate::vault::SESSION), b"{}").unwrap();

@@ -26,7 +26,7 @@ import java.util.concurrent.CountDownLatch;
  * granted at run time; without it, the camera app does the capturing under its own permission.
  */
 public class CameraCapture extends Activity {
-    private static final String TAG = "Murmur";
+    private static final String TAG = "Unisend";
     private static final int REQUEST = 9101;
     private static final long STALE_MS = 60 * 60 * 1000;
     private static final String EXTRA_VIDEO = "video";
@@ -159,7 +159,7 @@ public class CameraCapture extends Activity {
         ContentValues values = new ContentValues();
         values.put(MediaStore.MediaColumns.DISPLAY_NAME, source.getName());
         values.put(MediaStore.MediaColumns.MIME_TYPE, isVideo ? "video/mp4" : "image/jpeg");
-        values.put(MediaStore.MediaColumns.RELATIVE_PATH, (isVideo ? "Movies" : "Pictures") + "/Murmur");
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH, (isVideo ? "Movies" : "Pictures") + "/Unisend");
         Uri target = resolver.insert(
                 isVideo ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI : MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                 values);

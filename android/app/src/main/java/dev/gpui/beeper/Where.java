@@ -24,7 +24,7 @@ import java.util.Locale;
  * LocationManager (no Play Services). Called from Rust over JNI, {@link #fix} off the UI thread.
  */
 public final class Where {
-    private static final String TAG = "Murmur";
+    private static final String TAG = "Unisend";
     /** A fix this accurate (m) ends the wait early. */
     private static final float GOOD_ENOUGH = 30f;
     /** A cached fix younger than this (ms) may stand in when nothing fresher arrives. */

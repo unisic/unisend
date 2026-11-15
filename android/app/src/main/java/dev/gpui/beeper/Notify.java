@@ -282,7 +282,7 @@ public final class Notify {
         }
         long now = System.currentTimeMillis();
         NotificationCompat.MessagingStyle.Message line = new NotificationCompat.MessagingStyle.Message(text, now,
-                mine ? old.getUser() : new Person.Builder().setName("Murmur").setKey("beeper").build());
+                mine ? old.getUser() : new Person.Builder().setName("Unisend").setKey("beeper").build());
         NotificationCompat.MessagingStyle style = extend(context, old, old.getConversationTitle() == null ? null
                 : old.getConversationTitle().toString(), old.isGroupConversation(), line);
         Bundle extras = shown.getNotification().extras;
@@ -424,7 +424,7 @@ public final class Notify {
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         manager.notify(SUMMARY, 0, new NotificationCompat.Builder(context, MESSAGES)
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
-                .setContentTitle("Murmur")
+                .setContentTitle("Unisend")
                 .setContentText(context.getResources().getQuantityString(R.plurals.chats_with_new, chats, chats))
                 .setGroup(GROUP)
                 .setGroupSummary(true)

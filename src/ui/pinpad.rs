@@ -343,13 +343,13 @@ impl BeeperApp {
             .bg(p.ground)
             .text_color(p.text)
             .child(Icon::new(IconName::Lock).size_6().text_color(p.muted))
-            .child(self.render_pad(t!("Enter your Murmur PIN"), None, false, window, cx))
+            .child(self.render_pad(t!("Enter your Unisend PIN"), None, false, window, cx))
             .into_any_element()
     }
 
     /// The settings' page for the step that takes a PIN.
     pub(super) fn render_lock_change(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let forgot = t!("If you forget it, the only way back in is to clear Murmur's data and sign in again.");
+        let forgot = t!("If you forget it, the only way back in is to clear Unisend's data and sign in again.");
         let (prompt, checking) = match (self.pad_step(), &self.pad.first) {
             (Some(Step::CheckPin), _) => {
                 self.read_wait(cx);

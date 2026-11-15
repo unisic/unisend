@@ -24,7 +24,7 @@ import java.io.OutputStream;
  * lower version code. The system's answer arrives in {@link #onReceive}.
  */
 public final class Update extends BroadcastReceiver {
-    private static final String TAG = "Murmur";
+    private static final String TAG = "Unisend";
 
     /** Set by the native library when it is loaded; runs in the app's process. */
     private static native void nativeFailed(int status, String message);
@@ -67,7 +67,7 @@ public final class Update extends BroadcastReceiver {
         try {
             id = installer.createSession(params);
             try (PackageInstaller.Session session = installer.openSession(id)) {
-                try (InputStream in = new FileInputStream(apk); OutputStream out = session.openWrite("murmur.apk", 0, apk.length())) {
+                try (InputStream in = new FileInputStream(apk); OutputStream out = session.openWrite("unisend.apk", 0, apk.length())) {
                     byte[] buffer = new byte[64 * 1024];
                     int n;
                     while ((n = in.read(buffer)) > 0) {

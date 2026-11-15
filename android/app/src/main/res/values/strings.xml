@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" translatable="false">Murmur</string>
+    <string name="app_name" translatable="false">Unisend</string>
     <string name="you">You</string>
     <string name="chat">Chat</string>
     <string name="reply">Reply</string>
     <string name="mark_read">Mark as read</string>
-    <string name="reply_not_sent">Not sent. Open Murmur and try again.</string>
-    <string name="mute_failed">Not muted. Open Murmur and try again.</string>
+    <string name="reply_not_sent">Not sent. Open Unisend and try again.</string>
+    <string name="mute_failed">Not muted. Open Unisend and try again.</string>
     <string name="channel_direct">Direct messages</string>
     <string name="channel_groups">Group chats</string>
     <string name="channel_mentions">Mentions</string>
@@ -17,7 +17,7 @@
         <item quantity="one">%d chat has new messages</item>
         <item quantity="other">%d chats have new messages</item>
     </plurals>
-    <string name="unlock_app">Unlock Murmur</string>
+    <string name="unlock_app">Unlock Unisend</string>
     <string name="confirm_lock">Confirm it is you</string>
     <string name="close">Close</string>
     <string name="mute">Mute</string>

@@ -24,7 +24,7 @@ import java.io.IOException;
  * the UI thread; every method holds the class lock, so calls from several threads queue up.
  */
 public final class Voice {
-    private static final String TAG = "Murmur";
+    private static final String TAG = "Unisend";
     /** MAX_RECORDING in src/ui/voice.rs, which stops the recording there. */
     private static final int MAX_MS = 15 * 60 * 1000;
     /** Only for a recording Rust lost track of: a recorder stopped by this limit loses its file. */

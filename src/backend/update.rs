@@ -1,12 +1,12 @@
 //! Updates of the Android app, outside any app store. A manifest at a URL fixed at build time
-//! (`MURMUR_UPDATE_URL`, https only) names the newest release; without one nothing here runs and
+//! (`UNISEND_UPDATE_URL`, https only) names the newest release; without one nothing here runs and
 //! Settings shows no updates. Every request is a plain GET without cookies, identifiers or a user
 //! agent. The APK is streamed to the app's files, checked against the manifest's SHA-256, then
 //! handed to Android's PackageInstaller, which also refuses one signed with another key.
 //!
 //! The manifest, e.g. a release asset at
 //! `https://github.com/<owner>/<repo>/releases/latest/download/update.json`, or on any static host:
-//! `{ "versionCode": 42, "versionName": "0.2.0", "url": "https://…/murmur-0.2.0.apk",
+//! `{ "versionCode": 42, "versionName": "0.2.0", "url": "https://…/unisend-0.2.0.apk",
 //! "sha256": "<64 hex>", "notes": "What changed" }`. `scripts/release.sh` writes it.
 
 use std::io::Write as _;
@@ -17,7 +17,7 @@ use anyhow::{Result, bail, ensure};
 use matrix_sdk::reqwest;
 use serde::{Deserialize, Serialize};
 
-const URL: Option<&str> = option_env!("MURMUR_UPDATE_URL");
+const URL: Option<&str> = option_env!("UNISEND_UPDATE_URL");
 const MANIFEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Longest wait for the next piece of the APK; the whole download may take longer.
 const STALL: Duration = Duration::from_secs(60);
@@ -217,7 +217,7 @@ pub(super) async fn run_install(http: reqwest::Client, ev: tokio::sync::mpsc::Se
     // A name per download: an aborted one may still write a chunk before it stops.
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let folder = folder(&dir);
-    let apk = folder.join(format!("murmur-{}.apk", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let apk = folder.join(format!("unisend-{}.apk", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     // Progress may be dropped when the UI lags; the outcome below never is.
     let progress = |p| {
         let _ = ev.try_send(super::Ev::Update(Step::Progress(p)));
@@ -411,7 +411,7 @@ mod tests {
                 let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(&body));
             }
         });
-        format!("http://{addr}/murmur.apk")
+        format!("http://{addr}/unisend.apk")
     }
 
     #[tokio::test]
@@ -419,9 +419,9 @@ mod tests {
         let body = b"test".repeat(50_000);
         let sum: String = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &body).as_ref().iter().map(|b| format!("{b:02x}")).collect();
         let url = serve(body.clone());
-        let dir = std::env::temp_dir().join(format!("murmur-update-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("unisend-update-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let to = dir.join("murmur.apk");
+        let to = dir.join("unisend.apk");
         let http = reqwest::Client::new();
         let mut release = Release { version_code: 2, version_name: "2".into(), url, sha256: sum, notes: String::new() };
         let mut seen = Vec::new();
@@ -434,7 +434,7 @@ mod tests {
         assert!(format!("{e:#}").contains("SHA-256"), "{e:#}");
         assert!(!to.exists(), "a file that does not match is removed");
 
-        let manifest = serve(manifest("https://example.org/m.apk", SUM).into_bytes()).replace("murmur.apk", "update.json");
+        let manifest = serve(manifest("https://example.org/m.apk", SUM).into_bytes()).replace("unisend.apk", "update.json");
         assert_eq!(check(&http, &manifest, 6).await.unwrap().map(|r| r.version_code), Some(7));
         assert_eq!(check(&http, &manifest, 7).await.unwrap(), None, "same version is not an update");
         let _ = std::fs::remove_dir_all(&dir);

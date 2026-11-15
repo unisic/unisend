@@ -10,7 +10,7 @@ import android.os.LocaleList;
 
 /**
  * The app's language. Android 13 and later keep one per app, the same one the system settings
- * page (Apps, Murmur, Language) shows; the picker in the app writes it there, and Android then
+ * page (Apps, Unisend, Language) shows; the picker in the app writes it there, and Android then
  * applies it to every text it draws for the app. Earlier versions have none: there the native
  * texts follow the phone. Public static methods are called from Rust over JNI.
  */

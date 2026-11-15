@@ -1,6 +1,6 @@
 # Data at rest
 
-How Murmur keeps what it stores on the phone. Code: `src/vault.rs`,
+How Unisend keeps what it stores on the phone. Code: `src/vault.rs`,
 `android/app/src/main/java/dev/gpui/beeper/DataKey.java`, `src/backend.rs` (`unlock`, `lost`,
 `restore`, `fresh_store`, `wipe_account`), `src/backend/search.rs`.
 
@@ -64,7 +64,7 @@ Plain on purpose, short-lived:
 - `notify/`: a chat's picture for a notification, deleted as soon as the notification has it.
 - `cache/voice`, `cache/camera`, `cache/outgoing`, shared-in copies: the user's own recordings,
   photos and picked files on the way out; deleted after sending or when stale.
-- Saved to gallery (`Pictures/Murmur`): the user asked for a public copy.
+- Saved to gallery (`Pictures/Unisend`): the user asked for a public copy.
 
 Backup and transfer: `android:allowBackup="false"`, and `res/xml/data_extraction_rules.xml`
 excludes every file from cloud backup, device-to-device transfer (which Android 12+ runs despite

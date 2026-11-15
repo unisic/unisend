@@ -118,7 +118,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     let (cmd, events) = backend::start(dir.clone());
     let options = WindowOptions {
         window_bounds,
-        titlebar: Some(TitlebarOptions { title: Some("Murmur".into()), ..Default::default() }),
+        titlebar: Some(TitlebarOptions { title: Some("Unisend".into()), ..Default::default() }),
         // Wayland app id; matches packaging/linux/dev.gpui.beeper.desktop so the shell finds the icon.
         app_id: Some("dev.gpui.beeper".into()),
         ..Default::default()
@@ -128,7 +128,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     cx.activate(true);
 }
 
-/// Takes the language Android 13 and later keep for the app (Settings, Apps, Murmur, Language)
+/// Takes the language Android 13 and later keep for the app (Settings, Apps, Unisend, Language)
 /// into `settings`, so the two never disagree, and applies it. True when the interface language changed.
 pub(crate) fn apply_language(settings: &mut Settings, dir: &std::path::Path) -> bool {
     let before = i18n::polish();
@@ -691,8 +691,8 @@ pub(crate) fn share_file(path: &std::path::Path, mime: Option<&str>) {
     let _ = (path, mime);
 }
 
-/// Copies a downloaded file into the user's pictures: on Android `Pictures/Murmur` (`Movies/Murmur`
-/// for a video) in the gallery, on desktops `Pictures/Murmur` in the home folder. Returns where it
+/// Copies a downloaded file into the user's pictures: on Android `Pictures/Unisend` (`Movies/Unisend`
+/// for a video) in the gallery, on desktops `Pictures/Unisend` in the home folder. Returns where it
 /// went, for the user to read. Blocking.
 pub(crate) fn save_file(path: &std::path::Path, name: &str, mime: Option<&str>) -> Result<String, String> {
     #[cfg(target_os = "android")]
@@ -703,7 +703,7 @@ pub(crate) fn save_file(path: &std::path::Path, name: &str, mime: Option<&str>) 
     #[cfg(not(target_os = "android"))]
     {
         let _ = mime;
-        let folder = dirs::picture_dir().or_else(|| dirs::home_dir().map(|h| h.join("Pictures"))).ok_or("no pictures folder")?.join("Murmur");
+        let folder = dirs::picture_dir().or_else(|| dirs::home_dir().map(|h| h.join("Pictures"))).ok_or("no pictures folder")?.join("Unisend");
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         let target = free_name(&folder, name);
         std::fs::copy(path, &target).map_err(|e| e.to_string())?;
@@ -1216,7 +1216,7 @@ mod tests {
 
     #[test]
     fn a_taken_name_in_the_pictures_folder_gets_a_number() {
-        let dir = std::env::temp_dir().join(format!("murmur-free-name-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("unisend-free-name-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(super::free_name(&dir, "a.jpg"), dir.join("a.jpg"));
         std::fs::write(dir.join("a.jpg"), b"x").unwrap();

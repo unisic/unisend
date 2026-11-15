@@ -1,7 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Murmur
-Comment=Chat client for Beeper accounts
+Name=Unisend
+Comment=Matrix client
+Comment[pl]=Klient Matrix
 Exec=beeper-gpui
 Icon=dev.gpui.beeper
 Terminal=false
