@@ -301,7 +301,7 @@ impl BeeperApp {
 
     /// Whether a wide window has room for the screen beside the conversation.
     pub(super) fn info_beside(window: &Window) -> bool {
-        frame::viewport(window).width >= px(NAV_W + LIST_W + INFO_W + CHAT_MIN)
+        frame::viewport(window).width >= px(Self::nav_w(window) + LIST_W + INFO_W + CHAT_MIN)
     }
 
     /// What the panel takes from the conversation's width.
@@ -356,12 +356,14 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let view = frame::viewport(window).width;
         let narrow = view < px(NARROW);
+        // The rightmost pane, under the window buttons.
+        let end = frame::reserve(window);
         let width = if beside {
             INFO_W
         } else if narrow {
             f32::from(view)
         } else {
-            f32::from(view) - NAV_W - LIST_W
+            f32::from(view) - Self::nav_w(window) - LIST_W
         };
         let inner = width - 2. * GUTTER;
         let cols = (((inner + CELL_GAP) / (CELL_MIN + CELL_GAP)).floor() as usize).clamp(3, 6);
@@ -390,9 +392,11 @@ impl BeeperApp {
             .bg(p.ground)
             .when_some(slide, |el, (v, far)| el.relative().left(px(far * (1. - v))).opacity(v))
             .child(
-                header().map(|el| {
-                    let title = div().flex_1().min_w_0().pl(px(if beside { 10. } else { 4. })).child(screen_title(t!("Chat info")));
-                    if beside { el.child(title).child(close) } else { el.child(close).child(title) }
+                header().when(end > 0., |el| el.pr(px(GUTTER - 10. + end))).map(|el| {
+                    let title = div().flex_1().min_w_0().pl(px(if beside && end == 0. { 10. } else { 4. })).child(screen_title(t!("Chat info")));
+                    let title = frame::drag(title.when(end > 0., |el| el.h_full().flex().items_center()), window, cx);
+                    // Its close button keeps away from the window's own close button.
+                    if beside && end == 0. { el.child(title).child(close) } else { el.child(close).child(title) }
                 }),
             )
             .child(body)

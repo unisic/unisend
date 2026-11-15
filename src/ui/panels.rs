@@ -278,7 +278,8 @@ impl BeeperApp {
         }
     }
 
-    pub(super) fn render_panel(&mut self, panel: Panel, narrow: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// `banners` go under the title, kept to the content's column.
+    pub(super) fn render_panel(&mut self, panel: Panel, narrow: bool, banners: Option<AnyElement>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let (title, body) = match panel {
             Panel::NewChat => return self.render_new_chat(narrow, window, cx),
             Panel::Settings if self.pad_page() => (t!("App lock"), self.render_lock_change(window, cx)),
@@ -294,27 +295,41 @@ impl BeeperApp {
         let paged = panel == Panel::Settings && !self.settings_pages.is_empty();
         let deep = matches!(panel, Panel::Add | Panel::Login) || (panel == Panel::Settings && self.pad_page()) || paged;
         let edge = if narrow { GUTTER } else { GUTTER + 6. };
+        // Always the rightmost pane, under the window buttons.
+        let end = frame::reserve(window);
+        // A long translation ends in an ellipsis rather than past the screen edge.
+        let title = screen_title(title).min_w_0().truncate();
+        let title = if end > 0. { frame::drag(div().flex_1().min_w_0().h_full().flex().items_center().child(title), window, cx) } else { title };
+        let settings = panel == Panel::Settings && !deep;
+        let page = paged && !self.pad_page();
+        let scrolled = div()
+            .id("panel-body")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .when(settings, |el| el.track_scroll(&self.settings_scroll))
+            .when(page, |el| el.track_scroll(&self.page_scroll))
+            .child(v_flex().w_full().max_w(px(PANEL_W)).px(px(edge)).pt(px(8.)).pb(px(GAP * 2.)).gap(px(GAP * 2.)).child(body));
+        let handle = if settings { Some(&self.settings_scroll) } else if page { Some(&self.page_scroll) } else { None };
+        let scrolled = match handle.filter(|_| !gpui_kit::is_mobile()) {
+            Some(handle) => div().flex_1().min_h_0().relative().child(scrolled.size_full()).vertical_scrollbar(handle).into_any_element(),
+            None => scrolled.into_any_element(),
+        };
         v_flex()
             .size_full()
             .child(
                 header()
                     .when(deep, |el| el.child(round_button("panel-back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
                     .when(!deep, |el| el.pl(px(edge)))
-                    // A long translation ends in an ellipsis rather than past the screen edge.
-                    .child(screen_title(title).min_w_0().truncate()),
+                    .when(end > 0., |el| el.pr(px(GUTTER - 10. + end)))
+                    .child(title),
             )
-            .child(
-                div()
-                    .id("panel-body")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .when(panel == Panel::Settings && !deep, |el| el.track_scroll(&self.settings_scroll))
-                    .when(paged && !self.pad_page(), |el| el.track_scroll(&self.page_scroll))
-                    .child(
-                    v_flex().w_full().max_w(px(PANEL_W)).px(px(edge)).pt(px(8.)).pb(px(GAP * 2.)).gap(px(GAP * 2.)).child(body),
-                ),
-            )
+            // A card standing above the cards keeps their spacing.
+            .children(banners.map(|banners| {
+                let card = self.need_recovery || self.error.is_some();
+                div().w_full().max_w(px(PANEL_W)).px(px(edge - GUTTER)).when(card, |el| el.pb(px(GAP * 2. - 8.))).child(banners)
+            }))
+            .child(scrolled)
             .into_any_element()
     }
 
