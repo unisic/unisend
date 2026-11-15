@@ -285,6 +285,8 @@ pub struct BeeperApp {
     drafts: navigate::Drafts,
     place: navigate::Place,
     rooms_scroll: UniformListScrollHandle,
+    /// Kept here so the settings return to where they were after the lock keypad replaces them.
+    settings_scroll: ScrollHandle,
     /// Room avatars; `None` while loading or when the room has none. One entry per room at most.
     avatars: HashMap<OwnedRoomId, Option<Arc<Image>>>,
     /// Pictures of the people writing in the open chat; `None` while loading or when they have
@@ -491,6 +493,7 @@ impl BeeperApp {
             loading: false,
             timeline,
             rooms_scroll: UniformListScrollHandle::new(),
+            settings_scroll: ScrollHandle::new(),
             drafts,
             place: navigate::Place::default(),
             avatars: HashMap::new(),

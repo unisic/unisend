@@ -203,7 +203,7 @@ impl BeeperApp {
                     .child(screen_title(title)),
             )
             .child(
-                div().id("panel-body").flex_1().min_h_0().overflow_y_scroll().child(
+                div().id("panel-body").flex_1().min_h_0().overflow_y_scroll().when(panel == Panel::Settings && !deep, |el| el.track_scroll(&self.settings_scroll)).child(
                     v_flex().w_full().max_w(px(PANEL_W)).px(px(edge)).pt(px(8.)).pb(px(GAP * 2.)).gap(px(GAP * 2.)).child(body),
                 ),
             )
