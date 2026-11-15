@@ -18,6 +18,8 @@ const FLICK_MIN: f32 = 32.;
 const GAP_ROWS: usize = 24;
 /// The fill behind the row brightens to the action's colour this fast when it arms.
 const LIGHT: Duration = Duration::from_millis(150);
+/// The fill's opacity before it arms.
+const FAINT: f32 = 0.2;
 /// A row carried off comes back if its chat has not left the list by then: a sync that stalls.
 const AWAY_FOR: Duration = Duration::from_secs(10);
 
@@ -346,10 +348,14 @@ impl BeeperApp {
         let side = if dx < 0. { self.settings.swipe_left } else { self.settings.swipe_right };
         let (icon, act) = resolve(side, room)?;
         let p = Palette::of(cx);
-        let (fill, ink) = match act {
-            Act::Delete => (p.negative, p.ground),
-            // The accent is kept for what is addressed to the user.
-            Act::Chat(_) => (p.lifted, p.text),
+        // The accent is kept for what is addressed to the user.
+        let fill = match act {
+            Act::Delete => p.negative,
+            Act::Chat(ChatAction::Archive(_)) => p.swipe_archive,
+            Act::Chat(ChatAction::Unread(_)) => p.swipe_read,
+            Act::Chat(ChatAction::Pin(_)) => p.swipe_pin,
+            Act::Chat(ChatAction::Mute(_)) => p.swipe_mute,
+            Act::Chat(ChatAction::LowPriority(_)) => p.swipe_later,
         };
         let reveal = (dx.abs() / (arm(Self::row_width(window)) * 0.6)).min(1.);
         let policy = if cx.reduce_motion() { Transition::new(Duration::ZERO) } else { Transition::new(LIGHT).easing(motion::EASE_OUT) };
@@ -359,7 +365,8 @@ impl BeeperApp {
                 .absolute()
                 .inset_0()
                 .bg(p.surface)
-                .child(div().absolute().inset_0().bg(fill).opacity(lit))
+                // Faint while short of the arm point, so the coming action shows before it is chosen.
+                .child(div().absolute().inset_0().bg(fill).opacity((FAINT * reveal).max(lit)))
                 .child(
                     h_flex()
                         .absolute()
@@ -367,7 +374,7 @@ impl BeeperApp {
                         .px(px(GUTTER + 8.))
                         .items_center()
                         .when(dx < 0., |el| el.justify_end())
-                        .child(Icon::new(icon).size(px(20. + 2. * lit)).text_color(if lit > 0.5 { ink } else { p.muted }).opacity(reveal)),
+                        .child(Icon::new(icon).size(px(20. + 2. * lit)).text_color(if lit > 0.5 { p.ground } else { p.muted }).opacity(reveal)),
                 ),
         )
     }
