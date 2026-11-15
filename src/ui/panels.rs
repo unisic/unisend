@@ -7,6 +7,7 @@ use gpui_kit::component::switch::Switch;
 use super::*;
 use crate::applock::{Goal, LockMode};
 use crate::i18n::LanguageChoice;
+use super::receipt::ReceiptStyle;
 use super::rowswipe::SwipeAction;
 use crate::{ChatColour, ThemeChoice};
 
@@ -73,14 +74,13 @@ impl BeeperApp {
         cx.notify();
     }
 
-    /// One choice per chat action, under its label, as the lock timeouts are.
-    fn swipe_choices(&self, left: bool, cx: &mut Context<Self>) -> Div {
+    /// One pill per choice, under its label, as the lock timeouts are; a tap saves it.
+    fn choices<T: Copy + PartialEq + 'static>(&self, id: &'static str, all: impl IntoIterator<Item = T>, current: T, label: fn(T) -> &'static str, set: fn(&mut crate::Settings, T), cx: &mut Context<Self>) -> Div {
         let p = Palette::of(cx);
-        let current = if left { self.settings.swipe_left } else { self.settings.swipe_right };
-        h_flex().flex_wrap().gap(px(4.)).pb(px(8.)).children(SwipeAction::ALL.into_iter().enumerate().map(|(ix, action)| {
-            let on = current == action;
+        h_flex().flex_wrap().gap(px(4.)).pb(px(8.)).children(all.into_iter().enumerate().map(|(ix, choice)| {
+            let on = current == choice;
             div()
-                .id((if left { "swipe-left" } else { "swipe-right" }, ix))
+                .id((id, ix))
                 .h(px(36.))
                 .px(px(GAP))
                 .flex()
@@ -91,12 +91,20 @@ impl BeeperApp {
                 .bg(if on { p.text } else { p.raised })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    *if left { &mut this.settings.swipe_left } else { &mut this.settings.swipe_right } = action;
+                    set(&mut this.settings, choice);
                     this.settings.save(&this.dir);
                     cx.notify();
                 }))
-                .child(action.label())
+                .child(label(choice))
         }))
+    }
+
+    fn swipe_choices(&self, left: bool, cx: &mut Context<Self>) -> Div {
+        if left {
+            self.choices("swipe-left", SwipeAction::ALL, self.settings.swipe_left, SwipeAction::label, |s, a| s.swipe_left = a, cx)
+        } else {
+            self.choices("swipe-right", SwipeAction::ALL, self.settings.swipe_right, SwipeAction::label, |s, a| s.swipe_right = a, cx)
+        }
     }
 
     fn set_language(&mut self, language: LanguageChoice, window: &mut Window, cx: &mut Context<Self>) {
@@ -393,7 +401,9 @@ impl BeeperApp {
                     .child(row(t!("Chat colour"), &t!("{colour}. Your own messages, on this device.", colour = self.settings.chat_colour.label()), cx))
                     .child(swatches)
                     .children(self.render_look(cx))
-                    .children(self.render_emoji(cx)),
+                    .children(self.render_emoji(cx))
+                    .child(row(t!("Message status"), "", cx))
+                    .child(self.choices("receipts", ReceiptStyle::ALL, self.settings.receipts, ReceiptStyle::label, |s, style| s.receipts = style, cx)),
             ))
             .child(section(t!("Chat list"), cx).child(
                 card(cx)

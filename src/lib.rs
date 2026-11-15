@@ -77,7 +77,11 @@ gpui_kit::assets::icon_assets!(
         Hash,
         Flag,
         LogOut,
-        Users
+        Users,
+        CheckCheck,
+        Circle,
+        CircleCheck,
+        CircleAlert
     ]
 );
 
@@ -317,6 +321,9 @@ pub(crate) struct Settings {
     /// What a chat row swiped left to right does.
     #[serde(default = "ui::rowswipe::SwipeAction::right_default")]
     pub swipe_right: ui::rowswipe::SwipeAction,
+    /// How the delivery of the user's own messages is shown.
+    #[serde(default)]
+    pub receipts: ui::receipt::ReceiptStyle,
 }
 
 impl Settings {
@@ -330,7 +337,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), receipts: Default::default() })
     }
 
     fn parse(raw: &[u8]) -> Option<Self> {
@@ -1218,6 +1225,7 @@ mod tests {
             include_str!("ui/navigate.rs"),
             include_str!("ui/panels.rs"),
             include_str!("ui/pollnew.rs"),
+            include_str!("ui/receipt.rs"),
             include_str!("ui/rich.rs"),
             include_str!("ui/rooms.rs"),
             include_str!("ui/sharein.rs"),
@@ -1286,6 +1294,17 @@ mod tests {
         let mut changed = old.clone();
         (changed.swipe_left, changed.swipe_right) = (SwipeAction::Delete, SwipeAction::None);
         assert_eq!(super::Settings::parse(&serde_json::to_vec(&changed).unwrap()).unwrap(), changed);
+    }
+
+    #[test]
+    fn receipt_style_defaults_to_text_and_round_trips() {
+        use crate::ui::receipt::ReceiptStyle;
+        let old = super::Settings::parse(br#"{"theme":"Light"}"#).unwrap();
+        assert_eq!(old.receipts, ReceiptStyle::Text);
+        for style in ReceiptStyle::ALL {
+            let changed = super::Settings { receipts: style, ..old.clone() };
+            assert_eq!(super::Settings::parse(&serde_json::to_vec(&changed).unwrap()).unwrap(), changed);
+        }
     }
 
     #[test]
