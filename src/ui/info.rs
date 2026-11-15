@@ -371,9 +371,9 @@ impl BeeperApp {
         let cell = ((inner - CELL_GAP * (cols - 1) as f32) / cols as f32).floor();
         let body = list(
             self.info.list.clone(),
-            cx.processor(move |this, ix: usize, _, cx| {
+            cx.processor(move |this, ix: usize, window, cx| {
                 let Some(&row) = this.info.rows.get(ix) else { return div().into_any_element() };
-                this.render_info_row(row, cell, cx)
+                this.render_info_row(row, cell, window, cx)
             }),
         )
         .flex_1()
@@ -398,7 +398,7 @@ impl BeeperApp {
             .into_any_element()
     }
 
-    fn render_info_row(&mut self, row: Row, cell: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_info_row(&mut self, row: Row, cell: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         let summary = self.room_summary().cloned();
         let details = self.info.details.clone();
@@ -541,6 +541,8 @@ impl BeeperApp {
             }
             Row::Shelves => {
                 let current = self.info.shelf;
+                // The pill glides to the chosen third; the labels switch colour at once.
+                let slot = transition("shelf-pill", current as usize as f32, motion::enter(), window, cx);
                 let choice = |label: &'static str, shelf: Shelf, cx: &mut Context<Self>| {
                     let on = current == shelf;
                     div()
@@ -553,7 +555,6 @@ impl BeeperApp {
                         .rounded_full()
                         .text_size(fs(14.))
                         .text_color(if on { p.ground } else { p.muted })
-                        .when(on, |el| el.bg(p.text))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| this.set_shelf(shelf, cx)))
                         .child(label)
@@ -563,9 +564,13 @@ impl BeeperApp {
                     .pb(px(GAP))
                     .child(
                         h_flex()
+                            .relative()
                             .p(px(4.))
                             .rounded_full()
                             .bg(p.raised)
+                            .child(div().absolute().top(px(4.)).bottom(px(4.)).left(px(4.)).right(px(4.)).child(
+                                div().absolute().top_0().h_full().w(relative(1. / 3.)).left(relative(slot / 3.)).rounded_full().bg(p.text),
+                            ))
                             .child(choice(t!("Media"), Shelf::Media, cx))
                             .child(choice(t!("Links"), Shelf::Links, cx))
                             .child(choice(t!("Files"), Shelf::Files, cx)),

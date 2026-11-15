@@ -1,5 +1,7 @@
 //! The form that starts a poll: a question, 2 to 20 options, one answer or several.
 
+use gpui_kit::component::switch::Switch;
+
 use super::*;
 use crate::backend::NewPoll;
 use crate::backend::pollnew::{MAX_ANSWERS, MIN_ANSWERS};
@@ -145,33 +147,25 @@ impl BeeperApp {
                 .when(live, |el| el.on_click(cx.listener(|this, _, window, cx| this.add_poll_option(window, cx))))
         });
         let multiple = f.multiple;
+        let weak = cx.entity().downgrade();
         let toggle = h_flex()
             .id("poll-multiple")
             .h(px(TAP + 8.))
             .mx(px(GUTTER))
             .mt(px(8.))
             .justify_between()
-            .cursor_pointer()
+            .items_center()
             .child(div().text_size(fs(16.)).child(t!("Allow multiple answers")))
-            .child(
-                div()
-                    .w(px(44.))
-                    .h(px(26.))
-                    .rounded_full()
-                    .p(px(3.))
-                    .flex()
-                    .when(multiple, |el| el.justify_end())
-                    .bg(if multiple { p.text } else { p.raised })
-                    .child(div().size(px(20.)).rounded_full().bg(if multiple { p.ground } else { p.muted })),
-            )
-            .when(live, |el| {
-                el.on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(f) = this.poll_form.fields.as_mut() {
-                        f.multiple = !f.multiple;
-                    }
-                    cx.notify();
-                }))
-            });
+            .child(Switch::new("poll-multiple-switch").checked(multiple).on_click(move |on, _, cx| {
+                if live {
+                    let _ = weak.update(cx, |this, cx| {
+                        if let Some(f) = this.poll_form.fields.as_mut() {
+                            f.multiple = *on;
+                        }
+                        cx.notify();
+                    });
+                }
+            }));
         let send = h_flex()
             .id("poll-send")
             .h(px(TAP))
