@@ -193,13 +193,13 @@ pub trait Keystore {
     fn unwrap(&self, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>, KeyError>;
 }
 
-/// Sorts an exception from `DataKey` (`crate::java_error`'s "name: message (frame)"): these
-/// mean the Keystore key is gone or does not fit the blob, anything else may pass.
+/// Sorts an exception from `DataKey` (`crate::java_error`'s "name: message (frame)"). `DataKey`
+/// throws `DataKey$Lost` only for a missing or invalidated key or a blob it does not open; every
+/// other exception, keystore2's `UnrecoverableKeyException` for a busy daemon included, may pass.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub fn classify(java_error: String) -> KeyError {
-    const LOST: [&str; 3] = ["KeyPermanentlyInvalidatedException", "UnrecoverableKeyException", "AEADBadTagException"];
     let name = java_error.split(':').next().unwrap_or_default();
-    if LOST.iter().any(|lost| name.ends_with(lost)) { KeyError::Lost(java_error) } else { KeyError::Transient(java_error) }
+    if name.ends_with("DataKey$Lost") { KeyError::Lost(java_error) } else { KeyError::Transient(java_error) }
 }
 
 /// What the files under `dir` say about how this install keeps its data.
@@ -282,11 +282,13 @@ mod android {
             let input_array = env.byte_array_from_slice(input).map_err(|e| e.to_string())?;
             let name = jni::strings::JNIString::new(method);
             let called = env.call_static_method(&class, &name, jni::jni_sig!("([B)[B"), &[JValue::Object(&input_array)]).and_then(|v| v.l());
+            // A thrown exception is still pending and makes `set_region` fail, so it is caught first.
+            let called = called.map_err(|e| crate::java_error(env, e));
             let zeros = vec![0i8; input.len()];
             let _ = input_array.set_region(env, 0, &zeros);
             let output = match called {
                 Ok(output) => output,
-                Err(e) => return Ok(Err(classify(crate::java_error(env, e)))),
+                Err(e) => return Ok(Err(classify(e))),
             };
             let output = env.cast_local::<JByteArray>(output).map_err(|e| e.to_string())?;
             let bytes = Zeroizing::new(env.convert_byte_array(&output).map_err(|e| e.to_string())?);
@@ -336,7 +338,7 @@ mod tests {
                 return Err(e);
             }
             // As the Java side reports a blob from another key.
-            open(&self.key, "wrap", blob).map(Zeroizing::new).map_err(|_| classify("javax.crypto.AEADBadTagException: null (at x)".into()))
+            open(&self.key, "wrap", blob).map(Zeroizing::new).map_err(|_| classify("dev.gpui.beeper.DataKey$Lost: blob does not authenticate (at x)".into()))
         }
     }
 
@@ -419,15 +421,22 @@ mod tests {
 
     #[test]
     fn java_errors_sorted_by_what_they_lose() {
+        // What DataKey.unwrap throws for a missing alias, an invalidated key and a foreign blob.
         let lost = [
-            "android.security.keystore.KeyPermanentlyInvalidatedException: Key permanently invalidated (at DataKey.unwrap)",
-            "java.security.UnrecoverableKeyException: no key murmur-data (at DataKey.unwrap)",
-            "javax.crypto.AEADBadTagException: null (at android.security.keystore2.AndroidKeyStoreCipherSpiBase.engineDoFinal)",
+            "dev.gpui.beeper.DataKey$Lost: no key murmur-data (at dev.gpui.beeper.DataKey.unwrap(DataKey.java:62))",
+            "dev.gpui.beeper.DataKey$Lost: key invalidated (at dev.gpui.beeper.DataKey.unwrap(DataKey.java:69))",
+            "dev.gpui.beeper.DataKey$Lost: blob does not authenticate (at dev.gpui.beeper.DataKey.unwrap(DataKey.java:75))",
+            "dev.gpui.beeper.DataKey$Lost: short blob (at dev.gpui.beeper.DataKey.unwrap(DataKey.java:63))",
         ];
         for e in lost {
             assert!(matches!(classify(e.into()), KeyError::Lost(_)), "{e}");
         }
         let transient = [
+            // keystore2 wraps a busy or restarted daemon in this; DataKey.existing rethrows it so.
+            "java.security.GeneralSecurityException: Failed to obtain information about key (code 4, transient) (at dev.gpui.beeper.DataKey.existing(DataKey.java:93))",
+            "java.security.UnrecoverableKeyException: Failed to obtain information about key (at android.security.keystore2.AndroidKeyStoreProvider.loadAndroidKeyStoreKeyFromKeystore)",
+            "android.security.keystore.KeyPermanentlyInvalidatedException: Key permanently invalidated (at x)",
+            "javax.crypto.AEADBadTagException: null (at android.security.keystore2.AndroidKeyStoreCipherSpiBase.engineDoFinal)",
             "android.security.KeyStoreException: System error (at android.security.KeyStore2.getKeyEntry)",
             "java.security.ProviderException: Keystore operation failed: UnrecoverableKeyException (at x)",
             "java.lang.ClassNotFoundException: dev.gpui.beeper.DataKey (at y)",
