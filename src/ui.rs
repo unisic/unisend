@@ -372,6 +372,8 @@ impl BeeperApp {
         ] {
             subs.push(cx.subscribe_in(input, window, move |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { shift: false, .. } => on_enter(this, window, cx),
+                // The emoji icon focuses the composer for its caret; the panel, not the keyboard, takes the keyboard's place.
+                InputEvent::Focus if matches!(keyboard, Keyboard::Text) && this.emoji_open == Some(emojipick::Target::Composer) => {}
                 other => keyboard_follows(other, keyboard, cx),
             }));
         }
