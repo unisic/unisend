@@ -13,8 +13,13 @@ use super::*;
 use crate::backend::caption as prepare;
 use crate::i18n::t;
 
-/// A sideways pan this long (px) turns the page.
+/// A sideways pan this long (px), or one let go this fast (px/s), turns the page.
 const PAN_PAGE: f32 = 48.;
+const PAN_SPEED: f32 = 500.;
+/// Between neighbouring pages while they slide.
+const PAGE_GAP: f32 = 16.;
+/// How far the stage follows a pan past the first or the last item.
+const EDGE_GIVE: f32 = 0.3;
 const STRIP_CELL: f32 = 48.;
 
 struct Entry {
@@ -37,7 +42,9 @@ pub(super) struct Preview {
     room: Option<OwnedRoomId>,
     reply_to: Option<String>,
     loading: bool,
-    pan: Option<f32>,
+    pan: Option<Pan>,
+    /// Where the stage is, sideways, once no finger holds it: it glides home from a let-go pan.
+    slide: motion::Glide,
     field: Entity<InputState>,
     _subs: Vec<Subscription>,
 }
@@ -65,6 +72,7 @@ impl Preview {
             reply_to: None,
             loading: false,
             pan: None,
+            slide: motion::Glide::new(motion::SETTLE.0, motion::SETTLE.1, 0.5, 0.),
             field,
             _subs: subs,
         }
@@ -84,21 +92,55 @@ fn is_media(path: &Path) -> Option<bool> {
     }
 }
 
-/// Advances a sideways pan by one event; gives the page turn (1 next, -1 previous) when it ends far
-/// enough. A mouse wheel has no start, so it never turns a page.
-fn pan_step(pan: &mut Option<f32>, dx: f32, dy: f32, phase: TouchPhase) -> Option<isize> {
+/// A sideways pan over the stage: how far it went, and its last few (time, total) for the speed.
+struct Pan {
+    total: f32,
+    samples: VecDeque<(Instant, f32)>,
+}
+
+/// Advances a sideways pan by one event, starting from `from` (a stage still gliding is caught where
+/// it is); gives the total and its speed in px/s when it ends. A mouse wheel has no start, so it never
+/// moves the stage.
+fn pan_step(pan: &mut Option<Pan>, from: f32, dx: f32, dy: f32, phase: TouchPhase, now: Instant) -> Option<(f32, f32)> {
     let sideways = if dx.abs() > dy.abs() { dx } else { 0. };
     match phase {
-        TouchPhase::Started => *pan = Some(sideways),
+        TouchPhase::Started => *pan = Some(Pan { total: from + sideways, samples: VecDeque::from([(now, from + sideways)]) }),
         TouchPhase::Moved => {
-            if let Some(total) = pan {
-                *total += sideways;
+            if let Some(pan) = pan {
+                pan.total += sideways;
+                pan.samples.push_back((now, pan.total));
+                if pan.samples.len() > 4 {
+                    pan.samples.pop_front();
+                }
             }
         }
-        TouchPhase::Ended => return pan.take().filter(|t| t.abs() >= PAN_PAGE).map(|t| if t > 0. { -1 } else { 1 }),
+        TouchPhase::Ended => {
+            let mut pan = pan.take()?;
+            pan.samples.push_back((now, pan.total));
+            return Some((pan.total, gallery::speed(&pan.samples)));
+        }
         TouchPhase::Cancelled => *pan = None,
     }
     None
+}
+
+/// The page a pan let go at `total` (px, positive rightward) and `speed` turns to: -1 the previous,
+/// 1 the next, 0 none.
+fn page_turn(total: f32, speed: f32) -> isize {
+    let flung = speed.abs() >= PAN_SPEED && speed.signum() == total.signum();
+    if total == 0. || !(total.abs() >= PAN_PAGE || flung) {
+        0
+    } else if total > 0. {
+        -1
+    } else {
+        1
+    }
+}
+
+/// How far the stage follows a pan: 1:1 toward a neighbour, with resistance past the ends.
+fn give(total: f32, previous: bool, next: bool) -> f32 {
+    let open = if total > 0. { previous } else { next };
+    if open { total } else { total * EDGE_GIVE }
 }
 
 impl BeeperApp {
@@ -203,6 +245,7 @@ impl BeeperApp {
             return;
         }
         p.cur = ix;
+        p.slide.set(0.);
         let text = p.entries[ix].caption.clone();
         p.field.update(cx, |f, cx| f.set_value(text, window, cx));
         self.trim_preview(cx);
@@ -210,12 +253,43 @@ impl BeeperApp {
         cx.notify();
     }
 
+    /// The stage follows a sideways pan 1:1; let go, it turns the page or not, and glides home from
+    /// the finger's speed in the frame of the page it lands on.
     fn pan_preview(&mut self, e: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let d = e.delta.pixel_delta(px(20.));
-        if let Some(turn) = pan_step(&mut self.preview.pan, f32::from(d.x), f32::from(d.y), e.touch_phase) {
+        let p = &mut self.preview;
+        let (previous, next) = (p.cur > 0, p.cur + 1 < p.entries.len());
+        let held = p.pan.is_some();
+        let Some((total, speed)) = pan_step(&mut p.pan, p.slide.pos, f32::from(d.x), f32::from(d.y), e.touch_phase, Instant::now()) else {
+            if let Some(pan) = &p.pan {
+                p.slide.hold(give(pan.total, previous, next));
+                cx.notify();
+            } else if held {
+                // Cancelled: back where it was, without a fling.
+                p.slide.release(0., 0., Instant::now());
+                cx.notify();
+            }
+            return;
+        };
+        let at = give(total, previous, next);
+        let turn = match page_turn(total, speed) {
+            -1 if previous => -1,
+            1 if next => 1,
+            _ => 0,
+        };
+        let page = f32::from(window.viewport_size().width) + PAGE_GAP;
+        if turn != 0 {
             let ix = self.preview.cur.saturating_add_signed(turn);
             self.show_item(ix, window, cx);
         }
+        let slide = &mut self.preview.slide;
+        slide.hold(at + turn as f32 * page);
+        if cx.reduce_motion() {
+            slide.set(0.);
+        } else {
+            slide.release(0., speed, Instant::now());
+        }
+        cx.notify();
     }
 
     fn remove_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -244,6 +318,7 @@ impl BeeperApp {
         p.open = false;
         p.loading = false;
         p.pan = None;
+        p.slide.set(0.);
         let reply = p.reply_to.take();
         for entry in p.entries.drain(..) {
             for image in [entry.strip, entry.big].into_iter().flatten() {
@@ -284,11 +359,17 @@ impl BeeperApp {
         }
         let p = Palette::of(cx);
         let (top, bottom) = crate::insets();
+        let shift = if self.preview.slide.running() {
+            window.request_animation_frame();
+            self.preview.slide.step(Instant::now())
+        } else {
+            self.preview.slide.pos
+        };
+        let width = f32::from(window.viewport_size().width);
         let pv = &self.preview;
         let count = pv.entries.len();
         let entry = pv.entries.get(pv.cur)?;
         let any_photo = pv.entries.iter().any(|e| !e.video);
-        let picture = entry.big.clone().or_else(|| entry.strip.clone());
         let hd = pv.hd;
 
         let bar = h_flex()
@@ -330,28 +411,12 @@ impl BeeperApp {
             .flex()
             .items_center()
             .justify_center()
+            .overflow_hidden()
             .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, cx| this.pan_preview(e, window, cx)))
-            .map(|el| match picture {
-                Some(image) => el.child(img(image).size_full().object_fit(ObjectFit::Contain)),
-                None if entry.failed => el.child(
-                    div().text_size(fs(14.)).text_color(p.faint).child(entry.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-                ),
-                None => el,
-            })
-            .when(entry.video, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .size(px(56.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .bg(gpui_kit::black().opacity(0.5))
-                        .text_color(gpui_kit::white())
-                        .child(Icon::new(IconName::Play).size_6()),
-                )
-            })
+            // The neighbour a pan brings in waits a gap beside the page.
+            .when_some(pv.cur.checked_sub(1).and_then(|ix| pv.entries.get(ix)).filter(|_| shift > 0.), |el, e| el.child(page(e, shift - width - PAGE_GAP, width, p)))
+            .child(page(entry, shift, width, p))
+            .when_some(pv.entries.get(pv.cur + 1).filter(|_| shift < 0.), |el, e| el.child(page(e, shift + width + PAGE_GAP, width, p)))
             .child(
                 div().absolute().top(px(4.)).right(px(GUTTER - 10.)).child(
                     round_button("preview-remove", IconName::Trash, cx)
@@ -430,6 +495,41 @@ impl BeeperApp {
     }
 }
 
+/// One item on the stage, `x` from its left edge.
+fn page(entry: &Entry, x: f32, width: f32, p: Palette) -> Div {
+    let picture = entry.big.clone().or_else(|| entry.strip.clone());
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(x))
+        .w(px(width))
+        .flex()
+        .items_center()
+        .justify_center()
+        .map(|el| match picture {
+            Some(image) => el.child(img(image).size_full().object_fit(ObjectFit::Contain)),
+            None if entry.failed => el.child(
+                div().text_size(fs(14.)).text_color(p.faint).child(entry.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+            ),
+            None => el,
+        })
+        .when(entry.video, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .size(px(56.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(gpui_kit::black().opacity(0.5))
+                    .text_color(gpui_kit::white())
+                    .child(Icon::new(IconName::Play).size_6()),
+            )
+        })
+}
+
 /// A still from a video, as JPEG with its long side at most `max`. Only Android can read one.
 #[cfg(not(target_os = "android"))]
 fn video_frame(_: &Path, _: u32) -> Option<Vec<u8>> {
@@ -460,29 +560,50 @@ fn video_frame(path: &Path, max: u32) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{PAN_PAGE, Path, is_media, pan_step};
+    use std::time::{Duration, Instant};
+
+    use super::{EDGE_GIVE, PAN_PAGE, Path, give, is_media, page_turn, pan_step};
     use gpui_kit::TouchPhase;
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
 
-    fn run(events: &[(f32, f32, TouchPhase)]) -> Option<isize> {
-        let mut pan = None;
-        events.iter().find_map(|&(dx, dy, phase)| pan_step(&mut pan, dx, dy, phase))
+    /// The page turn for `(dx, dy, phase)` events `gap` apart.
+    fn run(events: &[(f32, f32, TouchPhase)], gap: Duration) -> Option<isize> {
+        let (t0, mut pan) = (Instant::now(), None);
+        events.iter().zip(1..).find_map(|(&(dx, dy, phase), n)| pan_step(&mut pan, 0., dx, dy, phase, t0 + gap * n)).map(|(total, speed)| page_turn(total, speed))
     }
+
+    const SLOW: Duration = Duration::from_millis(200);
 
     #[test]
     fn a_long_sideways_pan_turns_the_page_toward_where_it_came_from() {
         let far = PAN_PAGE / 2. + 1.;
-        assert_eq!(run(&[(0., 0., Started), (-far, 0., Moved), (-far, 0., Moved), (0., 0., Ended)]), Some(1));
-        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (far, 0., Moved), (0., 0., Ended)]), Some(-1));
+        assert_eq!(run(&[(0., 0., Started), (-far, 0., Moved), (-far, 0., Moved), (0., 0., Ended)], SLOW), Some(1));
+        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (far, 0., Moved), (0., 0., Ended)], SLOW), Some(-1));
+    }
+
+    #[test]
+    fn a_short_flick_turns_the_page_and_a_short_slow_pan_does_not() {
+        let quick = Duration::from_millis(8);
+        assert_eq!(run(&[(0., 0., Started), (-10., 0., Moved), (-10., 0., Moved), (0., 0., Ended)], quick), Some(1));
+        assert_eq!(run(&[(0., 0., Started), (-10., 0., Moved), (-10., 0., Moved), (0., 0., Ended)], SLOW), Some(0));
+        // Flung back the other way at the end: the speed must agree with where the pan went.
+        assert_eq!(page_turn(-30., 900.), 0);
     }
 
     #[test]
     fn short_vertical_wheel_and_cancelled_pans_stay_put() {
         let far = PAN_PAGE / 2. + 1.;
-        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (0., 0., Ended)]), None);
-        assert_eq!(run(&[(0., 0., Started), (2., 300., Moved), (2., 300., Moved), (0., 0., Ended)]), None);
-        assert_eq!(run(&[(far, 0., Moved), (far, 0., Moved), (0., 0., Ended)]), None);
-        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (far, 0., Moved), (0., 0., Cancelled), (0., 0., Ended)]), None);
+        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (0., 0., Ended)], SLOW), Some(0));
+        assert_eq!(run(&[(0., 0., Started), (2., 300., Moved), (2., 300., Moved), (0., 0., Ended)], SLOW), Some(0));
+        assert_eq!(run(&[(far, 0., Moved), (far, 0., Moved), (0., 0., Ended)], SLOW), None);
+        assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (far, 0., Moved), (0., 0., Cancelled), (0., 0., Ended)], SLOW), None);
+    }
+
+    #[test]
+    fn the_stage_resists_past_the_ends() {
+        assert_eq!(give(40., true, false), 40.);
+        assert_eq!(give(40., false, true), 40. * EDGE_GIVE);
+        assert_eq!(give(-40., false, true), -40.);
     }
 
     #[test]
