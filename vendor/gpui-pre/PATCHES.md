@@ -28,3 +28,10 @@ vendor dir and the `[patch.crates-io]` entry once upstream cuts on grapheme boun
 Test: upstream's own test build needs the zed workspace assets, so `cargo test` inside this
 crate does not compile. Run `grapheme_cut_tests` by copying `grapheme_cut` and the test module
 into a scratch crate that depends on `unicode-segmentation`.
+
+Touch pan on a one-axis scroller: upstream `Interactivity::paint_scroll_listener` turns a horizontal
+delta into vertical scroll for a container that only scrolls vertically (and the reverse), meant for
+a mouse wheel. A touch pan is already axis-locked by the gesture recognizer, so a sideways swipe on
+the chat list scrolled it down. Change, marked `murmur patch`, in `src/elements/div.rs`: the
+cross-axis mapping applies only when the last input was not touch (`Window::last_input_was_touch`).
+Mouse wheel, shift-wheel and touchpad keep upstream behaviour.

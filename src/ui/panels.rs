@@ -7,6 +7,7 @@ use gpui_kit::component::switch::Switch;
 use super::*;
 use crate::applock::{Goal, LockMode};
 use crate::i18n::LanguageChoice;
+use super::rowswipe::SwipeAction;
 use crate::{ChatColour, ThemeChoice};
 
 /// A settings row, and the widest a settings page grows.
@@ -70,6 +71,32 @@ impl BeeperApp {
         cx.set_global(theme);
         crate::sync_theme(Some(window), cx);
         cx.notify();
+    }
+
+    /// One choice per chat action, under its label, as the lock timeouts are.
+    fn swipe_choices(&self, left: bool, cx: &mut Context<Self>) -> Div {
+        let p = Palette::of(cx);
+        let current = if left { self.settings.swipe_left } else { self.settings.swipe_right };
+        h_flex().flex_wrap().gap(px(4.)).pb(px(8.)).children(SwipeAction::ALL.into_iter().enumerate().map(|(ix, action)| {
+            let on = current == action;
+            div()
+                .id((if left { "swipe-left" } else { "swipe-right" }, ix))
+                .h(px(36.))
+                .px(px(GAP))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .text_size(fs(14.))
+                .text_color(if on { p.ground } else { p.muted })
+                .bg(if on { p.text } else { p.raised })
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    *if left { &mut this.settings.swipe_left } else { &mut this.settings.swipe_right } = action;
+                    this.settings.save(&this.dir);
+                    cx.notify();
+                }))
+                .child(action.label())
+        }))
     }
 
     fn set_language(&mut self, language: LanguageChoice, window: &mut Window, cx: &mut Context<Self>) {
@@ -367,6 +394,13 @@ impl BeeperApp {
                     .child(swatches)
                     .children(self.render_look(cx))
                     .children(self.render_emoji(cx)),
+            ))
+            .child(section(t!("Chat list"), cx).child(
+                card(cx)
+                    .child(row(t!("Swipe left"), "", cx))
+                    .child(self.swipe_choices(true, cx))
+                    .child(row(t!("Swipe right"), "", cx))
+                    .child(self.swipe_choices(false, cx)),
             ))
             .when(cfg!(target_os = "android"), |el| {
                 el.child(section(t!("Notifications"), cx).child(card(cx).child(
