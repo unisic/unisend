@@ -6,7 +6,7 @@
     <!-- Message notifications, and the service that keeps the connection in the background. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <!-- The attach sheet's photos and videos; 14 and later may grant chosen ones only. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -78,10 +78,15 @@
             android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <!-- specialUse, not dataSync: a standing chat connection is not a transfer, and dataSync stops after 6 hours a day in the background (apps targeting 15 and later). -->
         <service
             android:name="dev.gpui.beeper.SyncService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the chat connection open while the app is in the background, so new messages are notified. Can be turned off in the app's settings." />
+        </service>
 
         <!-- Reply box and mark-as-read button of a message notification. -->
         <receiver

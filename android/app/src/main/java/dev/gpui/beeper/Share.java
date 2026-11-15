@@ -2,10 +2,10 @@ package dev.gpui.beeper;
 
 import android.app.Activity;
 import android.content.ClipData;
+import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.provider.OpenableColumns;
 import androidx.core.content.IntentCompat;
@@ -97,32 +97,35 @@ public final class Share {
         List<ShortcutInfoCompat> list = new ArrayList<>();
         int max = ShortcutManagerCompat.getMaxShortcutCountPerActivity(activity);
         for (int i = 0; i + 2 < f.length && list.size() < max; i += 3) {
-            String id = f[i];
-            String name = f[i + 1].isEmpty() ? activity.getString(R.string.chat) : f[i + 1];
-            IconCompat icon = null;
-            if (!f[i + 2].isEmpty()) {
-                Bitmap picture = BitmapFactory.decodeFile(f[i + 2]);
-                if (picture != null) icon = IconCompat.createWithBitmap(picture);
-            }
-            if (icon == null) icon = IconCompat.createWithResource(activity, R.mipmap.ic_launcher);
-            // A tap on the shortcut itself opens the chat, as a notification does.
-            Intent open = new Intent(Intent.ACTION_VIEW)
-                    .setClassName(activity, "dev.gpui.mobile.GpuiActivity")
-                    .putExtra(Notify.EXTRA_CHAT, id);
-            list.add(new ShortcutInfoCompat.Builder(activity, id)
-                    .setShortLabel(name)
-                    .setIcon(icon)
-                    .setIntent(open)
-                    .setCategories(CATEGORIES)
-                    .setLongLived(true)
-                    .setRank(list.size())
-                    .build());
+            Bitmap picture = f[i + 2].isEmpty() ? null : Notify.round(f[i + 2]);
+            list.add(shortcut(activity, f[i], f[i + 1], picture, list.size()));
         }
         try {
             ShortcutManagerCompat.setDynamicShortcuts(activity, list);
         } catch (IllegalStateException | IllegalArgumentException e) {
             // Rate limited or refused: the share sheet keeps the previous chats until the next change.
         }
+    }
+
+    /**
+     * A chat as a share target, which also lets its notification be a conversation. {@code picture}
+     * is the chat's, already round (see {@link Notify#round}), or null for the app's icon.
+     */
+    static ShortcutInfoCompat shortcut(Context context, String id, String name, Bitmap picture, int rank) {
+        IconCompat icon = picture != null ? IconCompat.createWithBitmap(picture)
+                : IconCompat.createWithResource(context, R.mipmap.ic_launcher);
+        // A tap on the shortcut itself opens the chat, as a notification does.
+        Intent open = new Intent(Intent.ACTION_VIEW)
+                .setClassName(context, "dev.gpui.mobile.GpuiActivity")
+                .putExtra(Notify.EXTRA_CHAT, id);
+        return new ShortcutInfoCompat.Builder(context, id)
+                .setShortLabel(name.isEmpty() ? context.getString(R.string.chat) : name)
+                .setIcon(icon)
+                .setIntent(open)
+                .setCategories(CATEGORIES)
+                .setLongLived(true)
+                .setRank(rank)
+                .build();
     }
 
     private static String clean(String s) {

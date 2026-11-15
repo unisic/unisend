@@ -255,6 +255,9 @@ pub(crate) struct Settings {
     /// Percent of black over a photo wallpaper.
     #[serde(default = "ui::appearance::default_dim")]
     pub wallpaper_dim: u8,
+    /// Android: a foreground service keeps the connection while the app is closed.
+    #[serde(default = "Settings::private_by_default")]
+    pub stay_connected: bool,
 }
 
 impl Settings {
@@ -268,7 +271,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true })
     }
 
     fn parse(raw: &[u8]) -> Option<Self> {
@@ -670,11 +673,23 @@ pub(crate) fn pick_file(cx: &mut gpui_kit::App) -> gpui_kit::Task<Option<PathBuf
 /// Whether the window is in front. Notifications are for when it is not.
 pub(crate) static FOREGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// Starts or stops staying connected in the background (Android: a foreground service, which
-/// also asks for the notification permission). Desktop stays connected while it runs.
+/// On: asks for the notification permission (Android). Off, when signing out: ends the
+/// background connection and takes the notifications away.
 pub(crate) fn background(on: bool) {
     #[cfg(target_os = "android")]
     if let Err(e) = android_files::notify(if on { "start" } else { "stop" }, &[]) {
+        log::warn!("background connection: {e}");
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = on;
+}
+
+/// Starts or ends staying connected while the app is closed (Android: a foreground service with
+/// a quiet notice, started only while the app is in front and only if it is not running).
+/// Desktop stays connected while it runs.
+pub(crate) fn stay_connected(on: bool) {
+    #[cfg(target_os = "android")]
+    if let Err(e) = android_files::notify(if on { "connect" } else { "disconnect" }, &[]) {
         log::warn!("background connection: {e}");
     }
     #[cfg(not(target_os = "android"))]
@@ -1138,6 +1153,8 @@ mod tests {
     fn old_settings_file_loads_with_the_default_colour() {
         let old = super::Settings::parse(br#"{"theme":"Light","incognito":false}"#).unwrap();
         assert_eq!((old.theme, old.incognito, old.chat_colour), (super::ThemeChoice::Light, false, super::ChatColour::Default));
+        assert!(old.stay_connected, "files from before the switch keep the background connection");
+        assert!(!super::Settings::parse(br#"{"stay_connected":false}"#).unwrap().stay_connected);
         let new = super::Settings::parse(br#"{"chat_colour":"Teal"}"#).unwrap();
         assert_eq!(new.chat_colour, super::ChatColour::Teal);
     }

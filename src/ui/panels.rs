@@ -81,6 +81,13 @@ impl BeeperApp {
         self.send(Cmd::Incognito(on), cx);
     }
 
+    fn set_stay_connected(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.stay_connected = on;
+        self.settings.save(&self.dir);
+        crate::stay_connected(on);
+        cx.notify();
+    }
+
     fn set_lock(&mut self, lock: Option<bool>, timeout: Option<u32>, secure: Option<bool>, cx: &mut Context<Self>) {
         let l = &mut self.settings.lock;
         (l.lock, l.timeout, l.secure) = (lock.unwrap_or(l.lock), timeout.unwrap_or(l.timeout_secs()), secure.unwrap_or(l.secure));
@@ -251,6 +258,10 @@ impl BeeperApp {
         let incognito = Switch::new("incognito").checked(self.settings.incognito).on_click(move |on, _, cx| {
             let _ = weak.update(cx, |this, cx| this.set_incognito(*on, cx));
         });
+        let weak = cx.entity().downgrade();
+        let stay = Switch::new("stay-connected").checked(self.settings.stay_connected).on_click(move |on, _, cx| {
+            let _ = weak.update(cx, |this, cx| this.set_stay_connected(*on, cx));
+        });
         let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
         let security = cfg!(target_os = "android").then(|| self.render_security(cx));
         v_flex()
@@ -276,6 +287,8 @@ impl BeeperApp {
                             .on_click(|_, _, _| crate::notification_settings())
                             .child(t!("Change")),
                     ),
+                ).child(
+                    row(t!("Stay connected in the background"), t!("On: notifications arrive while Murmur is closed, under a quiet system notice. Off: no notice, messages arrive only while Murmur is open."), cx).child(stay),
                 )))
             })
             .child(section(t!("Privacy"), cx).child(card(cx).child(
