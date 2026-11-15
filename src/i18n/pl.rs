@@ -589,6 +589,9 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("📍 Location: {place}", "📍 Lokalizacja: {place}"),
     ("📷 Photo", "📷 Zdjęcie"),
     ("🖼 Sticker", "🖼 Naklejka"),
+    ("Maximise", "Maksymalizuj"),
+    ("Minimise", "Minimalizuj"),
+    ("Restore", "Przywróć"),
 ];
 
 /// Keyed by the English singular; the forms are one (1), few (2-4, 22-24) and many (0, 5-21, 25...).

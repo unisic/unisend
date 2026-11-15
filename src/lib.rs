@@ -121,6 +121,9 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
         titlebar: Some(TitlebarOptions { title: Some("Unisend".into()), ..Default::default() }),
         // Wayland app id; matches packaging/linux/dev.gpui.beeper.desktop so the shell finds the icon.
         app_id: Some("dev.gpui.beeper".into()),
+        // The app draws its own title bar (`ui/frame.rs`); a compositor that insists on drawing one wins.
+        #[cfg(target_os = "linux")]
+        window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, dir, settings, window, cx)))

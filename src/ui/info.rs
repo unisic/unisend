@@ -301,12 +301,12 @@ impl BeeperApp {
 
     /// Whether a wide window has room for the screen beside the conversation.
     pub(super) fn info_beside(window: &Window) -> bool {
-        window.viewport_size().width >= px(NAV_W + LIST_W + INFO_W + CHAT_MIN)
+        frame::viewport(window).width >= px(NAV_W + LIST_W + INFO_W + CHAT_MIN)
     }
 
     /// What the panel takes from the conversation's width.
     pub(super) fn info_aside(&self, window: &Window) -> f32 {
-        if self.info_open() && window.viewport_size().width >= px(NARROW) && Self::info_beside(window) { INFO_W } else { 0. }
+        if self.info_open() && frame::viewport(window).width >= px(NARROW) && Self::info_beside(window) { INFO_W } else { 0. }
     }
 
     pub(super) fn info_rows(&mut self) {
@@ -354,13 +354,14 @@ impl BeeperApp {
     /// `beside` draws it as a panel next to the conversation, with a close button instead of back.
     pub(super) fn render_info(&mut self, beside: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
-        let narrow = window.viewport_size().width < px(NARROW);
+        let view = frame::viewport(window).width;
+        let narrow = view < px(NARROW);
         let width = if beside {
             INFO_W
         } else if narrow {
-            f32::from(window.viewport_size().width)
+            f32::from(view)
         } else {
-            f32::from(window.viewport_size().width) - NAV_W - LIST_W
+            f32::from(view) - NAV_W - LIST_W
         };
         let inner = width - 2. * GUTTER;
         let cols = (((inner + CELL_GAP) / (CELL_MIN + CELL_GAP)).floor() as usize).clamp(3, 6);

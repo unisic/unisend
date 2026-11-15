@@ -28,6 +28,7 @@ mod cards;
 mod emojipick;
 mod contacts;
 mod forward;
+mod frame;
 mod disappear;
 mod gallery;
 mod heart;
@@ -979,7 +980,7 @@ impl BeeperApp {
     /// Escape, which is also Android's back gesture: undoes the innermost thing on screen.
     /// Returns whether there was anything to undo.
     fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let narrow = window.viewport_size().width < px(NARROW);
+        let narrow = frame::viewport(window).width < px(NARROW);
         if self.verify_back(cx) {
             return true;
         }
@@ -1151,10 +1152,12 @@ impl BeeperApp {
                 canvas(
                     |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
                     move |bounds, hitbox, window, cx| {
-                        let _ = weak.update(cx, |this, _| this.zoom.seen(&id, bounds, radius));
+                        // The viewer is laid out in the app's area, not the window.
+                        let home = Bounds { origin: frame::local(window, bounds.origin), size: bounds.size };
+                        let _ = weak.update(cx, |this, _| this.zoom.seen(&id, home, radius));
                         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
                             if phase.bubble() && e.button == MouseButton::Left && hitbox.is_hovered(window) {
-                                let _ = weak.update(cx, |this, _| this.zoom.pressed(&id, bounds, radius));
+                                let _ = weak.update(cx, |this, _| this.zoom.pressed(&id, home, radius));
                             }
                         });
                     },
@@ -1844,7 +1847,7 @@ impl BeeperApp {
                     return this.render_line(ix, cx);
                 }
                 // What a bubble has inside: its share of the row, less its padding and a mention's bar.
-                let row = f32::from(window.viewport_size().width) - 2. * GUTTER - this.info_aside(window);
+                let row = f32::from(frame::viewport(window).width) - 2. * GUTTER - this.info_aside(window);
                 // Wide, the pane beside the lists also holds a face and the hover buttons.
                 let room = if narrow { row * BUBBLE_SHARE } else { BUBBLE_W.min(row - NAV_W - LIST_W - SENDER - 8. - SIDE_ROOM).max(TAP * 4.) } - 2. * GAP - 9.;
                 // A picture sits in its bubble with a thin margin, concentric with it; alone, it is the bubble.
@@ -3580,6 +3583,13 @@ fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperA
 
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let screen = self.render_screen(window, cx);
+        frame::wrap(screen, window, cx)
+    }
+}
+
+impl BeeperApp {
+    fn render_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         if self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked() {
             return self.render_lock(window, cx);
@@ -3615,7 +3625,7 @@ impl Render for BeeperApp {
             Screen::Email | Screen::Code => root.child(self.render_login(cx)).into_any_element(),
             Screen::Matrix => root.child(self.render_matrix_login(cx)).into_any_element(),
             Screen::Main => {
-                let narrow = window.viewport_size().width < px(NARROW);
+                let narrow = frame::viewport(window).width < px(NARROW);
                 let panel = self.panel.map(|panel| self.render_panel(panel, narrow, window, cx));
                 let body = if narrow {
                     let deep_panel = matches!(self.panel, Some(Panel::Add | Panel::Login | Panel::NewChat));
@@ -3659,7 +3669,7 @@ impl Render for BeeperApp {
                     } else {
                         self.slide.last_panel.map(|last| self.render_panel(last, true, window, cx))
                     };
-                    let g = slide::layers(v, f32::from(window.viewport_size().width), cx.reduce_motion());
+                    let g = slide::layers(v, f32::from(frame::viewport(window).width), cx.reduce_motion());
                     let under = if over.is_none() || v < 1. {
                         if deep_panel && let Some(base) = self.slide.base {
                             panel_base = Some(self.render_panel(base, true, window, cx));

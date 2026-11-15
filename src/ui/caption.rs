@@ -278,7 +278,7 @@ impl BeeperApp {
             1 if next => 1,
             _ => 0,
         };
-        let page = f32::from(window.viewport_size().width) + PAGE_GAP;
+        let page = f32::from(frame::viewport(window).width) + PAGE_GAP;
         if turn != 0 {
             let ix = self.preview.cur.saturating_add_signed(turn);
             self.show_item(ix, window, cx);
@@ -366,7 +366,7 @@ impl BeeperApp {
         } else {
             self.preview.slide.pos
         };
-        let width = f32::from(window.viewport_size().width);
+        let width = f32::from(frame::viewport(window).width);
         let pv = &self.preview;
         let count = pv.entries.len();
         let entry = pv.entries.get(pv.cur)?;

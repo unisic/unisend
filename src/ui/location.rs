@@ -188,7 +188,7 @@ impl BeeperApp {
         let frame = self.location.sheet.sample(self.location.open, window, cx)?;
         let live = frame.live;
         let p = Palette::of(cx);
-        let width = f32::from(window.viewport_size().width).min(SHEET_W);
+        let width = f32::from(frame::viewport(window).width).min(SHEET_W);
         let (_, bottom) = crate::insets();
         let state = self.location.state.clone();
         let network = self.open.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id)).and_then(|r| r.network.clone());

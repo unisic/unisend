@@ -310,7 +310,7 @@ impl BeeperApp {
             self.emoji_pick.keyboard = bottom.clamp(PANEL_SEARCH_H, 480.);
         }
         let height = if typing { PANEL_SEARCH_H } else { self.emoji_pick.keyboard };
-        let width = Some(self.emoji_pick.width.get()).filter(|w| *w > 0.).unwrap_or_else(|| f32::from(window.viewport_size().width));
+        let width = Some(self.emoji_pick.width.get()).filter(|w| *w > 0.).unwrap_or_else(|| f32::from(frame::viewport(window).width));
         let probe = width_probe(self.emoji_pick.width.clone(), cx.entity_id());
         Some(div().id("emoji-panel").relative().w_full().h(px(height)).flex_none().child(probe).child(self.emoji_body(width, false, window, cx)).into_any_element())
     }
@@ -326,7 +326,7 @@ impl BeeperApp {
         let frame = self.emoji_pick.sheet.sample(live, window, cx)?;
         let live = frame.live;
         let p = Palette::of(cx);
-        let view = window.viewport_size();
+        let view = frame::viewport(window);
         let (_, bottom) = crate::insets();
         let height = (f32::from(view.height) * 0.6).min(460.);
         let width = f32::from(view.width).min(SHEET_W);
