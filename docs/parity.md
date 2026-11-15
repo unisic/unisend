@@ -42,7 +42,7 @@ is not started.
 | Merged chats | todo | `com.beeper.union` |
 | Drafts synced between devices | todo | `com.beeper.draft` |
 | Multi-select, archive all read | part | local: selection mode in a chat (copy with sender and time, forward, delete for me, delete for everyone when all are yours); archive all read is todo |
-| Swipe actions (Android) | todo | local |
+| Swipe actions | done | a chat row swiped either way runs the action chosen in Settings (default: left archives, right marks read or unread; delete asks first); local setting |
 | New chat, new group, contacts | done | + in the chat list: Beeper/Matrix (user directory, a Matrix ID; an existing DM is reused) or a network login, then a contact, a search result or a typed phone number or username. bridgev2 provisioning `GET capabilities`, `GET contacts`, `POST search_users`, `GET resolve_identifier/{id}`, `POST create_dm/{id}`, `POST create_group/{type}` (name and members as the network's capabilities allow); Matrix `createRoom` (private, encrypted). Contact list capped at 5000, 200 rows drawn; no avatars in the list |
 | Leave or delete a chat | done | last row of the chat's sheet, after a dialog. Matrix: leave and forget. A bridged chat whose `com.beeper.room_features` says `delete_chat` gets `com.beeper.delete_chat` (the bridge leaves the group and deletes the chat on the user's account), then the user leaves once the bridge deleted the room or after 60 s. Other bridged chats are only left here: bridgev2 drops Matrix leaves unless `bridge_matrix_leave` |
 

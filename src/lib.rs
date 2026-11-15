@@ -310,6 +310,12 @@ pub(crate) struct Settings {
     /// Android: a foreground service keeps the connection while the app is closed.
     #[serde(default = "Settings::private_by_default")]
     pub stay_connected: bool,
+    /// What a chat row swiped right to left does.
+    #[serde(default = "ui::rowswipe::SwipeAction::left_default")]
+    pub swipe_left: ui::rowswipe::SwipeAction,
+    /// What a chat row swiped left to right does.
+    #[serde(default = "ui::rowswipe::SwipeAction::right_default")]
+    pub swipe_right: ui::rowswipe::SwipeAction,
 }
 
 impl Settings {
@@ -323,7 +329,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default() })
     }
 
     fn parse(raw: &[u8]) -> Option<Self> {
@@ -1269,6 +1275,16 @@ mod tests {
         settings.save(&dir);
         assert!(!std::fs::read_to_string(dir.join("settings.json")).unwrap().contains("emoji_font"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn swipe_actions_default_and_round_trip() {
+        use crate::ui::rowswipe::SwipeAction;
+        let old = super::Settings::parse(br#"{"theme":"Light"}"#).unwrap();
+        assert_eq!((old.swipe_left, old.swipe_right), (SwipeAction::Archive, SwipeAction::Unread));
+        let mut changed = old.clone();
+        (changed.swipe_left, changed.swipe_right) = (SwipeAction::Delete, SwipeAction::None);
+        assert_eq!(super::Settings::parse(&serde_json::to_vec(&changed).unwrap()).unwrap(), changed);
     }
 
     #[test]

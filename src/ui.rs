@@ -50,6 +50,7 @@ mod signin;
 mod sharein;
 mod video;
 mod rooms;
+pub(crate) mod rowswipe;
 mod viewer;
 mod voice;
 mod verify;
@@ -294,6 +295,7 @@ pub struct BeeperApp {
     slide: slide::Slide,
     /// Rows displaced or arriving as a new message reorders the chat list.
     fly: slide::Fly,
+    rows: rowswipe::RowSwipe,
     /// A finger on the chat list, since when; reordering waits for it to lift.
     finger: Option<Instant>,
     /// The chat list scrolling to its top: when it started and where from.
@@ -526,6 +528,7 @@ impl BeeperApp {
             sheet_last: None,
             slide: slide::Slide::default(),
             fly: slide::Fly::default(),
+            rows: rowswipe::RowSwipe::default(),
             finger: None,
             to_top: None,
             list_in: None,
@@ -781,6 +784,7 @@ impl BeeperApp {
             Ev::Synced => self.synced = true,
             Ev::Exported(id, path, what) => self.exported(id, path, what, cx),
             Ev::Error(e) => {
+                self.row_return(cx);
                 self.error = Some(crate::backend::plain(&e).into());
                 self.busy = false;
                 self.loading = false;
@@ -864,12 +868,7 @@ impl BeeperApp {
             if !query.is_empty() {
                 return r.name.to_lowercase().contains(&query);
             }
-            let in_view = match self.view {
-                View::Inbox => !r.archived && !r.low_priority,
-                View::Archive => r.archived,
-                View::LowPriority => r.low_priority && !r.archived,
-            };
-            in_view && (!self.only_unread || r.is_unread())
+            in_view(self.view, r) && (!self.only_unread || r.is_unread())
         };
         self.shown = self.rooms.iter().enumerate().filter(|(_, r)| passes(r)).map(|(ix, _)| ix).collect();
         cx.notify();
@@ -1543,6 +1542,7 @@ impl BeeperApp {
 
     fn render_rooms(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
+        self.row_settle(cx);
         let list = uniform_list(
             "rooms",
             self.shown.len() + self.message_rows(),
@@ -1562,6 +1562,8 @@ impl BeeperApp {
                         let lit_fade = if lit { Transition::new(Duration::ZERO) } else { Transition::new(motion::ROW_FADE).easing(motion::EASE_OUT) };
                         let lit_alpha = transition(ElementId::NamedChild(Arc::new(key.clone()), "lit".into()), if lit { 1.0f32 } else { 0. }, lit_fade, window, cx);
                         let press = press::area(key.clone(), ROW_PRESS_DELAY, p.raised, window, cx);
+                        let (sx, armed) = this.row_offset(&id, window);
+                        let backdrop = (sx != 0.).then(|| this.row_backdrop(&this.rooms[this.shown[ix]], sx, armed, window, cx)).flatten();
                         let room = &this.rooms[this.shown[ix]];
                         let selected = this.open.as_ref() == Some(&id);
                         let unread = room.is_unread();
@@ -1573,15 +1575,19 @@ impl BeeperApp {
                             (Some(network), time) => format!("{network} · {time}"),
                             (None, time) => time,
                         };
-                        h_flex()
-                            .id(key)
+                        let row = h_flex()
+                            .id("row")
                             .w_full()
                             .h(px(ROOM_ROW_H))
                             .px(px(GUTTER))
                             .gap(px(GAP))
                             .relative()
-                            .top(px(dy))
-                            .when(alpha < 1., |el| el.opacity(alpha))
+                            .left(px(sx))
+                            .when(backdrop.is_some(), |el| el.bg(p.ground))
+                            .on_scroll_wheel(cx.listener({
+                                let id = id.clone();
+                                move |this, event: &ScrollWheelEvent, window, cx| this.row_pan(&id, event, window, cx)
+                            }))
                             .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(if selected { p.raised } else { p.surface })))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| this.open_room(id.clone(), cx)))
@@ -1652,7 +1658,17 @@ impl BeeperApp {
                                         this.open_chat_sheet(id.clone(), cx);
                                     }
                                 }
-                            }))
+                            }));
+                        // Clipped only while swiped: a row settling after a reorder travels past its slot.
+                        div()
+                            .id(key)
+                            .relative()
+                            .w_full()
+                            .h(px(ROOM_ROW_H))
+                            .top(px(dy))
+                            .when(alpha < 1., |el| el.opacity(alpha))
+                            .when_some(backdrop, |el, backdrop| el.overflow_hidden().child(backdrop))
+                            .child(row)
                     })
                     .collect()
             }),
@@ -2980,6 +2996,15 @@ fn avatar(name: &str, image: Option<&Option<Arc<Image>>>, size: f32, cx: &App) -
 }
 
 /// What can be done with a chat, each as the opposite of its current state.
+/// Whether a chat belongs to a section of the list, before the unread filter and the search.
+fn in_view(view: View, r: &RoomSummary) -> bool {
+    match view {
+        View::Inbox => !r.archived && !r.low_priority,
+        View::Archive => r.archived,
+        View::LowPriority => r.low_priority && !r.archived,
+    }
+}
+
 fn chat_actions(room: &RoomSummary) -> [(&'static str, IconName, ChatAction); 5] {
     [
         if room.is_unread() {

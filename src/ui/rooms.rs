@@ -152,7 +152,7 @@ impl BeeperApp {
         }))
     }
 
-    fn ask_leave(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
+    pub(super) fn ask_leave(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
         let Some(r) = self.rooms.iter().find(|r| r.id == room) else { return };
         let mut confirm = Confirm { room: room.clone(), name: r.name.clone(), network: r.network.clone(), dm: r.dm, delete: None };
         if confirm.network.is_none() {
@@ -162,6 +162,11 @@ impl BeeperApp {
         }
         self.people.confirm = Some(confirm);
         cx.notify();
+    }
+
+    /// The leave or delete dialog is asking about this chat, or waiting to.
+    pub(super) fn confirming(&self, room: &OwnedRoomId) -> bool {
+        self.people.confirm.as_ref().is_some_and(|c| c.room == *room)
     }
 
     /// Escape closes the dialog first.
