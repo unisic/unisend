@@ -981,6 +981,7 @@ impl BeeperApp {
             self.close_gallery(cx);
         } else if self.gifs_open() {
             self.close_gifs(cx);
+        } else if self.close_tone_menu(cx) {
         } else if self.emoji_open.is_some() {
             // The emoji panel and the mention list are part of the chat, under every sheet.
             self.close_emoji(cx);

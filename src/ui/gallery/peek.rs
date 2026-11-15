@@ -10,35 +10,49 @@ const HOLD: Duration = Duration::from_millis(500);
 const HOLD_SLOP: f32 = 8.;
 /// Room left around a peeked picture, inside the system bars.
 const MARGIN: f32 = 16.;
-/// A peek grows from this size about its cell; with reduced motion it only fades.
-const FROM: f32 = 0.9;
 const SCRIM: f32 = 0.55;
+
+/// x, y, width, height in window coordinates.
+type Rect = (f32, f32, f32, f32);
 
 pub(super) struct Peek {
     id: i64,
-    /// The cell it grows out of, in window coordinates.
-    cell: Bounds<Pixels>,
+    /// The cell it grows out of and shrinks back into.
+    cell: Rect,
     /// Width and height as shown, 0 when unknown.
     dims: (f32, f32),
     opened: Instant,
-    /// When it began to leave, and how far open it was then.
+    /// When it began to leave, and how far the scrim was in then.
     closing: Option<(Instant, f32)>,
+    /// Where the running motion of the frame began, and when: it heads for the fitted place, or for
+    /// the cell once closing, so a release or a late size carries on from where the frame is.
+    from: Rect,
+    since: Instant,
+    /// The frame as last drawn.
+    drawn: Rect,
     /// Its full picture asked for already, so a failed read is not repeated.
     tried: bool,
-    full: Option<(Arc<Image>, Instant)>,
+    /// The full picture, and when it was first ready to draw: decoding finishes after the bytes arrive.
+    full: Option<(Arc<Image>, Option<Instant>)>,
 }
 
 impl Peek {
-    /// How far open, 0 to 1.
-    fn shown(&self, now: Instant) -> f32 {
+    /// How far the scrim is in, 0 to 1.
+    fn veil(&self, now: Instant, still: bool) -> f32 {
+        let (enter, exit) = if still { (motion::ENTER, motion::EXIT) } else { (motion::HERO_IN, motion::HERO_OUT) };
         match self.closing {
-            Some((at, from)) => from * (1. - motion::ease_out(frac(now - at, motion::EXIT))),
-            None => motion::ease_out(frac(now - self.opened, motion::ENTER)),
+            Some((at, from)) => from * (1. - motion::ease_out(frac(now - at, exit))),
+            None => motion::ease_out(frac(now - self.opened, enter)),
         }
     }
 
-    fn finished(&self, now: Instant) -> bool {
-        self.closing.is_some_and(|(at, _)| now - at >= motion::EXIT)
+    fn finished(&self, now: Instant, still: bool) -> bool {
+        self.closing.is_some_and(|(at, _)| now - at >= if still { motion::EXIT } else { motion::HERO_OUT })
+    }
+
+    /// Starts the frame's motion again from where it is now, toward wherever it now heads.
+    fn retarget(&mut self, now: Instant) {
+        (self.from, self.since) = (self.drawn, now);
     }
 }
 
@@ -63,9 +77,18 @@ fn fit_rect(view: (f32, f32), top: f32, bottom: f32, dims: (f32, f32)) -> (f32, 
     ((view.0 - w) / 2., top + MARGIN + (room_h - h) / 2., w, h)
 }
 
-/// `rect` scaled by `s` about `origin`.
-fn grown((x, y, w, h): (f32, f32, f32, f32), origin: (f32, f32), s: f32) -> (f32, f32, f32, f32) {
-    (origin.0 + (x - origin.0) * s, origin.1 + (y - origin.1) * s, w * s, h * s)
+fn lerp(a: Rect, b: Rect, t: f32) -> Rect {
+    let mix = |a: f32, b: f32| a + (b - a) * t;
+    (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2), mix(a.3, b.3))
+}
+
+/// Where the grid's thumbnail, the picture's middle square, falls when the picture of `dims` covers
+/// `frame`, so the full picture fading in over it lines up; never wider or taller than the frame.
+fn middle_square((x, y, w, h): Rect, dims: (f32, f32)) -> Rect {
+    let aspect = if dims.0 > 0. && dims.1 > 0. { dims.0 / dims.1 } else { 1. };
+    let (pw, ph) = if w > h * aspect { (w, w / aspect) } else { (h * aspect, h) };
+    let side = pw.min(ph).min(w).min(h);
+    (x + (w - side) / 2., y + (h - side) / 2., side, side)
 }
 
 /// The scale, at most 1, that fits w x h into the screen turned either way, so a decode never
@@ -88,18 +111,21 @@ impl BeeperApp {
     fn peek_start(&mut self, id: i64, cell: Bounds<Pixels>, cx: &mut Context<Self>) {
         let Some(item) = self.gallery.items.iter().find(|item| item.id == id) else { return };
         let dims = (item.width as f32, item.height as f32);
+        let cell = (f32::from(cell.origin.x), f32::from(cell.origin.y), f32::from(cell.size.width), f32::from(cell.size.height));
         self.drop_peek(cx);
         #[cfg(target_os = "android")]
         motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Light);
-        self.gallery.peek = Some(Peek { id, cell, dims, opened: Instant::now(), closing: None, tried: false, full: None });
+        let now = Instant::now();
+        self.gallery.peek = Some(Peek { id, cell, dims, opened: now, closing: None, from: cell, since: now, drawn: cell, tried: false, full: None });
         self.pump_peek(cx);
         cx.notify();
     }
 
     fn peek_end(&mut self, cx: &mut Context<Self>) {
-        let now = Instant::now();
+        let (now, still) = (Instant::now(), cx.reduce_motion());
         if let Some(p) = self.gallery.peek.as_mut().filter(|p| p.closing.is_none()) {
-            p.closing = Some((now, p.shown(now)));
+            p.closing = Some((now, p.veil(now, still)));
+            p.retarget(now);
             cx.notify();
         }
     }
@@ -130,10 +156,12 @@ impl BeeperApp {
                 if let Some(p) = g.peek.as_mut().filter(|p| p.opened == opened && p.closing.is_none())
                     && let Some((format, bytes)) = bytes.and_then(|bytes| Some((image_format(&bytes)?, bytes)))
                 {
-                    if let Some(dims) = dims_of(&bytes) {
+                    // A size first unknown, or known wrong, reshapes the frame in motion rather than at once.
+                    if let Some(dims) = dims_of(&bytes).filter(|&dims| dims != p.dims) {
                         p.dims = dims;
+                        p.retarget(Instant::now());
                     }
-                    p.full = Some((Arc::new(Image::from_bytes(format, bytes)), Instant::now()));
+                    p.full = Some((Arc::new(Image::from_bytes(format, bytes)), None));
                     cx.notify();
                 }
                 this.pump_peek(cx);
@@ -227,33 +255,45 @@ impl BeeperApp {
         .size_0()
     }
 
-    /// The peeked item over the sheet: the cell's thumbnail at once, the full picture fading in
-    /// over it when read. It blocks the pointer, so a held mouse's release taps nothing.
+    /// The peeked item over the sheet. It grows out of its cell into place, the cell's thumbnail
+    /// shown where the picture's middle square falls, and the full picture fades in over it at the
+    /// same geometry once decoded; let go, it shrinks back into the cell. It blocks the pointer, so a
+    /// held mouse's release taps nothing.
     pub(super) fn render_peek(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = Instant::now();
-        if self.gallery.peek.as_ref().is_some_and(|p| p.finished(now)) {
+        let still = cx.reduce_motion();
+        if self.gallery.peek.as_ref().is_some_and(|p| p.finished(now, still)) {
             self.drop_peek(cx);
         }
         let p = Palette::of(cx);
-        let still = cx.reduce_motion();
-        let g = &mut self.gallery;
-        let peek = g.peek.as_ref()?;
-        let (id, shown, leaving) = (peek.id, peek.shown(now), peek.closing.is_some());
         let view = window.viewport_size();
         let (top, bottom) = crate::insets();
-        let rect = fit_rect((f32::from(view.width), f32::from(view.height)), top, bottom, peek.dims);
-        let centre = peek.cell.center();
-        let (x, y, w, h) = if still { rect } else { grown(rect, (f32::from(centre.x), f32::from(centre.y)), FROM + (1. - FROM) * shown) };
-        let full = peek.full.clone();
+        let g = &mut self.gallery;
+        let peek = g.peek.as_mut()?;
+        let (id, veil, leaving) = (peek.id, peek.veil(now, still), peek.closing.is_some());
+        let fitted = fit_rect((f32::from(view.width), f32::from(view.height)), top, bottom, peek.dims);
+        let (target, span) = if leaving { (peek.cell, motion::HERO_OUT) } else { (fitted, motion::HERO_IN) };
+        let moving = !still && now - peek.since < span;
+        let frame = if still { fitted } else { lerp(peek.from, target, motion::ease_out(frac(now - peek.since, span))) };
+        peek.drawn = frame;
+        let full = peek.full.as_mut().and_then(|(image, ready)| {
+            if ready.is_none() && image.clone().use_render_image(window, cx).is_some() {
+                *ready = Some(now);
+            }
+            Some((image.clone(), (*ready)?))
+        });
         let sharp = full.as_ref().map_or(0., |(_, at)| motion::ease_out(frac(now - *at, motion::SHARPEN)));
-        let entering = peek.closing.is_none() && now - peek.opened < motion::ENTER;
-        if entering || leaving || full.is_some() && sharp < 1. {
+        let fading = if still { now - peek.opened < motion::ENTER } else { now - peek.opened < motion::HERO_IN };
+        if moving || fading || leaving || full.is_some() && sharp < 1. {
             window.request_animation_frame();
         }
+        let (x, y, w, h) = frame;
+        let (sx, sy, side, _) = middle_square(frame, peek.dims);
+        let radius = if still { RADIUS } else { RADIUS * veil };
+        // Its corners are the frame's only where it reaches them.
+        let inner = if (w - side) / 2. < radius && (h - side) / 2. < radius { radius } else { 0. };
         let video = g.items.iter().find(|item| item.id == id).filter(|item| item.video()).map(|item| item.duration_ms);
-        let thumb = g.thumbs.get(id);
-        // An `img` with an auto size takes its pixels' size, so insets alone let a full decode spill off screen.
-        let picture = |image: Arc<Image>| img(image).absolute().inset_0().size_full().rounded(px(RADIUS)).object_fit(ObjectFit::Cover);
+        let thumb = (sharp < 1.).then(|| g.thumbs.get(id)).flatten();
         Some(
             div()
                 .id("gallery-peek")
@@ -261,7 +301,7 @@ impl BeeperApp {
                 .inset_0()
                 // Leaving, it lets the next tap through to the grid.
                 .when(!leaving, |el| el.occlude())
-                .bg(gpui_kit::black().opacity(SCRIM * shown))
+                .bg(gpui_kit::black().opacity(SCRIM * veil))
                 .child(
                     div()
                         .absolute()
@@ -269,11 +309,14 @@ impl BeeperApp {
                         .top(px(y))
                         .w(px(w))
                         .h(px(h))
-                        .rounded(px(RADIUS))
+                        .rounded(px(radius))
                         .bg(p.raised)
-                        .opacity(shown)
-                        .children(thumb.map(picture))
-                        .children(full.map(|(image, _)| picture(image).opacity(sharp)))
+                        .when(still, |el| el.opacity(veil))
+                        // An `img` with an auto size takes its pixels' size, so each gets an explicit one.
+                        .children(thumb.map(|image| {
+                            img(image).absolute().left(px(sx - x)).top(px(sy - y)).size(px(side)).rounded(px(inner)).object_fit(ObjectFit::Cover)
+                        }))
+                        .children(full.map(|(image, _)| img(image).absolute().inset_0().size_full().rounded(px(radius)).object_fit(ObjectFit::Cover).opacity(sharp)))
                         .children(video.map(|ms| {
                             div()
                                 .absolute()
@@ -285,6 +328,7 @@ impl BeeperApp {
                                 .text_color(gpui_kit::white())
                                 .text_size(fs(13.))
                                 .font_features(tabular())
+                                .opacity(veil)
                                 .child(length(Duration::from_millis(ms)))
                         })),
                 )
@@ -295,7 +339,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{FROM, MARGIN, fit_rect, grown, peek_scale};
+    use super::{MARGIN, fit_rect, lerp, middle_square, peek_scale};
 
     #[test]
     fn a_peek_fits_inside_the_bars_with_its_aspect() {
@@ -313,11 +357,22 @@ mod tests {
     }
 
     #[test]
-    fn growing_keeps_the_origin_still() {
-        let (x, y, w, h) = grown((100., 200., 300., 400.), (100., 200.), FROM);
-        assert_eq!((x, y), (100., 200.));
-        assert!((w - 270.).abs() < 0.01 && (h - 360.).abs() < 0.01);
-        assert_eq!(grown((10., 20., 30., 40.), (55., 66.), 1.), (10., 20., 30., 40.));
+    fn the_thumbnail_stays_where_the_full_picture_puts_its_middle() {
+        // A 4:3 photo growing from a 100 px cell to 368 x 276: the thumbnail is the middle square,
+        // so it fills the cell at the start, the frame's height at the end, and in between too.
+        let (cell, end) = ((10., 500., 100., 100.), (16., 200., 368., 276.));
+        assert_eq!(middle_square(cell, (4000., 3000.)), cell);
+        assert_eq!(middle_square(end, (4000., 3000.)), (16. + 46., 200., 276., 276.));
+        let mid = lerp(cell, end, 0.5);
+        let (x, y, side, _) = middle_square(mid, (4000., 3000.));
+        assert_eq!((y, side), (mid.1, mid.3));
+        assert!((x + side / 2. - (mid.0 + mid.2 / 2.)).abs() < 0.01);
+        // A tall one keeps the frame's width; an unknown size draws it whole.
+        assert_eq!(middle_square((0., 0., 300., 600.), (1000., 2000.)), (0., 150., 300., 300.));
+        assert_eq!(middle_square(cell, (0., 0.)), cell);
+        // Never larger than the frame, whatever the guess.
+        let (_, _, side, _) = middle_square((0., 0., 300., 100.), (1000., 1000.));
+        assert_eq!(side, 100.);
     }
 
     #[test]
