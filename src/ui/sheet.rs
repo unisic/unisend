@@ -167,7 +167,13 @@ impl SheetMotion {
                 if still {
                     glide.set(glide.target());
                 }
-                let y = glide.step(now);
+                let was = self.y;
+                let mut y = glide.step(now);
+                // Flung up hard, even a critical spring passes the open position once; the edge stops it instead of showing a gap under the sheet.
+                if live && glide.target() == 0. && was >= 0. && y < 0. {
+                    glide.set(0.);
+                    y = 0.;
+                }
                 if !live && y >= h {
                     self.unmount();
                     return h;
@@ -403,6 +409,20 @@ mod tests {
         }
         assert!(!s.moving());
         assert_eq!(s.y, 0.);
+    }
+
+    #[test]
+    fn flung_back_up_it_stops_at_the_open_position() {
+        let (mut s, t) = up(500.);
+        s.touch(TouchPhase::Started, 0., t);
+        s.touch(TouchPhase::Moved, 100., t + Duration::from_millis(500));
+        s.touch(TouchPhase::Moved, -30., t + Duration::from_millis(508));
+        s.touch(TouchPhase::Moved, -30., t + Duration::from_millis(516));
+        assert!(!s.touch(TouchPhase::Ended, 0., t + Duration::from_millis(524)), "40 px down, moving up fast");
+        for i in 1..100 {
+            assert!(s.advance(t + Duration::from_millis(524) + FRAME * i, false) >= 0.);
+        }
+        assert!(!s.moving());
     }
 
     #[test]
