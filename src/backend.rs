@@ -686,6 +686,9 @@ struct State {
     verify: verify::Verifier,
     /// Gathers what the info screen shows.
     info: Option<AbortOnDrop>,
+    /// The account on disk cannot be opened here (key gone, session unreadable), so a sign-in may
+    /// replace it; otherwise a sign-in never deletes a session that may still open.
+    replaceable: bool,
 }
 
 /// Room summaries, shared by the sync loop and preview refreshes. Never held across an await.
@@ -702,15 +705,11 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     let _ = std::fs::remove_dir_all(media_dir(&dir));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
-        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None };
-    let restored = if st.unlock().await { st.restore().await } else { Ok(false) };
-    match restored {
-        Ok(true) => {}
-        Ok(false) => st.emit(Ev::NeedLogin).await,
-        Err(e) => {
-            st.emit(Ev::Error(t!("Could not restore session: {error}", error = format!("{e:#}")))).await;
-            st.emit(Ev::NeedLogin).await;
-        }
+        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, replaceable: false };
+    tokio::spawn(sweep_media_every(media_dir(&st.dir)));
+    let restored = if st.unlock().await { st.restore_retrying().await } else { false };
+    if !restored {
+        st.emit(Ev::NeedLogin).await;
     }
     while let Some(cmd) = cmds.recv().await {
         // Boxed: the handler's future holds every command's state and is too large for the stack.
@@ -839,12 +838,42 @@ impl State {
         }
     }
 
-    /// The key to this device's data is gone for good, so the data is unreadable: the device is
-    /// signed out, and only then are the files that cannot be decrypted removed.
+    /// The key to this device's data is gone for good: the device is signed out. Nothing is
+    /// deleted here, in case the key comes back; the next sign-in replaces the files.
     async fn lost(&mut self) {
         self.emit(Ev::Error(t!("The key that encrypts this device's data is gone, so it was signed out. Sign in again; your recovery key brings back message history.").into())).await;
-        wipe_account(&self.dir);
-        self.seal = Seal::Plain;
+        (self.seal, self.replaceable) = (Seal::Plain, true);
+    }
+
+    /// The saved session is damaged or from a newer version of the app: signed out here, with the
+    /// files kept for the version that can read them until a sign-in replaces them.
+    async fn unreadable(&mut self) {
+        self.emit(Ev::Error(t!("The sign-in saved on this device could not be read. Sign in again.").into())).await;
+        (self.seal, self.replaceable) = (Seal::Plain, true);
+    }
+
+    /// `restore`, asked again after 2 s, doubling up to 60 s, while a session exists and fails to
+    /// open for a reason that may pass; only a lost key or session leads to the sign-in screen.
+    async fn restore_retrying(&mut self) -> bool {
+        let mut wait = Duration::from_secs(2);
+        let mut told = false;
+        loop {
+            match self.restore().await {
+                Ok(restored) => return restored,
+                Err(e) if vault::signed_in(&self.dir) => {
+                    log::warn!("restore: {e:#}");
+                    if !std::mem::replace(&mut told, true) {
+                        self.emit(Ev::Error(t!("Could not open the data on this device: {error}. Trying again.", error = format!("{e:#}")))).await;
+                    }
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(Duration::from_secs(60));
+                }
+                Err(e) => {
+                    self.emit(Ev::Error(t!("Could not restore session: {error}", error = format!("{e:#}")))).await;
+                    return false;
+                }
+            }
+        }
     }
 
     async fn build_client(&self) -> Result<Client> {
@@ -856,14 +885,26 @@ impl State {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             // A key that unwraps but does not open the session is not this device's key.
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidData && self.seal.sealed() => {
+            Err(e) if vault::broken(&e) == Some(&vault::Broken::Tag) => {
                 log::warn!("{e}");
                 self.lost().await;
                 return Ok(false);
             }
+            Err(e) if vault::broken(&e).is_some() => {
+                log::warn!("{e}");
+                self.unreadable().await;
+                return Ok(false);
+            }
             Err(e) => return Err(e).context("session"),
         };
-        let saved: SavedSession = serde_json::from_slice(&raw).context("session")?;
+        let saved: SavedSession = match serde_json::from_slice(&raw) {
+            Ok(saved) => saved,
+            Err(e) => {
+                log::warn!("session: {e}");
+                self.unreadable().await;
+                return Ok(false);
+            }
+        };
         let beeper = saved.homeserver.is_none();
         let homeserver = saved.homeserver.unwrap_or_else(|| self.homeserver.clone());
         let client = match self.client_builder().homeserver_url(&homeserver).build().await {
@@ -892,6 +933,10 @@ impl State {
             log::warn!("event cache: {e}");
         }
         let notif = client.notification_settings().await;
+        // Left by an account the server signed out; detached, they would follow its client still.
+        for task in self.tasks.drain(..) {
+            task.abort();
+        }
         self.tasks = vec![
             tokio::spawn(watch_recovery(client.clone(), self.ev.clone())),
             tokio::spawn(sync_loop(client.clone(), notif.clone(), self.dir.clone(), self.seal.clone(), self.rooms.clone(), self.ev.clone())),
@@ -908,7 +953,12 @@ impl State {
 
     /// A sign-in starts clean: a store left behind belongs to a device that never finished logging
     /// in. On Android it gets a key of its own, so the store is encrypted from its first byte.
+    /// A session that may still open is never replaced: only signing out deletes it.
     fn fresh_store(&mut self) -> Result<()> {
+        if vault::signed_in(&self.dir) && !self.replaceable {
+            return Err(anyhow!(t!("Already signed in on this device. Sign out first.")));
+        }
+        self.rooms.lock().unwrap().clear();
         let store = self.dir.join("store");
         if store.exists() {
             log::warn!("removing orphaned store at {}", store.display());
@@ -922,6 +972,7 @@ impl State {
             })?,
             None => Seal::Plain,
         };
+        self.replaceable = false;
         Ok(())
     }
 
@@ -2119,7 +2170,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
         let resp = match resp {
             Ok(r) => r,
             Err(e) if matches!(e.client_api_error_kind(), Some(ErrorKind::UnknownToken(_))) => {
-                vault::remove(&dir, vault::SESSION);
+                // The server dropped this device: nothing kept here can be used again.
+                wipe_account(&dir);
                 let _ = ev.send(Ev::Error(t!("Signed out by server: {error}", error = e))).await;
                 let _ = ev.send(Ev::NeedLogin).await;
                 return;
