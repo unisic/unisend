@@ -93,7 +93,11 @@ fn encrypted(state: EncryptionState) -> Option<bool> {
 
 async fn peer_identifiers(room: &Room, peer: &UserId) -> Vec<String> {
     match room.client().account().fetch_user_profile_of(peer).await {
-        Ok(profile) => identifiers(profile.get("com.beeper.bridge.identifiers")),
+        Ok(profile) => {
+            let mut ids = identifiers(profile.get("com.beeper.bridge.identifiers"));
+            ids.extend(facebook_id(peer).map(|id| format!("facebook:{id}")));
+            ids
+        }
         Err(e) => {
             log::debug!("profile of the other person: {e}");
             Vec::new()
@@ -108,9 +112,16 @@ pub(super) async fn peer(room: Room, ev: mpsc::Sender<Ev>) {
     let _ = ev.send(Ev::PeerIds(room.room_id().to_owned(), ids)).await;
 }
 
+/// The Facebook id in a Meta ghost's MXID, `@facebookgo_<id>:beeper.local` (the fixture in
+/// backend/tests.rs; the bridge's identifiers carry none). Only Beeper's own bridge server counts.
+fn facebook_id(ghost: &UserId) -> Option<&str> {
+    let (name, id) = ghost.localpart().rsplit_once('_')?;
+    (ghost.server_name() == "beeper.local" && name.starts_with("facebook") && !id.is_empty() && id.len() <= 20 && id.bytes().all(|b| b.is_ascii_digit())).then_some(id)
+}
+
 /// Whether `profile_link` can ever give a link in a chat on `network`, so a profile is worth fetching.
 pub fn links_profiles(network: Option<&str>) -> bool {
-    network.is_some_and(|n| ["instagram", "whatsapp", "telegram", "twitter", "bluesky"].iter().any(|k| n.to_ascii_lowercase().contains(k)) || n == "X")
+    network.is_some_and(|n| ["instagram", "messenger", "facebook", "whatsapp", "telegram", "twitter", "bluesky"].iter().any(|k| n.to_ascii_lowercase().contains(k)) || n == "X")
 }
 
 /// The network app's own page for the other person, as `(app, https link)`: a link its Android app
@@ -118,11 +129,12 @@ pub fn links_profiles(network: Option<&str>) -> bool {
 /// `instagram:<username>` (meta igconnector chatinfo.go), WhatsApp `tel:+<digits>` (whatsapp
 /// userinfo.go), Telegram `telegram:<username>` (telegram userinfo.go), X `twitter:<screen name>`
 /// (twitter chatinfo.go), Bluesky `bluesky:<handle>` (bluesky chatinfo.go). Messenger ghosts carry
-/// none; Signal usernames link only through an encrypted `#eu/` token; LinkedIn gives an opaque URN.
+/// none, so `facebook:<id>` is made from the ghost's MXID (`facebook_id`); Signal usernames link only through an encrypted `#eu/` token; LinkedIn gives an opaque URN.
 pub fn profile_link(network: Option<&str>, identifiers: &[String]) -> Option<(&'static str, String)> {
     // Identifiers come from the other side's profile, so only plain names go into a link.
     let plain = |s: &str, extra: &[char]| !s.is_empty() && s.len() <= 100 && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(&c));
     let whatsapp = network.is_some_and(|n| n.to_ascii_lowercase().contains("whatsapp"));
+    let messenger = network.is_some_and(|n| ["messenger", "facebook"].iter().any(|k| n.to_ascii_lowercase().contains(k)));
     identifiers.iter().find_map(|id| {
         let (kind, value) = id.split_once(':')?;
         match kind {
@@ -130,6 +142,7 @@ pub fn profile_link(network: Option<&str>, identifiers: &[String]) -> Option<(&'
             "telegram" if plain(value, &['_']) => Some(("Telegram", format!("https://t.me/{value}"))),
             "twitter" if plain(value, &['_']) => Some(("X", format!("https://x.com/{value}"))),
             "bluesky" if plain(value, &['.', '-']) => Some(("Bluesky", format!("https://bsky.app/profile/{value}"))),
+            "facebook" if messenger && value.len() <= 20 && value.bytes().all(|b| b.is_ascii_digit()) && !value.is_empty() => Some(("Facebook", format!("https://www.facebook.com/profile.php?id={value}"))),
             "tel" if whatsapp => value.strip_prefix('+').filter(|d| plain(d, &[]) && d.bytes().all(|b| b.is_ascii_digit())).map(|d| ("WhatsApp", format!("https://wa.me/{d}"))),
             _ => None,
         }
@@ -257,6 +270,14 @@ mod tests {
         assert_eq!(link("Telegram", &["tel:+48123"]), None);
         assert_eq!(link("Instagram", &["instagram:a/../b", "instagram:", "instagram:a?x=1"]), None);
         assert_eq!(link("WhatsApp", &["tel:48123", "tel:+48 123"]), None);
+        assert_eq!(link("Facebook Messenger", &["facebook:100001"]), Some(("Facebook", "https://www.facebook.com/profile.php?id=100001".into())));
+        assert_eq!(link("Instagram", &["facebook:100001"]), None);
+        assert_eq!(link("Messenger", &["facebook:1a", "facebook:", "facebook:123456789012345678901"]), None);
+        let ghost = |s: &str| facebook_id(<&UserId>::try_from(s).unwrap()).map(str::to_owned);
+        assert_eq!(ghost("@facebookgo_100001:beeper.local").as_deref(), Some("100001"));
+        assert_eq!(ghost("@facebookgo_100001:evil.org"), None);
+        assert_eq!(ghost("@facebookgo_1x:beeper.local"), None);
+        assert_eq!(ghost("@signal_100001:beeper.local"), None);
         assert_eq!(profile_link(None, &[]), None);
         assert!(links_profiles(Some("Instagram")) && links_profiles(Some("X")) && !links_profiles(Some("Signal")) && !links_profiles(None));
     }
