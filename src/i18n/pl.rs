@@ -294,6 +294,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Only the chat's admins can change this.", "Tylko administratorzy czatu mogą to zmienić."),
     ("Only the newest 200 are shown.", "Widać tylko 200 najnowszych."),
     ("Open Beeper, Element or Murmur where you are signed in and accept the request there.", "Otwórz Beepera, Elementa lub Murmur na zalogowanym urządzeniu i zaakceptuj prośbę."),
+    ("Open in {app}", "Otwórz w aplikacji {app}"),
     ("Open link", "Otwórz link"),
     ("Open the sign-in page", "Otwórz stronę logowania"),
     ("Option", "Opcja"),

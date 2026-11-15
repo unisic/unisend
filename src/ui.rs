@@ -273,6 +273,8 @@ pub struct BeeperApp {
     strip_sent: bool,
     /// The chat whose actions are showing.
     chat_sheet: Option<OwnedRoomId>,
+    /// The sheet's chat and its other person's page in their network's app, as `(app, link)`.
+    peer_link: Option<(OwnedRoomId, &'static str, String)>,
     /// The attach sheet's photos and videos.
     gallery: gallery::Gallery,
     location: location::Locate,
@@ -507,6 +509,7 @@ impl BeeperApp {
             status_last: None,
             strip_epoch: 0,
             chat_sheet: None,
+            peer_link: None,
             gallery: gallery::Gallery::default(),
             location: location::Locate::default(),
             poll_form: pollnew::Form::default(),
@@ -787,6 +790,13 @@ impl BeeperApp {
             ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_)) => self.on_verify_event(ev, cx),
             Ev::Disappear { room, setting } => self.on_disappear(room, setting),
             Ev::Info(room, details) => self.info_details(room, *details, cx),
+            Ev::PeerIds(room, ids) => {
+                if self.chat_sheet.as_ref() == Some(&room) {
+                    let network = self.rooms.iter().find(|r| r.id == room).and_then(|r| r.network.as_deref());
+                    self.peer_link = crate::backend::profile_link(network, &ids).map(|(app, url)| (room, app, url));
+                    cx.notify();
+                }
+            }
             Ev::InfoItems { room, items, scanned, done } => self.info_items(room, items, scanned, done, cx),
             Ev::Found { room, query, hits } => self.found(room, query, hits, cx),
         }
@@ -1596,14 +1606,20 @@ impl BeeperApp {
                                             .when(unread, |el| el.child(count_pill(room.unread, room.muted, cx))),
                                     ),
                             )
-                            // A long press on a touch screen, the right button of a mouse.
+                            .child(press::long_press(cx.listener({
+                                let id = room.id.clone();
+                                move |this, _: &LongPressEvent, _, cx| {
+                                    #[cfg(target_os = "android")]
+                                    motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Heavy);
+                                    this.open_chat_sheet(id.clone(), cx);
+                                }
+                            })))
+                            // The right button of a mouse.
                             .on_aux_click(cx.listener({
                                 let id = room.id.clone();
                                 move |this, event: &ClickEvent, _, cx| {
                                     if event.is_secondary() {
-                                        this.chat_sheet = Some(id.clone());
-                                        this.disappear.picking = false;
-                                        cx.notify();
+                                        this.open_chat_sheet(id.clone(), cx);
                                     }
                                 }
                             }))
@@ -2110,9 +2126,9 @@ impl BeeperApp {
                     .when(room.is_some(), |el| el.child(self.find_button(cx)))
                     .when(room.is_some(), |el| {
                         el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, _, _, cx| {
-                            this.chat_sheet = this.open.clone();
-                            this.disappear.picking = false;
-                            cx.notify();
+                            if let Some(id) = this.open.clone() {
+                                this.open_chat_sheet(id, cx);
+                            }
                         })))
                     }),
             )
@@ -2618,6 +2634,18 @@ impl BeeperApp {
 
     /// Actions for the open chat. Rises with Vaul's sheet curve and falls quicker; the scrim
     /// follows the same progress, so the two never drift apart when reversed halfway.
+    fn open_chat_sheet(&mut self, id: OwnedRoomId, cx: &mut Context<Self>) {
+        let network = self.rooms.iter().find(|r| r.id == id).and_then(|r| r.network.as_deref());
+        // One profile lookup at the homeserver, which already holds it, so the row shows only when it leads somewhere.
+        if self.peer_link.as_ref().is_none_or(|(room, ..)| *room != id) && crate::backend::links_profiles(network) {
+            self.peer_link = None;
+            self.send(Cmd::PeerIds(id.clone()), cx);
+        }
+        self.chat_sheet = Some(id);
+        self.disappear.picking = false;
+        cx.notify();
+    }
+
     fn render_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.chat_sheet.is_some() {
             self.sheet_last = self.chat_sheet.clone();
@@ -2650,6 +2678,19 @@ impl BeeperApp {
                 }))
             })
             .collect();
+        if let Some((_, app, url)) = self.peer_link.as_ref().filter(|(room, ..)| *room == id) {
+            let url = url.clone();
+            let row = sheet_row("open-in-app", IconName::ExternalLink, t!("Open in {app}", app = app), p.text, window, cx);
+            rows.push(if live {
+                row.on_click(cx.listener(move |this, _, _, cx| {
+                    crate::open_link(cx, &url);
+                    this.chat_sheet = None;
+                    cx.notify();
+                }))
+            } else {
+                row
+            });
+        }
         rows.extend(self.disappear_entry(&id, live, cx));
         rows.push(self.leave_row(id, live, window, cx));
         Some(self.sheet(&self.chat_motion, frame, 0, title, rows, |this| &mut this.chat_motion, window, cx))
@@ -3285,13 +3326,13 @@ fn skeleton(p: Palette) -> Div {
 }
 
 /// One action in a sheet.
-fn sheet_row(id: &'static str, icon: IconName, label: &'static str, ink: Hsla, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+fn sheet_row(id: &'static str, icon: IconName, label: impl Into<SharedString>, ink: Hsla, window: &mut Window, cx: &mut App) -> Stateful<Div> {
     let press = press::area(id, Duration::ZERO, Palette::of(cx).raised, window, cx);
     sheet_row_idle(id, icon, label, ink, cx).relative().child(press)
 }
 
 /// A sheet action drawn where there is no window to read touches in: it shows only a mouse's press.
-fn sheet_row_idle(id: &'static str, icon: IconName, label: &'static str, ink: Hsla, cx: &App) -> Stateful<Div> {
+fn sheet_row_idle(id: &'static str, icon: IconName, label: impl Into<SharedString>, ink: Hsla, cx: &App) -> Stateful<Div> {
     let p = Palette::of(cx);
     h_flex()
         .id(id)
@@ -3303,7 +3344,7 @@ fn sheet_row_idle(id: &'static str, icon: IconName, label: &'static str, ink: Hs
         .text_color(ink)
         .cursor_pointer()
         .child(Icon::new(icon).size_5())
-        .child(label)
+        .child(label.into())
 }
 
 /// A network's name as the chat list has room for it: "Facebook Messenger" is Messenger there,

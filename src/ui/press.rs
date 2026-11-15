@@ -92,6 +92,25 @@ pub(super) fn area(id: impl Into<ElementId>, delay: Duration, tint: Hsla, window
     div().absolute().inset_0().bg(tint).opacity(alpha).child(probe)
 }
 
+/// A touch's long press on the `.relative()` parent. GPUI never turns one into a secondary click, and
+/// an unclaimed one still ends as a tap, so this claims it: the lift then does not click the parent.
+pub(super) fn long_press(on: impl Fn(&LongPressEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
+            window.on_mouse_event(move |e: &LongPressEvent, phase, window, cx| {
+                if phase.bubble() && e.phase == TouchPhase::Started && !window.default_prevented() && hitbox.is_hovered(window) {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    on(e, window, cx);
+                }
+            });
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
 const ITEMS: usize = 8;
 
 /// Bounds of a segmented control's items, measured by last frame's paint.

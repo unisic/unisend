@@ -478,6 +478,12 @@ impl BeeperApp {
                 };
                 let topic = details.as_ref().and_then(|d| d.topic.clone());
                 // The chat sheet's own rows, inset as the facts are.
+                let link = summary.as_ref().filter(|r| r.dm).zip(details.as_ref()).and_then(|(r, d)| crate::backend::profile_link(r.network.as_deref(), &d.identifiers));
+                let open = link.map(|(app, url)| {
+                    sheet_row("info-open-in-app", IconName::ExternalLink, t!("Open in {app}", app = app), p.text, window, cx)
+                        .px(px(GAP))
+                        .on_click(move |_, _, cx| crate::open_link(cx, &url))
+                });
                 let room = summary.map(|r| r.id);
                 let timer = room.as_ref().and_then(|id| self.disappear_entry(id, true, cx)).map(|row| row.px(px(GAP)));
                 let leave = room.map(|id| self.leave_row(id, true, window, cx).px(px(GAP)));
@@ -490,6 +496,7 @@ impl BeeperApp {
                             .bg(p.surface)
                             .children(topic.map(|t| fact(IconName::Info, t.into())))
                             .child(fact(icon, text.into()))
+                            .children(open)
                             .children(timer)
                             .children(leave),
                     )
