@@ -298,6 +298,8 @@ fn kids(d: &[u8], b: &Bx, skip: usize) -> Result<Vec<Bx>> {
     let from = b.body.checked_add(skip).filter(|&f| f <= b.end).context("iso: box too short")?;
     match boxes(d, from, b.end) {
         (found, None) => Ok(found),
+        // QuickTime lets a container end in a 32-bit zero.
+        (found, Some(at)) if b.end - at < 8 && d[at..b.end].iter().all(|&c| c == 0) => Ok(found),
         (_, Some(at)) => bail!("iso: bad box at {at} inside {:?}", b.kind),
     }
 }
@@ -329,7 +331,8 @@ fn iso(d: &mut Vec<u8>) -> Result<()> {
         match &b.kind {
             b"moov" => movie(d, b, &mut edits)?,
             b"meta" => items(d, b, &mut edits)?,
-            b"udta" => edits.push(Edit::Free(*b)),
+            // `mpvd` is the video of a Samsung motion photo, with its own metadata; a JPEG loses it too.
+            b"udta" | b"mpvd" => edits.push(Edit::Free(*b)),
             _ if xmp_box(d, b) => edits.push(Edit::Free(*b)),
             _ => {}
         }
@@ -744,6 +747,8 @@ mod tests {
             let gps = bx(b"trak", &[&bx(b"tkhd", &[&stamped]), &bx(b"mdia", &[&bx(b"hdlr", &[&full(0), &[0; 4], b"meta", &[0; 13]]), &bx(b"minf", &[&stbl])])]);
             let udta = bx(b"udta", &[&bx(b"\xa9xyz", &[GPS]), &bx(b"\xa9mod", &[b"SM-S911B"])]);
             let meta = bx(b"meta", &[&bx(b"hdlr", &[&[0; 8], b"mdta", &[0; 13]]), &bx(b"keys", &[b"com.apple.quicktime.location.ISO6709"]), &bx(b"ilst", &[GPS])]);
+            // A container ending in QuickTime's 32-bit zero.
+            let video = bx(b"trak", &[&video[8..], &[0; 4]]);
             bx(b"moov", &[&bx(b"mvhd", &[&stamped, &[0; 80]]), &video, &gps, &udta, &meta])
         };
         let mdat_at = (ftyp.len() + build(0).len()) as u32;
@@ -790,7 +795,7 @@ mod tests {
         };
         let ftyp = bx(b"ftyp", &[b"heic", &[0; 4], b"mif1heic"]);
         let mdat_at = (ftyp.len() + build(0).len()) as u32;
-        let sample = [ftyp, build(mdat_at), bx(b"mdat", &[pixels, &exif_item, &xmp])].concat();
+        let sample = [ftyp, build(mdat_at), bx(b"mdat", &[pixels, &exif_item, &xmp]), bx(b"mpvd", &[GPS])].concat();
         let clean = image(sample.clone()).unwrap();
         assert_eq!(clean.len(), sample.len());
         assert!(!has(&clean, GPS) && !has(&clean, b"xmpmeta"));
