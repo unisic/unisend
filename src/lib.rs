@@ -10,6 +10,7 @@ mod beeper;
 mod bridges;
 mod emoji;
 mod i18n;
+mod ime;
 mod share;
 mod ui;
 mod vault;
