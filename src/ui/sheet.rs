@@ -70,6 +70,8 @@ pub(super) struct SheetMotion {
     h: Rc<Cell<f32>>,
     /// Natural height of the content `fit` wraps.
     fit: Rc<Cell<f32>>,
+    /// Which content `fit` drew last, and when it changed to it.
+    fit_key: Cell<Option<(usize, Option<Instant>)>>,
     /// Opened over a sheet that is leaving: the scrim is already there, so it is full at once, and
     /// the rise waits `HANDOFF_DELAY`.
     pub handoff: bool,
@@ -125,6 +127,7 @@ impl SheetMotion {
     fn unmount(&mut self) {
         (self.mounted, self.drive, self.quiet, self.handoff, self.risen, self.y) = (false, Drive::Still, false, false, None, 0.);
         self.fit.set(0.);
+        self.fit_key.set(None);
     }
 
     fn advance(&mut self, now: Instant, still: bool) -> f32 {
@@ -146,7 +149,7 @@ impl SheetMotion {
                 let start = *start.get_or_insert(now);
                 let (from, to, delay, dur, ease) = (*from, *to, *delay, *dur, *ease);
                 let t = if still { 1. } else { (now.saturating_duration_since(start).saturating_sub(delay).as_secs_f32() / dur.as_secs_f32()).min(1.) };
-                if to == 0. && now >= start + delay {
+                if to == 0. && !still && now >= start + delay {
                     self.risen.get_or_insert(start + delay);
                 }
                 if t >= 1. {
@@ -260,11 +263,21 @@ impl SheetMotion {
     }
 
     /// Content whose height can change while the sheet is up: the box follows it in `ENTER`, clipped,
-    /// and content under a new `key` fades in, instead of the sheet jumping.
+    /// and content under a new `key` fades in, instead of the sheet jumping. What it opened with is
+    /// simply there.
     pub(super) fn fit(&self, id: &'static str, key: usize, content: impl IntoElement, view: EntityId, window: &mut Window, cx: &mut App) -> Div {
         let natural = self.fit.get();
         let tall = (natural > 0.).then(|| transition(id, natural, motion::enter(), window, cx));
-        let fade = Presence::new(ElementId::from((id, key)), true).transition(Transition::new(motion::FADE_IN).easing(motion::EASE_OUT)).sample(window, cx).progress;
+        let since = match self.fit_key.get() {
+            Some((old, since)) if old == key => since,
+            Some(_) if !cx.reduce_motion() => Some(Instant::now()),
+            _ => None,
+        };
+        self.fit_key.set(Some((key, since)));
+        let fade = since.map_or(1., |at| motion::ease_out((at.elapsed().as_secs_f32() / motion::FADE_IN.as_secs_f32()).min(1.)));
+        if fade < 1. {
+            window.request_animation_frame();
+        }
         v_flex()
             .flex_none()
             .overflow_hidden()

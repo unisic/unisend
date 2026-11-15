@@ -269,6 +269,7 @@ pub struct BeeperApp {
     contacts: contacts::State,
     /// The chat whose sheet is still falling after it closed.
     sheet_last: Option<OwnedRoomId>,
+    chat_motion: sheet::SheetMotion,
     /// The phone's last move between the chat list and a chat: when, and whether it went in.
     nav: Option<(std::time::Instant, bool)>,
     /// The picture still fading out after the viewer closed.
@@ -484,6 +485,7 @@ impl BeeperApp {
             attaching: false,
             contacts: contacts::State::default(),
             sheet_last: None,
+            chat_motion: sheet::SheetMotion::default(),
             nav: None,
             viewer_last: None,
             zoom: viewer::Zoom::default(),
@@ -2124,44 +2126,66 @@ impl BeeperApp {
 
     /// Rows that rise from the bottom over a dimmed screen: the app's menus. Touch has no
     /// right-click, and a popup's rows are too small for a finger.
-    /// `title` says what the rows act on; `shown` is how far it has risen, 0 to 1. While it falls
-    /// (`live` false) it takes no input, so taps reach the screen under it.
-    fn sheet(&self, title: String, rows: Vec<Stateful<Div>>, shown: f32, live: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// `title` says what the rows act on; a different `key` is a different set of rows, which the
+    /// sheet grows or shrinks to. While it falls it takes no input, so taps reach the screen under
+    /// it. The title can be dragged down; `motion` finds the sheet's motion again in the listener.
+    #[expect(clippy::too_many_arguments, reason = "one call site per sheet, each with its own motion")]
+    fn sheet(
+        &self,
+        state: &sheet::SheetMotion,
+        frame: sheet::SheetFrame,
+        key: usize,
+        title: String,
+        rows: Vec<Stateful<Div>>,
+        motion: fn(&mut Self) -> &mut sheet::SheetMotion,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let p = Palette::of(cx);
         let (_, bottom) = crate::insets();
-        // Its own height, from the parts below: top padding, title, rows, bottom padding.
-        let height = 8. + 36. + SHEET_ROW_H * rows.len() as f32 + bottom + 8.;
-        div()
-            .id("sheet")
-            .absolute()
-            .inset_0()
+        let live = frame.live;
+        let close = |this: &mut Self, cx: &mut Context<Self>| {
+            this.chat_sheet = None;
+            this.gallery.menu = false;
+            cx.notify();
+        };
+        let head = div()
+            .id("sheet-title")
+            .h(px(44.))
+            .pt(px(8.))
+            .px(px(GUTTER + 4.))
             .flex()
-            .flex_col()
-            .justify_end()
             .items_center()
-            .bg(gpui_kit::black().opacity(0.6 * shown))
+            .truncate()
+            .text_size(fs(14.))
+            .text_color(p.faint)
             .when(live, |el| {
-                el.occlude().on_click(cx.listener(|this, _, _, cx| {
-                    this.chat_sheet = None;
-                    this.gallery.menu = false;
+                el.on_scroll_wheel(cx.listener(move |this, e: &ScrollWheelEvent, _, cx| {
+                    if motion(this).drag(e) {
+                        close(this, cx);
+                    }
                     cx.notify();
                 }))
             })
+            .child(title);
+        let view = cx.entity_id();
+        let body = state.fit("sheet-rows", key, v_flex().child(head).children(rows), view, window, cx);
+        sheet::scrim("sheet", frame)
+            .when(live, |el| el.on_click(cx.listener(move |this, _, _, cx| close(this, cx))))
             .child(
                 v_flex()
                     .id("sheet-rows")
                     .relative()
-                    .top(px(height * (1. - shown)))
+                    .top(px(frame.y))
                     .w_full()
                     .max_w(px(SHEET_W))
-                    .pt(px(8.))
                     .pb(px(bottom + 8.))
                     .rounded_t(px(RADIUS))
                     .bg(p.surface)
                     // A tap between the rows is not a tap outside the sheet.
                     .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
-                    .child(div().h(px(36.)).px(px(GUTTER + 4.)).flex().items_center().truncate().text_size(fs(14.)).text_color(p.faint).child(title))
-                    .children(rows),
+                    .child(state.probe(view))
+                    .child(body),
             )
             .into_any_element()
     }
@@ -2324,29 +2348,21 @@ impl BeeperApp {
     /// Actions for the open chat. Rises with Vaul's sheet curve and falls quicker; the scrim
     /// follows the same progress, so the two never drift apart when reversed halfway.
     fn render_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.chat_sheet.is_some();
-        if live {
+        if self.chat_sheet.is_some() {
             self.sheet_last = self.chat_sheet.clone();
-        } else if self.sheet_last.is_none() {
-            return None;
         }
-        let motion = if live {
-            Transition::new(motion::SHEET_IN).easing(motion::EASE_SHEET)
-        } else {
-            Transition::new(motion::SHEET_OUT).easing(motion::EASE_OUT)
-        };
-        let shown = Presence::new("chat-sheet", live).transition(motion).sample(window, cx);
-        if !shown.should_render() {
+        let Some(frame) = self.chat_motion.sample(self.chat_sheet.is_some(), window, cx) else {
             self.sheet_last = None;
             return None;
-        }
+        };
+        let live = frame.live;
         let p = Palette::of(cx);
         let room = self.sheet_last.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id))?;
         let (id, title) = (room.id.clone(), room.name.clone());
         if self.disappear.picking
             && let Some((title, rows)) = self.disappear_sheet(&id, live, cx)
         {
-            return Some(self.sheet(title, rows, shown.progress, live, cx));
+            return Some(self.sheet(&self.chat_motion, frame, 1, title, rows, |this| &mut this.chat_motion, window, cx));
         }
         let mut rows: Vec<_> = chat_actions(room)
             .into_iter()
@@ -2365,7 +2381,7 @@ impl BeeperApp {
             .collect();
         rows.extend(self.disappear_entry(&id, live, cx));
         rows.push(self.leave_row(id, live, cx));
-        Some(self.sheet(title, rows, shown.progress, live, cx))
+        Some(self.sheet(&self.chat_motion, frame, 0, title, rows, |this| &mut this.chat_motion, window, cx))
     }
 
     /// What the composer is replying to or editing, with a way out. It opens and closes over the
