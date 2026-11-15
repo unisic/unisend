@@ -871,7 +871,8 @@ impl BeeperApp {
         if self.share.open {
             self.close_share(cx);
         } else if self.viewer.is_some() {
-            self.close_viewer(cx);
+            // Android's back is a gesture and animates; a desktop's Escape is a key and does not.
+            self.dismiss_viewer(gpui_kit::is_mobile(), cx);
         } else if self.close_confirm(cx) {
         } else if self.preview.open() {
             self.close_preview(true, window, cx);
@@ -1002,7 +1003,7 @@ impl BeeperApp {
 
     /// `room` is the width a bubble has for its content.
     /// `radius` is a picture's corner, concentric with the bubble around it.
-    fn render_media(&self, m: &Msg, media: &Media, room: f32, radius: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_media(&self, m: &Msg, media: &Media, room: f32, radius: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if let Some(card) = self.contact_card(m, media, room, cx) {
             return card;
         }
@@ -1019,6 +1020,28 @@ impl BeeperApp {
             let (w, h) = picture_size(media, room);
             let thumb = self.thumbs.get(&m.id).cloned();
             let video = media.kind == MediaKind::Video;
+            // Fades in when it loads; one already loaded is there at once. Left out while the
+            // viewer draws this picture over its place, which stays as the slot it lands in.
+            let arrived = transition((SharedString::from(m.id.clone()), "in"), if thumb.is_some() { 1. } else { 0. }, Transition::new(motion::THUMB_IN).easing(motion::EASE_OUT), window, cx);
+            let alpha = if self.zoom.covers(&m.id) { 0. } else { arrived };
+            // Where the viewer flies this picture from and back to: its bounds as painted each frame.
+            let probe = matches!(media.kind, MediaKind::Image | MediaKind::Sticker).then(|| {
+                let (weak, id) = (cx.entity().downgrade(), m.id.clone());
+                let radius = if media.kind == MediaKind::Sticker { 0. } else { radius };
+                canvas(
+                    |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+                    move |bounds, hitbox, window, cx| {
+                        let _ = weak.update(cx, |this, _| this.zoom.seen(&id, bounds, radius));
+                        window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                            if phase.bubble() && e.button == MouseButton::Left && hitbox.is_hovered(window) {
+                                let _ = weak.update(cx, |this, _| this.zoom.pressed(&id, bounds, radius));
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .inset_0()
+            });
             return div()
                 .id(SharedString::from(format!("{}-media", m.id)))
                 .relative()
@@ -1030,11 +1053,12 @@ impl BeeperApp {
                 .when(media.kind != MediaKind::Sticker || thumb.is_none(), |el| el.bg(raised))
                 .cursor_pointer()
                 .on_click(open)
+                .children(probe)
                 .map(|el| match thumb {
-                    Some(image) if media.kind == MediaKind::Sticker => el.child(img(image).size_full().object_fit(ObjectFit::Contain)),
+                    Some(image) if media.kind == MediaKind::Sticker => el.child(img(image).size_full().object_fit(ObjectFit::Contain).opacity(alpha)),
                     // The ring keeps a dark picture's edge from melting into the ground.
-                    Some(image) => el.child(img(image).size_full().rounded(px(radius)).object_fit(ObjectFit::Cover)).child(
-                        div().absolute().inset_0().rounded(px(radius)).border_1().border_color(Palette::of(cx).text.opacity(0.1)),
+                    Some(image) => el.child(img(image).size_full().rounded(px(radius)).object_fit(ObjectFit::Cover).opacity(alpha)).child(
+                        div().absolute().inset_0().rounded(px(radius)).border_1().border_color(Palette::of(cx).text.opacity(0.1)).opacity(alpha),
                     ),
                     None => el.child(
                         div().size_full().flex().items_center().justify_center().opacity(0.5).child(
@@ -1676,7 +1700,7 @@ impl BeeperApp {
                 let text_x = if pictured { GAP - pad_x } else { 0. };
                 // A caption keeps to its picture's width.
                 let framed_w = m.media.as_ref().filter(|_| pictured && !bare).map(|media| picture_size(media, room).0 + 2. * pad_x);
-                let attachment = m.media.as_ref().filter(|_| !m.deleted).map(|media| this.render_media(m, media, room, RADIUS - pad_x, cx));
+                let attachment = m.media.as_ref().filter(|_| !m.deleted).map(|media| this.render_media(m, media, room, RADIUS - pad_x, window, cx));
                 // Rows that draw nothing do not come between two messages.
                 let drawn = |row: &&Msg| !matches!(row.kind, Kind::Hidden | Kind::Status { .. }) && !this.is_hidden(&row.id);
                 let prev = this.msgs[..ix].iter().rev().find(drawn);
