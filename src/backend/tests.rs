@@ -346,7 +346,7 @@ async fn login_sync_decrypt_send_recover() {
     alice2.handle(Cmd::Attach { room: room.clone(), path: picture.clone(), reply_to: None }).await.unwrap();
     until(&mut alice2_rx, "the picture", |rows| rows.iter().any(|m| m.media.is_some() && m.id.starts_with('$'))).await;
     let (photo_id, media) = alice2_rx.rows.iter().find_map(|m| m.media.clone().map(|media| (m.id.clone(), media))).unwrap();
-    assert_eq!((media.kind, media.dims, media.name.as_str()), (MediaKind::Image, Some((2400, 1200)), "holiday photo.png"));
+    assert_eq!((media.kind, media.dims, media.name.as_str()), (MediaKind::Image, Some((2400, 1200)), "image.png"));
     let longest = |bytes: &[u8]| {
         let image = image::load_from_memory(bytes).unwrap();
         image.width().max(image.height())
@@ -371,14 +371,14 @@ async fn login_sync_decrypt_send_recover() {
         _ => None,
     })
     .await;
-    assert!(saved.starts_with(root.join("alice2/media")) && saved.ends_with("holiday photo.png"), "{saved:?}");
+    assert!(saved.starts_with(root.join("alice2/media")) && saved.ends_with("image.png"), "{saved:?}");
     assert_eq!(std::fs::read(&saved).unwrap(), std::fs::read(&picture).unwrap());
     // The same picture from the preview, without HD and with a caption: at most 2048 px, as JPEG,
     // and the caption is the body while the file name moves to `filename` (MSC2530).
     alice2.handle(Cmd::AttachMedia { room: room.clone(), path: picture.clone(), reply_to: None, caption: "sunset".into(), hd: false }).await.unwrap();
     until(&mut alice2_rx, "the captioned picture", |rows| rows.iter().any(|m| m.body == "sunset" && m.media.is_some())).await;
     let shrunk = alice2_rx.rows.iter().find(|m| m.body == "sunset").and_then(|m| m.media.clone()).unwrap();
-    assert_eq!((shrunk.dims, shrunk.name.as_str()), (Some((2048, 1024)), "holiday photo.jpg"));
+    assert_eq!((shrunk.dims, shrunk.name.as_str()), (Some((2048, 1024)), "image.jpg"));
 
     // A chat with no messages, as a bridge creates them before it brings the history in: it has
     // no time, so it sorts last, and it is marked as looked at. Its first message dates it.
