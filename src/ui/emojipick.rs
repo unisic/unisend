@@ -206,10 +206,10 @@ impl BeeperApp {
     }
 
     pub(super) fn open_emoji(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        // The composer is not focused for it: on Android a text input gaining focus raises the
+        // keyboard from the platform layer (gpui-mobile `text_input_state_changed`), past any hide.
+        // `insert` works at the kept caret without focus.
         self.search_emoji("", window, cx);
-        if target == Target::Composer {
-            self.composer.update(cx, |c, cx| c.focus(window, cx));
-        }
         self.emoji_open = Some(target);
         cx.notify();
     }

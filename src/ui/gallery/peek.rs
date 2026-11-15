@@ -252,7 +252,8 @@ impl BeeperApp {
         }
         let video = g.items.iter().find(|item| item.id == id).filter(|item| item.video()).map(|item| item.duration_ms);
         let thumb = g.thumbs.get(id);
-        let picture = |image: Arc<Image>| img(image).absolute().inset_0().rounded(px(RADIUS)).object_fit(ObjectFit::Cover);
+        // An `img` with an auto size takes its pixels' size, so insets alone let a full decode spill off screen.
+        let picture = |image: Arc<Image>| img(image).absolute().inset_0().size_full().rounded(px(RADIUS)).object_fit(ObjectFit::Cover);
         Some(
             div()
                 .id("gallery-peek")
