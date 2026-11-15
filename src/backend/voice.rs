@@ -21,10 +21,14 @@ pub const BARS: usize = 42;
 
 /// Uploads a recording as a voice message, then deletes it. `levels` are 0 to 1, one per tick.
 pub(super) async fn send(room: &Room, path: &Path, duration: Duration, levels: Vec<f32>, reply_to: Option<String>) -> Result<()> {
-    let data = tokio::fs::read(path).await?;
+    let mut data = tokio::fs::read(path).await?;
     // Android records Ogg Opus from 10 on; before that, AAC in MP4, which the WhatsApp bridge
     // takes only as `audio/mp4` (mime_guess says `audio/m4a`).
     let ogg = path.extension().is_some_and(|e| e == "ogg");
+    if !ogg {
+        // MediaRecorder's MP4 names the Android version in its metadata.
+        super::strip::video(&mut data)?;
+    }
     let (name, mime) = if ogg { ("Voice message.ogg", "audio/ogg") } else { ("Voice message.m4a", "audio/mp4") };
     let info = BaseAudioInfo { duration: Some(duration), size: UInt::new(data.len() as u64), waveform: Some(resample(&levels, SENT_SAMPLES)) };
     let mut config = AttachmentConfig::new().info(AttachmentInfo::Voice(info));

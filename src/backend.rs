@@ -1827,16 +1827,41 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &st
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("vcf")) {
         mime = "text/vcard".parse()?;
     }
-    let pictured = mime.type_() == mime_guess::mime::IMAGE;
+    // SVG is markup the user wrote or chose, sent as a document.
+    let pictured = mime.type_() == mime_guess::mime::IMAGE && mime.subtype() != "svg";
+    let filmed = mime.type_() == mime_guess::mime::VIDEO;
     let mut dims = None;
+    let downscale = |source: PathBuf| async move { anyhow::Ok(tokio::task::spawn_blocking(move || caption::downscale(&source)).await??) };
     let data = if pictured && !hd && caption::recodable(&mime) {
-        let source = path.to_owned();
-        let sent = tokio::task::spawn_blocking(move || caption::downscale(&source)).await??;
+        let sent = downscale(path.to_owned()).await?;
         (name, mime, dims) = (sent.name, sent.mime, Some((sent.width, sent.height)));
         sent.bytes
+    } else if pictured {
+        let raw = tokio::fs::read(path).await?;
+        match tokio::task::spawn_blocking(move || strip::image(raw)).await? {
+            Ok(clean) => clean,
+            // A format the walk does not know (TIFF, BMP) or a file it finds broken: a re-encode carries no metadata.
+            Err(e) => {
+                log::debug!("strip: {e:#}");
+                let sent = downscale(path.to_owned()).await.map_err(|_| anyhow!(t!("could not remove the location from this photo")))?;
+                (name, mime, dims) = (sent.name, sent.mime, Some((sent.width, sent.height)));
+                sent.bytes
+            }
+        }
+    } else if filmed {
+        let mut raw = tokio::fs::read(path).await?;
+        tokio::task::spawn_blocking(move || strip::video(&mut raw).map(|()| raw)).await?.map_err(|e| {
+            log::debug!("strip: {e:#}");
+            anyhow!(t!("could not remove the location from this video"))
+        })?
     } else {
         tokio::fs::read(path).await?
     };
+    if pictured || filmed {
+        // The file's own name tells when it was taken (IMG_20250101_120000) or more.
+        let ext = Path::new(&name).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        name = format!("{}.{ext}", if filmed { "video" } else { "image" });
+    }
     let mut config = AttachmentConfig::new();
     if pictured {
         // Bridges and other clients lay the bubble out from these.
@@ -2871,6 +2896,7 @@ mod contact;
 mod gifs;
 pub(crate) use gifs::{Found as GifPage, Gif, enabled as gifs_enabled};
 pub(crate) mod caption;
+mod strip;
 pub(crate) mod forward;
 mod info;
 mod polls;

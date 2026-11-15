@@ -16,9 +16,6 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 
 /**
@@ -57,8 +54,14 @@ public class CameraCapture extends Activity {
         if (!dir.isDirectory() && !dir.mkdirs()) {
             return null;
         }
-        String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date(now));
-        File out = new File(dir, (video ? "VID_" : "IMG_") + stamp + (video ? ".mp4" : ".jpg"));
+        File out;
+        try {
+            // Not IMG_<local time>: the name would tell when, and in which time zone, it was taken.
+            out = File.createTempFile(video ? "video" : "photo", video ? ".mp4" : ".jpg", dir);
+        } catch (IOException e) {
+            Log.w(TAG, "camera", e);
+            return null;
+        }
         CountDownLatch mine = new CountDownLatch(1);
         synchronized (CameraCapture.class) {
             latch = mine;

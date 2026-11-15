@@ -503,6 +503,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Your device {name}", "Twoje urządzenie {name}"),
     ("Your devices", "Twoje urządzenia"),
     ("and {more} more", "i {more} więcej"),
+    ("could not remove the location from this photo", "nie udało się usunąć lokalizacji z tego zdjęcia"),
+    ("could not remove the location from this video", "nie udało się usunąć lokalizacji z tego filmu"),
     ("the bridge did not come up", "mostek się nie uruchomił"),
     ("the file is larger than {mb} MB", "plik jest większy niż {mb} MB"),
     ("the login is already complete", "logowanie jest już zakończone"),

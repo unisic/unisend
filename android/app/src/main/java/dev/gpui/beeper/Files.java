@@ -31,6 +31,8 @@ public final class Files {
     private static final String TAG = "Murmur";
     private static final long STALE_MS = 60 * 60 * 1000;
     private static final AtomicInteger PICKS = new AtomicInteger();
+    /** Longest document name kept, in UTF-8 bytes; file systems allow 255. */
+    static final int MAX_NAME_BYTES = 200;
 
     private Files() {}
 
@@ -122,8 +124,8 @@ public final class Files {
     }
 
     /**
-     * Copies a picked or shared document into the cache under a neutral name (image.jpg,
-     * video.mp4, file.pdf) and returns the path, or null when it cannot be read or is this app's
+     * Copies a picked or shared document into the cache under the name it is sent with (see
+     * {@link #uploadName}) and returns the path, or null when it cannot be read or is this app's
      * own. Each pick gets a directory; ones older than an hour are removed.
      */
     public static String copyToCache(Activity activity, String uriString) {
@@ -157,7 +159,7 @@ public final class Files {
         if (mime == null && ext != null) {
             mime = types.getMimeTypeFromExtension(ext);
         }
-        String name = neutralName(ext, mime);
+        String name = uploadName(display, ext, mime);
 
         File root = new File(activity.getCacheDir(), "outgoing");
         long now = System.currentTimeMillis();
@@ -257,12 +259,36 @@ public final class Files {
         return ext;
     }
 
-    /** A name that says only the kind: image.jpg, video.mp4, file.pdf, or file. */
-    static String neutralName(String ext, String mime) {
+    /**
+     * The name a picked file is sent under. A photo or video gets its kind alone (image.jpg,
+     * video.mp4): its own name often says when it was taken. A document keeps its name, which says
+     * what it is, without path separators, control or direction-flipping characters, cut to
+     * {@link #MAX_NAME_BYTES} with its extension kept; with none usable, file.ext.
+     */
+    static String uploadName(String display, String ext, String mime) {
         String kind = mime == null ? "file"
                 : mime.startsWith("image/") ? "image"
                 : mime.startsWith("video/") ? "video"
                 : "file";
-        return ext == null ? kind : kind + "." + ext;
+        String plain = ext == null ? kind : kind + "." + ext;
+        if (!kind.equals("file") || display == null) {
+            return plain;
+        }
+        String name = display.replaceAll("[\\p{Cntrl}/\\\\\u202a-\u202e\u2066-\u2069]", "_").trim();
+        int dot = name.lastIndexOf('.');
+        String suffix = ext != null && dot > 0 ? name.substring(dot) : "";
+        String base = name.substring(0, name.length() - suffix.length());
+        int budget = MAX_NAME_BYTES - suffix.length();
+        StringBuilder kept = new StringBuilder();
+        for (int i = 0, cp; i < base.length(); i += Character.charCount(cp)) {
+            cp = base.codePointAt(i);
+            budget -= cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+            if (budget < 0) {
+                break;
+            }
+            kept.appendCodePoint(cp);
+        }
+        String out = kept.toString().trim() + suffix;
+        return out.isEmpty() || out.equals(".") || out.equals("..") ? plain : out;
     }
 }
