@@ -20,6 +20,7 @@ use matrix_sdk::{
         EventId, OwnedEventId, OwnedRoomId, OwnedTransactionId, OwnedUserId, UserId,
         events::{
             AnySyncStateEvent, AnySyncTimelineEvent, StateEventContentChange, SyncStateEvent,
+            receipt::{ReceiptThread, ReceiptType},
             room::{member::MembershipChange as Change, message::MessageType},
         },
         room_version_rules::RoomVersionRules,
@@ -35,7 +36,7 @@ use matrix_sdk_ui::timeline::{
 use tokio::sync::{broadcast, mpsc};
 
 use super::{
-    AbortOnDrop, deleted, utd, Delivery, Ev, Kind, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
+    AbortOnDrop, deleted, utd, Delivery, Ev, Kind, OwnRead, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
     format, marks, network, other_person, plain, sticker, disappear, features,
 };
 use crate::i18n::t;
@@ -61,7 +62,7 @@ pub(super) struct Open {
     pub timeline: Arc<Timeline>,
     /// Builds every row again, as after a change of the interface language.
     pub relabel: Arc<tokio::sync::Notify>,
-    _tasks: [AbortOnDrop; 3],
+    _tasks: [AbortOnDrop; 4],
     _features: EventHandlerDropGuard,
 }
 
@@ -122,8 +123,10 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
         }
     });
     let relabel = Arc::new(tokio::sync::Notify::new());
+    // A receipt on an event the timeline had not loaded yet gets its row only once it is loaded.
+    let rows_changed = Arc::new(tokio::sync::Notify::new());
     let rows = tokio::spawn({
-        let (timeline, ev, id, viewer, relabel) = (timeline.clone(), ev.clone(), id.clone(), viewer.clone(), relabel.clone());
+        let (timeline, ev, id, viewer, relabel, rows_changed) = (timeline.clone(), ev.clone(), id.clone(), viewer.clone(), relabel.clone(), rows_changed.clone());
         async move {
             let mut diffs = std::pin::pin!(diffs);
             let (mut asked, mut keyed): (HashSet<OwnedEventId>, HashSet<String>) = Default::default();
@@ -149,6 +152,7 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
                 if ev.send(Ev::Timeline { room: id.clone(), diffs }).await.is_err() {
                     break;
                 }
+                rows_changed.notify_one();
                 if timer_changed {
                     let setting = disappear::read(timeline.room()).await;
                     if ev.send(Ev::Disappear { room: id.clone(), setting }).await.is_err() {
@@ -195,8 +199,47 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
             }
         }
     });
+    let reads = tokio::spawn({
+        let (timeline, ev, id) = (timeline.clone(), ev.clone(), id.clone());
+        async move {
+            let mut changed = std::pin::pin!(timeline.subscribe_own_user_read_receipts_changed().await);
+            let mut last = None;
+            loop {
+                let read = own_read(&timeline).await;
+                if last.as_ref() != Some(&read) {
+                    last = Some(read.clone());
+                    if ev.send(Ev::OwnRead { room: id.clone(), read }).await.is_err() {
+                        break;
+                    }
+                }
+                tokio::select! {
+                    next = changed.next() => if next.is_none() { break },
+                    () = rows_changed.notified() => {}
+                }
+            }
+        }
+    });
     let _features = follow_features(room, ev).await;
-    Ok(Open { room: id, timeline, relabel, _tasks: [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing)], _features })
+    Ok(Open { room: id, timeline, relabel, _tasks: [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing), AbortOnDrop(reads)], _features })
+}
+
+/// Reads only what the SDK keeps; never sends a receipt.
+async fn own_read(timeline: &Timeline) -> OwnRead {
+    let room = timeline.room();
+    let own = room.own_user_id();
+    let row = timeline.latest_user_read_receipt_timeline_event_id(own).await.map(String::from);
+    let newest = timeline.latest_user_read_receipt(own).await.map(|(id, _)| id);
+    // As the SDK looks it up: unthreaded first, then the main thread.
+    let mut public = room.load_user_receipt(ReceiptType::Read, &ReceiptThread::Unthreaded, own).await.ok().flatten();
+    if public.is_none() {
+        public = room.load_user_receipt(ReceiptType::Read, &ReceiptThread::Main, own).await.ok().flatten();
+    }
+    let public = public.map(|(id, receipt)| {
+        let at = receipt.ts.map_or(0, |ts| u64::from(ts.0));
+        // The newest receipt being the public one, it falls back to the same shown row.
+        (id.to_string(), row.clone().filter(|_| newest.as_ref() == Some(&id)), at)
+    });
+    OwnRead { read: newest.map(|id| (id.to_string(), row)), public }
 }
 
 /// Sends the room's features now and again whenever sync brings the event; the SDK has stored

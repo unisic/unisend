@@ -43,6 +43,7 @@ mod pinpad;
 mod press;
 mod slide;
 mod pollnew;
+pub(crate) mod receipt;
 mod rich;
 mod search;
 mod sheet;
@@ -60,10 +61,11 @@ use std::path::PathBuf;
 use menu::{MenuKind, QUICK_REACTIONS};
 use appearance::fs;
 use panels::Panel;
+use receipt::{Mark, Receipt};
 
 use crate::{Keyboard, Palette};
 use crate::bridges::{Flow, Network, Step};
-use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, Quote, QuoteState, RoomSummary};
+use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, OwnRead, Quote, QuoteState, RoomSummary};
 
 const NARROW: f32 = 720.;
 // Metrics; `docs/design.md` gives the reasons.
@@ -225,6 +227,10 @@ pub struct BeeperApp {
     msgs: Vec<Msg>,
     /// Who is writing in the open conversation.
     typing: Vec<String>,
+    /// How far the user has read the open chat, publicly and at all.
+    own_read: OwnRead,
+    /// Someone else's message whose status line a tap showed.
+    tapped: Option<String>,
     /// What the typing line said last, drawn while it leaves.
     typing_last: SharedString,
     /// When the others were last told that the user is writing.
@@ -258,8 +264,8 @@ pub struct BeeperApp {
     opened_at: Option<Instant>,
     /// A finger resting on a message's bubble, before it is a long press.
     bubble_press: Option<BubblePress>,
-    /// The state last said under the user's newest message, and since when.
-    status_last: Option<(String, String, Instant)>,
+    /// The state last shown under the user's newest message, the one it replaced, and since when.
+    status_last: Option<(String, Mark, Option<Mark>, Instant)>,
     /// The message a quote led to, tinted for a moment; the tint's clock starts when it is drawn.
     flash: Option<(String, Option<Instant>)>,
     /// A message being looked for among older ones, with how many more pages it may load.
@@ -493,6 +499,8 @@ impl BeeperApp {
             open: None,
             msgs: Vec::new(),
             typing: Vec::new(),
+            own_read: OwnRead::default(),
+            tapped: None,
             typing_last: SharedString::default(),
             typing_sent: None,
             tail: None,
@@ -721,7 +729,7 @@ impl BeeperApp {
                         if let Some(arrival) = self.arrivals.iter_mut().find(|a| a.id == old.id) {
                             arrival.id = value.id.clone();
                         }
-                        if let Some((on, _, _)) = self.status_last.as_mut().filter(|(on, _, _)| *on == old.id) {
+                        if let Some((on, ..)) = self.status_last.as_mut().filter(|(on, ..)| *on == old.id) {
                             *on = value.id.clone();
                         }
                     }
@@ -783,6 +791,11 @@ impl BeeperApp {
                     return;
                 }
                 self.typing = names;
+            }
+            Ev::OwnRead { room, read } => {
+                if self.open.as_ref() == Some(&room) {
+                    self.own_read = read;
+                }
             }
             Ev::Online(online) => self.offline = !online,
             Ev::Synced => self.synced = true,
@@ -1050,9 +1063,8 @@ impl BeeperApp {
     }
 
     /// Asks once for the picture of whoever wrote this message.
-    fn want_face(&mut self, ix: usize) {
-        let from = &self.msgs[ix].from;
-        if self.faces.contains_key(from) || self.faces.len() >= MAX_FACES || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
+    fn want_face(&mut self, from: OwnedUserId) {
+        if self.faces.contains_key(&from) || self.faces.len() >= MAX_FACES || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
             return;
         }
         let Some(room) = self.open.clone() else { return };
@@ -1339,7 +1351,8 @@ impl BeeperApp {
         self.close_viewer(cx);
         self.fetching.clear();
         (self.swipe, self.swipe_back, self.flash, self.seek, self.fresh_reaction, self.strip_last) = (None, None, None, None, None, None);
-        (self.bubble_press, self.status_last) = (None, None);
+        (self.bubble_press, self.status_last, self.tapped) = (None, None, None);
+        self.own_read = OwnRead::default();
         self.arrivals.clear();
         for (_, image) in self.faces.drain() {
             if let Some(image) = image {
@@ -1876,7 +1889,13 @@ impl BeeperApp {
                         })),
                     }
                 });
-                let state = if m.own { this.delivery_line(ix, dm) } else { None };
+                let style = this.settings.receipts;
+                let asked = match this.settings.incoming {
+                    receipt::IncomingStatus::Always => last,
+                    receipt::IncomingStatus::OnTap => this.tapped.as_ref() == Some(&m.id),
+                };
+                let said = if m.own { this.delivery_line(ix, dm) } else if asked && !m.deleted { Some(this.heard(ix, dm)) } else { None };
+                let state = said.and_then(|r| Some((receipt::mark(&r, style)?, r)));
                 // Still only here, not yet with the server.
                 let leaving = m.delivery == Delivery::Sending && !m.id.starts_with('$');
                 let (id, held) = (m.id.clone(), m.id.clone());
@@ -2030,10 +2049,15 @@ impl BeeperApp {
                 // In a group, the sender's picture stands beside the last message of the run.
                 let faces = !dm && !m.own;
                 if faces && last {
-                    this.want_face(ix);
+                    this.want_face(m.from.clone());
                 }
                 let arriving = this.arriving(ix, window, cx);
-                let state_level = state.as_ref().and_then(|(text, _)| this.status_level(ix, text, window, cx));
+                let state_level = state.as_ref().filter(|_| this.tail == Some(ix)).and_then(|(mark, _)| this.status_level(ix, mark, window, cx));
+                if let Some((Mark::Faces(readers, _), _)) = &state {
+                    for (user, _) in readers.clone() {
+                        this.want_face(user);
+                    }
+                }
                 let m = &this.msgs[ix];
                 let side = if faces { px(SENDER + 8.) } else { px(0.) };
                 let row = v_flex()
@@ -2106,13 +2130,16 @@ impl BeeperApp {
                             .map(|el| if m.own { el.items_end() } else { el.items_start() })
                             .children(reactions)
                             .when(last || state.is_some() || shrink.is_some(), |el| {
-                                let failed = state.as_ref().is_some_and(|(_, failed)| *failed);
+                                let failed = state.as_ref().is_some_and(|(_, r)| matches!(r, Receipt::Failed(_)));
+                                // Words follow the time after a dot, icons after a space.
+                                let worded = state.as_ref().is_some_and(|(mark, _)| matches!(mark, Mark::Words(_) | Mark::Failed { .. }));
                                 // A new state fades in where the old one was; the time stays.
-                                let (time, said) = match (state, last) {
-                                    (Some((state, _)), true) => (Some(format!("{} \u{b7} ", clock(m.ts))), Some(state)),
-                                    (Some((state, _)), false) => (None, Some(state)),
-                                    (None, _) => (Some(clock(m.ts)), None),
+                                let time = match &state {
+                                    Some(_) if m.own && !last => None,
+                                    Some(_) if worded => Some(format!("{} \u{b7} ", clock(m.ts))),
+                                    _ => Some(clock(m.ts)),
                                 };
+                                let said = state.as_ref().map(|(mark, r)| this.receipt_mark(r, mark, state_level.as_ref().map(|(v, before)| (before.as_ref(), *v)), cx));
                                 let ink = if failed { p.negative } else { this.on_wallpaper(p.faint, cx) };
                                 el.child(
                                     h_flex()
@@ -2125,7 +2152,7 @@ impl BeeperApp {
                                         .font_features(tabular())
                                         .text_color(ink)
                                         .when(this.disappears(ix), |el| el.child(Icon::new(IconName::Timer).size_3().text_color(ink)))
-                                        .child(h_flex().children(time).children(said.map(|said| div().when_some(state_level, |el, v| el.opacity(v)).child(said)))),
+                                        .child(h_flex().children(time).children(said)),
                                 )
                             }),
                     )
@@ -2388,9 +2415,9 @@ impl BeeperApp {
         div().w_full().px(px(GUTTER)).pt(px(GAP)).flex().justify_center().text_size(fs(12.)).text_color(ink).child(text).into_any_element()
     }
 
-    /// What became of the user's message at `ix`, and whether that is a failure. Said of the
-    /// newest message of the chat when it is the user's, and of any that failed.
-    fn delivery_line(&self, ix: usize, dm: bool) -> Option<(String, bool)> {
+    /// What became of the user's message at `ix`. Said of the newest message of the chat when it
+    /// is the user's, and of any that failed.
+    fn delivery_line(&self, ix: usize, dm: bool) -> Option<Receipt> {
         let m = &self.msgs[ix];
         // The bridge's word on it follows it; the latest counts, except as a step back from delivered.
         let mut state = m.delivery.clone();
@@ -2402,39 +2429,49 @@ impl BeeperApp {
                 state = delivery.clone();
             }
         }
-        if let Delivery::Failed(why) = &state {
-            return Some((if why.is_empty() { t!("Not sent").to_owned() } else { t!("Not sent: {why}", why = why) }, true));
+        if let Delivery::Failed(why) = state {
+            return Some(Receipt::Failed(why));
         }
         if self.tail != Some(ix) {
             return None;
         }
-        // A read receipt on this row or under it: that person has read this far.
+        let (readers, who) = self.readers(ix, None);
+        if !readers.is_empty() {
+            return Some(Receipt::Seen { who: who.filter(|_| !dm), readers });
+        }
+        let waited = (chrono::Utc::now().timestamp_millis() as u64).saturating_sub(m.ts) > BRIDGE_WAIT_MS;
+        Some(match state {
+            Delivery::Sending if m.id.starts_with('$') && waited => Receipt::Sent,
+            Delivery::Sending => Receipt::Sending,
+            Delivery::Delivered => Receipt::Delivered,
+            Delivery::Sent | Delivery::Failed(_) => Receipt::Sent,
+        })
+    }
+
+    /// Who has read message `ix` besides `but`, by the receipts on it or under it, each with a
+    /// name, and all of them named as a sentence would.
+    fn readers(&self, ix: usize, but: Option<&OwnedUserId>) -> (Vec<(OwnedUserId, String)>, Option<String>) {
         let mut readers: Vec<&OwnedUserId> = Vec::new();
         for user in self.msgs[ix..].iter().flat_map(|row| &row.seen) {
-            if !readers.contains(&user) {
+            if !readers.contains(&user) && Some(user) != but {
                 readers.push(user);
             }
         }
-        if !readers.is_empty() {
-            if dm {
-                return Some((t!("Seen").to_owned(), false));
-            }
-            let named: Vec<&str> =
-                readers.iter().filter_map(|user| self.msgs.iter().rev().find(|m| m.from == **user && !m.sender.is_empty())).map(|m| m.sender.as_str()).collect();
-            let who = if named.len() == readers.len() { people(&named).0 } else { readers.len().to_string() };
-            return Some((t!("Seen by {who}", who = who), false));
+        if readers.is_empty() {
+            return (Vec::new(), None);
         }
-        let waited = (chrono::Utc::now().timestamp_millis() as u64).saturating_sub(m.ts) > BRIDGE_WAIT_MS;
-        Some((
-            match state {
-                Delivery::Sending if m.id.starts_with('$') && waited => t!("Sent"),
-                Delivery::Sending => t!("Sending…"),
-                Delivery::Delivered => t!("Delivered"),
-                Delivery::Sent | Delivery::Failed(_) => t!("Sent"),
-            }
-            .to_owned(),
-            false,
-        ))
+        let name = |user: &OwnedUserId| self.msgs.iter().rev().find(|m| m.from == *user && !m.sender.is_empty()).map(|m| m.sender.as_str());
+        let named = readers.iter().map(|user| ((*user).clone(), name(user).map_or_else(|| user.localpart().to_owned(), str::to_owned))).collect();
+        let known: Vec<&str> = readers.iter().filter_map(|user| name(user)).collect();
+        (named, Some(if known.len() == readers.len() { people(&known).0 } else { readers.len().to_string() }))
+    }
+
+    /// Whether the user has read someone else's message `ix`, and whether its sender can see that.
+    fn heard(&self, ix: usize, dm: bool) -> Receipt {
+        match receipt::heard(&self.msgs, ix, &self.own_read) {
+            None => Receipt::Unread,
+            Some(public) => Receipt::Heard { public, others: if dm { None } else { self.readers(ix, Some(&self.msgs[ix].from)).1 } },
+        }
     }
 
     /// Scrolls to a message and tints it for a moment; one not loaded yet is looked for among
@@ -2493,19 +2530,20 @@ impl BeeperApp {
     }
 
     /// How far the newest own message's state (Sending, Sent, Seen) has faded in since it last
-    /// changed; the first state seen for a message is shown as it is.
-    fn status_level(&mut self, ix: usize, text: &str, window: &mut Window, cx: &App) -> Option<f32> {
+    /// changed, and what it replaced; the first state seen for a message is shown as it is.
+    fn status_level(&mut self, ix: usize, mark: &Mark, window: &mut Window, cx: &App) -> Option<(f32, Option<Mark>)> {
         let id = &self.msgs[ix].id;
         match &mut self.status_last {
-            Some((on, said, at)) if on == id => {
-                if said != text {
-                    (*said, *at) = (text.to_owned(), Instant::now());
+            Some((on, shown, before, at)) if on == id => {
+                if shown != mark {
+                    *before = Some(std::mem::replace(shown, mark.clone()));
+                    *at = Instant::now();
                 }
-                fresh(*at, motion::EXIT, window, cx)
+                fresh(*at, motion::EXIT, window, cx).map(|v| (v, before.clone()))
             }
             last => {
                 // A long-past change: nothing to fade.
-                *last = Some((id.clone(), text.to_owned(), Instant::now().checked_sub(motion::EXIT).unwrap_or_else(Instant::now)));
+                *last = Some((id.clone(), mark.clone(), None, Instant::now().checked_sub(motion::EXIT).unwrap_or_else(Instant::now)));
                 None
             }
         }
