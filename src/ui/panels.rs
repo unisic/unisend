@@ -283,8 +283,9 @@ impl BeeperApp {
         let (title, body) = match panel {
             Panel::NewChat => return self.render_new_chat(narrow, window, cx),
             Panel::Settings if self.pad_page() => (t!("App lock"), self.render_lock_change(window, cx)),
+            Panel::Settings if !narrow => return self.render_settings_split(banners, window, cx),
             Panel::Settings => match self.settings_pages.last().copied() {
-                None => (t!("Settings"), self.render_settings(cx).into_any_element()),
+                None => (t!("Settings"), self.render_settings(false, cx).into_any_element()),
                 Some(page) => (page.title(), self.render_page(page, window, cx)),
             },
             Panel::Networks => (t!("Networks"), self.render_networks(cx).into_any_element()),
@@ -334,7 +335,84 @@ impl BeeperApp {
     }
 
     /// The settings list: one row per category, each with what is set in it now.
-    fn render_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Settings on a wide window, laid out as the chats are: the categories where the chat list
+    /// stands, the chosen one beside them in a centred column.
+    fn render_settings_split(&mut self, banners: Option<AnyElement>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let edge = GUTTER + 6.;
+        let end = frame::reserve(window);
+        let mobile = gpui_kit::is_mobile();
+        let list = div()
+            .id("settings-list")
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.settings_scroll)
+            .child(v_flex().px(px(GUTTER)).pt(px(8.)).pb(px(GAP * 2.)).child(self.render_settings(true, cx)));
+        let list = v_flex()
+            .w(px(LIST_W))
+            .flex_none()
+            .h_full()
+            .border_r_1()
+            .border_color(p.rule)
+            .child(
+                h_flex().flex_none().h(px(BAR_H)).pl(px(GUTTER)).pr(px(GUTTER - 10.)).child(frame::drag(
+                    div().flex_1().when(!mobile, |el| el.h_full().flex().items_center()).child(screen_title(t!("Settings"))),
+                    window,
+                    cx,
+                )),
+            )
+            .children(banners)
+            .child(div().flex_1().min_h_0().relative().child(list).when(!mobile, |el| el.vertical_scrollbar(&self.settings_scroll)));
+        let Some(page) = self.settings_pages.last().copied() else {
+            let strip = frame::drag(div().absolute().top_0().left_0().w_full().h(px(BAR_H)), window, cx);
+            let empty = v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .relative()
+                .items_center()
+                .justify_center()
+                .gap(px(10.))
+                .text_size(fs(14.))
+                .text_color(p.faint)
+                .child(strip)
+                .when(!mobile, |el| el.child(Icon::new(IconName::Settings).size_8()))
+                .child(t!("Choose a setting"));
+            return h_flex().size_full().child(list).child(empty).into_any_element();
+        };
+        let deep = self.settings_pages.len() > 1;
+        let body = self.render_page(page, window, cx);
+        let title = screen_title(page.title()).min_w_0().truncate();
+        // Even room at both ends keeps the title over the column while the window buttons take the right.
+        let header = h_flex().h(px(BAR_H)).flex_none().justify_center().px(px(end)).child(
+            h_flex()
+                .w_full()
+                .max_w(px(PANEL_W))
+                .h_full()
+                .items_center()
+                .gap(px(4.))
+                .px(px(edge - 10.))
+                .when(deep, |el| el.child(round_button("panel-back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
+                .when(!deep, |el| el.pl(px(edge)))
+                .child(frame::drag(div().flex_1().min_w_0().h_full().flex().items_center().child(title), window, cx)),
+        );
+        let scrolled = div()
+            .id("panel-body")
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.page_scroll)
+            .child(v_flex().items_center().child(v_flex().w_full().max_w(px(PANEL_W)).px(px(edge)).pt(px(8.)).pb(px(GAP * 2.)).gap(px(GAP * 2.)).child(body)));
+        let pane = v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .child(header)
+            .child(div().flex_1().min_h_0().relative().child(scrolled).when(!mobile, |el| el.vertical_scrollbar(&self.page_scroll)));
+        h_flex().size_full().child(list).child(pane).into_any_element()
+    }
+
+    /// `split`: beside the chosen category on a wide window, which a category row then replaces.
+    fn render_settings(&mut self, split: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         let s = &self.settings;
         let theme = match s.theme {
@@ -353,8 +431,16 @@ impl BeeperApp {
         };
         let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
         let updates = self.updates_summary();
+        let selected = self.settings_pages.first().copied().filter(|_| split);
         let category = |page: Page, icon: IconName, summary: SharedString, cx: &mut Context<Self>| {
-            link(page.id(), page.title(), summary, Some(icon), Some(IconName::ChevronRight), cx).on_click(cx.listener(move |this, _, _, cx| this.open_page(page, cx)))
+            link(page.id(), page.title(), summary, Some(icon), Some(IconName::ChevronRight), cx)
+                .when(selected == Some(page), |el| el.bg(p.raised))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if split {
+                        this.settings_pages.clear();
+                    }
+                    this.open_page(page, cx)
+                }))
         };
         v_flex()
             .gap(px(GAP * 2.))
