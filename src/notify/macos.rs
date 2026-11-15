@@ -18,14 +18,14 @@ impl Sink {
         false
     }
 
-    pub(super) async fn post(&mut self, entry: &mut Entry, body: &str, _alert: bool) {
+    pub(super) async fn post(&mut self, entry: &mut Entry, body: &str, _alert: bool, buttons: bool) {
         let action = |id: &'static str, label: &'static str| SystemNotificationAction { id: id.into(), label: label.into() };
         to_ui(ToUi::Show(SystemNotification {
             // A request with the same identifier takes the earlier one's place.
             tag: entry.chat.clone().into(),
             title: entry.name.clone().into(),
             body: body.to_owned().into(),
-            actions: vec![action("read", t!("Mark as read")), action("mute", t!("Mute"))],
+            actions: if buttons { vec![action("read", t!("Mark as read")), action("mute", t!("Mute"))] } else { Vec::new() },
         }));
     }
 

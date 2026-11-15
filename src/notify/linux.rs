@@ -1,15 +1,37 @@
 //! `org.freedesktop.Notifications` on the session bus (spec 1.2; KDE adds the reply box).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use zbus::zvariant::Value;
 
-use super::{APP_ID, Entry, Event, Target, act, event};
+use super::{APP_ID, Act, Entry, Event, MAX_CHATS, Target, act, event, file_uri};
 use crate::i18n::t;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The numbers of the notifications this app has showing. A server sends its signals to every
+/// listener: other apps' would otherwise fill the button queue.
+static OURS: Mutex<VecDeque<u32>> = Mutex::new(VecDeque::new());
+/// The token of the notification about to be clicked open, until the click hands it to the raise.
+static TOKEN: Mutex<Option<(u32, String)>> = Mutex::new(None);
+
+fn ours(id: u32) -> bool {
+    OURS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains(&id)
+}
+
+fn forget(id: u32) {
+    OURS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|&n| n != id);
+}
+
+/// Lets the raise that follows a click pass KWin's focus stealing prevention.
+pub(super) fn hand_token() {
+    if let Some((_, token)) = TOKEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        gpui_linux::set_next_activation_token(token);
+    }
+}
 
 pub(super) struct Sink {
     proxy: zbus::Proxy<'static>,
@@ -49,8 +71,9 @@ impl Sink {
         self.markup
     }
 
-    pub(super) async fn post(&mut self, entry: &mut Entry, body: &str, alert: bool) {
-        let actions = ["default", t!("Open"), "inline-reply", t!("Reply"), "read", t!("Mark as read"), "mute", t!("Mute")];
+    pub(super) async fn post(&mut self, entry: &mut Entry, body: &str, alert: bool, buttons: bool) {
+        let all = ["default", t!("Open"), "inline-reply", t!("Reply"), "read", t!("Mark as read"), "mute", t!("Mute")];
+        let actions = if buttons { &all[..] } else { &all[..2] };
         let mut hints: HashMap<&str, Value> = HashMap::new();
         hints.insert("desktop-entry", APP_ID.into());
         hints.insert("category", "im.received".into());
@@ -64,14 +87,26 @@ impl Sink {
         } else {
             hints.insert("suppress-sound", true.into());
         }
-        let args = ("Unisend", entry.id, APP_ID, entry.name.as_str(), body, &actions[..], hints, -1i32);
+        let args = ("Unisend", entry.id, APP_ID, entry.name.as_str(), body, actions, hints, -1i32);
         match self.proxy.call("Notify", &args).await {
-            Ok(id) => entry.id = id,
+            Ok(id) => {
+                if id != entry.id {
+                    forget(entry.id);
+                    let mut ours = OURS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // Closed ones are forgotten as they go; this only bounds a server that never says.
+                    if ours.len() == 2 * MAX_CHATS {
+                        ours.pop_front();
+                    }
+                    ours.push_back(id);
+                }
+                entry.id = id;
+            }
             Err(e) => log::warn!("notification: {e}"),
         }
     }
 
     pub(super) async fn close(&mut self, entry: &Entry) {
+        forget(entry.id);
         if entry.id != 0
             && let Err(e) = self.proxy.call::<_, _, ()>("CloseNotification", &(entry.id,)).await
         {
@@ -97,49 +132,38 @@ fn on_signal(msg: &zbus::Message) {
     match header.member().map(|m| m.as_str()) {
         Some("ActionInvoked") => {
             if let Ok((id, key)) = body.deserialize::<(u32, &str)>()
+                && ours(id)
                 && let Some(act) = act(key)
             {
+                // Kept only for the click that opens the window.
+                let mut token = TOKEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if act != Act::Open || token.as_ref().is_some_and(|(of, _)| *of != id) {
+                    *token = None;
+                }
+                drop(token);
                 event(Event::Act(Target::Id(id), act));
             }
         }
-        // Sent just before ActionInvoked for the same click: lets the raise that follows pass
-        // KWin's focus stealing prevention.
+        // Sent just before ActionInvoked for the same click.
         Some("ActivationToken") => {
-            if let Ok((_id, token)) = body.deserialize::<(u32, String)>() {
-                gpui_linux::set_next_activation_token(token);
-            }
+            let token = body.deserialize::<(u32, String)>().ok().filter(|(id, _)| ours(*id));
+            *TOKEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = token;
         }
         Some("NotificationReplied") => {
-            if let Ok((id, text)) = body.deserialize::<(u32, String)>() {
+            if let Ok((id, text)) = body.deserialize::<(u32, String)>()
+                && ours(id)
+            {
                 event(Event::Replied(Target::Id(id), text));
             }
         }
         Some("NotificationClosed") => {
-            if let Ok((id, _reason)) = body.deserialize::<(u32, u32)>() {
+            if let Ok((id, _reason)) = body.deserialize::<(u32, u32)>()
+                && ours(id)
+            {
+                forget(id);
                 event(Event::Closed(Target::Id(id)));
             }
         }
         _ => {}
-    }
-}
-
-/// `image-path` takes a `file://` URI.
-fn file_uri(path: &str) -> String {
-    let mut uri = String::from("file://");
-    for b in path.bytes() {
-        if b.is_ascii_alphanumeric() || b"/._-~".contains(&b) {
-            uri.push(b as char);
-        } else {
-            uri.push_str(&format!("%{b:02X}"));
-        }
-    }
-    uri
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_picture_path_becomes_a_file_uri() {
-        assert_eq!(super::file_uri("/home/a b/notify/_x_y"), "file:///home/a%20b/notify/_x_y");
     }
 }

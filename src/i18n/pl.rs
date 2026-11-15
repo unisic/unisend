@@ -264,6 +264,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Networks are a Beeper feature. Chats from WhatsApp, Signal and the rest come through Beeper's bridges, and this account is on another Matrix server.", "Sieci to funkcja Beepera. Czaty z WhatsAppa, Signala i innych przychodzą przez mostki Beepera, a to konto jest na innym serwerze Matrix."),
     ("New chat", "Nowy czat"),
     ("New group", "Nowa grupa"),
+    ("New message", "Nowa wiadomość"),
     ("New messages", "Nowe wiadomości"),
     ("New poll", "Nowa ankieta"),
     ("No GIFs found", "Nie znaleziono GIF-ów"),
