@@ -119,6 +119,8 @@ public final class Notify {
         NotificationChannel channel = new NotificationChannel(id, name, importance);
         if (importance >= NotificationManager.IMPORTANCE_DEFAULT) {
             channel.setShowBadge(true);
+            // Android takes this only when a channel is first made; each notice also carries it.
+            channel.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
         }
         return channel;
     }
@@ -310,11 +312,13 @@ public final class Notify {
                 .setSilent(!alert)
                 .setContentIntent(tap)
                 .setShortcutId(chat)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .setPublicVersion(locked(context, channel))
                 .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_menu_send, context.getString(R.string.reply), reply)
                         .addRemoteInput(input)
                         .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
                         .setShowsUserInterface(false)
-                        .setAllowGeneratedReplies(true)
+                        .setAllowGeneratedReplies(false)
                         .build())
                 .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_menu_view, context.getString(R.string.mark_read), read)
                         .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
@@ -353,11 +357,23 @@ public final class Notify {
                 .setContentText(context.getResources().getQuantityString(R.plurals.chats_with_new, chats, chats))
                 .setGroup(GROUP)
                 .setGroupSummary(true)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .setPublicVersion(locked(context, MESSAGES))
                 // The chats alert on their own; the line over them stays quiet.
                 .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
                 .setAutoCancel(true)
                 .setContentIntent(open)
                 .build());
+    }
+
+    /** What a secure lock screen shows instead: the app and that something came, not from whom. */
+    private static Notification locked(Context context, String channel) {
+        return new NotificationCompat.Builder(context, channel)
+                .setSmallIcon(android.R.drawable.stat_notify_chat)
+                .setContentTitle(context.getString(R.string.app_name))
+                .setContentText(context.getString(R.string.new_message))
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .build();
     }
 
     private static Intent receiver(Context context, String action, String chat) {
