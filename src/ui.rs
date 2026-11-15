@@ -2067,6 +2067,7 @@ impl BeeperApp {
                     .children(self.wallpaper_layer(0., cx))
                     .child(timeline)
                     .child(self.press_tracker(cx))
+                    .child(self.bubble_release(cx))
                     .children(self.jump_button(window, cx))
                     .children(self.date_pill(window, cx))
                     .children(self.find_results(cx))
@@ -2389,6 +2390,38 @@ impl BeeperApp {
         if let Some(press) = self.bubble_press.as_mut().filter(|b| b.id == id && b.released.is_none()) {
             press.part = Some(n);
         }
+    }
+
+    /// Ends a bubble's press: the finger lifted (a tap), started scrolling, or let go of a long press.
+    fn bubble_release(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let weak = cx.entity().downgrade();
+        let release = move |cx: &mut App| {
+            let _ = weak.update(cx, |this, cx| this.bubble_released(cx));
+        };
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let scroll = release.clone();
+                window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        scroll(cx);
+                    }
+                });
+                let up = release.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                    if phase.bubble() {
+                        up(cx);
+                    }
+                });
+                window.on_mouse_event(move |e: &LongPressEvent, phase, _, cx| {
+                    if phase.bubble() && matches!(e.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        release(cx);
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
     }
 
     /// The press ended: a tint already shown fades, one not yet shown never comes.

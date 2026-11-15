@@ -477,7 +477,6 @@ impl BeeperApp {
         let lift = menu.map(|m| m.lift(now, still));
         let shield = menu.is_some_and(|m| m.closing.is_none());
         let weak = cx.entity().downgrade();
-        let pressing = self.bubble_press.as_ref().is_some_and(|b| b.id == id && b.released.is_none());
         let id = id.to_owned();
         let probe = canvas(
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
@@ -510,32 +509,6 @@ impl BeeperApp {
                         }
                     }
                 });
-                // Only the pressed bubble listens for what ends its press: a scroll, a lift, a long press let go.
-                if pressing {
-                    let release = {
-                        let weak = weak.clone();
-                        move |cx: &mut App| {
-                            let _ = weak.update(cx, |this, cx| this.bubble_released(cx));
-                        }
-                    };
-                    let scroll = release.clone();
-                    window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
-                        if phase.bubble() {
-                            scroll(cx);
-                        }
-                    });
-                    let up = release.clone();
-                    window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-                        if phase.bubble() {
-                            up(cx);
-                        }
-                    });
-                    window.on_mouse_event(move |e: &LongPressEvent, phase, _, cx| {
-                        if phase.bubble() && matches!(e.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                            release(cx);
-                        }
-                    });
-                }
                 window.on_mouse_event(move |e: &LongPressEvent, phase, window, cx| {
                     if !phase.bubble() || e.phase != TouchPhase::Started || window.default_prevented() || !hitbox.is_hovered(window) {
                         return;
