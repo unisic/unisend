@@ -224,7 +224,7 @@ impl BeeperApp {
             State::Locating => v_flex().gap(px(12.)).child(line(t!("Finding your location. This can take up to 20 seconds."))),
             State::Failed => v_flex()
                 .gap(px(12.))
-                .child(line(t!("No location fix in time. Try again with a clearer view of the sky.")))
+                .child(line(t!("No GPS fix in time. Murmur uses only GPS, so try again outdoors or by a window.")))
                 .child(button("location-retry", t!("Try again"), true).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.open_location(cx))))),
             State::Found(fix) => {
                 let fix = *fix;
