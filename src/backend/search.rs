@@ -11,11 +11,12 @@
 //! (`search.enc`, see `vault`) every `SAVE_EVERY` while it changes; FTS5 needs the words in clear,
 //! so no part of the file can stay plain. A kill loses at most the last `SAVE_EVERY` of indexing.
 //!
-//! Cost: at most `MAX_MESSAGES` rows, oldest pruned first; 16 MB on disk at the cap for short chat
-//! lines (the `size_at_cap` test), more for long messages. Sealed, that much is also held in memory,
-//! and each save copies, seals and writes all of it (twice its size in memory for a moment). One
-//! thread, idle while nothing arrives; a write is one transaction per batch, a query one FTS lookup
-//! ordered by time.
+//! Cost: at most `MAX_MESSAGES` rows and `MAX_BYTES` of pages in use, oldest pruned first, with
+//! `MAX_TEXT` indexed per message and the database never past `HARD_BYTES` (24 MiB); 16 MB at the
+//! row cap for short chat lines (the `size_at_cap` test). Sealed, the database is held in memory
+//! and each save seals one copy of it in place, so at most 48 MiB for a moment; a start reads and
+//! opens the file in one buffer and hands SQLite one copy, also 2x. One thread, idle while nothing
+//! arrives; a write is one transaction per batch, a query one FTS lookup ordered by time.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -39,6 +40,12 @@ use crate::vault::Seal;
 /// Messages kept; the oldest go first once this is passed by `PRUNE_SLACK`.
 const MAX_MESSAGES: i64 = 50_000;
 const PRUNE_SLACK: i64 = 2_500;
+/// Pages in use past which the oldest messages go, whatever their count: long messages fill bytes
+/// long before rows. `HARD_BYTES` stops the database growing within one batch.
+const MAX_BYTES: i64 = 20 << 20;
+const HARD_BYTES: i64 = 24 << 20;
+/// Bytes of a message's text indexed; the rest is not searched.
+const MAX_TEXT: usize = 4096;
 /// Edits whose message is not indexed yet, kept until it is.
 const MAX_PENDING_EDITS: i64 = 2_000;
 /// Batches of changes waiting for the index thread.
@@ -256,7 +263,8 @@ fn text(body: &str, file: Option<&str>) -> String {
         Some(name) if !body.contains(name) => format!("{body} {name}"),
         _ => body.to_owned(),
     };
-    joined.replace([OPEN, CLOSE], " ").trim().to_owned()
+    let clean = joined.replace([OPEN, CLOSE], " ");
+    clean[..clean.floor_char_boundary(MAX_TEXT)].trim().to_owned()
 }
 
 /// Messages matching `query`, newest first, in `room` or in every room. Empty for short queries.
@@ -327,12 +335,14 @@ fn open(path: &Path) -> anyhow::Result<Connection> {
 /// The index in memory, from its sealed copy when there is one. A copy that does not open is a
 /// cache lost, not the account's data: the index starts again.
 fn open_sealed(dir: &Path, seal: &Seal) -> anyhow::Result<Connection> {
-    let mut conn = Connection::open_in_memory()?;
-    match seal.read(dir, FILE) {
+    let mut conn = memory()?;
+    // Larger than the database may grow: not this app's index, and too big to hold.
+    let too_big = std::fs::metadata(seal.path(dir, FILE)).is_ok_and(|m| m.len() > HARD_BYTES as u64 + 64);
+    match if too_big { Err(std::io::Error::other("too large")) } else { seal.read(dir, FILE) } {
         Ok(bytes) => {
             if let Err(e) = conn.deserialize_read_exact(MAIN_DB, &bytes[..], bytes.len(), false) {
                 log::warn!("search index: {e}, starting again");
-                conn = Connection::open_in_memory()?;
+                conn = memory()?;
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -340,6 +350,12 @@ fn open_sealed(dir: &Path, seal: &Seal) -> anyhow::Result<Connection> {
     }
     schema(&conn)?;
     Ok(conn)
+}
+
+/// An empty database in memory. memdb rather than ":memory:", so `serialize` lends its pages
+/// instead of copying them; the name has no leading '/', so no other connection shares it.
+fn memory() -> rusqlite::Result<Connection> {
+    Connection::open("file:search?vfs=memdb")
 }
 
 /// Writes a sealed index back.
@@ -369,10 +385,13 @@ impl Saver {
 }
 
 fn schema(conn: &Connection) -> rusqlite::Result<()> {
+    let page: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    let _: i64 = conn.query_row(&format!("PRAGMA max_page_count = {}", HARD_BYTES / page), [], |r| r.get(0))?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
          PRAGMA secure_delete = ON;
+         PRAGMA temp_store = MEMORY;
          CREATE TABLE IF NOT EXISTS msg (
              id INTEGER PRIMARY KEY,
              event TEXT NOT NULL UNIQUE,
@@ -421,6 +440,8 @@ fn serve(conn: Connection, mut rx: mpsc::Receiver<Op>, mut saver: Option<Saver>)
 
 fn apply(conn: &Connection, changes: &[Change], count: &mut i64) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
+    // Before as well as after: a batch must find room under `HARD_BYTES`.
+    prune_bytes(&tx, count, MAX_BYTES)?;
     for change in changes {
         match change {
             Change::Add { event, room, sender, ts, body, replace } => {
@@ -485,7 +506,20 @@ fn apply(conn: &Connection, changes: &[Change], count: &mut i64) -> rusqlite::Re
         tx.execute("DELETE FROM msg WHERE id IN (SELECT id FROM msg ORDER BY ts, id LIMIT ?1)", [over])?;
         *count = MAX_MESSAGES;
     }
+    prune_bytes(&tx, count, MAX_BYTES)?;
     tx.commit()
+}
+
+/// Deletes the oldest messages until the pages in use fit in `max` bytes.
+fn prune_bytes(conn: &Connection, count: &mut i64, max: i64) -> rusqlite::Result<()> {
+    let used = || conn.query_row("SELECT (SELECT page_count FROM pragma_page_count()) - (SELECT freelist_count FROM pragma_freelist_count()), (SELECT page_size FROM pragma_page_size())", [], |r| Ok(r.get::<_, i64>(0)? * r.get::<_, i64>(1)?));
+    while *count > 0 && used()? > max {
+        // A tenth at a time: pages do not free in proportion to rows, so measure again after each.
+        let over = (*count / 10).max(1);
+        conn.execute("DELETE FROM body WHERE rowid IN (SELECT id FROM msg ORDER BY ts, id LIMIT ?1)", [over])?;
+        *count -= conn.execute("DELETE FROM msg WHERE id IN (SELECT id FROM msg ORDER BY ts, id LIMIT ?1)", [over])? as i64;
+    }
+    Ok(())
 }
 
 fn query_hits(conn: &Connection, room: Option<&str>, query: &str) -> rusqlite::Result<Vec<Found>> {
@@ -573,6 +607,7 @@ mod tests {
     fn sealed_index_saves_and_reopens() {
         let dir = temp("sealed");
         let seal = Seal::Sealed(std::sync::Arc::new(zeroize::Zeroizing::new([5; crate::vault::KEY_LEN])));
+        std::fs::write(dir.join(crate::vault::SESSION), b"{}").unwrap();
         let conn = open_sealed(&dir, &seal).unwrap();
         let mut n = 0;
         apply(&conn, &[add("$1", "!r", 1, "the secret meeting place")], &mut n).unwrap();
@@ -612,6 +647,49 @@ mod tests {
         assert_eq!(text("a\u{2}b\u{3}", None), "a b");
         assert_eq!(text("", Some("report.pdf")), "report.pdf");
         assert_eq!(text("see report.pdf", Some("report.pdf")), "see report.pdf");
+        // Cut to `MAX_TEXT` bytes, never inside a character.
+        let long = "ż".repeat(MAX_TEXT);
+        let cut = text(&long, None);
+        assert_eq!(cut.len(), MAX_TEXT);
+        assert!(cut.chars().all(|c| c == 'ż'));
+        let odd = format!("a{long}");
+        assert_eq!(text(&odd, None).len(), MAX_TEXT - 1);
+    }
+
+    #[test]
+    fn prunes_by_bytes_oldest_first() {
+        let conn = memory().unwrap();
+        schema(&conn).unwrap();
+        let mut n = 0;
+        let words: Vec<String> = (0..600).map(|i| format!("w{i}x{}", i * 7919 % 1000)).collect();
+        for batch in 0..10 {
+            let changes: Vec<Change> = (0..100)
+                .map(|i| {
+                    let k = batch * 100 + i;
+                    let body: String = (0..400).map(|j| words[(k * 31 + j * 17) % 600].as_str()).collect::<Vec<_>>().join(" ");
+                    add(&format!("$e{k}"), "!r", k as i64, &format!("m{k} {body}"))
+                })
+                .collect();
+            apply(&conn, &changes, &mut n).unwrap();
+        }
+        assert_eq!(n, 1000);
+        let page: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+        let used = || conn.query_row("SELECT (SELECT page_count FROM pragma_page_count()) - (SELECT freelist_count FROM pragma_freelist_count())", [], |r| r.get::<_, i64>(0)).unwrap() * page;
+        let full = used();
+        // Deleting rows frees pages, though not in proportion: the FTS index keeps some structure.
+        let tx = conn.unchecked_transaction().unwrap();
+        prune_bytes(&tx, &mut n, full / 2).unwrap();
+        tx.commit().unwrap();
+        assert!(used() <= full / 2, "{} of {full} bytes in use", used());
+        assert!(n > 0 && n < 1000, "{n} kept");
+        let rows: i64 = conn.query_row("SELECT count(*) FROM msg", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, n);
+        // The newest stay, the oldest went.
+        assert_eq!(find(&conn, None, "m999").len(), 1);
+        assert!(find(&conn, None, "m0").is_empty());
+        // The database cannot outgrow its hard bound.
+        let max: i64 = conn.query_row("PRAGMA max_page_count", [], |r| r.get(0)).unwrap();
+        assert_eq!(max * page, HARD_BYTES);
     }
 
     /// Disk at the cap, with chat-like text. Run with `--ignored --nocapture`.
