@@ -54,7 +54,7 @@ is not started.
 | Edits applied, "Edited" mark | part | `m.replace`, applied by the SDK's timeline; no edit history |
 | Sender grouping, timestamps | done | local |
 | Day separators | done | the timeline's own |
-| Unread divider | done | "New messages" above what arrived since the chat was last read (`m.fully_read`, else the read receipt: matrix-sdk-ui `controller/mod.rs`); opening scrolls to it |
+| Unread divider | done | "New messages" above what arrived since the chat was last read (`m.fully_read`, else the read receipt: matrix-sdk-ui `controller/mod.rs`); opening scrolls to it. It stays put while the chat is open, needs a message from someone else under it, and reading moves `m.fully_read` too, so a read chat reopens without it |
 | Local drafts | done | per chat, kept in `drafts.json` (200 chats, 4 KB each), restored on open, "Draft:" in the chat list; not synced |
 | Jump to newest | done | button once scrolled over a screen up, counts messages from others that arrived meanwhile |
 | Replies (quote shown) | done | `m.in_reply_to`; a quoted message that is not loaded is fetched; a touch goes to it when it is loaded |

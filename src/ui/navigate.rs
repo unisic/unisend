@@ -110,6 +110,9 @@ pub(super) struct Place {
     pub missed: usize,
     /// The chat was just opened: scroll to its first unread message once it is in the list.
     pub seek_unread: bool,
+    /// The first message the user had not seen when the chat opened: "New messages" stays above
+    /// it while the chat is open, though reading moves the SDK's marker to the end.
+    pub unread: Option<String>,
     /// Text the composer is to be given by the next frame: a chat's draft, or nothing.
     pub restore: Option<String>,
     /// The text last given to the composer, so its change is not taken for the user typing.
@@ -200,13 +203,14 @@ impl BeeperApp {
         cx.notify();
     }
 
-    /// Once the rows of a freshly opened chat are in, brings its first unread one into view.
+    /// Once the rows of a freshly opened chat are in, marks its first unread one and brings it into view.
     pub(super) fn seek_unread(&mut self) {
         if !self.place.seek_unread {
             return;
         }
-        if let Some(ix) = self.msgs.iter().position(|m| m.kind == Kind::Unread) {
+        if let Some(ix) = first_unseen(&self.msgs) {
             self.place.seek_unread = false;
+            self.place.unread = Some(self.msgs[ix].id.clone());
             self.timeline.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
         }
     }
@@ -306,14 +310,35 @@ impl BeeperApp {
     }
 }
 
+/// The first message from someone else after the SDK's read marker. The marker stops before any
+/// event of another's, also one drawn as nothing; with no such message after it, nothing is new.
+pub(super) fn first_unseen(msgs: &[Msg]) -> Option<usize> {
+    let mark = msgs.iter().position(|m| m.kind == Kind::Unread)?;
+    msgs[mark..].iter().position(|m| m.kind == Kind::Message && !m.own).map(|ix| mark + ix)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use matrix_sdk::ruma::OwnedRoomId;
+    use matrix_sdk::ruma::{OwnedRoomId, user_id};
 
-    use super::{Drafts, MAX_DRAFT_BYTES, MAX_DRAFTS};
+    use super::{Drafts, MAX_DRAFT_BYTES, MAX_DRAFTS, first_unseen};
+    use crate::backend::{Delivery, Kind, Msg};
     use crate::vault::Seal;
+
+    #[test]
+    fn new_messages_need_one_from_someone_else_after_the_marker() {
+        let row = |kind: Kind, own: bool| Msg { own, ..Msg::bare(String::new(), kind, user_id!("@a:x").to_owned()) };
+        let status = || Kind::Status { target: String::new(), delivery: Delivery::Sent };
+        let read = [row(Kind::Message, false), row(Kind::Message, true)];
+        assert_eq!(first_unseen(&read), None, "no marker");
+        let bottom = [row(Kind::Message, false), row(Kind::Unread, false), row(Kind::Message, true), row(status(), false), row(Kind::Hidden, false)];
+        assert_eq!(first_unseen(&bottom), None, "only the user's own and rows drawn as nothing follow");
+        assert_eq!(first_unseen(&[row(Kind::Message, false), row(Kind::Unread, false)]), None, "marker last");
+        let unread = [row(Kind::Message, true), row(Kind::Unread, false), row(Kind::Hidden, false), row(Kind::Day, false), row(Kind::Message, false)];
+        assert_eq!(first_unseen(&unread), Some(4));
+    }
 
     fn room(n: usize) -> OwnedRoomId {
         OwnedRoomId::try_from(format!("!r{n}:example.org")).unwrap()
