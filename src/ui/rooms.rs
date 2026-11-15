@@ -289,6 +289,8 @@ impl BeeperApp {
     pub(super) fn open_new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Name or Matrix ID")));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Group name")));
+        crate::ime::follow(&query, window, cx);
+        crate::ime::follow(&name, window, cx);
         let subs = vec![
             cx.subscribe_in(&query, window, |this, _, ev: &InputEvent, _, cx| match ev {
                 InputEvent::Change => this.query_changed(cx),

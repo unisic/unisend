@@ -43,6 +43,8 @@ impl ShareIn {
     pub(super) fn new(window: &mut Window, cx: &mut Context<BeeperApp>, subs: &mut Vec<Subscription>) -> Self {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search chats")));
         let message = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Add a message")));
+        crate::ime::follow(&query, window, cx);
+        crate::ime::follow(&message, window, cx);
         subs.push(cx.subscribe_in(&query, window, |_, _, ev: &InputEvent, _, cx| match ev {
             InputEvent::Change => cx.notify(),
             other => keyboard_follows(other, Keyboard::Text, cx),

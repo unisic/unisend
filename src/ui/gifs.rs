@@ -49,6 +49,7 @@ impl BeeperApp {
         }
         if self.gifs.input.is_none() {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search KLIPY")));
+            crate::ime::follow(&input, window, cx);
             self.gifs._input_events = Some(cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, _, cx| match ev {
                 InputEvent::Change => this.gif_typed(cx),
                 other => keyboard_follows(other, Keyboard::Text, cx),

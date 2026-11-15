@@ -25,6 +25,7 @@ pub(super) struct Form {
 
 fn field(placeholder: &'static str, window: &mut Window, cx: &mut Context<BeeperApp>) -> Field {
     let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+    crate::ime::follow(&input, window, cx);
     let sub = cx.subscribe_in(&input, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Text, cx));
     (input, sub)
 }
