@@ -1902,7 +1902,7 @@ impl BeeperApp {
                     receipt::IncomingStatus::Always => last,
                     receipt::IncomingStatus::OnTap => this.tapped.as_ref() == Some(&m.id),
                 };
-                let said = if m.own { this.delivery_line(ix, dm) } else if asked && !m.deleted { Some(this.heard(ix, dm)) } else { None };
+                let said = if m.own { this.delivery_line(ix, dm) } else if asked && !m.deleted { this.heard(ix) } else { None };
                 let state = said.and_then(|r| Some((receipt::mark(&r, style)?, r)));
                 // Still only here, not yet with the server.
                 let leaving = m.delivery == Delivery::Sending && !m.id.starts_with('$');
@@ -2443,7 +2443,7 @@ impl BeeperApp {
         if self.tail != Some(ix) {
             return None;
         }
-        let (readers, who) = self.readers(ix, None);
+        let (readers, who) = self.readers(ix);
         if !readers.is_empty() {
             return Some(Receipt::Seen { who: who.filter(|_| !dm), readers });
         }
@@ -2456,12 +2456,12 @@ impl BeeperApp {
         })
     }
 
-    /// Who has read message `ix` besides `but`, by the receipts on it or under it, each with a
-    /// name, and all of them named as a sentence would.
-    fn readers(&self, ix: usize, but: Option<&OwnedUserId>) -> (Vec<(OwnedUserId, String)>, Option<String>) {
+    /// Who has read message `ix`, by the receipts on it or under it, each with a name, and all of
+    /// them named as a sentence would.
+    fn readers(&self, ix: usize) -> (Vec<(OwnedUserId, String)>, Option<String>) {
         let mut readers: Vec<&OwnedUserId> = Vec::new();
         for user in self.msgs[ix..].iter().flat_map(|row| &row.seen) {
-            if !readers.contains(&user) && Some(user) != but {
+            if !readers.contains(&user) {
                 readers.push(user);
             }
         }
@@ -2474,12 +2474,12 @@ impl BeeperApp {
         (named, Some(if known.len() == readers.len() { people(&known).0 } else { readers.len().to_string() }))
     }
 
-    /// Whether the user has read someone else's message `ix`, and whether its sender can see that.
-    fn heard(&self, ix: usize, dm: bool) -> Receipt {
-        match receipt::heard(&self.msgs, ix, &self.own_read) {
-            None => Receipt::Unread,
-            Some(public) => Receipt::Heard { public, others: if dm { None } else { self.readers(ix, Some(&self.msgs[ix].from)).1 } },
-        }
+    /// Someone else's message `ix` as its sender's app shows it, where the network says.
+    fn heard(&self, ix: usize) -> Option<Receipt> {
+        let view = receipt::their_view(self.open_network(), receipt::heard(&self.msgs, ix, &self.own_read))?;
+        let me = self.user.clone()?;
+        let name = self.msgs.iter().rev().find(|m| m.own && !m.sender.is_empty()).map_or_else(|| me.localpart().to_owned(), |m| m.sender.clone());
+        Some(Receipt::Theirs { view, me: (me, name) })
     }
 
     /// Scrolls to a message and tints it for a moment; one not loaded yet is looked for among
