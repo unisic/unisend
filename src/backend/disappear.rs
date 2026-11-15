@@ -99,7 +99,7 @@ pub(super) async fn read(room: &Room) -> Disappearing {
 }
 
 /// The contents of a room's state events of one type, every state key.
-async fn state(room: &Room, kind: &str) -> Vec<Value> {
+pub(super) async fn state(room: &Room, kind: &str) -> Vec<Value> {
     let Ok(events) = room.get_state_events(StateEventType::from(kind)).await else { return Vec::new() };
     events
         .iter()

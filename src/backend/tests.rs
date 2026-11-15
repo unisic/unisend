@@ -1577,6 +1577,52 @@ async fn a_disappearing_timer_is_read_set_and_told() {
     assert!(!seat.rows.iter().any(|m| m.kind != Kind::Hidden && m.body.starts_with("Set the disappearing")), "the bridge's notice repeats the line");
 }
 
+/// A chat's features: none in a plain room, read when it opens, and read again when the bridge
+/// publishes new ones while it is open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn room_features_are_read_on_open_and_followed() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-features-{tag}"));
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+    req.invite = vec![alice.client().unwrap().user_id().unwrap().to_owned()];
+    let room = bob.create_room(req).await.unwrap();
+    let room_id = room.room_id().to_owned();
+    alice.client().unwrap().join_room_by_id(&room_id).await.unwrap();
+    wait_for(&mut seat, "the chat in the list", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id).then_some(()),
+        _ => None,
+    })
+    .await;
+    let features = |e: Ev| match e {
+        Ev::Features { features, .. } => Some(features),
+        _ => None,
+    };
+
+    alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
+    assert_eq!(wait_for(&mut seat, "no features", features).await, None);
+
+    // As a bridge on a network without polls or locations publishes it.
+    let meta = serde_json::json!({ "reply": 2, "reaction": 2, "file": { "m.file": { "mime_types": { "*/*": 2 } } } });
+    room.send_state_event_raw("com.beeper.room_features", "fi.mau.meta", meta).await.unwrap();
+    let read = wait_for(&mut seat, "the bridge's features", features).await.expect("features");
+    assert_eq!((read.poll, read.location, read.reply), (0, 0, 2));
+    assert!(read.file && !read.voice);
+
+    room.send_state_event_raw("com.beeper.room_features", "fi.mau.meta", serde_json::json!({ "poll": 1 })).await.unwrap();
+    let again = wait_for(&mut seat, "the new features", |e| features(e).flatten().filter(|f| f.poll == 1)).await;
+    assert_eq!(again.reply, 0);
+}
+
 /// The info screen's backend: details with members and roles, then the history's media, files
 /// and links, ending with `done`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -28,7 +28,8 @@ pub struct Support {
     pub block: bool,
 }
 
-/// From the bridge's display name (the `m.bridge` protocol). mautrix-whatsapp sends a location
+/// From the bridge's display name (the `m.bridge` protocol), for a bridge that publishes no
+/// `com.beeper.room_features`; where it does, its `location_message` decides. mautrix-whatsapp sends a location
 /// message (whatsapp pkg/msgconv/from-matrix.go `case event.MsgLocation`); mautrix-signal sends the
 /// coordinates as a Google Maps link in the text (signal from-matrix.go, `location_format`);
 /// mautrix-meta has no Instagram support (igconv/from-matrix.go falls to the unsupported default) and

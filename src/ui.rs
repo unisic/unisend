@@ -339,6 +339,8 @@ pub struct BeeperApp {
     /// Leaving chats and starting new ones.
     people: rooms::People,
     disappear: disappear::Disappear,
+    /// What the open chat's network takes, once read.
+    features: Option<(OwnedRoomId, Option<crate::backend::Features>)>,
     /// The app PIN's keypad, on the lock screen and in the settings.
     pad: pinpad::Pad,
 }
@@ -554,6 +556,7 @@ impl BeeperApp {
             _events: events,
             people: Default::default(),
             disappear: disappear::Disappear::default(),
+            features: None,
             pad: Default::default(),
         }
     }
@@ -791,6 +794,11 @@ impl BeeperApp {
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
             ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_)) => self.on_verify_event(ev, cx),
             Ev::Disappear { room, setting } => self.on_disappear(room, setting),
+            Ev::Features { room, features } => {
+                if self.open.as_ref() == Some(&room) {
+                    self.features = Some((room, features));
+                }
+            }
             Ev::Info(room, details) => self.info_details(room, *details, cx),
             Ev::PeerIds(room, ids) => {
                 if self.chat_sheet.as_ref() == Some(&room) {
@@ -1237,6 +1245,21 @@ impl BeeperApp {
             .into_any_element()
     }
 
+    /// What the open chat's network takes; everything until its bridge has said otherwise.
+    fn caps(&self) -> &crate::backend::Features {
+        self.published().unwrap_or(&crate::backend::Features::ALL)
+    }
+
+    /// The open chat's features as its bridge publishes them; `None` without a bridge or until read.
+    fn published(&self) -> Option<&crate::backend::Features> {
+        self.features.as_ref().filter(|(room, _)| self.open.as_ref() == Some(room)).and_then(|(_, f)| f.as_ref())
+    }
+
+    /// The open chat's network, by its bridge's name.
+    fn open_network(&self) -> Option<&str> {
+        self.open.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id)).and_then(|r| r.network.as_deref())
+    }
+
     /// Adds the reaction, or removes it when it is already ours.
     fn toggle_reaction(&mut self, target: &str, key: &str, cx: &mut Context<Self>) {
         let Some(room) = self.open.clone() else { return };
@@ -1244,6 +1267,11 @@ impl BeeperApp {
         // The SDK takes a reaction back only by its exact key; the user's own may lack or carry U+FE0F.
         let own = self.msgs.iter().find(|m| m.id == target).and_then(|m| m.reactions.iter().find(|r| r.own && menu::same_emoji(&r.key, key)));
         let adding = own.is_none();
+        if adding && !self.caps().reacts_with(key) {
+            self.error = Some(t!("This chat does not take that reaction").into());
+            cx.notify();
+            return;
+        }
         let key = own.map_or(key, |r| r.key.as_str()).to_owned();
         if adding {
             self.fresh_reaction = Some((target.to_owned(), key.clone(), None));
@@ -2608,7 +2636,7 @@ impl BeeperApp {
     /// Follows a pan to the right over a message, as in Signal and iMessage; one that travels far
     /// enough starts a reply.
     fn swipe(&mut self, id: &str, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.fwd.selecting() {
+        if self.fwd.selecting() || self.caps().reply < 1 {
             return;
         }
         let delta = event.delta.pixel_delta(px(20.));

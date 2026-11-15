@@ -209,18 +209,22 @@ pub(super) enum Attach {
     Poll,
 }
 
-/// The entries this build and its keys can offer.
-pub(super) fn attach_actions() -> Vec<Attach> {
-    [
-        Some(Attach::File),
-        crate::backend::gifs_enabled().then_some(Attach::Gif),
-        super::location::enabled().then_some(Attach::Location),
-        super::contacts::enabled().then_some(Attach::Contact),
-        Some(Attach::Poll),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
+impl BeeperApp {
+    /// The entries this build and its keys can offer, and the open chat's network takes.
+    pub(super) fn attach_actions(&self) -> Vec<Attach> {
+        let caps = self.caps();
+        let gif_file = crate::backend::wants_gif_file(self.open_network());
+        [
+            caps.file.then_some(Attach::File),
+            (crate::backend::gifs_enabled() && caps.gif(gif_file)).then_some(Attach::Gif),
+            (super::location::enabled() && caps.location >= 1).then_some(Attach::Location),
+            (super::contacts::enabled() && caps.contact).then_some(Attach::Contact),
+            (caps.poll >= 1).then_some(Attach::Poll),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
 }
 
 impl Attach {
@@ -349,7 +353,7 @@ impl BeeperApp {
     pub(super) fn render_attach_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let frame = self.gallery.menu_sheet.sample(self.gallery.menu, window, cx)?;
         let live = frame.live;
-        let rows = attach_actions()
+        let rows = self.attach_actions()
             .into_iter()
             .map(|action| {
                 let row = action.row(cx);
@@ -713,7 +717,7 @@ impl BeeperApp {
         // The buttons keep the row's height either way, so the grid above never jumps.
         let sending = transition("gallery-row", (count > 0) as u8 as f32, motion::enter(), window, cx);
         let risen = self.gallery.sheet.risen_for();
-        let buttons = attach_actions();
+        let buttons = self.attach_actions();
         if sheet::stagger(risen, buttons.len().saturating_sub(1), STAGGER_FIRST, STAGGER_STEP) < 1. {
             window.request_animation_frame();
         }

@@ -116,9 +116,10 @@ fn loudness(amplitude: i32) -> f32 {
 }
 
 impl BeeperApp {
-    /// Whether the send button is a microphone: Android, an open chat, nothing typed, not editing.
+    /// Whether the send button is a microphone: Android, an open chat that takes voice notes,
+    /// nothing typed, not editing.
     pub(super) fn mic_shown(&self, cx: &App) -> bool {
-        INLINE && self.open.is_some() && !matches!(self.compose, Compose::Edit(_)) && self.composer.read(cx).value().is_empty()
+        INLINE && self.open.is_some() && self.caps().voice && !matches!(self.compose, Compose::Edit(_)) && self.composer.read(cx).value().is_empty()
     }
 
     /// The composer turned empty or stopped being empty: the send button changes.

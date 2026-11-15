@@ -253,6 +253,9 @@ pub enum Ev {
     SignOutStep(Result<Option<verify::Auth>, String>),
     /// The open chat's disappearing messages, when it opens and whenever its timer changes.
     Disappear { room: OwnedRoomId, setting: Disappearing },
+    /// What the open chat's network takes, when it opens and whenever its bridge says anew.
+    /// `None`: no bridge says, so the chat is plain Matrix and takes everything.
+    Features { room: OwnedRoomId, features: Option<Features> },
     /// A chat's details for its info screen; sent again as more is known.
     Info(OwnedRoomId, Box<info::Details>),
     /// The answer to `Cmd::PeerIds`; never sent for a group.
@@ -2894,7 +2897,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
 mod location;
 mod contact;
 mod gifs;
-pub(crate) use gifs::{Found as GifPage, Gif, enabled as gifs_enabled};
+pub(crate) use gifs::{Found as GifPage, Gif, enabled as gifs_enabled, wants_gif_file};
 pub(crate) mod caption;
 mod strip;
 pub(crate) mod forward;
@@ -2902,7 +2905,7 @@ mod info;
 mod polls;
 mod rich;
 pub use rich::{Block, Rich, Run};
-pub use location::support as location_support;
+pub use location::{Support as LocationSupport, support as location_support};
 pub use polls::{Place, Poll};
 pub(crate) mod pollnew;
 pub use pollnew::NewPoll;
@@ -2914,6 +2917,8 @@ mod timeline;
 mod video;
 mod disappear;
 pub use disappear::{Disappearing, label as disappear_label};
+mod features;
+pub use features::Features;
 mod search;
 pub use search::Hit;
 pub(crate) use search::{MAX_HITS, MIN_QUERY};
