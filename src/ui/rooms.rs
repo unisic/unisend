@@ -135,13 +135,13 @@ fn wording(c: &Confirm) -> (String, String, &'static str) {
 
 impl BeeperApp {
     /// The last row of a chat's sheet.
-    pub(super) fn leave_row(&self, room: OwnedRoomId, live: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn leave_row(&self, room: OwnedRoomId, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = Palette::of(cx);
         let bridged = self.rooms.iter().any(|r| r.id == room && r.network.is_some());
         let row = if bridged {
-            sheet_row_idle("chat-delete", IconName::Trash, t!("Delete chat"), p.negative, cx)
+            sheet_row("chat-delete", IconName::Trash, t!("Delete chat"), p.negative, window, cx)
         } else {
-            sheet_row_idle("chat-leave", IconName::LogOut, t!("Leave chat"), p.negative, cx)
+            sheet_row("chat-leave", IconName::LogOut, t!("Leave chat"), p.negative, window, cx)
         };
         if !live {
             return row;

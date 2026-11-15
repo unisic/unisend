@@ -197,6 +197,8 @@ pub enum Ev {
     Ready { user: OwnedUserId, beeper: bool, seal: Seal },
     /// The connection to the server is lost (false) or back (true).
     Online(bool),
+    /// The first sync answered: a list still empty is the account's, not one still loading.
+    Synced,
     /// True while this device lacks the secrets needed to decrypt history.
     NeedRecovery(bool),
     Rooms(Vec<RoomSummary>),
@@ -2059,6 +2061,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
     let mut stream = std::pin::pin!(client.sync_stream(settings).await);
     // Requests failed in a row.
     let mut failed = 0u32;
+    let mut synced = false;
     while let Some(resp) = stream.next().await {
         let resp = match resp {
             Ok(r) => r,
@@ -2155,6 +2158,9 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
             changed = refresh_cached(&client, &notif, &rooms).await;
         }
         if !changed.is_empty() && ev.send(Ev::Rooms(changed)).await.is_err() {
+            return;
+        }
+        if !std::mem::replace(&mut synced, true) && ev.send(Ev::Synced).await.is_err() {
             return;
         }
     }
