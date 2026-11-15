@@ -1032,7 +1032,7 @@ impl State {
             )));
 
         }
-        auth.login_username(user, password).initial_device_display_name("Beeper GPUI").await.map_err(|e| {
+        auth.login_username(user, password).initial_device_display_name("Murmur").await.map_err(|e| {
             match e.client_api_error_kind() {
                 Some(ErrorKind::Forbidden) => anyhow!(t!("Wrong user name or password.")),
                 Some(ErrorKind::UserDeactivated) => anyhow!(t!("This account has been deactivated.")),
@@ -2251,7 +2251,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
     // shortcut: the SDK drops a full answer at the token it already holds, so the resync lands at
     // the first change on the account; clear the stored token if a quiet account ever needs it.
     let token = if rooms.lock().unwrap().is_empty() || forgotten(&client, &rooms).await { SyncToken::NoToken } else { SyncToken::ReusePrevious };
-    let settings = SyncSettings::default().filter(def.into()).token(token);
+    // Syncing marks the account online by default; nothing in the app shows presence, so never share it.
+    let settings = SyncSettings::default().filter(def.into()).token(token).set_presence(matrix_sdk::ruma::presence::PresenceState::Offline);
 
     let mut stream = std::pin::pin!(client.sync_stream(settings).await);
     // Requests failed in a row.
