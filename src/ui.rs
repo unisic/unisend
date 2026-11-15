@@ -1721,7 +1721,7 @@ impl BeeperApp {
                 .rounded_full()
                 .bg(p.surface)
                 .child(Icon::new(IconName::Search).size_4().flex_none().text_color(p.faint))
-                .child(div().flex_1().min_w_0().child(Input::new(&self.search).appearance(false)))
+                .child(div().flex_1().min_w_0().child(Input::new(&self.search).appearance(false)).child(crate::ime::marks(&self.search)))
                 .child(round_button("close-search", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| {
                     this.set_searching(false, window, cx);
                 })))
@@ -2257,7 +2257,8 @@ impl BeeperApp {
                             }))
                             .text_size(fs(16.))
                             .map(|el| self.mention_keys(el, cx))
-                            .child(Input::new(&self.composer).appearance(false).large().token(|t, _, cx| mentions::token(t, cx))),
+                            .child(Input::new(&self.composer).appearance(false).large().token(|t, _, cx| mentions::token(t, cx)))
+                            .child(crate::ime::marks(&self.composer)),
                     )
                     .child(
                         div()

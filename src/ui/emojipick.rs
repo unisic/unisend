@@ -420,7 +420,8 @@ impl BeeperApp {
                             .items_center()
                             .rounded(px(20.))
                             .bg(p.raised)
-                            .child(Input::new(&self.emoji_pick.search).appearance(false)),
+                            .child(Input::new(&self.emoji_pick.search).appearance(false))
+                            .child(crate::ime::marks(&self.emoji_pick.search)),
                     )
                     .child(
                         div()

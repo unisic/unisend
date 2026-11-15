@@ -115,7 +115,7 @@ impl BeeperApp {
                 .pr(px(GUTTER - 6.))
                 .pb(px(8.))
                 .items_center()
-                .child(div().flex_1().min_w_0().child(Input::new(input).large()))
+                .child(div().flex_1().min_w_0().child(Input::new(input).large()).child(crate::ime::marks(input)))
                 .child(
                     div()
                         .id(("poll-remove", i))
@@ -215,7 +215,7 @@ impl BeeperApp {
                         .overflow_y_scroll()
                         .pb(px(24.))
                         .child(label(t!("Question")))
-                        .child(div().px(px(GUTTER)).child(Input::new(&f.question.0).large()))
+                        .child(div().px(px(GUTTER)).child(Input::new(&f.question.0).large()).child(crate::ime::marks(&f.question.0)))
                         .child(label(t!("Options")))
                         .children(rows)
                         .children(add)

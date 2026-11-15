@@ -7,8 +7,18 @@
 //! a tap moving the caret, a draft, an emoji or a mention), is published back (`gpuiImeSync`) with
 //! the sequence number of the last applied edit, so Java tells its own echo from the app's change.
 //! Only fields passed to `follow` take part: secrets never reach the proxy as context.
+//!
+//! The text is drawn by GPUI, so what a native EditText underlines (the word being composed, words
+//! the system spell checker marked in the proxy) is kept here and drawn over the field by `marks`.
 
+use std::cell::RefCell;
 use std::ops::Range;
+
+use gpui_kit::component::RopeExt as _;
+use gpui_kit::component::input::InputState;
+use gpui_kit::{App, ContentMask, Entity, Focusable as _, Hsla, IntoElement, Pixels, Styled as _, Window, canvas, fill, point, px, size};
+
+use crate::Palette;
 
 /// UTF-16 units of context the keyboard gets before and after the selection.
 /// `GpuiInputActivity` trims and refills its copy relative to `BEFORE`.
@@ -72,6 +82,106 @@ fn plan(edit: &Edit) -> Vec<Op> {
     }
 }
 
+/// Misspelled ranges kept per field; the proxy's window holds about 100 words.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+const MAX_SPELL: usize = 64;
+/// Underline height above the line box's bottom, in line heights: about where GPUI draws one.
+const LIFT: f32 = 0.15;
+
+/// What the keyboard marks in the focused followed field, in UTF-16 offsets of the whole field.
+#[derive(Default)]
+struct Marks {
+    field: u64,
+    /// The word the keyboard is composing.
+    comp: Option<Range<usize>>,
+    /// Misspelled words with the text each covered when reported: a range gone stale is not drawn.
+    spell: Vec<(Range<usize>, String)>,
+}
+
+thread_local! {
+    static MARKS: RefCell<Marks> = RefCell::default();
+}
+
+/// Moves spell ranges past an edit that replaced `old` with `new_len` units; ranges it touched go.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn shift(spell: &mut Vec<(Range<usize>, String)>, old: &Range<usize>, new_len: usize) {
+    spell.retain_mut(|(r, _)| {
+        if r.end <= old.start {
+            return true;
+        }
+        if r.start < old.end {
+            return false;
+        }
+        *r = r.start - old.end + old.start + new_len..r.end - old.end + old.start + new_len;
+        true
+    });
+}
+
+/// Draws the composing underline and the misspelled-word dots over `input` while it has focus.
+/// Place it next to the field's `Input`; it takes no space.
+pub(crate) fn marks(input: &Entity<InputState>) -> impl IntoElement + use<> {
+    let input = input.clone();
+    canvas(|_, _, _| (), move |_, _, window, cx| paint_marks(&input, window, cx)).absolute().inset_0()
+}
+
+fn paint_marks(input: &Entity<InputState>, window: &mut Window, cx: &mut App) {
+    let field = input.entity_id().as_u64();
+    let (comp, spell) = MARKS.with_borrow(|m| if m.field == field { (m.comp.clone(), m.spell.clone()) } else { (None, Vec::new()) });
+    if comp.is_none() && spell.is_empty() {
+        return;
+    }
+    let state = input.read(cx);
+    if !state.focus_handle(cx).is_focused(window) {
+        return;
+    }
+    let Some(text_bounds) = state.text_bounds() else {
+        return;
+    };
+    let rope = state.text();
+    let bytes = |r: &Range<usize>| rope.offset_utf16_to_offset(r.start)..rope.offset_utf16_to_offset(r.end);
+    // One stretch per line the range covers (a word wrapped at the edge has two): left x, right x, underline y.
+    let lines = |r: &Range<usize>| -> Vec<(Pixels, Pixels, Pixels)> {
+        let (Some(a), Some(b)) = (state.range_to_bounds(&(r.start..r.start)), state.range_to_bounds(&(r.end..r.end))) else {
+            return Vec::new();
+        };
+        let lift = a.size.height * LIFT;
+        let stretches = if a.top() == b.top() {
+            vec![(a.left(), b.left(), a.bottom() - lift)]
+        } else {
+            vec![(a.left(), text_bounds.right(), a.bottom() - lift), (text_bounds.left(), b.left(), b.bottom() - lift)]
+        };
+        stretches.into_iter().filter(|(x0, x1, _)| x1 > x0).collect()
+    };
+    let p = Palette::of(cx);
+    let mut quads = Vec::new();
+    if let Some(comp) = comp.as_ref().map(bytes).filter(|r| !r.is_empty()) {
+        for (x0, x1, y) in lines(&comp) {
+            quads.push(fill(gpui_kit::Bounds::new(point(x0, y), size(x1 - x0, px(1.))), p.text));
+        }
+    }
+    for (range, word) in &spell {
+        let range = bytes(range);
+        if range.is_empty() || rope.slice(range.clone()) != word.as_str() {
+            continue;
+        }
+        for (x0, x1, y) in lines(&range) {
+            quads.extend(dots(x0, x1, y, p.negative));
+        }
+    }
+    window.with_content_mask(Some(ContentMask { bounds: state.input_bounds() }), |window| {
+        for quad in quads {
+            window.paint_quad(quad);
+        }
+    });
+}
+
+/// A dotted line from `x0` to `x1`: round 2 px dots, 2 px apart, as a spell checker marks a word.
+fn dots(x0: Pixels, x1: Pixels, y: Pixels, colour: Hsla) -> impl Iterator<Item = gpui_kit::PaintQuad> {
+    const DOT: f32 = 2.;
+    let count = (f32::from(x1 - x0) / (DOT * 2.)).ceil() as usize;
+    (0..count).map(move |i| fill(gpui_kit::Bounds::new(point(x0 + px(i as f32 * DOT * 2.), y - px(DOT / 2.)), size(px(DOT), px(DOT))), colour).corner_radii(px(DOT / 2.)))
+}
+
 #[cfg(target_os = "android")]
 pub(crate) use android::{follow, set_incognito};
 
@@ -92,14 +202,16 @@ mod android {
     use gpui_kit::component::input::{InputEvent, InputState};
     use gpui_kit::{App, Context, Entity, EntityInputHandler as _, Focusable as _, WeakEntity, Window};
     use gpui_mobile::android::jni::{activity, get_string, with_env};
-    use jni::objects::{JObject, JValue};
+    use jni::objects::{JIntArray, JObject, JValue};
     use tokio::sync::mpsc;
 
-    use super::{Edit, Op, around, plan};
+    use super::{Edit, MARKS, MAX_SPELL, Op, around, plan, shift};
 
     enum Msg {
         Edit(Edit),
         Resync,
+        /// Misspelled ranges of a field, all of them, in field UTF-16 offsets.
+        Spell(u64, Vec<Range<usize>>),
     }
 
     /// Edits waiting for the GPUI thread; Java resyncs if one does not fit.
@@ -167,15 +279,51 @@ mod android {
         })
     }
 
+    fn find(field: u64) -> Option<Entity<InputState>> {
+        FIELDS.with_borrow(|fields| fields.iter().filter_map(WeakEntity::upgrade).find(|f| f.entity_id().as_u64() == field))
+    }
+
     fn handle(msg: Msg, window: &mut Window, cx: &mut App) {
         if let Msg::Edit(edit) = &msg {
             APPLIED.set(edit.seq);
-            let target = FIELDS.with_borrow(|fields| {
-                fields.iter().filter_map(WeakEntity::upgrade).find(|f| f.entity_id().as_u64() == edit.field)
+            MARKS.with_borrow_mut(|m| {
+                if m.field != edit.field {
+                    *m = super::Marks { field: edit.field, ..Default::default() };
+                }
+                if let Some((old, text)) = &edit.replace {
+                    shift(&mut m.spell, old, text.encode_utf16().count());
+                }
+                m.comp = edit.comp.clone();
             });
-            if let Some(target) = target {
-                target.update(cx, |state, cx| apply(state, edit, window, cx));
+            if let Some(target) = find(edit.field) {
+                target.update(cx, |state, cx| {
+                    apply(state, edit, window, cx);
+                    // A composition that only ended changes no text, yet its underline must go.
+                    cx.notify();
+                });
             }
+        }
+        if let Msg::Spell(field, ranges) = &msg {
+            if let Some(target) = find(*field) {
+                target.update(cx, |state, cx| {
+                    let spell = ranges
+                        .iter()
+                        .filter_map(|r| {
+                            let mut adjusted = None;
+                            let word = state.text_for_range(r.clone(), &mut adjusted, window, cx)?;
+                            (adjusted.as_ref() == Some(r)).then(|| (r.clone(), word))
+                        })
+                        .collect();
+                    MARKS.with_borrow_mut(|m| {
+                        if m.field != *field {
+                            *m = super::Marks { field: *field, ..Default::default() };
+                        }
+                        m.spell = spell;
+                    });
+                    cx.notify();
+                });
+            }
+            return;
         }
         match focused(window, cx) {
             Some(input) => publish(&input, matches!(msg, Msg::Resync), window, cx),
@@ -332,6 +480,23 @@ mod android {
         let _ = sender().try_send(Msg::Resync);
     }
 
+    /// # Safety
+    /// Called by the JVM with a valid (or null) `int[]` of start, end pairs.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeImeSpell(_env: *mut c_void, _class: *mut c_void, field: i64, ranges: *mut c_void) -> u8 {
+        let Ok(flat) = with_env(|env| {
+            let array = unsafe { JIntArray::from_raw(env, ranges as jni::sys::jarray) };
+            let len = array.len(env).map_err(|e| e.to_string())?.min(MAX_SPELL * 2);
+            let mut flat = vec![0; len];
+            array.get_region(env, 0, &mut flat).map_err(|e| e.to_string())?;
+            Ok(flat)
+        }) else {
+            return 0;
+        };
+        let ranges = flat.chunks_exact(2).filter(|p| 0 <= p[0] && p[0] < p[1]).map(|p| range(p[0], p[1])).collect();
+        u8::from(sender().try_send(Msg::Spell(field as u64, ranges)).is_ok())
+    }
+
     /// Settings > Privacy > Incognito keyboard: whether text fields ask the keyboard not to learn.
     pub(crate) fn set_incognito(on: bool) {
         let sent = with_env(|env| {
@@ -348,10 +513,28 @@ mod android {
 
 #[cfg(test)]
 mod tests {
-    use super::{AFTER, BEFORE, Edit, Op, around, plan};
+    use super::{AFTER, BEFORE, Edit, Op, around, plan, shift};
 
     fn edit(replace: Option<(std::ops::Range<usize>, &str)>, sel: std::ops::Range<usize>, comp: Option<std::ops::Range<usize>>) -> Edit {
         Edit { field: 1, seq: 1, replace: replace.map(|(r, t)| (r, t.to_owned())), sel: Some(sel), comp }
+    }
+
+    #[test]
+    fn spell_ranges_follow_edits_before_them_and_go_with_edits_inside() {
+        let words = |v: &[(std::ops::Range<usize>, &str)]| v.iter().map(|(r, w)| (r.clone(), (*w).to_owned())).collect::<Vec<_>>();
+        // "teh qick fox": misspelled "teh" 0..3 and "qick" 4..8.
+        let mut spell = words(&[(0..3, "teh"), (4..8, "qick")]);
+        // Typing "x" at the end moves nothing.
+        shift(&mut spell, &(12..12), 1);
+        assert_eq!(spell, words(&[(0..3, "teh"), (4..8, "qick")]));
+        // "teh" corrected to "the " (4 units over 3, with the space): it goes, "qick" moves by one.
+        shift(&mut spell, &(0..3), 4);
+        assert_eq!(spell, words(&[(5..9, "qick")]));
+        // An emoji (two units) inserted right before the word moves it; touching its end removes it.
+        shift(&mut spell, &(5..5), 2);
+        assert_eq!(spell, words(&[(7..11, "qick")]));
+        shift(&mut spell, &(10..11), 0);
+        assert!(spell.is_empty());
     }
 
     #[test]

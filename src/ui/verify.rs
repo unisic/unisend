@@ -232,6 +232,7 @@ impl BeeperApp {
                 .py(px(8.))
                 .gap(px(8.))
                 .child(Input::new(&self.verify.name))
+                .child(crate::ime::marks(&self.verify.name))
                 .child(
                     h_flex()
                         .gap(px(8.))
