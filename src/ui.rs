@@ -1977,6 +1977,9 @@ impl BeeperApp {
             }),
         )
         .size_full();
+        // The send button turns between a microphone (nothing typed) and an arrow; desktop has no microphone.
+        let mic = self.mic_shown(cx);
+        let send_mode = transition(("send", "mode"), if mic { 0. } else { 1. }, motion::exit(), window, cx);
 
         v_flex()
             .size_full()
@@ -2107,8 +2110,19 @@ impl BeeperApp {
                             .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
                             .active(|el| el.bg(p.muted))
                             .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
-                            .child(Icon::new(if self.mic_shown(cx) { IconName::Mic } else { IconName::ArrowUp }).size_5())
-                            .when(self.mic_shown(cx), |el| el.relative().child(self.mic_touch(cx))),
+                            .relative()
+                            .children([(IconName::ArrowUp, send_mode), (IconName::Mic, 1. - send_mode)].into_iter().filter(|(_, v)| *v > 0.).map(|(icon, v)| {
+                                let scale = 0.5 + 0.5 * v;
+                                div()
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .opacity(v)
+                                    .child(Icon::new(icon).size_5().transform(Transformation::scale(size(scale, scale))))
+                            }))
+                            .when(mic && send_mode < 0.5, |el| el.child(self.mic_touch(cx))),
                     )
                     .relative()
                     .children(self.render_recorder(window, cx)),
