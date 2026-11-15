@@ -95,7 +95,7 @@ public final class Player extends Activity {
                 .putExtra(LOOP, loop)
                 .putExtra(WIDTH, width)
                 .putExtra(HEIGHT, height);
-        Bundle fade = ActivityOptions.makeCustomAnimation(activity, android.R.anim.fade_in, android.R.anim.fade_out).toBundle();
+        Bundle fade = ActivityOptions.makeCustomAnimation(activity, R.anim.player_in, R.anim.hold).toBundle();
         try {
             activity.startActivity(intent, fade);
             return true;
@@ -444,7 +444,7 @@ public final class Player extends Activity {
     @Override
     public void finish() {
         super.finish();
-        overridePendingTransition(0, android.R.anim.fade_out);
+        overridePendingTransition(0, R.anim.player_out);
     }
 
     private int dp(int value) {
