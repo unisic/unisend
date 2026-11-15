@@ -41,6 +41,7 @@ mod pinpad;
 mod pollnew;
 mod rich;
 mod search;
+mod sheet;
 mod signin;
 mod sharein;
 mod video;

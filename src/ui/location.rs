@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use super::cards;
+use super::sheet::{self, SheetMotion};
 use super::*;
 use crate::backend::{Place, location_support};
 use crate::i18n::t;
@@ -39,11 +40,12 @@ pub(super) struct Locate {
     state: State,
     epoch: u64,
     asked: bool,
+    pub sheet: SheetMotion,
 }
 
 impl Default for Locate {
     fn default() -> Self {
-        Self { open: false, state: State::Locating, epoch: 0, asked: false }
+        Self { open: false, state: State::Locating, epoch: 0, asked: false, sheet: SheetMotion::default() }
     }
 }
 
@@ -183,12 +185,8 @@ impl BeeperApp {
     }
 
     pub(super) fn render_location(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.location.open;
-        let motion = if live { Transition::new(motion::SHEET_IN).easing(motion::EASE_SHEET) } else { Transition::new(motion::SHEET_OUT).easing(motion::EASE_OUT) };
-        let shown = Presence::new("location", live).transition(motion).sample(window, cx);
-        if !shown.should_render() {
-            return None;
-        }
+        let frame = self.location.sheet.sample(self.location.open, window, cx)?;
+        let live = frame.live;
         let p = Palette::of(cx);
         let width = f32::from(window.viewport_size().width).min(SHEET_W);
         let (_, bottom) = crate::insets();
@@ -249,23 +247,37 @@ impl BeeperApp {
         let note_only = !matches!(state, State::Found(_));
         let body = body.when(note_only, |el| el.children(support.as_ref().map(|s| div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.muted).child(s.note))));
 
-        let y = (1. - shown.progress) * 320.;
+        let key = match state {
+            State::Asking => 0,
+            State::Denied => 1,
+            State::Off => 2,
+            State::Locating => 3,
+            State::Failed => 4,
+            State::Found(_) => 5,
+        };
+        let view = cx.entity_id();
+        let body = self.location.sheet.fit("location-body", key, body, view, window, cx);
+        let head = v_flex()
+            .id("location-head")
+            .gap(px(12.))
+            .when(live, |el| {
+                el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+                    if this.location.sheet.drag(e) {
+                        this.close_location(cx);
+                    }
+                    cx.notify();
+                }))
+            })
+            .child(sheet::handle(p.faint))
+            .child(div().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(t!("Share location")));
         Some(
-            div()
-                .id("location")
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .justify_end()
-                .items_center()
-                .bg(gpui_kit::black().opacity(0.6 * shown.progress))
-                .when(live, |el| el.occlude().on_click(cx.listener(|this, _, _, cx| this.close_location(cx))))
+            sheet::scrim("location", frame)
+                .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.close_location(cx))))
                 .child(
                     v_flex()
                         .id("location-sheet")
                         .relative()
-                        .top(px(y))
+                        .top(px(frame.y))
                         .w(px(width))
                         .gap(px(12.))
                         .px(px(GUTTER))
@@ -273,8 +285,8 @@ impl BeeperApp {
                         .rounded_t(px(RADIUS))
                         .bg(p.surface)
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
-                        .child(div().h(px(20.)).flex().items_center().justify_center().child(div().w(px(36.)).h(px(4.)).rounded_full().bg(p.faint.opacity(0.5))))
-                        .child(div().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(t!("Share location")))
+                        .child(self.location.sheet.probe(view))
+                        .child(head)
                         .child(body),
                 )
                 .into_any_element(),
