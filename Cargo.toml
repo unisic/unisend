@@ -40,6 +40,9 @@ memmap2 = "0.9"
 ttf-parser = { version = "0.25", default-features = false }
 # Already in the tree (gpui-kit's Markdown view): the composer's CommonMark turned into Matrix HTML.
 markdown = { version = "1", default-features = false }
+# Already in the tree (rustls through matrix-sdk), same features: the app PIN's salt, PBKDF2 and
+# constant-time comparison.
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
 # gpui-kit re-exports gpui (gpui-pre 0.3.6) and, on desktop, its platform layer.
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "13c716b687b47f96a677aaf46c8fa341fa7208da", default-features = false, features = ["component", "assets"] }
 
