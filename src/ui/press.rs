@@ -121,12 +121,14 @@ impl Segments {
             window.request_animation_frame();
             return None;
         };
-        let b = transition(id, to, motion::enter(), window, cx);
+        // Relative to the control: animating window coordinates made the pill chase every scroll.
+        let at = Bounds { origin: point(to.origin.x - root.origin.x, to.origin.y - root.origin.y), size: to.size };
+        let b = transition(id, at, motion::enter(), window, cx);
         Some(
             div()
                 .absolute()
-                .left(b.origin.x - root.origin.x)
-                .top(b.origin.y - root.origin.y)
+                .left(b.origin.x)
+                .top(b.origin.y)
                 .w(b.size.width)
                 .h(b.size.height)
                 .rounded_full()
