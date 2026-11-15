@@ -824,10 +824,7 @@ mod native {
         helpers::with_env(|env| {
             let activity = helpers::activity(env)?;
             let class = helpers::find_app_class(env, CLASS)?;
-            f(env, &class, &activity).map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })
+            f(env, &class, &activity).map_err(|e| crate::java_error(env, e))
         })
         .map_err(|e| log::warn!("voice {what}: {e}"))
         .ok()

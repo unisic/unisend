@@ -71,10 +71,7 @@ fn take(video: bool) -> Option<PathBuf> {
                 &[JValue::Object(&activity), JValue::Bool(video)],
             )
             .and_then(|v| v.l())
-            .map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })?;
+            .map_err(|e| crate::java_error(env, e))?;
         Ok((!path.is_null()).then(|| helpers::get_string(env, &path)))
     });
     taken.map_err(|e| log::warn!("camera: {e}")).ok()?.map(PathBuf::from)

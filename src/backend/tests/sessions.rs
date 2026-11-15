@@ -256,3 +256,24 @@ async fn gui_verify_helper() {
     }
     sync.abort();
 }
+
+/// Listing the devices queries the account's keys, after which the SDK sets the verification state
+/// again; the watcher must not take that for a change and list them again, forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn device_list_does_not_refresh_itself() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-devloop-{tag}"));
+    let (mut a, mut a_rx) = state(root.clone(), &hs);
+    a.login_jwt(jwt(&secret, &format!("erin{tag}"))).await.unwrap();
+    wait_for(&mut a_rx, "ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let mut lists = 0;
+    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, a_rx.rx.recv()).await {
+        lists += usize::from(matches!(ev, Ev::Devices(_)));
+    }
+    assert!(lists <= 2, "{lists} device lists in 4 s");
+    let _ = std::fs::remove_dir_all(root);
+}

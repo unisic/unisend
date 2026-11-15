@@ -73,14 +73,8 @@ fn animations_off() -> Result<bool, String> {
         let resolver = env
             .call_method(&activity, jni::jni_str!("getContentResolver"), jni::jni_sig!("()Landroid/content/ContentResolver;"), &[])
             .and_then(|v| v.l())
-            .map_err(|e| {
-                env.exception_clear();
-                e.to_string()
-            })?;
-        let class = env.find_class(jni::jni_str!("android/provider/Settings$Global")).map_err(|e| {
-            env.exception_clear();
-            e.to_string()
-        })?;
+            .map_err(|e| crate::java_error(env, e))?;
+        let class = env.find_class(jni::jni_str!("android/provider/Settings$Global")).map_err(|e| crate::java_error(env, e))?;
         let key = env.new_string("animator_duration_scale").map_err(|e| e.to_string())?;
         env.call_static_method(
             &class,
@@ -90,9 +84,6 @@ fn animations_off() -> Result<bool, String> {
         )
         .and_then(|v| v.f())
         .map(|scale| scale == 0.)
-        .map_err(|e| {
-            env.exception_clear();
-            e.to_string()
-        })
+        .map_err(|e| crate::java_error(env, e))
     })
 }

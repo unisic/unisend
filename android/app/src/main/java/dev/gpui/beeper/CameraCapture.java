@@ -9,6 +9,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
+import android.util.Log;
 import androidx.core.content.FileProvider;
 import java.io.File;
 import java.io.FileInputStream;
@@ -28,6 +29,7 @@ import java.util.concurrent.CountDownLatch;
  * granted at run time; without it, the camera app does the capturing under its own permission.
  */
 public class CameraCapture extends Activity {
+    private static final String TAG = "Murmur";
     private static final int REQUEST = 9101;
     private static final long STALE_MS = 60 * 60 * 1000;
     private static final String EXTRA_VIDEO = "video";
@@ -71,6 +73,7 @@ public class CameraCapture extends Activity {
             activity.startActivity(proxy);
             mine.await();
         } catch (RuntimeException e) {
+            Log.w(TAG, "camera", e);
             return null;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -103,6 +106,7 @@ public class CameraCapture extends Activity {
         try {
             startActivityForResult(camera, REQUEST);
         } catch (ActivityNotFoundException | SecurityException e) {
+            Log.w(TAG, "no camera app took the capture", e);
             deliver(null);
             finish();
         }
@@ -166,6 +170,7 @@ public class CameraCapture extends Activity {
             }
             source.delete();
         } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "camera shot to gallery", e);
             resolver.delete(target, null, null);
         }
     }

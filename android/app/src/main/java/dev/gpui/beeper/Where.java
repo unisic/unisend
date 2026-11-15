@@ -14,6 +14,7 @@ import android.os.Bundle;
 import android.os.HandlerThread;
 import android.os.SystemClock;
 import android.provider.Settings;
+import android.util.Log;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -23,6 +24,7 @@ import java.util.Locale;
  * Services). Called from Rust over JNI, {@link #fix} off the UI thread.
  */
 public final class Where {
+    private static final String TAG = "Murmur";
     /** A fix this accurate (m) ends the wait early. */
     private static final float GOOD_ENOUGH = 30f;
     /** A cached fix younger than this (ms) may stand in when nothing fresher arrives. */
@@ -70,6 +72,7 @@ public final class Where {
                 sources.add(LocationManager.NETWORK_PROVIDER);
             }
         } catch (SecurityException e) {
+            Log.w(TAG, "location sources", e);
             return "none";
         }
         if (sources.isEmpty()) return "off";
@@ -117,6 +120,7 @@ public final class Where {
                 }
             }
         } catch (SecurityException e) {
+            Log.w(TAG, "location updates", e);
             return "none";
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
