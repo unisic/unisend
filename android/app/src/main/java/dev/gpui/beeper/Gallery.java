@@ -10,6 +10,9 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.ImageDecoder;
+import android.graphics.Matrix;
+import android.media.ExifInterface;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -76,7 +79,7 @@ public final class Gallery {
     /**
      * Up to `limit` photos and videos older than (date, id), newest first; date -1 starts at the
      * newest. One line each: id, content uri, mime type, date added (s), duration (ms), width,
-     * height, separated by tabs. Null when MediaStore refuses.
+     * height (as shown, so turned with the orientation), separated by tabs. Null when MediaStore refuses.
      */
     public static String page(Activity activity, long date, long id, int limit) {
         String selection = "media_type IN (" + TYPE_IMAGE + "," + TYPE_VIDEO + ")";
@@ -90,7 +93,7 @@ public final class Gallery {
         query.putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args);
         query.putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, "date_added DESC, _id DESC");
         query.putInt(ContentResolver.QUERY_ARG_LIMIT, limit);
-        String[] columns = {"_id", "media_type", "mime_type", "date_added", "duration", "width", "height"};
+        String[] columns = {"_id", "media_type", "mime_type", "date_added", "duration", "width", "height", "orientation"};
         StringBuilder out = new StringBuilder();
         try (Cursor c = activity.getContentResolver()
                 .query(MediaStore.Files.getContentUri("external"), columns, query, null)) {
@@ -100,6 +103,8 @@ public final class Gallery {
             // Providers before Android 11 may ignore the limit.
             for (int n = 0; n < limit && c.moveToNext(); n++) {
                 long itemId = c.getLong(0);
+                // MediaStore keeps the stored size; a photo taken sideways is shown the other way round.
+                boolean turned = c.getInt(7) % 180 != 0;
                 Uri base = c.getInt(1) == TYPE_VIDEO
                         ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
                         : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
@@ -108,8 +113,8 @@ public final class Gallery {
                         .append(c.isNull(2) ? "" : c.getString(2)).append('\t')
                         .append(c.getLong(3)).append('\t')
                         .append(c.getLong(4)).append('\t')
-                        .append(c.getInt(5)).append('\t')
-                        .append(c.getInt(6)).append('\n');
+                        .append(c.getInt(turned ? 6 : 5)).append('\t')
+                        .append(c.getInt(turned ? 5 : 6)).append('\n');
             }
         } catch (RuntimeException e) {
             Log.w(TAG, "gallery page", e);
@@ -166,6 +171,102 @@ public final class Gallery {
                 bitmap.recycle();
             }
         }
+    }
+
+    /**
+     * The item whole and upright, as JPEG (PNG when it has transparency), or null; a video gives a
+     * still. Its pixels fit `longer` x `shorter` in either orientation, so at most a screenful.
+     * `width` and `height` are the item's as shown, 0 when unknown.
+     */
+    public static byte[] peek(Activity activity, String uriString, boolean video, int longer, int shorter, int width, int height) {
+        Uri uri = Uri.parse(uriString);
+        ContentResolver resolver = activity.getContentResolver();
+        Bitmap bitmap = null;
+        try {
+            if (Build.VERSION.SDK_INT >= 28 && !video) {
+                bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(resolver, uri), (decoder, info, source) -> {
+                    int w = info.getSize().getWidth(), h = info.getSize().getHeight();
+                    float scale = fit(w, h, longer, shorter);
+                    if (scale < 1) {
+                        decoder.setTargetSize(Math.max(1, Math.round(w * scale)), Math.max(1, Math.round(h * scale)));
+                    }
+                    // Hardware bitmaps cannot be compressed.
+                    decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+                });
+            } else if (video && Build.VERSION.SDK_INT >= 29) {
+                float scale = width > 0 && height > 0 ? fit(width, height, longer, shorter) : 0;
+                Size size = scale > 0 ? new Size(Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))) : new Size(shorter, shorter);
+                bitmap = resolver.loadThumbnail(uri, size, null);
+            } else if (video) {
+                bitmap = MediaStore.Video.Thumbnails.getThumbnail(
+                        resolver, ContentUris.parseId(uri), MediaStore.Video.Thumbnails.MINI_KIND, null);
+            } else {
+                bitmap = decodeUpright(resolver, uri, longer, shorter);
+            }
+            if (bitmap == null) {
+                return null;
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            if (bitmap.hasAlpha()) {
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
+            } else {
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out);
+            }
+            return out.toByteArray();
+        } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "gallery peek", e);
+            return null;
+        } finally {
+            if (bitmap != null) {
+                bitmap.recycle();
+            }
+        }
+    }
+
+    /** The scale, at most 1, that fits w x h into longer x shorter turned either way. Same rule as `peek_scale` in Rust. */
+    private static float fit(int w, int h, int longer, int shorter) {
+        if (w <= 0 || h <= 0) {
+            return 1;
+        }
+        return Math.min(1f, Math.min((float) longer / Math.max(w, h), (float) shorter / Math.min(w, h)));
+    }
+
+    /** Before Android 9: a power-of-two sample that fits, turned as its EXIF says. */
+    private static Bitmap decodeUpright(ContentResolver resolver, Uri uri, int longer, int shorter) throws IOException {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        try (InputStream in = resolver.openInputStream(uri)) {
+            BitmapFactory.decodeStream(in, null, bounds);
+        }
+        float scale = fit(bounds.outWidth, bounds.outHeight, longer, shorter);
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = 1;
+        while (options.inSampleSize * 2 * scale <= 1) {
+            options.inSampleSize *= 2;
+        }
+        int degrees;
+        try (InputStream in = resolver.openInputStream(uri)) {
+            switch (new ExifInterface(in).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                case ExifInterface.ORIENTATION_ROTATE_90: degrees = 90; break;
+                case ExifInterface.ORIENTATION_ROTATE_180: degrees = 180; break;
+                case ExifInterface.ORIENTATION_ROTATE_270: degrees = 270; break;
+                default: degrees = 0;
+            }
+        }
+        Bitmap bitmap;
+        try (InputStream in = resolver.openInputStream(uri)) {
+            bitmap = BitmapFactory.decodeStream(in, null, options);
+        }
+        if (bitmap == null || degrees == 0) {
+            return bitmap;
+        }
+        Matrix turn = new Matrix();
+        turn.postRotate(degrees);
+        Bitmap upright = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), turn, true);
+        if (upright != bitmap) {
+            bitmap.recycle();
+        }
+        return upright;
     }
 
     private static Bitmap decodeSmall(ContentResolver resolver, Uri uri, int size) throws IOException {

@@ -11,6 +11,9 @@ use super::sheet::{self, SheetMotion};
 use super::*;
 use crate::i18n::t;
 
+mod peek;
+use peek::{Held, Peek};
+
 /// Items asked of the store at a time.
 const PAGE: usize = 120;
 pub(super) const MAX_SELECTED: usize = 10;
@@ -35,7 +38,7 @@ pub(super) struct Item {
     /// When it was added, in seconds.
     pub date: i64,
     pub duration_ms: u64,
-    /// Pixels as stored, 0 when unknown; Android asks for thumbnails in this shape.
+    /// Pixels as shown (turned upright), 0 when unknown; Android asks for thumbnails in this shape.
     pub width: u32,
     pub height: u32,
 }
@@ -187,6 +190,13 @@ pub(super) struct Gallery {
     asked: bool,
     /// Where there is no sheet (desktop), the paperclip opens a menu of the same entries.
     pub menu: bool,
+    peek: Option<Peek>,
+    /// A mouse button down on a photo, a peek once held for `HOLD`.
+    held: Option<Held>,
+    /// A peek's full picture is being read; one at a time.
+    decoding: bool,
+    /// The window in physical pixels, the most a peek decodes.
+    screen_px: (u32, u32),
 }
 
 /// What can be attached besides photos and videos, in the order shown.
@@ -377,6 +387,9 @@ impl BeeperApp {
         g.loading.clear();
         g.failed.clear();
         g.visible = 0..0;
+        g.held = None;
+        self.drop_peek(cx);
+        let g = &mut self.gallery;
         if g.items.len() > PAGE {
             g.items.truncate(PAGE);
             g.done = false;
@@ -594,6 +607,7 @@ impl BeeperApp {
         let cols = if width >= 480. { 4 } else { 3 };
         let cell = ((width - GRID_GAP * (cols - 1) as f32) / cols as f32).floor();
         self.gallery.thumb_px = (cell * window.scale_factor()).min(THUMB_MAX) as u32;
+        self.gallery.screen_px = ((view_w * window.scale_factor()) as u32, (view_h * window.scale_factor()) as u32);
 
         let g = &self.gallery;
         let count = g.selection.0.len();
@@ -735,6 +749,8 @@ impl BeeperApp {
             )
         });
 
+        let peek = self.render_peek(window, cx);
+        let tracker = live.then(|| self.peek_tracker(cx));
         Some(
             sheet::scrim("gallery", frame)
                 .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.close_gallery(cx))))
@@ -757,6 +773,8 @@ impl BeeperApp {
                         .child(grid)
                         .child(div().flex_none().relative().child(actions).children(send)),
                 )
+                .children(tracker)
+                .children(peek)
                 .into_any_element(),
         )
     }
@@ -768,6 +786,7 @@ impl BeeperApp {
         let number = g.selection.number(id);
         let blocked = number.is_none() && g.selection.is_full();
         let thumb = g.thumbs.get(id);
+        let probe = live.then(|| self.peek_probe(id, cx));
         let p = Palette::of(cx);
         // Keyed by the item, not the cell, so a pick stays with its photo as the grid pages; a cell
         // first drawn with its thumbnail takes it at once, so scrolling never blinks.
@@ -836,6 +855,7 @@ impl BeeperApp {
                 )
             })
             .child(marker)
+            .children(probe)
             .when(live, |el| el.on_click(cx.listener(move |this, _, _, cx| this.toggle_item(id, cx))))
     }
 }
@@ -928,6 +948,38 @@ mod store {
         bytes.map_err(|e| log::warn!("gallery thumbnail: {e}")).ok()?
     }
 
+    /// The item whole and upright at most a screenful, for a peek; a video's still.
+    pub fn full(item: &Item, screen: (u32, u32)) -> Option<Vec<u8>> {
+        let bytes = helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, CLASS)?;
+            let uri = env.new_string(&item.uri).map_err(|e| e.to_string())?;
+            let bytes = env
+                .call_static_method(
+                    &class,
+                    jni::jni_str!("peek"),
+                    jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;ZIIII)[B"),
+                    &[
+                        JValue::Object(&activity),
+                        JValue::Object(&uri),
+                        JValue::Bool(item.video()),
+                        JValue::Int(screen.0.max(screen.1) as i32),
+                        JValue::Int(screen.0.min(screen.1) as i32),
+                        JValue::Int(item.width as i32),
+                        JValue::Int(item.height as i32),
+                    ],
+                )
+                .and_then(|v| v.l())
+                .map_err(|e| crate::java_error(env, e))?;
+            if bytes.is_null() {
+                return Ok(None);
+            }
+            let bytes = env.cast_local::<JByteArray>(bytes).map_err(|e| e.to_string())?;
+            env.convert_byte_array(&bytes).map(Some).map_err(|e| e.to_string())
+        });
+        bytes.map_err(|e| log::warn!("gallery peek: {e}")).ok()?
+    }
+
     pub fn local_copy(item: &Item) -> Option<std::path::PathBuf> {
         crate::android_files::copy_to_cache(&item.uri).map_err(|e| log::warn!("gallery item: {e}")).ok()?.map(Into::into)
     }
@@ -996,6 +1048,24 @@ mod store {
         let picture = image::ImageReader::open(&item.uri).ok()?.with_guessed_format().ok()?.decode().ok()?;
         let mut out = std::io::Cursor::new(Vec::new());
         picture.resize_to_fill(px, px, image::imageops::FilterType::Triangle).to_rgb8().write_to(&mut out, image::ImageFormat::Jpeg).ok()?;
+        Some(out.into_inner())
+    }
+
+    pub fn full(item: &Item, screen: (u32, u32)) -> Option<Vec<u8>> {
+        use image::ImageDecoder as _;
+        let mut decoder = image::ImageReader::open(&item.uri).ok()?.with_guessed_format().ok()?.into_decoder().ok()?;
+        let orientation = decoder.orientation().ok();
+        let mut picture = image::DynamicImage::from_decoder(decoder).ok()?;
+        if let Some(orientation) = orientation {
+            picture.apply_orientation(orientation);
+        }
+        let scale = super::peek::peek_scale(picture.width(), picture.height(), screen);
+        if scale < 1. {
+            let (w, h) = ((picture.width() as f32 * scale).round().max(1.) as u32, (picture.height() as f32 * scale).round().max(1.) as u32);
+            picture = picture.resize(w, h, image::imageops::FilterType::Triangle);
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        picture.to_rgb8().write_to(&mut out, image::ImageFormat::Jpeg).ok()?;
         Some(out.into_inner())
     }
 
