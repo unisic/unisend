@@ -1600,7 +1600,7 @@ impl State {
                 }
             }
             let _ = ev.send(Ev::Paged { room, more }).await;
-            if first && let Err(e) = mark_read(timeline.room(), timeline.latest_event_id().await, incognito.load(Ordering::Relaxed)).await {
+            if first && !crate::LOCKED.load(Ordering::Relaxed) && let Err(e) = mark_read(timeline.room(), timeline.latest_event_id().await, incognito.load(Ordering::Relaxed)).await {
                 log::warn!("mark read: {e:#}");
             }
         });

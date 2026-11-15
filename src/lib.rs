@@ -796,6 +796,9 @@ pub(crate) fn pick_file(cx: &mut gpui_kit::App) -> gpui_kit::Task<Option<PathBuf
 /// Whether the window is in front. Notifications are for when it is not.
 pub(crate) static FOREGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// The app lock's screen is up: a chat opened behind it is not marked read. Set by the UI.
+pub(crate) static LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// On: asks for the notification permission (Android). Off, when signing out: ends the
 /// background connection and takes the notifications away.
 pub(crate) fn background(on: bool) {

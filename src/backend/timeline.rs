@@ -169,7 +169,7 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
                 if !sessions.is_empty() || !quotes.is_empty() {
                     let _ = lookups.send((sessions, quotes)).await;
                 }
-                if arrived && crate::FOREGROUND.load(Ordering::Relaxed) {
+                if arrived && crate::FOREGROUND.load(Ordering::Relaxed) && !crate::LOCKED.load(Ordering::Relaxed) {
                     let newest = timeline.latest_event_id().await;
                     if let Err(e) = mark_read(timeline.room(), newest, incognito.load(Ordering::Relaxed)).await {
                         log::warn!("mark read: {e:#}");
