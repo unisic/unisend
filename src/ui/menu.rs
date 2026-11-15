@@ -372,6 +372,8 @@ impl BeeperApp {
             let _ = this.update(cx, |this, cx| {
                 // Still the same press: one let go and pressed again has its own timer.
                 if let Some(press) = this.press.take_if(|p| p.since == since) {
+                    // The lift takes over from the press's tint.
+                    this.bubble_press = None;
                     this.open_menu(press.id, MenuKind::Touch, press.at, Some(press.bubble), true, cx);
                 }
             });
@@ -475,6 +477,7 @@ impl BeeperApp {
         let lift = menu.map(|m| m.lift(now, still));
         let shield = menu.is_some_and(|m| m.closing.is_none());
         let weak = cx.entity().downgrade();
+        let pressing = self.bubble_press.as_ref().is_some_and(|b| b.id == id && b.released.is_none());
         let id = id.to_owned();
         let probe = canvas(
             |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
@@ -495,6 +498,44 @@ impl BeeperApp {
                         }
                     }
                 });
+                // A finger landing here: the bubble tints after `ROW_PRESS_DELAY` unless the touch turns
+                // into a scroll first. A touch reaches the app as a click only when it lifts.
+                let visible = window.content_mask().bounds;
+                window.on_mouse_event({
+                    let (weak, id) = (weak.clone(), id.clone());
+                    move |e: &TouchDragEvent, phase, _, cx| {
+                        let at = e.start_position;
+                        if phase.bubble() && e.phase == TouchPhase::Started && bounds.contains(&at) && visible.contains(&at) {
+                            let _ = weak.update(cx, |this, cx| this.bubble_pressed(id.clone(), cx));
+                        }
+                    }
+                });
+                // Only the pressed bubble listens for what ends its press: a scroll, a lift, a long press let go.
+                if pressing {
+                    let release = {
+                        let weak = weak.clone();
+                        move |cx: &mut App| {
+                            let _ = weak.update(cx, |this, cx| this.bubble_released(cx));
+                        }
+                    };
+                    let scroll = release.clone();
+                    window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            scroll(cx);
+                        }
+                    });
+                    let up = release.clone();
+                    window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            up(cx);
+                        }
+                    });
+                    window.on_mouse_event(move |e: &LongPressEvent, phase, _, cx| {
+                        if phase.bubble() && matches!(e.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                            release(cx);
+                        }
+                    });
+                }
                 window.on_mouse_event(move |e: &LongPressEvent, phase, window, cx| {
                     if !phase.bubble() || e.phase != TouchPhase::Started || window.default_prevented() || !hitbox.is_hovered(window) {
                         return;
@@ -503,7 +544,10 @@ impl BeeperApp {
                     window.prevent_default();
                     window.capture_long_press(&app);
                     cx.stop_propagation();
-                    app.update(cx, |this, cx| this.open_menu(id.clone(), MenuKind::Touch, e.start_position, Some(rest), true, cx));
+                    app.update(cx, |this, cx| {
+                        this.bubble_press = None;
+                        this.open_menu(id.clone(), MenuKind::Touch, e.start_position, Some(rest), true, cx);
+                    });
                 });
             },
         )

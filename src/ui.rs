@@ -246,6 +246,8 @@ pub struct BeeperApp {
     arrivals: VecDeque<Arrival>,
     /// When the open chat was opened: what arrives in its first moments is history, not news.
     opened_at: Option<Instant>,
+    /// A finger resting on a message's bubble, before it is a long press.
+    bubble_press: Option<BubblePress>,
     /// The message a quote led to, tinted for a moment; the tint's clock starts when it is drawn.
     flash: Option<(String, Option<Instant>)>,
     /// A message being looked for among older ones, with how many more pages it may load.
@@ -482,6 +484,7 @@ impl BeeperApp {
             heart_pop: None,
             strip_last: None,
             strip_sent: false,
+            bubble_press: None,
             strip_epoch: 0,
             chat_sheet: None,
             gallery: gallery::Gallery::default(),
@@ -1661,6 +1664,7 @@ impl BeeperApp {
                 this.want_thumb(ix);
                 this.want_card(ix);
                 let flash = this.flash_level(ix, window, cx);
+                let pressed = this.press_level(&this.msgs[ix].id.clone(), window, cx);
                 let reaction_since = this.reaction_since(ix);
                 let m = &this.msgs[ix];
                 if m.kind != Kind::Message {
@@ -1816,6 +1820,10 @@ impl BeeperApp {
                     // Where a quote led: the tint sits under the content and fades.
                     .when_some(flash, |el, level| {
                         el.relative().child(corners(div().absolute().inset_0(), m.own, top_r, bottom_r).bg(inside.text.opacity(0.16 * level)))
+                    })
+                    // A finger resting on it, before the long press lifts it.
+                    .when_some(pressed, |el, level| {
+                        el.relative().child(corners(div().absolute().inset_0(), m.own, top_r, bottom_r).bg(inside.text.opacity(0.08 * level)))
                     })
                     .children(quote)
                     .children(attachment)
@@ -2296,6 +2304,47 @@ impl BeeperApp {
         let Some(since) = arrival.since else { return Some(0.) };
         let t = since.elapsed().as_secs_f32() / motion::ENTER.as_secs_f32();
         (t < 1.).then(|| motion::ease_out(t))
+    }
+
+    fn bubble_pressed(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.menu_open() || self.fwd.selecting() {
+            return;
+        }
+        let since = Instant::now();
+        self.bubble_press = Some(BubblePress { id, since, released: None });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ROW_PRESS_DELAY).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.bubble_press.as_ref().is_some_and(|b| b.since == since && b.released.is_none()) {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The press ended: a tint already shown fades, one not yet shown never comes.
+    fn bubble_released(&mut self, cx: &mut Context<Self>) {
+        let Some(press) = self.bubble_press.as_mut().filter(|b| b.released.is_none()) else { return };
+        if press.since.elapsed() < ROW_PRESS_DELAY {
+            self.bubble_press = None;
+        } else {
+            press.released = Some(Instant::now());
+        }
+        cx.notify();
+    }
+
+    /// How strongly message `id`'s bubble shows a press: at once in full, then fading over `EXIT`.
+    fn press_level(&mut self, id: &str, window: &mut Window, cx: &App) -> Option<f32> {
+        let press = self.bubble_press.as_ref().filter(|b| b.id == id)?;
+        let Some(released) = press.released else { return (press.since.elapsed() >= ROW_PRESS_DELAY).then_some(1.) };
+        let t = released.elapsed().as_secs_f32() / motion::EXIT.as_secs_f32();
+        if t >= 1. || cx.reduce_motion() {
+            self.bubble_press = None;
+            return None;
+        }
+        window.request_animation_frame();
+        Some(1. - motion::ease_out(t))
     }
 
     /// Measures an arriving row as it is laid out, for the next frame to grow it to.
@@ -2869,6 +2918,13 @@ fn rubber(far: f32) -> f32 {
 /// what the chat catches up on just after it opened.
 fn arrived(len_before: usize, appended_in_batch: usize, open_for: Duration) -> bool {
     len_before > 0 && appended_in_batch <= MAX_ARRIVALS && open_for >= Duration::from_millis(500)
+}
+
+/// A finger on a message's bubble: when it landed, and when the press ended (it then fades).
+struct BubblePress {
+    id: String,
+    since: Instant,
+    released: Option<Instant>,
 }
 
 /// A message that just arrived at the end of the open chat.
