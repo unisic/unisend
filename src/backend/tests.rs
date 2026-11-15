@@ -8,7 +8,8 @@ use hmac::{Hmac, Mac as _};
 use matrix_sdk::ruma::events::room::message::ReplacementMetadata;
 use sha2::Sha256;
 
-use matrix_sdk::ruma::events::{reaction::ReactionEventContent, relation::Annotation};
+use matrix_sdk::ruma::api::client::receipt::create_receipt;
+use matrix_sdk::ruma::events::{reaction::ReactionEventContent, receipt::ReceiptThread, relation::Annotation};
 
 use super::*;
 
@@ -1812,4 +1813,58 @@ fn cached_previews_in_another_language_are_relabelled_on_load() {
     assert_eq!(a.preview.as_deref(), Some("You: 📷 Photo"));
     assert!(a.dated, "relabelled locally, not looked up again");
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The SDK's read marker follows `m.fully_read`: reading a chat here has to move it, or the "New
+/// messages" divider comes back on every opening, where another client last left the marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn a_read_chat_opens_again_without_the_new_messages_divider() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-marker-{tag}"));
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+    req.invite = vec![alice.client().unwrap().user_id().unwrap().to_owned()];
+    let room = bob.create_room(req).await.unwrap();
+    let room_id = room.room_id().to_owned();
+    alice.client().unwrap().join_room_by_id(&room_id).await.unwrap();
+    let one = room.send(RoomMessageEventContent::text_plain("one")).await.unwrap().response.event_id;
+    // As another client of Alice's leaves it: read up to "one".
+    let mine = alice.client().unwrap().get_room(&room_id).unwrap();
+    mine.send_multiple_receipts(matrix_sdk::room::Receipts::new().fully_read_marker(one)).await.unwrap();
+    room.send(RoomMessageEventContent::text_plain("two")).await.unwrap();
+    mine.send(RoomMessageEventContent::text_plain("mine")).await.unwrap();
+    wait_for(&mut seat, "the chat in the list", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id && s.preview.as_deref().is_some_and(|p| p.ends_with("mine"))).then_some(()),
+        _ => None,
+    })
+    .await;
+    let paged = |e: Ev| matches!(e, Ev::Paged { .. }).then_some(());
+
+    alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
+    until(&mut seat, "the divider above the unread message", |rows| {
+        rows.iter().position(|m| m.kind == Kind::Unread).is_some_and(|ix| rows[ix + 1..].iter().find(|m| m.kind == Kind::Message).is_some_and(|m| m.body == "two"))
+    })
+    .await;
+    wait_for(&mut seat, "the first page", paged).await;
+    // Opening reads the chat; the marker the SDK follows moves to its end, which takes the divider away.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while seat.rows.iter().any(|m| m.kind == Kind::Unread) {
+        seat.next("the read marker to move", deadline).await;
+    }
+
+    alice.handle(Cmd::Close).await.unwrap();
+    alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
+    until(&mut seat, "the conversation again", |rows| bodies(rows).iter().any(|b| b == "mine")).await;
+    wait_for(&mut seat, "the first page", paged).await;
+    assert!(!seat.rows.iter().any(|m| m.kind == Kind::Unread), "divider in a read chat: {:?}", seat.rows.iter().map(|m| (&m.kind, &m.body)).collect::<Vec<_>>());
+    let _ = std::fs::remove_dir_all(&root);
 }
