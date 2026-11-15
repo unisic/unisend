@@ -365,6 +365,9 @@ impl BeeperApp {
         let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search emoji")));
         let emoji_pick = emojipick::Picker::new(emoji_search.clone(), &dir);
 
+        for input in [&composer, &search, &emoji_search] {
+            crate::ime::follow(input, window, cx);
+        }
         let mut subs = Vec::new();
         let look = appearance::Look::new(&settings, &dir, cx);
         subs.push(cx.subscribe_in(&look.dim, window, |this, _, ev: &appearance::SliderEvent, _, cx| this.dim_changed(ev, cx)));

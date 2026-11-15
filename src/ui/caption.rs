@@ -52,6 +52,7 @@ pub(super) struct Preview {
 impl Preview {
     pub fn new(window: &mut Window, cx: &mut Context<BeeperApp>) -> Self {
         let field = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Add a caption")));
+        crate::ime::follow(&field, window, cx);
         let subs = vec![cx.subscribe_in(&field, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { shift: false, .. } => this.send_preview(window, cx),
             InputEvent::Change => {

@@ -22,6 +22,7 @@ pub(super) struct Find {
 impl Find {
     pub(super) fn new(window: &mut Window, cx: &mut Context<BeeperApp>, subs: &mut Vec<Subscription>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search this chat")));
+        crate::ime::follow(&input, window, cx);
         subs.push(cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, _, cx| {
             match ev {
                 InputEvent::Change => this.find_in_chat(cx),

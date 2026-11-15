@@ -106,6 +106,7 @@ pub(super) struct Forward {
 impl Forward {
     pub fn new(window: &mut Window, cx: &mut Context<BeeperApp>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search chats")));
+        crate::ime::follow(&search, window, cx);
         let sub = cx.subscribe_in(&search, window, |_, _, ev: &InputEvent, _, cx| match ev {
             InputEvent::Change => cx.notify(),
             other => keyboard_follows(other, Keyboard::Text, cx),

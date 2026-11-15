@@ -36,6 +36,7 @@ impl Ui {
         let name = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Device name")));
         let password = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Password")).masked(true));
         let code = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Code")));
+        crate::ime::follow(&name, window, cx);
         subs.push(cx.subscribe_in(&name, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { shift: false, .. } => this.save_name(window, cx),
             other => keyboard_follows(other, Keyboard::Text, cx),
