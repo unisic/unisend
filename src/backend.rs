@@ -1710,11 +1710,15 @@ fn announce(client: &Client, dir: &Path, summary: &RoomSummary, prev: Option<&Ro
     let (client, dir, summary) = (client.clone(), dir.to_owned(), summary.clone());
     // Off the sync loop: the picture may have to be fetched.
     tokio::spawn(async move {
-        let icon = tokio::time::timeout(ICON_WAIT, notification_icon(&client, &dir, &summary.id)).await.ok().flatten();
-        let icon = icon.as_deref().and_then(Path::to_str).unwrap_or_default();
+        let file = tokio::time::timeout(ICON_WAIT, notification_icon(&client, &dir, &summary.id)).await.ok().flatten();
+        let icon = file.as_deref().and_then(Path::to_str).unwrap_or_default();
         for (n, note) in notes.iter().enumerate() {
             let alert = n + 1 == notes.len();
             crate::notify(&crate::Notice { chat: summary.id.as_str(), name: &summary.name, group: !summary.dm, icon, note, alert });
+        }
+        // `Notify` has decoded and kept the picture by now; a chat's face does not stay on disk in clear.
+        if let Some(file) = file {
+            let _ = std::fs::remove_file(file);
         }
     });
 }
