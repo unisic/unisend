@@ -1843,11 +1843,13 @@ impl BeeperApp {
                 let framed_w = m.media.as_ref().filter(|_| pictured && !bare).map(|media| picture_size(media, room).0 + 2. * pad_x);
                 let attachment = m.media.as_ref().filter(|_| !m.deleted).map(|media| this.render_media(m, media, room, RADIUS - pad_x, window, cx));
                 // Rows that draw nothing do not come between two messages.
-                let drawn = |row: &&Msg| !matches!(row.kind, Kind::Hidden | Kind::Status { .. }) && !this.is_hidden(&row.id);
+                let drawn = |row: &&Msg| !matches!(row.kind, Kind::Hidden | Kind::Unread | Kind::Status { .. }) && !this.is_hidden(&row.id);
                 let prev = this.msgs[..ix].iter().rev().find(drawn);
                 let next = this.msgs[ix + 1..].iter().find(drawn);
                 // A run: one person's messages with no long pause, and no other row, between them.
-                let joined = |a: &Msg, b: &Msg| b.kind == a.kind && a.from == b.from && b.ts.saturating_sub(a.ts) < RUN_PAUSE_MS;
+                let joined = |a: &Msg, b: &Msg| {
+                    b.kind == a.kind && a.from == b.from && b.ts.saturating_sub(a.ts) < RUN_PAUSE_MS && this.place.unread.as_ref() != Some(&b.id)
+                };
                 let first = prev.is_none_or(|p| !joined(p, m));
                 let last = next.is_none_or(|n| !joined(m, n));
                 let faded = m.deleted || m.body == crate::backend::utd();
@@ -2124,6 +2126,7 @@ impl BeeperApp {
                             }),
                     )
                     .children(this.selection_mark(m, cx));
+                let row = if this.place.unread.as_ref() == Some(&m.id) { v_flex().w_full().child(Self::unread_line(cx)).child(row) } else { row };
                 match arriving {
                     // It grows from nothing over the composer, so the messages above move up with it
                     // instead of jumping; the row hangs from the top and rises as the space opens.
@@ -2353,13 +2356,20 @@ impl BeeperApp {
             .into_any_element()
     }
 
-    /// A row that is not a message: a day, a line about the chat, the mark of what is new.
+    /// "New messages", above the first one the user had not seen when the chat opened.
+    fn unread_line(cx: &App) -> Div {
+        let p = Palette::of(cx);
+        let rule = || div().h(px(1.)).flex_1().bg(p.rule);
+        h_flex().w_full().px(px(GUTTER)).pt(px(GAP)).gap(px(8.)).items_center().text_size(fs(12.)).text_color(p.accent_ink).child(rule()).child(t!("New messages")).child(rule())
+    }
+
+    /// A row that is not a message: a day, a line about the chat. The SDK's read marker draws
+    /// nothing; `unread_line` stands where it was when the chat opened.
     fn render_line(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         let m = &self.msgs[ix];
         let (text, ink) = match &m.kind {
             Kind::Day => (day_label(m.ts), self.on_wallpaper(p.faint, cx)),
-            Kind::Unread => (t!("New messages").to_owned(), p.accent_ink),
             Kind::Notice => (m.body.clone(), self.on_wallpaper(p.faint, cx)),
             // Joins that follow one another are told once, by the last of them.
             Kind::Joined if self.msgs.get(ix + 1).is_none_or(|next| next.kind != Kind::Joined) => {
@@ -2370,10 +2380,6 @@ impl BeeperApp {
             }
             _ => return div().into_any_element(),
         };
-        if m.kind == Kind::Unread {
-            let rule = || div().h(px(1.)).flex_1().bg(p.rule);
-            return h_flex().w_full().px(px(GUTTER)).pt(px(GAP)).gap(px(8.)).items_center().text_size(fs(12.)).text_color(ink).child(rule()).child(text).child(rule()).into_any_element();
-        }
         div().w_full().px(px(GUTTER)).pt(px(GAP)).flex().justify_center().text_size(fs(12.)).text_color(ink).child(text).into_any_element()
     }
 

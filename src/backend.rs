@@ -40,13 +40,11 @@ use matrix_sdk::{
                 membership::joined_rooms,
                 profile::AvatarUrl,
                 session::get_login_types::v3::LoginType,
-                receipt::create_receipt,
             },
             error::ErrorKind,
         },
         events::{
             AnySyncMessageLikeEvent, AnySyncTimelineEvent, Mentions, StateEventType, SyncMessageLikeEvent,
-            receipt::ReceiptThread,
             room::{
                 EncryptedFile, MediaSource,
                 message::{
@@ -2053,12 +2051,15 @@ struct Done {
 }
 
 /// Clears the unread state. A private receipt does that without telling the other side, or the
-/// bridged network, that the message was read.
+/// bridged network, that the message was read. The read marker moves with it, so the chat opens
+/// again without "New messages".
 async fn mark_read(room: &Room, newest: Option<OwnedEventId>, private: bool) -> Result<()> {
     room.set_unread_flag(false).await?;
     if let Some(id) = newest {
-        let kind = if private { create_receipt::v3::ReceiptType::ReadPrivate } else { create_receipt::v3::ReceiptType::Read };
-        room.send_single_receipt(kind, ReceiptThread::Unthreaded, id).await?;
+        // `m.fully_read` is the user's own account data, never shown to others, so it suits private receipts too.
+        let receipts = matrix_sdk::room::Receipts::new().fully_read_marker(id.clone());
+        let receipts = if private { receipts.private_read_receipt(id) } else { receipts.public_read_receipt(id) };
+        room.send_multiple_receipts(receipts).await?;
     }
     Ok(())
 }
