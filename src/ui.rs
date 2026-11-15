@@ -282,6 +282,8 @@ pub struct BeeperApp {
     to_top: Option<(Instant, f32)>,
     /// The chat list's first rows arrived: it fades in over the skeleton.
     list_in: Option<Instant>,
+    /// The first sync of this session has answered.
+    synced: bool,
     /// The picture still fading out after the viewer closed.
     viewer_last: Option<(String, Option<Arc<Image>>)>,
     zoom: viewer::Zoom,
@@ -498,6 +500,7 @@ impl BeeperApp {
             finger: None,
             to_top: None,
             list_in: None,
+            synced: false,
             viewer_last: None,
             zoom: viewer::Zoom::default(),
             find,
@@ -732,6 +735,7 @@ impl BeeperApp {
                 self.typing = names;
             }
             Ev::Online(online) => self.offline = !online,
+            Ev::Synced => self.synced = true,
             Ev::Exported(id, path, what) => self.exported(id, path, what, cx),
             Ev::Error(e) => {
                 self.error = Some(crate::backend::plain(&e).into());
@@ -1592,7 +1596,7 @@ impl BeeperApp {
 
         let archive = self.view == View::Archive;
         let has_query = !self.search.read(cx).value().trim().is_empty();
-        let syncing = self.rooms.is_empty() && !has_query;
+        let state = list_state(self.synced, self.rooms.is_empty(), has_query);
         let empty = if has_query {
             t!("No chat or message matches")
         } else if self.only_unread {
@@ -1665,8 +1669,12 @@ impl BeeperApp {
                 el.child(filters)
             })
             .child(self.list_touch(cx))
-            .child(div().flex_1().min_h_0().child(if syncing {
+            .child(div().flex_1().min_h_0().child(if state == RoomsView::Skeleton {
                 skeleton(p).into_any_element()
+            } else if state == RoomsView::Empty {
+                let note = v_flex().size_full().items_center().justify_center().gap(px(4.)).px(px(GUTTER));
+                let note = note.child(div().text_size(fs(16.)).text_color(p.muted).child(t!("No chats yet")));
+                note.child(div().text_size(fs(14.)).text_color(p.faint).child(t!("Start one with +."))).into_any_element()
             } else if self.shown.is_empty() && self.message_rows() == 0 {
                 div().px(px(GUTTER)).py(px(GAP)).text_size(fs(14.)).text_color(p.faint).child(empty).into_any_element()
             } else {
@@ -2410,7 +2418,7 @@ impl BeeperApp {
             })
             .collect();
         rows.extend(self.disappear_entry(&id, live, cx));
-        rows.push(self.leave_row(id, live, cx));
+        rows.push(self.leave_row(id, live, window, cx));
         Some(self.sheet(title, rows, shown.progress, live, cx))
     }
 
@@ -2907,6 +2915,24 @@ fn swipe_step(swipe: &mut Option<(String, f32)>, id: &str, dx: f32, dy: f32, pha
 }
 
 /// What the chat list shows until its first rows arrive: still, so it costs no frames.
+#[derive(Debug, PartialEq)]
+enum RoomsView {
+    Skeleton,
+    Empty,
+    Filtered,
+    List,
+}
+
+/// What the chat list shows: skeleton until the first sync answers, then the account's empty state.
+fn list_state(synced: bool, empty: bool, filtered: bool) -> RoomsView {
+    match (empty, filtered) {
+        (false, _) => RoomsView::List,
+        (true, true) => RoomsView::Filtered,
+        (true, false) if synced => RoomsView::Empty,
+        (true, false) => RoomsView::Skeleton,
+    }
+}
+
 fn skeleton(p: Palette) -> Div {
     let bar = |w: f32, h: f32| div().w(relative(w)).h(px(h)).rounded_full().bg(p.surface);
     v_flex().size_full().children((0..8).map(|_| {
@@ -3246,8 +3272,18 @@ impl Render for BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, rubber, swipe_step, urls};
+    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, swipe_step, urls, RoomsView};
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
+
+    #[test]
+    fn chat_list_state_follows_sync_and_filter() {
+        assert_eq!(list_state(false, true, false), RoomsView::Skeleton);
+        assert_eq!(list_state(true, true, false), RoomsView::Empty);
+        assert_eq!(list_state(true, true, true), RoomsView::Filtered);
+        assert_eq!(list_state(false, true, true), RoomsView::Filtered);
+        assert_eq!(list_state(false, false, false), RoomsView::List);
+        assert_eq!(list_state(true, false, true), RoomsView::List);
+    }
 
     #[test]
     fn web_addresses_are_found_without_the_punctuation_around_them() {

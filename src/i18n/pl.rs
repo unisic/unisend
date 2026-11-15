@@ -279,6 +279,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Nothing in low priority", "Brak czatów o niskim priorytecie"),
     ("Nothing shared could be read.", "Nie udało się odczytać niczego z udostępnionych."),
     ("Nothing unread", "Brak nieprzeczytanych"),
+    ("No chats yet", "Nie masz jeszcze czatów"),
+    ("Start one with +.", "Zacznij nowy przyciskiem +."),
     ("Nothing was recorded", "Nic nie nagrano"),
     ("Notifications", "Powiadomienia"),
     ("Objects", "Przedmioty"),

@@ -480,7 +480,7 @@ impl BeeperApp {
                 // The chat sheet's own rows, inset as the facts are.
                 let room = summary.map(|r| r.id);
                 let timer = room.as_ref().and_then(|id| self.disappear_entry(id, true, cx)).map(|row| row.px(px(GAP)));
-                let leave = room.map(|id| self.leave_row(id, true, cx).px(px(GAP)));
+                let leave = room.map(|id| self.leave_row(id, true, window, cx).px(px(GAP)));
                 edge()
                     .pb(px(GAP))
                     .child(
