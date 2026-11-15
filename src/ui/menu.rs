@@ -571,6 +571,13 @@ impl BeeperApp {
         if event.click_count() == 2 && id.starts_with('$') {
             self.double_tap(id, cx);
         }
+        // A tap shows or hides someone else's status line; the double tap's second click undoes its first.
+        let swiped = self.swipe_back.as_ref().is_some_and(|(on, at)| on == id && at.elapsed() < Duration::from_millis(600));
+        if event.click_count() <= 2 && !swiped && !self.menu_open() && !self.fwd.selecting() {
+            let theirs = self.msgs.iter().any(|m| m.id == id && !m.own);
+            self.tapped = if !theirs || self.tapped.as_deref() == Some(id) { None } else { Some(id.to_owned()) };
+            cx.notify();
+        }
     }
 
     /// Signal Desktop's buttons beside a message on a wide window: react, reply, more. They show

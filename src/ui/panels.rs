@@ -7,7 +7,7 @@ use gpui_kit::component::switch::Switch;
 use super::*;
 use crate::applock::{Goal, LockMode};
 use crate::i18n::LanguageChoice;
-use super::receipt::ReceiptStyle;
+use super::receipt::{IncomingStatus, ReceiptStyle};
 use super::rowswipe::SwipeAction;
 use crate::{ChatColour, ThemeChoice};
 
@@ -403,7 +403,9 @@ impl BeeperApp {
                     .children(self.render_look(cx))
                     .children(self.render_emoji(cx))
                     .child(row(t!("Message status"), "", cx))
-                    .child(self.choices("receipts", ReceiptStyle::ALL, self.settings.receipts, ReceiptStyle::label, |s, style| s.receipts = style, cx)),
+                    .child(self.choices("receipts", ReceiptStyle::ALL, self.settings.receipts, ReceiptStyle::label, |s, style| s.receipts = style, cx))
+                    .child(row(t!("Status of received messages"), t!("Whether you have read them, and whether their sender can see that."), cx))
+                    .child(self.choices("incoming", IncomingStatus::ALL, self.settings.incoming, IncomingStatus::label, |s, when| s.incoming = when, cx)),
             ))
             .child(section(t!("Chat list"), cx).child(
                 card(cx)

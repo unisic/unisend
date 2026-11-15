@@ -32,7 +32,28 @@ impl ReceiptStyle {
     }
 }
 
-/// What became of one of the user's messages.
+/// When someone else's message shows whether the user has read it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum IncomingStatus {
+    /// Beside the time under each run of their messages.
+    Always,
+    /// Under a message once it is tapped.
+    #[default]
+    OnTap,
+}
+
+impl IncomingStatus {
+    pub(crate) const ALL: [Self; 2] = [Self::Always, Self::OnTap];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Always => t!("Always"),
+            Self::OnTap => t!("On tap"),
+        }
+    }
+}
+
+/// What became of one of the user's messages, or of someone else's on the user's side.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Receipt {
     Sending,
@@ -42,6 +63,11 @@ pub(super) enum Receipt {
     Seen { who: Option<String>, readers: Vec<(OwnedUserId, String)> },
     /// The bridge's reason, empty when it gave none.
     Failed(String),
+    /// Someone else's message the user has not read yet.
+    Unread,
+    /// Someone else's message the user has read; `public` when its sender can see that. `others`
+    /// names who else read it, in a group.
+    Heard { public: bool, others: Option<String> },
 }
 
 impl Receipt {
@@ -55,6 +81,14 @@ impl Receipt {
             Self::Seen { who: Some(who), .. } => t!("Seen by {who}", who = who),
             Self::Failed(why) if why.is_empty() => t!("Not sent").to_owned(),
             Self::Failed(why) => t!("Not sent: {why}", why = why),
+            Self::Unread => t!("Not read yet").to_owned(),
+            Self::Heard { public, others } => {
+                let status = if *public { t!("Seen") } else { t!("Seen privately") };
+                match others {
+                    Some(who) => t!("{status}, also by {who}", status = status, who = who),
+                    None => status.to_owned(),
+                }
+            }
         }
     }
 }
@@ -70,6 +104,9 @@ pub(super) enum Glyph {
     Disc,
     /// A filled circle with two ticks.
     DiscTicks,
+    /// Read without telling the sender: the ticks or the disc beside a crossed eye.
+    TicksPrivate,
+    DiscPrivate,
 }
 
 /// How a receipt is drawn after the time.
@@ -104,6 +141,12 @@ pub(super) fn mark(receipt: &Receipt, style: ReceiptStyle) -> Option<Mark> {
         (ReceiptStyle::Ticks, Receipt::Sent) => glyph(Tick, false),
         (ReceiptStyle::Ticks, Receipt::Delivered) => glyph(Ticks, false),
         (ReceiptStyle::Ticks, Receipt::Seen { .. }) => glyph(Ticks, true),
+        (ReceiptStyle::Ticks, Receipt::Unread) => glyph(Tick, false),
+        (ReceiptStyle::Ticks, Receipt::Heard { public: true, .. }) => glyph(Ticks, true),
+        (ReceiptStyle::Ticks, Receipt::Heard { .. }) => glyph(TicksPrivate, false),
+        (_, Receipt::Unread) => glyph(RingTick, false),
+        (_, Receipt::Heard { public: true, .. }) => glyph(Disc, true),
+        (_, Receipt::Heard { .. }) => glyph(DiscPrivate, false),
         (_, Receipt::Sending) => glyph(Ring, false),
         (_, Receipt::Sent) => glyph(RingTick, false),
         (_, Receipt::Delivered) => glyph(Disc, false),
@@ -113,6 +156,20 @@ pub(super) fn mark(receipt: &Receipt, style: ReceiptStyle) -> Option<Mark> {
         (_, Receipt::Seen { readers, .. }) => faces(readers, FACES),
         (_, Receipt::Failed(_)) => unreachable!("handled above"),
     }
+}
+
+/// Whether the user has read message `ix` of `msgs`: `None` if not, else whether its sender can
+/// see that. Reads only what has arrived; never sends a receipt.
+pub(super) fn heard(msgs: &[Msg], ix: usize, own: &OwnRead) -> Option<bool> {
+    let at = |event: &str, shown: &Option<String>| {
+        let find = |id: &str| msgs.iter().position(|row| row.id == id);
+        find(event).or_else(|| shown.as_deref().and_then(find))
+    };
+    // Sending a message reads what came before it, for all to see.
+    let answered = msgs[ix + 1..].iter().any(|row| row.own && row.kind == Kind::Message);
+    let read = answered || own.read.as_ref().and_then(|(event, shown)| at(event, shown)).is_some_and(|row| row >= ix);
+    // A public receipt on no row this chat has loaded is placed by when it was sent.
+    read.then(|| answered || own.public.as_ref().is_some_and(|(event, shown, ts)| at(event, shown).map_or(*ts >= msgs[ix].ts, |row| row >= ix)))
 }
 
 impl BeeperApp {
@@ -156,6 +213,7 @@ impl BeeperApp {
 /// Lucide's stroke at the size of 12 px text; the filled ones are its circle, filled, with the
 /// ticks in the ground's colour.
 fn glyph_el(glyph: Glyph, ink: Hsla, ground: Hsla) -> AnyElement {
+    let private = |first: Glyph| h_flex().gap(px(2.)).child(glyph_el(first, ink, ground)).child(Icon::new(IconName::EyeOff).size(fs(12.)).text_color(ink)).into_any_element();
     let icon = |name: IconName| Icon::new(name).size(fs(13.)).text_color(ink).into_any_element();
     let disc = |name: IconName, size: f32| {
         div()
@@ -174,12 +232,14 @@ fn glyph_el(glyph: Glyph, ink: Hsla, ground: Hsla) -> AnyElement {
         Glyph::RingTick => icon(IconName::CircleCheck),
         Glyph::Disc => disc(IconName::Check, 9.),
         Glyph::DiscTicks => disc(IconName::CheckCheck, 10.),
+        Glyph::TicksPrivate => private(Glyph::Ticks),
+        Glyph::DiscPrivate => private(Glyph::Disc),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Glyph, Mark, OwnedUserId, Receipt, ReceiptStyle, mark};
+    use super::{Glyph, Kind, Mark, Msg, OwnRead, OwnedUserId, Receipt, ReceiptStyle, heard, mark};
 
     fn seen(dm: bool) -> Receipt {
         let readers = ["@a:x", "@b:x", "@c:x", "@d:x"].iter().take(if dm { 1 } else { 4 }).map(|u| (OwnedUserId::try_from(*u).unwrap(), u[1..2].to_owned())).collect();
@@ -216,6 +276,39 @@ mod tests {
     fn avatars_show_three_readers_and_count_the_rest() {
         assert!(matches!(mark(&seen(false), ReceiptStyle::Avatars), Some(Mark::Faces(f, 1)) if f.len() == 3 && f[0].1 == "a"));
         assert_eq!(mark(&Receipt::Sent, ReceiptStyle::Avatars), Some(Mark::Glyph { glyph: Glyph::RingTick, read: false }));
+    }
+
+    #[test]
+    fn received_messages_say_whether_the_sender_sees_the_read() {
+        let heard = |public| Receipt::Heard { public, others: None };
+        assert_eq!(mark(&Receipt::Unread, ReceiptStyle::Ticks), Some(Mark::Glyph { glyph: Glyph::Tick, read: false }));
+        assert_eq!(mark(&heard(true), ReceiptStyle::Ticks), Some(Mark::Glyph { glyph: Glyph::Ticks, read: true }));
+        assert_eq!(mark(&heard(false), ReceiptStyle::Ticks), Some(Mark::Glyph { glyph: Glyph::TicksPrivate, read: false }));
+        assert_eq!(mark(&heard(true), ReceiptStyle::Circles), Some(Mark::Glyph { glyph: Glyph::Disc, read: true }));
+        assert_eq!(mark(&heard(false), ReceiptStyle::Avatars), Some(Mark::Glyph { glyph: Glyph::DiscPrivate, read: false }));
+        assert_eq!(mark(&heard(false), ReceiptStyle::Off), None);
+        assert_eq!(mark(&Receipt::Heard { public: false, others: Some("Ann".into()) }, ReceiptStyle::Text), Some(Mark::Words("Seen privately, also by Ann".into())));
+        assert_eq!(mark(&Receipt::Unread, ReceiptStyle::Text), Some(Mark::Words("Not read yet".into())));
+    }
+
+    #[test]
+    fn heard_places_the_users_receipts() {
+        let them = OwnedUserId::try_from("@b:x").unwrap();
+        let row = |id: &str, ts: u64, own: bool| Msg { ts, own, ..Msg::bare(id.into(), Kind::Message, them.clone()) };
+        let mut msgs = vec![row("$1", 10, false), row("$2", 20, false), row("$3", 30, false)];
+        let pair = |id: &str| Some((id.to_owned(), None));
+        // Read privately up to $2: $3 is unread, $1 and $2 read without the sender knowing.
+        let own = OwnRead { read: pair("$2"), public: None };
+        assert_eq!((heard(&msgs, 0, &own), heard(&msgs, 1, &own), heard(&msgs, 2, &own)), (Some(false), Some(false), None));
+        // The public receipt on a hidden event, sent after $1 arrived: $1 public, $2 private.
+        let own = OwnRead { read: pair("$2"), public: Some(("$hidden".into(), None, 15)) };
+        assert_eq!((heard(&msgs, 0, &own), heard(&msgs, 1, &own)), (Some(true), Some(false)));
+        // A hidden event falls back to the row the timeline shows it on.
+        let own = OwnRead { read: Some(("$hidden".into(), Some("$3".into()))), public: None };
+        assert_eq!(heard(&msgs, 2, &own), Some(false));
+        // Answering reads everything before it, publicly.
+        msgs.push(row("$4", 40, true));
+        assert_eq!(heard(&msgs, 2, &OwnRead::default()), Some(true));
     }
 
     #[test]

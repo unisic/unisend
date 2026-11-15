@@ -211,6 +211,8 @@ pub enum Ev {
     Paged { room: OwnedRoomId, more: bool },
     /// Who is writing in the open conversation right now.
     Typing { room: OwnedRoomId, names: Vec<String> },
+    /// How far the user has read the open conversation, and how far others can see that.
+    OwnRead { room: OwnedRoomId, read: OwnRead },
     /// Thumbnail bytes as served (PNG, JPEG, ...).
     Avatar(OwnedRoomId, Vec<u8>),
     Face(OwnedUserId, Vec<u8>),
@@ -386,6 +388,16 @@ pub enum Kind {
     Status { target: String, delivery: Delivery },
     /// Takes a place in the list and shows nothing.
     Hidden,
+}
+
+/// The user's own read receipts in the open conversation: each as its event and, when the
+/// timeline hides that event, the shown row it falls back to.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OwnRead {
+    /// The newest of them, public or private.
+    pub read: Option<(String, Option<String>)>,
+    /// The public one (`m.read`), which the others see, and when it was sent.
+    pub public: Option<(String, Option<String>, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

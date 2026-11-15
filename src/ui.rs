@@ -65,7 +65,7 @@ use receipt::{Mark, Receipt};
 
 use crate::{Keyboard, Palette};
 use crate::bridges::{Flow, Network, Step};
-use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, Quote, QuoteState, RoomSummary};
+use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, OwnRead, Quote, QuoteState, RoomSummary};
 
 const NARROW: f32 = 720.;
 // Metrics; `docs/design.md` gives the reasons.
@@ -227,6 +227,10 @@ pub struct BeeperApp {
     msgs: Vec<Msg>,
     /// Who is writing in the open conversation.
     typing: Vec<String>,
+    /// How far the user has read the open chat, publicly and at all.
+    own_read: OwnRead,
+    /// Someone else's message whose status line a tap showed.
+    tapped: Option<String>,
     /// What the typing line said last, drawn while it leaves.
     typing_last: SharedString,
     /// When the others were last told that the user is writing.
@@ -494,6 +498,8 @@ impl BeeperApp {
             open: None,
             msgs: Vec::new(),
             typing: Vec::new(),
+            own_read: OwnRead::default(),
+            tapped: None,
             typing_last: SharedString::default(),
             typing_sent: None,
             tail: None,
@@ -784,6 +790,11 @@ impl BeeperApp {
                     return;
                 }
                 self.typing = names;
+            }
+            Ev::OwnRead { room, read } => {
+                if self.open.as_ref() == Some(&room) {
+                    self.own_read = read;
+                }
             }
             Ev::Online(online) => self.offline = !online,
             Ev::Synced => self.synced = true,
@@ -1338,7 +1349,8 @@ impl BeeperApp {
         self.close_viewer(cx);
         self.fetching.clear();
         (self.swipe, self.swipe_back, self.flash, self.seek, self.fresh_reaction, self.strip_last) = (None, None, None, None, None, None);
-        (self.bubble_press, self.status_last) = (None, None);
+        (self.bubble_press, self.status_last, self.tapped) = (None, None, None);
+        self.own_read = OwnRead::default();
         self.arrivals.clear();
         for (_, image) in self.faces.drain() {
             if let Some(image) = image {
@@ -1877,7 +1889,12 @@ impl BeeperApp {
                     }
                 });
                 let style = this.settings.receipts;
-                let state = if m.own { this.delivery_line(ix, dm).and_then(|r| Some((receipt::mark(&r, style)?, r))) } else { None };
+                let asked = match this.settings.incoming {
+                    receipt::IncomingStatus::Always => last,
+                    receipt::IncomingStatus::OnTap => this.tapped.as_ref() == Some(&m.id),
+                };
+                let said = if m.own { this.delivery_line(ix, dm) } else if asked && !m.deleted { Some(this.heard(ix, dm)) } else { None };
+                let state = said.and_then(|r| Some((receipt::mark(&r, style)?, r)));
                 // Still only here, not yet with the server.
                 let leaving = m.delivery == Delivery::Sending && !m.id.starts_with('$');
                 let (id, held) = (m.id.clone(), m.id.clone());
@@ -2116,9 +2133,9 @@ impl BeeperApp {
                                 // Words follow the time after a dot, icons after a space.
                                 let worded = state.as_ref().is_some_and(|(mark, _)| matches!(mark, Mark::Words(_) | Mark::Failed { .. }));
                                 // A new state fades in where the old one was; the time stays.
-                                let time = match (&state, last) {
-                                    (Some(_), true) if worded => Some(format!("{} \u{b7} ", clock(m.ts))),
-                                    (Some(_), false) => None,
+                                let time = match &state {
+                                    Some(_) if m.own && !last => None,
+                                    Some(_) if worded => Some(format!("{} \u{b7} ", clock(m.ts))),
                                     _ => Some(clock(m.ts)),
                                 };
                                 let said = state.as_ref().map(|(mark, r)| this.receipt_mark(r, mark, state_level.as_ref().map(|(v, before)| (before.as_ref(), *v)), cx));
@@ -2416,22 +2433,9 @@ impl BeeperApp {
         if self.tail != Some(ix) {
             return None;
         }
-        // A read receipt on this row or under it: that person has read this far.
-        let mut readers: Vec<&OwnedUserId> = Vec::new();
-        for user in self.msgs[ix..].iter().flat_map(|row| &row.seen) {
-            if !readers.contains(&user) {
-                readers.push(user);
-            }
-        }
+        let (readers, who) = self.readers(ix, None);
         if !readers.is_empty() {
-            let name = |user: &OwnedUserId| self.msgs.iter().rev().find(|m| m.from == *user && !m.sender.is_empty()).map(|m| m.sender.as_str());
-            let named: Vec<(OwnedUserId, String)> =
-                readers.iter().map(|user| ((*user).clone(), name(user).map_or_else(|| user.localpart().to_owned(), str::to_owned))).collect();
-            let who = (!dm).then(|| {
-                let known: Vec<&str> = readers.iter().filter_map(|user| name(user)).collect();
-                if known.len() == readers.len() { people(&known).0 } else { readers.len().to_string() }
-            });
-            return Some(Receipt::Seen { who, readers: named });
+            return Some(Receipt::Seen { who: who.filter(|_| !dm), readers });
         }
         let waited = (chrono::Utc::now().timestamp_millis() as u64).saturating_sub(m.ts) > BRIDGE_WAIT_MS;
         Some(match state {
@@ -2440,6 +2444,32 @@ impl BeeperApp {
             Delivery::Delivered => Receipt::Delivered,
             Delivery::Sent | Delivery::Failed(_) => Receipt::Sent,
         })
+    }
+
+    /// Who has read message `ix` besides `but`, by the receipts on it or under it, each with a
+    /// name, and all of them named as a sentence would.
+    fn readers(&self, ix: usize, but: Option<&OwnedUserId>) -> (Vec<(OwnedUserId, String)>, Option<String>) {
+        let mut readers: Vec<&OwnedUserId> = Vec::new();
+        for user in self.msgs[ix..].iter().flat_map(|row| &row.seen) {
+            if !readers.contains(&user) && Some(user) != but {
+                readers.push(user);
+            }
+        }
+        if readers.is_empty() {
+            return (Vec::new(), None);
+        }
+        let name = |user: &OwnedUserId| self.msgs.iter().rev().find(|m| m.from == *user && !m.sender.is_empty()).map(|m| m.sender.as_str());
+        let named = readers.iter().map(|user| ((*user).clone(), name(user).map_or_else(|| user.localpart().to_owned(), str::to_owned))).collect();
+        let known: Vec<&str> = readers.iter().filter_map(|user| name(user)).collect();
+        (named, Some(if known.len() == readers.len() { people(&known).0 } else { readers.len().to_string() }))
+    }
+
+    /// Whether the user has read someone else's message `ix`, and whether its sender can see that.
+    fn heard(&self, ix: usize, dm: bool) -> Receipt {
+        match receipt::heard(&self.msgs, ix, &self.own_read) {
+            None => Receipt::Unread,
+            Some(public) => Receipt::Heard { public, others: if dm { None } else { self.readers(ix, Some(&self.msgs[ix].from)).1 } },
+        }
     }
 
     /// Scrolls to a message and tints it for a moment; one not loaded yet is looked for among
