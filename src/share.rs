@@ -22,6 +22,7 @@ pub(crate) struct Incoming {
 }
 
 /// Parses `Share.take`'s answer: chat, text, then addresses, separated by NUL.
+#[cfg_attr(not(any(target_os = "android", debug_assertions)), allow(dead_code))]
 fn parse(raw: &str) -> Incoming {
     let mut fields = raw.split('\0');
     let chat = fields.next().filter(|c| !c.is_empty()).map(str::to_owned);
