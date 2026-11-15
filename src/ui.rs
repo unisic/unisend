@@ -3076,10 +3076,8 @@ impl Render for BeeperApp {
                         panel_over
                     } else if in_chat {
                         Some(if self.info_open() { self.render_info(false, window, cx) } else { self.render_chat(true, window, cx).into_any_element() })
-                    } else if let Some(last) = self.slide.last_panel {
-                        Some(self.render_panel(last, true, window, cx))
                     } else {
-                        None
+                        self.slide.last_panel.map(|last| self.render_panel(last, true, window, cx))
                     };
                     let g = slide::layers(v, f32::from(window.viewport_size().width), cx.reduce_motion());
                     let under = if over.is_none() || v < 1. {

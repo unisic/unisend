@@ -186,7 +186,7 @@ impl BeeperApp {
         let (title, body) = match panel {
             Panel::NewChat => return self.render_new_chat(narrow, window, cx),
             Panel::Settings if self.pad_page() => (t!("App lock"), self.render_lock_change(window, cx)),
-            Panel::Settings => (t!("Settings"), self.render_settings(cx).into_any_element()),
+            Panel::Settings => (t!("Settings"), self.render_settings(window, cx).into_any_element()),
             Panel::Networks => (t!("Networks"), self.render_networks(cx).into_any_element()),
             Panel::Add => (t!("Add an account"), self.render_add(cx).into_any_element()),
             Panel::Login => (t!("Sign in"), self.render_login_step(window, cx).into_any_element()),
@@ -210,13 +210,18 @@ impl BeeperApp {
             .into_any_element()
     }
 
-    fn render_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         let theme = self.settings.theme;
-        let choice = |label: &'static str, value: ThemeChoice, cx: &mut Context<Self>| {
+        let seg = press::Segments::new("themes", window, cx);
+        let chosen = [ThemeChoice::Dark, ThemeChoice::Light, ThemeChoice::System].iter().position(|&t| t == theme).unwrap_or(0);
+        let slider = seg.pill("themes-pill", chosen, p.text, window, cx);
+        let measured = slider.is_some();
+        let choice = |ix: usize, label: &'static str, value: ThemeChoice, cx: &mut Context<Self>| {
             let on = theme == value;
             div()
                 .id(label)
+                .relative()
                 .h(px(36.))
                 .px(px(GAP))
                 .flex()
@@ -226,18 +231,22 @@ impl BeeperApp {
                 .flex_1()
                 .justify_center()
                 .text_color(if on { p.ground } else { p.muted })
-                .when(on, |el| el.bg(p.text))
+                .when(on && !measured, |el| el.bg(p.text))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| this.set_theme(value, window, cx)))
+                .child(seg.probe(ix))
                 .child(label)
         };
         let themes = h_flex()
             .p(px(4.))
             .rounded_full()
             .bg(p.raised)
-            .child(choice(t!("Dark"), ThemeChoice::Dark, cx))
-            .child(choice(t!("Light"), ThemeChoice::Light, cx))
-            .child(choice(t!("System"), ThemeChoice::System, cx));
+            .relative()
+            .child(seg.container())
+            .children(slider)
+            .child(choice(0, t!("Dark"), ThemeChoice::Dark, cx))
+            .child(choice(1, t!("Light"), ThemeChoice::Light, cx))
+            .child(choice(2, t!("System"), ThemeChoice::System, cx));
         let swatches = h_flex().flex_wrap().gap_x(px(4.)).pb(px(8.)).children(ChatColour::ALL.map(|colour| {
             let on = self.settings.chat_colour == colour;
             let name = t!("Chat colour: {colour}", colour = colour.label());

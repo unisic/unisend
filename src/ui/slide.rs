@@ -180,7 +180,7 @@ impl Fly {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{layers, reorder};
 
     #[test]
     fn a_row_jumping_up_pushes_the_ones_above_it_down() {
