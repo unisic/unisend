@@ -2,6 +2,7 @@ package dev.gpui.beeper;
 
 import android.app.Notification;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.IBinder;
@@ -19,6 +20,8 @@ import androidx.core.app.ServiceCompat;
 public final class SyncService extends Service {
     /** From onCreate to onDestroy, on the main thread; read by {@link Notify#connect}. */
     static volatile boolean running;
+    /** The notice's ID; message notifications use 0 with the chat as tag. */
+    static final int NOTICE = 1;
 
     @Override
     public void onCreate() {
@@ -29,15 +32,19 @@ public final class SyncService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         Notify.channels(this);
-        Notification notification = new Notification.Builder(this, Notify.CONNECTION)
+        // specialUse: a chat connection fits no other type, and unlike dataSync it has no daily limit.
+        ServiceCompat.startForeground(this, NOTICE, notice(this), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        return START_NOT_STICKY;
+    }
+
+    /** The notice's text is in the app's language; {@link Notify#relocale} posts it again after a change. */
+    static Notification notice(Context context) {
+        return new Notification.Builder(context, Notify.CONNECTION)
                 .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
                 .setContentTitle("Murmur")
-                .setContentText(getString(R.string.connected_for_new))
+                .setContentText(context.getString(R.string.connected_for_new))
                 .setOngoing(true)
                 .build();
-        // specialUse: a chat connection fits no other type, and unlike dataSync it has no daily limit.
-        ServiceCompat.startForeground(this, 1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        return START_NOT_STICKY;
     }
 
     /**

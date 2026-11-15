@@ -391,6 +391,7 @@ impl BeeperApp {
             if active {
                 // The animation setting may have changed while the app was away.
                 motion::follow_system(cx);
+                this.follow_platform_language(window, cx);
                 this.open_from_notification(cx);
                 this.take_share(Some(window), cx);
                 this.publish_share_targets();

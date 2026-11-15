@@ -24,7 +24,7 @@ use matrix_sdk::{
         room_version_rules::RoomVersionRules,
     },
 };
-use matrix_sdk_ui::eyeball_im::VectorDiff;
+use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
     AnyOtherStateEventContentChange, EncryptedMessage, EventSendState, EventTimelineItem, InReplyToDetails, MembershipChange, MsgLikeKind, PollState,
     Profile, RoomMembershipChange, Timeline, TimelineBuilder, TimelineDetails, TimelineEventItemId, TimelineItem, TimelineItemContent,
@@ -57,6 +57,8 @@ const LINE_MAX: usize = 120;
 pub(super) struct Open {
     pub room: OwnedRoomId,
     pub timeline: Arc<Timeline>,
+    /// Builds every row again, as after a change of the interface language.
+    pub relabel: Arc<tokio::sync::Notify>,
     _tasks: [AbortOnDrop; 3],
 }
 
@@ -116,13 +118,24 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
             }
         }
     });
+    let relabel = Arc::new(tokio::sync::Notify::new());
     let rows = tokio::spawn({
-        let (timeline, ev, id, viewer) = (timeline.clone(), ev.clone(), id.clone(), viewer.clone());
+        let (timeline, ev, id, viewer, relabel) = (timeline.clone(), ev.clone(), id.clone(), viewer.clone(), relabel.clone());
         async move {
             let mut diffs = std::pin::pin!(diffs);
             let (mut asked, mut keyed): (HashSet<OwnedEventId>, HashSet<String>) = Default::default();
             let mut first = true;
-            while let Some(batch) = diffs.next().await {
+            // The items as the screen has them, so that each can be built again in place, without a refetch.
+            let mut shown = Vector::new();
+            loop {
+                let batch = tokio::select! {
+                    batch = diffs.next() => match batch {
+                        Some(batch) => batch,
+                        None => break,
+                    },
+                    () = relabel.notified() => shown.iter().cloned().enumerate().map(|(index, value)| VectorDiff::Set { index, value }).collect(),
+                };
+                batch.iter().cloned().for_each(|diff| diff.apply(&mut shown));
                 let timer_changed = std::mem::take(&mut first) || batch.iter().flat_map(touched).any(|item| sets_timer(item));
                 let arrived = batch.iter().any(|diff| matches!(diff, VectorDiff::PushBack { value } if from_someone_else(value)));
                 let quotes: Vec<OwnedEventId> =
@@ -179,7 +192,7 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
             }
         }
     });
-    Ok(Open { room: id, timeline, _tasks: [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing)] })
+    Ok(Open { room: id, timeline, relabel, _tasks: [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing)] })
 }
 
 /// The items a change brings: new ones, and ones that took the place of an old one.

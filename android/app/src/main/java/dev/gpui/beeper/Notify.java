@@ -85,6 +85,36 @@ public final class Notify {
         manager.createNotificationChannel(connection);
     }
 
+    /**
+     * After a change of language: the channels' names, the waiting chats' buttons and summary, and
+     * the connection's notice, posted again quietly. A notice the user swiped away stays away.
+     */
+    static void relocale(Context context) {
+        channels(context);
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        for (StatusBarNotification shown : manager.getActiveNotifications()) {
+            Notification n = shown.getNotification();
+            String chat = shown.getTag();
+            if (chat == null && shown.getId() == SyncService.NOTICE) {
+                manager.notify(SyncService.NOTICE, SyncService.notice(context));
+                continue;
+            }
+            if (chat == null || shown.getId() != 0 || chat.equals(SUMMARY)) {
+                continue;
+            }
+            NotificationCompat.MessagingStyle style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n);
+            if (style != null) {
+                post(context, manager, chat, text(n, Notification.EXTRA_TITLE), n.getChannelId(), cached(chat), style,
+                        text(n, Notification.EXTRA_TEXT), n.when, false);
+            }
+        }
+    }
+
+    private static String text(Notification n, String key) {
+        CharSequence text = n.extras.getCharSequence(key);
+        return text == null ? "" : text.toString();
+    }
+
     private static NotificationChannel channel(String id, String name, int importance) {
         NotificationChannel channel = new NotificationChannel(id, name, importance);
         if (importance >= NotificationManager.IMPORTANCE_DEFAULT) {
