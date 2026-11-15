@@ -2632,8 +2632,6 @@ impl BeeperApp {
         }
     }
 
-    /// Actions for the open chat. Rises with Vaul's sheet curve and falls quicker; the scrim
-    /// follows the same progress, so the two never drift apart when reversed halfway.
     fn open_chat_sheet(&mut self, id: OwnedRoomId, cx: &mut Context<Self>) {
         let network = self.rooms.iter().find(|r| r.id == id).and_then(|r| r.network.as_deref());
         // One profile lookup at the homeserver, which already holds it, so the row shows only when it leads somewhere.
@@ -2646,6 +2644,8 @@ impl BeeperApp {
         cx.notify();
     }
 
+    /// Actions for the open chat. Rises with Vaul's sheet curve and falls quicker; the scrim
+    /// follows the same progress, so the two never drift apart when reversed halfway.
     fn render_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.chat_sheet.is_some() {
             self.sheet_last = self.chat_sheet.clone();
