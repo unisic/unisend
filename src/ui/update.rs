@@ -3,7 +3,7 @@
 
 use gpui_kit::component::switch::Switch;
 
-use super::panels::{card, row, section};
+use super::panels::{card, footnote, row};
 use super::*;
 use crate::backend::update::{self, Prefs, Release, Step};
 use crate::i18n::t;
@@ -157,7 +157,19 @@ impl BeeperApp {
         )
     }
 
-    /// The Updates section of Settings; `None` in a build that has no manifest URL.
+    /// What the settings list says of updates; `None` in a build that has no manifest URL.
+    pub(super) fn updates_summary(&self) -> Option<String> {
+        if !update::enabled() {
+            return None;
+        }
+        Some(match self.updates.status.release() {
+            Some(r) => t!("Update to {version}", version = r.version_name),
+            None if self.updates.prefs.auto => t!("Checked once a day").to_owned(),
+            None => t!("Checked when you ask").to_owned(),
+        })
+    }
+
+    /// The Updates page of Settings; `None` in a build that has no manifest URL.
     pub(super) fn render_updates(&mut self, cx: &mut Context<Self>) -> Option<Div> {
         if !update::enabled() {
             return None;
@@ -183,17 +195,13 @@ impl BeeperApp {
             .child(t!("Check"));
         let action = self.update_action("update-install", cx);
         Some(
-            section(t!("Updates"), cx).child(
-                card(cx)
-                    .child(
-                        row(t!("Check for updates automatically"), &t!("Once a day Unisend asks {host} for the newest version. It sends nothing about you or this phone.", host = host), cx)
-                            .child(auto),
-                    )
-                    .child(match found {
-                        Some(label) => row(&label, &line, cx).children(action),
-                        None => row(t!("Check now"), &line, cx).child(check),
-                    }),
-            ),
+            v_flex()
+                .gap(px(8.))
+                .child(card(cx).child(row(t!("Check for updates automatically"), "", cx).child(auto)).child(match found {
+                    Some(label) => row(&label, &line, cx).children(action),
+                    None => row(t!("Check now"), &line, cx).child(check),
+                }))
+                .child(footnote(&t!("Once a day Unisend asks {host} for the newest version. It sends nothing about you or this phone.", host = host), cx)),
         )
     }
 
