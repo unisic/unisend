@@ -619,6 +619,10 @@ mod tests {
         assert!(!sealed.windows(6).any(|w| w == b"secret"));
         let again = open_sealed(&dir, &seal).unwrap();
         assert_eq!(find(&again, None, "secret").len(), 1);
+        // memdb lends its pages to a save instead of copying them, fresh or reopened.
+        for conn in [&conn, &again] {
+            assert!(matches!(conn.serialize(MAIN_DB).unwrap(), rusqlite::serialize::Data::Shared(_)));
+        }
         // Another key reads nothing and starts over.
         let other = Seal::Sealed(std::sync::Arc::new(zeroize::Zeroizing::new([6; crate::vault::KEY_LEN])));
         assert!(find(&open_sealed(&dir, &other).unwrap(), None, "secret").is_empty());
