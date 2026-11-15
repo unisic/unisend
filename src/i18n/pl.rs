@@ -387,6 +387,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Starting… this can take a minute.", "Uruchamianie… może to potrwać minutę."),
     ("Language", "Język"),
     ("Stay connected in the background", "Połączenie w tle"),
+    ("Hide the connection notice", "Ukryj komunikat o połączeniu"),
+    ("Opens Android settings for this notice only. Messages keep arriving.", "Otwiera ustawienia Androida tylko dla tego komunikatu. Wiadomości dalej przychodzą."),
     ("Sticker", "Naklejka"),
     ("Still working on the previous request, try again", "Poprzednia prośba wciąż trwa, spróbuj ponownie"),
     ("Symbols", "Symbole"),

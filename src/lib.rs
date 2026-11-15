@@ -798,6 +798,14 @@ pub(crate) fn notification_settings() {
     }
 }
 
+/// Opens the system's page for the background connection's notice alone, so it can be hidden.
+pub(crate) fn connection_notice_settings() {
+    #[cfg(target_os = "android")]
+    if let Err(e) = android_files::notify("connectionSettings", &[]) {
+        log::warn!("connection notice settings: {e}");
+    }
+}
+
 pub(crate) fn clear_notification(chat: &str) {
     #[cfg(target_os = "android")]
     if let Err(e) = android_files::notify("clear", &[chat]) {

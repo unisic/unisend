@@ -25,8 +25,10 @@ import androidx.core.app.NotificationCompat;
 import androidx.core.app.Person;
 import androidx.core.app.RemoteInput;
 import androidx.core.content.ContextCompat;
+import androidx.core.content.pm.ShortcutInfoCompat;
 import androidx.core.content.pm.ShortcutManagerCompat;
 import androidx.core.graphics.drawable.IconCompat;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -161,9 +163,28 @@ public final class Notify {
         activity.stopService(new Intent(activity, SyncService.class));
     }
 
+    /** Signed out: no background connection, no notifications, and no chats left in share sheets or the launcher. */
     public static void stop(Activity activity) {
         disconnect(activity);
         activity.getSystemService(NotificationManager.class).cancelAll();
+        try {
+            List<String> ids = new ArrayList<>();
+            for (ShortcutInfoCompat s : ShortcutManagerCompat.getShortcuts(activity,
+                    ShortcutManagerCompat.FLAG_MATCH_DYNAMIC | ShortcutManagerCompat.FLAG_MATCH_CACHED)) {
+                ids.add(s.getId());
+            }
+            ShortcutManagerCompat.removeLongLivedShortcuts(activity, ids);
+            ShortcutManagerCompat.removeAllDynamicShortcuts(activity);
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            Log.w("Notify", "shortcuts not removed", e);
+        }
+    }
+
+    /** The system's page for the connection notice's channel alone, where the user can hide it. */
+    public static void connectionSettings(Activity activity) {
+        activity.startActivity(new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, activity.getPackageName())
+                .putExtra(Settings.EXTRA_CHANNEL_ID, CONNECTION));
     }
 
     /** The system's page for this app's notification channels: sounds, vibration, importance. */
