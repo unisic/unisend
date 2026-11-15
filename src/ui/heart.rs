@@ -14,6 +14,12 @@ fn frame(t: f32) -> (f32, f32) {
     (scale, opacity)
 }
 
+/// The glyph's size for `scale`, in steps of 4 px: every distinct size rasterizes a new colour glyph
+/// into the atlas, so the pop uses about a dozen instead of one per frame.
+fn glyph_size(scale: f32) -> f32 {
+    (SIZE * scale / 4.).round() * 4.
+}
+
 impl BeeperApp {
     /// A double tap at `at` on message `id`: gives the heart, or takes ours back.
     pub(super) fn double_tap(&mut self, id: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
@@ -26,16 +32,18 @@ impl BeeperApp {
         motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Light);
     }
 
-    /// The heart over the tap point while it lasts; nothing under reduced motion.
+    /// The heart over the tap point while it lasts; under reduced motion it only fades, at full size.
     pub(super) fn render_heart(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (at, since) = self.heart_pop?;
-        let t = since.elapsed().as_secs_f32() / motion::HEART.as_secs_f32();
-        if t >= 1. || cx.reduce_motion() {
+        let still = cx.reduce_motion();
+        let length = if still { motion::HEART_STILL } else { motion::HEART };
+        let t = since.elapsed().as_secs_f32() / length.as_secs_f32();
+        if t >= 1. {
             self.heart_pop = None;
             return None;
         }
         window.request_animation_frame();
-        let (scale, opacity) = frame(t);
+        let (scale, opacity) = if still { (1., 1. - t) } else { frame(t) };
         Some(
             div()
                 .absolute()
@@ -46,7 +54,7 @@ impl BeeperApp {
                 .items_center()
                 .justify_center()
                 .opacity(opacity)
-                .text_size(fs(SIZE * scale))
+                .text_size(fs(glyph_size(scale)))
                 .line_height(fs(SIZE))
                 .child(LIKE)
                 .into_any_element(),
@@ -56,7 +64,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::frame;
+    use super::{frame, glyph_size};
 
     #[test]
     fn pop_grows_then_fades_out() {
@@ -65,5 +73,14 @@ mod tests {
         assert!(start < 0.5 && peak > 1.1);
         assert_eq!(frame(0.5).1, 1.);
         assert!(frame(0.999).1 < 0.01);
+    }
+
+    #[test]
+    fn pop_uses_few_glyph_sizes() {
+        let mut sizes: Vec<u32> = (0..=700).map(|ms| glyph_size(frame(ms as f32 / 700.).0) as u32).collect();
+        sizes.sort_unstable();
+        sizes.dedup();
+        assert!(sizes.len() <= 13, "{sizes:?}");
+        assert!(sizes.iter().all(|s| s % 4 == 0));
     }
 }
