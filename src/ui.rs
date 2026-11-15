@@ -1803,7 +1803,7 @@ impl BeeperApp {
                                 }),
                         )
                 });
-                let poll_card = m.poll.as_ref().filter(|_| !m.deleted).map(|poll| cards::poll(m, poll, this.user.as_ref(), room, inside, window, cx));
+                let poll_card = m.poll.as_ref().filter(|_| !m.deleted).map(|poll| cards::poll(m, poll, this.user.as_ref(), room, inside, pressed.and_then(|(part, level)| Some((part?, level))), window, cx));
                 let place_card = m.place.as_ref().filter(|_| !m.deleted).map(|place| cards::place(m, place, room, inside, cx));
                 let bubble = v_flex()
                     .id(SharedString::from(m.id.clone()))
@@ -1830,7 +1830,7 @@ impl BeeperApp {
                         el.relative().child(corners(div().absolute().inset_0(), m.own, top_r, bottom_r).bg(inside.text.opacity(0.16 * level)))
                     })
                     // A finger resting on it, before the long press lifts it.
-                    .when_some(pressed, |el, level| {
+                    .when_some(pressed.filter(|(part, _)| part.is_none()), |el, (_, level)| {
                         el.relative().child(corners(div().absolute().inset_0(), m.own, top_r, bottom_r).bg(inside.text.opacity(0.08 * level)))
                     })
                     .children(quote)
@@ -2340,7 +2340,7 @@ impl BeeperApp {
             return;
         }
         let since = Instant::now();
-        self.bubble_press = Some(BubblePress { id, since, released: None });
+        self.bubble_press = Some(BubblePress { id, part: None, since, released: None });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(ROW_PRESS_DELAY).await;
             let _ = this.update(cx, |this, cx| {
@@ -2350,6 +2350,13 @@ impl BeeperApp {
             });
         })
         .detach();
+    }
+
+    /// The finger that pressed message `id` is on its answer `n`; the bubble's own probe saw it first.
+    pub(super) fn part_pressed(&mut self, id: &str, n: usize) {
+        if let Some(press) = self.bubble_press.as_mut().filter(|b| b.id == id && b.released.is_none()) {
+            press.part = Some(n);
+        }
     }
 
     /// The press ended: a tint already shown fades, one not yet shown never comes.
@@ -2364,16 +2371,18 @@ impl BeeperApp {
     }
 
     /// How strongly message `id`'s bubble shows a press: at once in full, then fading over `EXIT`.
-    fn press_level(&mut self, id: &str, window: &mut Window, cx: &App) -> Option<f32> {
+    /// Also says which of its poll's answers, if any, holds the press.
+    fn press_level(&mut self, id: &str, window: &mut Window, cx: &App) -> Option<(Option<usize>, f32)> {
         let press = self.bubble_press.as_ref().filter(|b| b.id == id)?;
-        let Some(released) = press.released else { return (press.since.elapsed() >= ROW_PRESS_DELAY).then_some(1.) };
+        let part = press.part;
+        let Some(released) = press.released else { return (press.since.elapsed() >= ROW_PRESS_DELAY).then_some((part, 1.)) };
         let t = released.elapsed().as_secs_f32() / motion::EXIT.as_secs_f32();
         if t >= 1. || cx.reduce_motion() {
             self.bubble_press = None;
             return None;
         }
         window.request_animation_frame();
-        Some(1. - motion::ease_out(t))
+        Some((part, 1. - motion::ease_out(t)))
     }
 
     /// Measures an arriving row as it is laid out, for the next frame to grow it to.
@@ -2952,6 +2961,8 @@ fn arrived(len_before: usize, appended_in_batch: usize, open_for: Duration) -> b
 /// A finger on a message's bubble: when it landed, and when the press ended (it then fades).
 struct BubblePress {
     id: String,
+    /// A poll's answer under the finger, which then shows the press instead of the whole bubble.
+    part: Option<usize>,
     since: Instant,
     released: Option<Instant>,
 }
