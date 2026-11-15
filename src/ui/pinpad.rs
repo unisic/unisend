@@ -340,25 +340,26 @@ impl BeeperApp {
             .bg(p.ground)
             .text_color(p.text)
             .child(Icon::new(IconName::Lock).size_6().text_color(p.muted))
-            .child(self.render_pad(t!("Enter your Murmur PIN"), None, window, cx))
+            .child(self.render_pad(t!("Enter your Murmur PIN"), None, false, window, cx))
             .into_any_element()
     }
 
     /// The settings' page for the step that takes a PIN.
     pub(super) fn render_lock_change(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let forgot = t!("If you forget it, the only way back in is to clear Murmur's data and sign in again.");
-        let (prompt, hint) = match (self.pad_step(), &self.pad.first) {
+        let (prompt, checking) = match (self.pad_step(), &self.pad.first) {
             (Some(Step::CheckPin), _) => {
                 self.read_wait(cx);
-                (t!("Enter your current PIN"), None)
+                (t!("Enter your current PIN"), true)
             }
-            (_, None) => (t!("Choose a PIN of 4 to 8 digits"), Some(forgot)),
-            (_, Some(_)) => (t!("Enter the new PIN again"), Some(forgot)),
+            (_, None) => (t!("Choose a PIN of 4 to 8 digits"), false),
+            (_, Some(_)) => (t!("Enter the new PIN again"), false),
         };
-        div().w_full().pt(px(16.)).flex().justify_center().child(self.render_pad(prompt, hint, window, cx)).into_any_element()
+        // The hint keeps its space while checking, so the keys stay put from one step to the next.
+        div().w_full().pt(px(16.)).flex().justify_center().child(self.render_pad(prompt, Some(forgot), checking, window, cx)).into_any_element()
     }
 
-    fn render_pad(&mut self, prompt: &'static str, hint: Option<&'static str>, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn render_pad(&mut self, prompt: &'static str, hint: Option<&'static str>, hide_hint: bool, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let p = Palette::of(cx);
         let wait = self.pad_wait();
         let len = self.pad.entry.len();
@@ -410,7 +411,7 @@ impl BeeperApp {
             .px(px(GUTTER))
             .gap(px(GAP))
             .child(div().text_size(fs(18.)).line_height(fs(24.)).text_center().child(prompt))
-            .when_some(hint, |el, hint| el.child(div().text_size(fs(13.)).line_height(fs(18.)).text_center().text_color(p.muted).child(hint)))
+            .when_some(hint, |el, hint| el.child(div().text_size(fs(13.)).line_height(fs(18.)).text_center().text_color(p.muted).when(hide_hint, |el| el.invisible()).child(hint)))
             .child(dots)
             .child(div().min_h(px(40.)).text_size(fs(14.)).line_height(fs(20.)).text_center().text_color(p.negative).children(note))
             .child(keys.opacity(if wait > 0 { 0.4 } else { 1. }))
