@@ -21,7 +21,15 @@ import android.view.inputmethod.InputConnectionWrapper;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 
+import androidx.core.view.inputmethod.EditorInfoCompat;
+import androidx.core.view.inputmethod.InputConnectionCompat;
+import androidx.core.view.inputmethod.InputContentInfoCompat;
+
+import dev.gpui.beeper.Files;
+
 import java.util.Arrays;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /** NativeActivity with a UI-thread InputConnection for multistage IMEs. */
 public class GpuiInputActivity extends NativeActivity {
@@ -418,7 +426,7 @@ public class GpuiInputActivity extends NativeActivity {
             if (connection == null) return null;
             final long connectionSession = session;
             final int connectionGeneration = generation;
-            return new InputConnectionWrapper(connection, false) {
+            InputConnection wrapped = new InputConnectionWrapper(connection, false) {
                 private boolean stale() {
                     return connectionSession != session || connectionGeneration != generation;
                 }
@@ -505,7 +513,33 @@ public class GpuiInputActivity extends NativeActivity {
                     return commitText("\n", 1);
                 }
             };
+            EditorInfoCompat.setContentMimeTypes(info, PICTURES);
+            return InputConnectionCompat.createWrapper(wrapped, info, (content, flags, opts) ->
+                    connectionSession == session && connectionGeneration == generation && insertPicture(content, flags));
         }
+    }
+
+    // Pictures the keyboard inserts (its clipboard, stickers): copied into the cache off the UI
+    // thread, one at a time, while the keyboard's read grant lasts.
+    private static final String[] PICTURES = {"image/*"};
+    private static final ExecutorService PICTURE_COPIES = Executors.newSingleThreadExecutor();
+
+    private boolean insertPicture(InputContentInfoCompat content, int flags) {
+        boolean granted = (flags & InputConnectionCompat.INPUT_CONTENT_GRANT_READ_URI_PERMISSION) != 0;
+        if (granted) {
+            try {
+                content.requestPermission();
+            } catch (RuntimeException e) {
+                return false;
+            }
+        }
+        String uri = content.getContentUri().toString();
+        PICTURE_COPIES.execute(() -> {
+            String path = Files.copyToCache(this, uri);
+            if (granted) content.releasePermission();
+            if (path != null) nativeImePicture(path);
+        });
+        return true;
     }
 
     private static native void nativeIme(long session, int kind, String text, int start, int end);
@@ -516,4 +550,6 @@ public class GpuiInputActivity extends NativeActivity {
     private static native void nativeImeResync();
     // src/ime.rs: every misspelled range of the field as start, end pairs; false if Rust's queue is full.
     private static native boolean nativeImeSpell(long field, int[] ranges);
+    // src/ime.rs: a picture the keyboard inserted, at this path in the cache.
+    private static native void nativeImePicture(String path);
 }

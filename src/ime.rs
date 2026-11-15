@@ -183,7 +183,7 @@ fn dots(x0: Pixels, x1: Pixels, y: Pixels, colour: Hsla) -> impl Iterator<Item =
 }
 
 #[cfg(target_os = "android")]
-pub(crate) use android::{follow, set_incognito};
+pub(crate) use android::{follow, on_picture, set_incognito};
 
 #[cfg(not(target_os = "android"))]
 pub(crate) fn follow<T: 'static>(_: &gpui_kit::Entity<gpui_kit::component::input::InputState>, _: &mut gpui_kit::Window, _: &mut gpui_kit::Context<T>) {}
@@ -192,11 +192,16 @@ pub(crate) fn follow<T: 'static>(_: &gpui_kit::Entity<gpui_kit::component::input
 #[cfg(not(target_os = "android"))]
 pub(crate) fn set_incognito(_: bool) {}
 
+/// Where a picture the Android keyboard inserts goes (its clipboard, stickers); desktop pastes on its own.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn on_picture(_: impl Fn(std::path::PathBuf, &mut gpui_kit::App) + 'static) {}
+
 #[cfg(target_os = "android")]
 mod android {
     use std::cell::{Cell, RefCell};
     use std::ffi::c_void;
     use std::ops::Range;
+    use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
     use gpui_kit::component::input::{InputEvent, InputState};
@@ -212,6 +217,8 @@ mod android {
         Resync,
         /// Misspelled ranges of a field, all of them, in field UTF-16 offsets.
         Spell(u64, Vec<Range<usize>>),
+        /// A picture the keyboard inserted, already copied into the cache.
+        Picture(PathBuf),
     }
 
     /// Edits waiting for the GPUI thread; Java resyncs if one does not fit.
@@ -244,6 +251,11 @@ mod android {
         static APPLIED: Cell<i64> = const { Cell::new(0) };
         /// What Java was last told: `None` before the first push, `Some(None)` for no field.
         static PUSHED: RefCell<Option<Option<State>>> = const { RefCell::new(None) };
+        static ON_PICTURE: RefCell<Option<Box<dyn Fn(PathBuf, &mut App)>>> = RefCell::new(None);
+    }
+
+    pub(crate) fn on_picture(f: impl Fn(PathBuf, &mut App) + 'static) {
+        ON_PICTURE.set(Some(Box::new(f)));
     }
 
     /// Mirror this field to the keyboard while it is focused. The subscriptions end with the field.
@@ -284,6 +296,16 @@ mod android {
     }
 
     fn handle(msg: Msg, window: &mut Window, cx: &mut App) {
+        if let Msg::Picture(path) = msg {
+            match ON_PICTURE.take() {
+                Some(f) => {
+                    f(path, cx);
+                    ON_PICTURE.set(Some(f));
+                }
+                None => crate::share::discard(&path),
+            }
+            return;
+        }
         if let Msg::Edit(edit) = &msg {
             APPLIED.set(edit.seq);
             MARKS.with_borrow_mut(|m| {
@@ -495,6 +517,18 @@ mod android {
         };
         let ranges = flat.chunks_exact(2).filter(|p| 0 <= p[0] && p[0] < p[1]).map(|p| range(p[0], p[1])).collect();
         u8::from(sender().try_send(Msg::Spell(field as u64, ranges)).is_ok())
+    }
+
+    /// # Safety
+    /// Called by the JVM with a valid (or null) string reference.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeImePicture(_env: *mut c_void, _class: *mut c_void, path: *mut c_void) {
+        let Ok(path) = with_env(|env| Ok(get_string(env, &unsafe { JObject::from_raw(env, path as jni::sys::jobject) }))) else { return };
+        let path = PathBuf::from(path);
+        if let Err(e) = sender().try_send(Msg::Picture(path.clone())) {
+            log::warn!("keyboard picture dropped: {e}");
+            crate::share::discard(&path);
+        }
     }
 
     /// Settings > Privacy > Incognito keyboard: whether text fields ask the keyboard not to learn.

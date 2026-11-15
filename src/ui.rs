@@ -394,6 +394,13 @@ impl BeeperApp {
             crate::ime::follow(input, window, cx);
         }
         crate::ime::set_incognito(settings.incognito_keyboard);
+        let ui = cx.weak_entity();
+        crate::ime::on_picture(move |path, cx| {
+            let taken = ui.update(cx, |this, cx| this.open.is_some().then(|| this.attach_paths(vec![path.clone()], cx))).ok().flatten();
+            if taken.is_none() {
+                crate::share::discard(&path);
+            }
+        });
         let mut subs = Vec::new();
         let look = appearance::Look::new(&settings, &dir, cx);
         subs.push(cx.subscribe_in(&look.dim, window, |this, _, ev: &appearance::SliderEvent, _, cx| this.dim_changed(ev, cx)));
@@ -1563,7 +1570,13 @@ impl BeeperApp {
             "k" if only_secondary => self.set_searching(true, window, cx),
             "n" if only_secondary => self.open_new_chat(window, cx),
             "up" | "down" if only_alt => self.step_chat(k.key == "down", cx),
-            "v" if only_secondary && self.open.is_some() && self.composer.read(cx).focus_handle(cx).is_focused(window) => return self.paste_files(cx),
+            // In the composer, or with no text field focused at all (after a click into the chat).
+            "v" if only_secondary
+                && self.open.is_some()
+                && (self.composer.read(cx).focus_handle(cx).is_focused(window) || !window.context_stack().iter().any(|c| c.contains("Input"))) =>
+            {
+                return self.paste_files(cx);
+            }
             "up" if plain && self.composer_idle(window, cx) => match self.last_editable() {
                 Some(id) => self.start_compose(Compose::Edit(id), window, cx),
                 None => return false,

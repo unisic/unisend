@@ -14,6 +14,12 @@ over. Changes, marked `murmur patch`:
 - removed `Cargo.lock`, `Cargo.toml.orig` and `.cargo-ok` (not vendored); the crate ships no
   examples, tests or docs and `autoexamples`/`autotests`/`autobenches` are already false
 
+Pasting copied files: upstream's Wayland clipboard read takes plain text before anything else, so
+files copied in a file manager (Dolphin offers `text/uri-list` and their paths as text) reached the
+app only as text and Ctrl+V pasted the path. `src/linux/wayland/clipboard.rs` `read()` now reads
+`text/uri-list` first, as `ClipboardEntry::ExternalPaths`, followed by the text form for text
+fields (`read_paths`, marked `murmur patch`). Primary selection and X11 are as upstream.
+
 Re-apply on upgrade: copy the new crate into this directory, repeat the above
 (`grep -rn "murmur patch" vendor/gpui-pre-linux`), bump the `gpui-pre-linux =` pin in the root
 Cargo.toml together with gpui-pre, or drop the vendor dir and the `[patch.crates-io]` entry once

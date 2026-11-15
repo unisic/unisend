@@ -14,7 +14,8 @@ use crate::linux::{
     WaylandClientStatePtr,
     platform::{PIPE_READ_TIMEOUT, read_fd_with_timeout},
 };
-use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, hash};
+use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat, hash};
+use http_client::Url;
 
 /// Text mime types that we'll offer to other programs.
 pub(crate) const TEXT_MIME_TYPES: [&str; 3] =
@@ -96,6 +97,25 @@ impl<T: ReceiveData> DataOffer<T> {
                 None
             }
         }
+    }
+
+    // murmur patch: files a file manager copied, as paths, ahead of the text it offers for them.
+    fn read_paths(&self, connection: &Connection) -> Option<ClipboardItem> {
+        if !self.has_mime_type(FILE_LIST_MIME_TYPE) {
+            return None;
+        }
+        let list = String::from_utf8(self.read_bytes(connection, FILE_LIST_MIME_TYPE)?).ok()?;
+        let paths: smallvec::SmallVec<_> = list
+            .lines()
+            .filter_map(|line| Url::parse(line.trim()).ok()?.to_file_path().ok())
+            .collect();
+        if paths.is_empty() {
+            return None;
+        }
+        let mut entries = vec![ClipboardEntry::ExternalPaths(ExternalPaths(paths))];
+        // The text form stays for text fields, which paste it as before.
+        entries.extend(self.read_text(connection).into_iter().flat_map(|text| text.entries));
+        Some(ClipboardItem { entries })
     }
 
     fn read_text(&self, connection: &Connection) -> Option<ClipboardItem> {
@@ -207,7 +227,8 @@ impl Clipboard {
         }
 
         let item = offer
-            .read_text(&self.connection)
+            .read_paths(&self.connection)
+            .or_else(|| offer.read_text(&self.connection))
             .or_else(|| offer.read_image(&self.connection))?;
 
         self.cached_read = Some(item.clone());
