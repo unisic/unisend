@@ -44,6 +44,8 @@ gpui_kit::assets::icon_assets!(
         ListFilter,
         Lock,
         LockOpen,
+        MonitorSmartphone,
+        Shield,
         MapPin,
         Mail,
         MailOpen,
@@ -375,6 +377,8 @@ pub(crate) struct Palette {
     pub on_accent: Hsla,
     /// The accent as text: the fill itself is unreadable on a light ground.
     pub accent_ink: Hsla,
+    /// The owner's violet, on the icons of the settings' rows only.
+    pub brand: Hsla,
     pub negative: Hsla,
     pub warning: Hsla,
     pub warning_bg: Hsla,
@@ -394,6 +398,10 @@ pub(crate) struct Palette {
 
 /// The `swipe_*` fills, dark then light: muted, so a row being moved does not shout.
 const SWIPE: [[u32; 5]; 2] = [[0x4fae79, 0x6290dc, 0xd29a45, 0xa87fe2, 0x8796ab], [0x237a4b, 0x2d5cbf, 0x9a5c12, 0x6c34b8, 0x4e5c73]];
+
+/// The `brand` icon colour, dark then light: #8006da is 2.7:1 on the dark `surface`, so dark takes a
+/// lighter step of the same hue.
+const BRAND: [u32; 2] = [0x9b3cf0, 0x8006da];
 
 impl Global for Palette {}
 
@@ -431,6 +439,7 @@ fn apply_palette(cx: &mut App) {
             accent: c(0xc6f24e),
             on_accent: c(0x000000),
             accent_ink: c(0xc6f24e),
+            brand: c(BRAND[0]),
             negative: c(0xe5484d),
             warning: c(0xe5a93b),
             warning_bg: c(0x2b2414),
@@ -456,6 +465,7 @@ fn apply_palette(cx: &mut App) {
             accent: c(0xc6f24e),
             on_accent: c(0x000000),
             accent_ink: c(0x486b00),
+            brand: c(BRAND[1]),
             negative: c(0xc62f35),
             warning: c(0x7a5200),
             warning_bg: c(0xfbefd2),
@@ -1304,6 +1314,14 @@ mod tests {
                 let ratio = super::contrast(*fill, ground);
                 assert!(ratio >= 4.5, "{fill:06x}: {ratio}");
             }
+        }
+    }
+
+    #[test]
+    fn brand_icons_reach_3_on_cards() {
+        for (fill, surface) in super::BRAND.into_iter().zip([0x111111, 0xf2f2f2]) {
+            let ratio = super::contrast(fill, surface);
+            assert!(ratio >= 3., "{fill:06x}: {ratio}");
         }
     }
 
