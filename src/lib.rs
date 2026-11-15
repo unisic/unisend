@@ -11,6 +11,8 @@ mod bridges;
 mod emoji;
 mod i18n;
 mod ime;
+#[cfg(not(target_os = "android"))]
+mod notify;
 mod share;
 mod ui;
 mod vault;
@@ -128,8 +130,12 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     };
-    gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, dir, settings, window, cx)))
+    let (window, app) = gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, dir, settings, window, cx)))
         .expect("open main window");
+    #[cfg(not(target_os = "android"))]
+    notify::attach(window, app.downgrade(), cx);
+    #[cfg(target_os = "android")]
+    let _ = (window, app);
     cx.activate(true);
 }
 
@@ -798,7 +804,9 @@ pub(crate) fn background(on: bool) {
         log::warn!("background connection: {e}");
     }
     #[cfg(not(target_os = "android"))]
-    let _ = on;
+    if !on {
+        notify::close_all();
+    }
 }
 
 /// Starts or ends staying connected while the app is closed (Android: a foreground service with
@@ -814,10 +822,10 @@ pub(crate) fn stay_connected(on: bool) {
 }
 
 /// A message for a chat's notification.
-#[cfg_attr(not(target_os = "android"), expect(dead_code, reason = "only Android shows notifications"))]
 pub(crate) struct Notice<'a> {
     pub chat: &'a str,
     pub name: &'a str,
+    #[cfg_attr(not(target_os = "android"), expect(dead_code, reason = "desktop notifications name the sender in every chat"))]
     pub group: bool,
     /// Path of the chat's picture, or empty.
     pub icon: &'a str,
@@ -827,15 +835,13 @@ pub(crate) struct Notice<'a> {
 }
 
 /// Adds a message to the chat's notification, which shows the last few messages of the chat.
-/// shortcut: Android only, desktop has none yet; add them through the platform's notification
-/// service when the desktop app is used day to day.
 pub(crate) fn notify(notice: &Notice) {
     #[cfg(target_os = "android")]
     if let Err(e) = android_files::message(notice) {
         log::warn!("notification: {e}");
     }
     #[cfg(not(target_os = "android"))]
-    let _ = notice;
+    notify::show(notice);
 }
 
 /// The chat a tapped notification asked to open, once.
@@ -846,7 +852,7 @@ pub(crate) fn pending_chat() -> Option<String> {
         None
     });
     #[cfg(not(target_os = "android"))]
-    None
+    notify::take_pending()
 }
 
 /// Opens the system's page for the app's notification sounds and importance, where there is one.
@@ -871,7 +877,7 @@ pub(crate) fn clear_notification(chat: &str) {
         log::warn!("notification: {e}");
     }
     #[cfg(not(target_os = "android"))]
-    let _ = chat;
+    notify::close(chat);
 }
 
 /// Signs in to a chat network in a browser and returns its cookies as `name=value; ...`.

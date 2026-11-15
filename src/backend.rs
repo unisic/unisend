@@ -635,13 +635,22 @@ pub fn apply(rows: &mut Vec<Msg>, diff: Diff) -> Option<(std::ops::Range<usize>,
 /// The command channel, for what happens outside the UI: a reply typed into a notification.
 #[cfg(target_os = "android")]
 static COMMANDS: std::sync::OnceLock<mpsc::Sender<Cmd>> = std::sync::OnceLock::new();
+/// Weak: desktop notifications must not keep the backend running once the UI is gone.
+#[cfg(not(target_os = "android"))]
+static COMMANDS: std::sync::OnceLock<mpsc::WeakSender<Cmd>> = std::sync::OnceLock::new();
+
+fn commands() -> Option<mpsc::Sender<Cmd>> {
+    #[cfg(target_os = "android")]
+    return COMMANDS.get().cloned();
+    #[cfg(not(target_os = "android"))]
+    COMMANDS.get()?.upgrade()
+}
 
 /// Sends a message from a notification's reply box. False when the app is not signed in.
-#[cfg(target_os = "android")]
 pub(crate) fn reply(chat: &str, body: &str) -> bool {
     log::debug!("notification: reply");
     let (body, Ok(room)) = (body.trim(), OwnedRoomId::try_from(chat)) else { return false };
-    !body.is_empty() && COMMANDS.get().is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None, mentions: Vec::new() }).is_ok())
+    !body.is_empty() && commands().is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None, mentions: Vec::new() }).is_ok())
 }
 
 /// Android's answer when it did not install an update.
@@ -653,20 +662,18 @@ pub(crate) fn update_failed(why: String) {
 }
 
 /// Marks a chat read from its notification.
-#[cfg(target_os = "android")]
 pub(crate) fn read_from_notification(chat: &str) {
     log::debug!("notification: mark read");
-    if let (Some(tx), Ok(room)) = (COMMANDS.get(), OwnedRoomId::try_from(chat)) {
+    if let (Some(tx), Ok(room)) = (commands(), OwnedRoomId::try_from(chat)) {
         let _ = tx.try_send(Cmd::Chat(room, ChatAction::Unread(false)));
     }
 }
 
 /// Mutes a chat from its notification. False when the app is not signed in.
-#[cfg(target_os = "android")]
 pub(crate) fn mute_from_notification(chat: &str) -> bool {
     log::debug!("notification: mute");
     let Ok(room) = OwnedRoomId::try_from(chat) else { return false };
-    COMMANDS.get().is_some_and(|tx| tx.try_send(Cmd::Chat(room, ChatAction::Mute(true))).is_ok())
+    commands().is_some_and(|tx| tx.try_send(Cmd::Chat(room, ChatAction::Mute(true))).is_ok())
 }
 
 /// Stack of the backend's threads. Opening a chat polls deep matrix-sdk futures whose debug-build
@@ -677,6 +684,8 @@ pub fn start(dir: PathBuf) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Ev>) {
     let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_CAP);
     #[cfg(target_os = "android")]
     let _ = COMMANDS.set(cmd_tx.clone());
+    #[cfg(not(target_os = "android"))]
+    let _ = COMMANDS.set(cmd_tx.downgrade());
     let (ev_tx, ev_rx) = mpsc::channel(CHANNEL_CAP);
     std::thread::Builder::new()
         .name("matrix".into())
@@ -760,6 +769,8 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
         incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, replaceable: false, update: None };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
+    #[cfg(not(target_os = "android"))]
+    tokio::spawn(crate::notify::serve(st.dir.clone()));
     let restored = if st.unlock().await { st.restore_retrying().await } else { false };
     if !restored {
         st.emit(Ev::NeedLogin).await;
@@ -1979,11 +1990,8 @@ fn notes(msgs: &[Msg], now_ms: i64) -> Vec<Note> {
 }
 
 /// Notifies while the window is not in front; clears the chat's notification once it has been
-/// read somewhere. Only Android has notifications.
+/// read somewhere.
 fn announce(client: &Client, dir: &Path, summary: &RoomSummary, prev: Option<&RoomSummary>, msgs: &[Msg]) {
-    if !cfg!(target_os = "android") {
-        return;
-    }
     let chat = summary.id.as_str();
     if summary.unread == 0 && prev.is_some_and(|p| p.unread > 0) {
         crate::clear_notification(chat);
@@ -2005,7 +2013,10 @@ fn announce(client: &Client, dir: &Path, summary: &RoomSummary, prev: Option<&Ro
             crate::notify(&crate::Notice { chat: summary.id.as_str(), name: &summary.name, group: !summary.dm, icon, note, alert });
         }
         // `Notify` has decoded and kept the picture by now; a chat's face does not stay on disk in clear.
-        if let Some(file) = file {
+        // A desktop notification reads it later: `notify` removes it with the notification.
+        if cfg!(target_os = "android")
+            && let Some(file) = file
+        {
             let _ = std::fs::remove_file(file);
         }
     });
