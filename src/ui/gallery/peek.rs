@@ -8,6 +8,9 @@ use super::*;
 const HOLD: Duration = Duration::from_millis(500);
 /// How far a held mouse may travel and still peek, as for a message.
 const HOLD_SLOP: f32 = 8.;
+/// How long a press rests before its full picture is read ahead: taps and scroll starts are
+/// shorter, so they read nothing, and the hold leaves the read time to finish.
+const READ_AHEAD: Duration = Duration::from_millis(150);
 /// Room left around a peeked picture, inside the system bars.
 const MARGIN: f32 = 16.;
 const SCRIM: f32 = 0.55;
@@ -30,8 +33,8 @@ pub(super) struct Peek {
     since: Instant,
     /// The frame as last drawn.
     drawn: Rect,
-    /// Its full picture asked for already, so a failed read is not repeated.
-    tried: bool,
+    /// Its full picture's read once asked for, so a failed read is not repeated.
+    ticket: Option<u64>,
     /// The full picture, and when it was first ready to draw: decoding finishes after the bytes arrive.
     full: Option<(Arc<Image>, Option<Instant>)>,
 }
@@ -54,6 +57,26 @@ impl Peek {
     fn retarget(&mut self, now: Instant) {
         (self.from, self.since) = (self.drawn, now);
     }
+
+    /// Its full picture arrived. A size first unknown, or known wrong, reshapes the frame in motion
+    /// rather than at once.
+    fn take(&mut self, image: Arc<Image>, dims: Option<(f32, f32)>, now: Instant) {
+        if let Some(dims) = dims.filter(|&dims| dims != self.dims) {
+            self.dims = dims;
+            self.retarget(now);
+        }
+        self.full = Some((image, None));
+    }
+}
+
+/// A photo pressed and maybe about to peek: its full picture is read ahead, one at a time.
+pub(super) struct Early {
+    id: i64,
+    since: Instant,
+    ticket: Option<u64>,
+    full: Option<Arc<Image>>,
+    /// The size the picture's bytes tell.
+    dims: Option<(f32, f32)>,
 }
 
 pub(super) struct Held {
@@ -113,10 +136,20 @@ impl BeeperApp {
         let dims = (item.width as f32, item.height as f32);
         let cell = (f32::from(cell.origin.x), f32::from(cell.origin.y), f32::from(cell.size.width), f32::from(cell.size.height));
         self.drop_peek(cx);
+        let early = self.gallery.early.take_if(|e| e.id == id);
+        self.drop_early(cx);
         #[cfg(target_os = "android")]
         motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Light);
         let now = Instant::now();
-        self.gallery.peek = Some(Peek { id, cell, dims, opened: now, closing: None, from: cell, since: now, drawn: cell, tried: false, full: None });
+        let mut peek = Peek { id, cell, dims, opened: now, closing: None, from: cell, since: now, drawn: cell, ticket: None, full: None };
+        // A read still running for the press lands in the peek.
+        if let Some(early) = early {
+            peek.ticket = early.ticket;
+            if let Some(image) = early.full {
+                peek.take(image, early.dims, now);
+            }
+        }
+        self.gallery.peek = Some(peek);
         self.pump_peek(cx);
         cx.notify();
     }
@@ -136,32 +169,39 @@ impl BeeperApp {
         }
     }
 
-    /// Reads the open peek's full picture unless one is being read; the next starts when it is done.
+    /// Reads the open peek's full picture, or with no peek on screen the pressed photo's once it
+    /// has rested `READ_AHEAD`, unless one is being read; the next starts when it is done.
     fn pump_peek(&mut self, cx: &mut Context<Self>) {
         let g = &mut self.gallery;
         if g.decoding {
             return;
         }
-        let Some(p) = g.peek.as_mut().filter(|p| p.closing.is_none() && !p.tried) else { return };
-        let Some(item) = g.items.iter().find(|item| item.id == p.id).cloned() else { return };
-        p.tried = true;
-        let (opened, screen) = (p.opened, g.screen_px);
-        g.decoding = true;
+        let ticket = g.tickets + 1;
+        let slot = if let Some(p) = g.peek.as_mut() {
+            (p.closing.is_none() && p.ticket.is_none()).then_some((p.id, &mut p.ticket))
+        } else {
+            g.early.as_mut().filter(|e| e.ticket.is_none() && e.since.elapsed() >= READ_AHEAD).map(|e| (e.id, &mut e.ticket))
+        };
+        let Some((id, slot)) = slot else { return };
+        let Some(item) = g.items.iter().find(|item| item.id == id).cloned() else { return };
+        *slot = Some(ticket);
+        (g.tickets, g.decoding) = (ticket, true);
+        let screen = g.screen_px;
         cx.spawn(async move |this, cx| {
             let bytes = cx.background_spawn(async move { store::full(&item, screen) }).await;
             let _ = this.update(cx, |this, cx| {
                 let g = &mut this.gallery;
                 g.decoding = false;
-                // One that ended or was replaced meanwhile never sees it: the bytes drop here.
-                if let Some(p) = g.peek.as_mut().filter(|p| p.opened == opened && p.closing.is_none())
-                    && let Some((format, bytes)) = bytes.and_then(|bytes| Some((image_format(&bytes)?, bytes)))
+                let picture = bytes.and_then(|bytes| Some((image_format(&bytes)?, bytes))).map(|(format, bytes)| (dims_of(&bytes), Arc::new(Image::from_bytes(format, bytes))));
+                // A press or peek that ended or was replaced meanwhile never sees it: the bytes drop here.
+                if let Some(p) = g.peek.as_mut().filter(|p| p.ticket == Some(ticket) && p.closing.is_none())
+                    && let Some((dims, image)) = picture
                 {
-                    // A size first unknown, or known wrong, reshapes the frame in motion rather than at once.
-                    if let Some(dims) = dims_of(&bytes).filter(|&dims| dims != p.dims) {
-                        p.dims = dims;
-                        p.retarget(Instant::now());
-                    }
-                    p.full = Some((Arc::new(Image::from_bytes(format, bytes)), None));
+                    p.take(image, dims, Instant::now());
+                    cx.notify();
+                } else if let Some(e) = g.early.as_mut().filter(|e| e.ticket == Some(ticket)) {
+                    let (dims, full) = picture.unzip();
+                    (e.dims, e.full) = (dims.flatten(), full);
                     cx.notify();
                 }
                 this.pump_peek(cx);
@@ -174,6 +214,7 @@ impl BeeperApp {
     fn hold_start(&mut self, id: i64, cell: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
         let since = Instant::now();
         self.gallery.held = Some(Held { id, cell, at, since });
+        self.read_ahead(id, cx);
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(HOLD).await;
             let _ = this.update(cx, |this, cx| {
@@ -183,6 +224,27 @@ impl BeeperApp {
             });
         })
         .detach();
+    }
+
+    /// A press on a photo, before it is known to be a hold: its full picture is read ahead from
+    /// `READ_AHEAD` on, so a peek opening after the hold usually has it from the first frame.
+    fn read_ahead(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self.gallery.early.as_ref().is_some_and(|e| e.id == id && e.full.is_some()) {
+            return;
+        }
+        self.drop_early(cx);
+        self.gallery.early = Some(Early { id, since: Instant::now(), ticket: None, full: None, dims: None });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(READ_AHEAD).await;
+            let _ = this.update(cx, |this, cx| this.pump_peek(cx));
+        })
+        .detach();
+    }
+
+    pub(super) fn drop_early(&mut self, cx: &mut Context<Self>) {
+        if let Some(image) = self.gallery.early.take().and_then(|e| e.full) {
+            image.remove_asset(cx);
+        }
     }
 
     /// What starts a peek on a cell: a touch's long press, or a held mouse button.
@@ -196,6 +258,15 @@ impl BeeperApp {
                     move |e: &MouseDownEvent, phase, window, cx| {
                         if phase.bubble() && e.button == MouseButton::Left && hitbox.is_hovered(window) {
                             let _ = weak.update(cx, |this, cx| this.hold_start(id, bounds, e.position, cx));
+                        }
+                    }
+                });
+                // A touch's first contact, offered as a drag nobody here claims.
+                window.on_mouse_event({
+                    let (weak, hitbox) = (weak.clone(), hitbox.clone());
+                    move |e: &TouchDragEvent, phase, window, cx| {
+                        if phase.bubble() && e.phase == TouchPhase::Started && hitbox.is_hovered(window) {
+                            let _ = weak.update(cx, |this, cx| this.read_ahead(id, cx));
                         }
                     }
                 });
@@ -226,9 +297,11 @@ impl BeeperApp {
                     let weak = weak.clone();
                     move |e: &MouseMoveEvent, phase, _, cx| {
                         if phase.bubble() {
-                            let _ = weak.update(cx, |this, _| {
+                            let _ = weak.update(cx, |this, cx| {
                                 let at = e.position;
-                                this.gallery.held.take_if(|h| f32::from(at.x - h.at.x).hypot(f32::from(at.y - h.at.y)) > HOLD_SLOP);
+                                if this.gallery.held.take_if(|h| f32::from(at.x - h.at.x).hypot(f32::from(at.y - h.at.y)) > HOLD_SLOP).is_some() {
+                                    this.drop_early(cx);
+                                }
                             });
                         }
                     }
@@ -239,14 +312,27 @@ impl BeeperApp {
                         if phase.bubble() && e.button == MouseButton::Left {
                             let _ = weak.update(cx, |this, cx| {
                                 this.gallery.held = None;
+                                this.drop_early(cx);
                                 this.peek_end(cx);
                             });
                         }
                     }
                 });
+                // A touch past the slop pans the grid: no hold.
+                window.on_mouse_event({
+                    let weak = weak.clone();
+                    move |_: &ScrollWheelEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            let _ = weak.update(cx, |this, cx| this.drop_early(cx));
+                        }
+                    }
+                });
                 window.on_mouse_event(move |e: &LongPressEvent, phase, _, cx| {
                     if phase.bubble() && matches!(e.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                        let _ = weak.update(cx, |this, cx| this.peek_end(cx));
+                        let _ = weak.update(cx, |this, cx| {
+                            this.drop_early(cx);
+                            this.peek_end(cx);
+                        });
                     }
                 });
             },
@@ -264,6 +350,11 @@ impl BeeperApp {
         let still = cx.reduce_motion();
         if self.gallery.peek.as_ref().is_some_and(|p| p.finished(now, still)) {
             self.drop_peek(cx);
+            self.pump_peek(cx);
+        }
+        // The read-ahead picture is decoded for drawing now, so a peek can show it from its first frame.
+        if let Some(image) = self.gallery.early.as_ref().and_then(|e| e.full.clone()) {
+            let _ = image.use_render_image(window, cx);
         }
         let p = Palette::of(cx);
         let view = frame::viewport(window);
@@ -275,10 +366,12 @@ impl BeeperApp {
         let (target, span) = if leaving { (peek.cell, motion::HERO_OUT) } else { (fitted, motion::HERO_IN) };
         let moving = !still && now - peek.since < span;
         let frame = if still { fitted } else { lerp(peek.from, target, motion::ease_out(frac(now - peek.since, span))) };
+        let first = peek.since == peek.opened && peek.drawn == peek.from;
         peek.drawn = frame;
         let full = peek.full.as_mut().and_then(|(image, ready)| {
             if ready.is_none() && image.clone().use_render_image(window, cx).is_some() {
-                *ready = Some(now);
+                // Ready by the first frame, it shows whole at once; the fade is for one that arrives late.
+                *ready = Some(if first { now.checked_sub(motion::SHARPEN).unwrap_or(now) } else { now });
             }
             Some((image.clone(), (*ready)?))
         });

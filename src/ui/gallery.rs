@@ -12,7 +12,7 @@ use super::*;
 use crate::i18n::t;
 
 mod peek;
-use peek::{Held, Peek};
+use peek::{Early, Held, Peek};
 
 /// Items asked of the store at a time.
 const PAGE: usize = 120;
@@ -193,8 +193,12 @@ pub(super) struct Gallery {
     peek: Option<Peek>,
     /// A mouse button down on a photo, a peek once held for `HOLD`.
     held: Option<Held>,
+    /// The pressed photo's full picture, read while the hold is still pending.
+    early: Option<Early>,
     /// A peek's full picture is being read; one at a time.
     decoding: bool,
+    /// Names each read, so its result finds the press or peek that asked.
+    tickets: u64,
     /// The window in physical pixels, the most a peek decodes.
     screen_px: (u32, u32),
 }
@@ -393,6 +397,7 @@ impl BeeperApp {
         g.failed.clear();
         g.visible = 0..0;
         g.held = None;
+        self.drop_early(cx);
         self.drop_peek(cx);
         let g = &mut self.gallery;
         if g.items.len() > PAGE {
