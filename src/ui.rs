@@ -1031,7 +1031,12 @@ impl BeeperApp {
             self.start_compose(Compose::New, window, cx);
         } else if self.panel.is_some() {
             self.slide.jump = !cfg!(target_os = "android");
+            // Beside the categories the one shown is no level of its own: Escape leaves Settings as from its list.
+            let leave = !narrow && self.panel == Some(Panel::Settings) && self.settings_pages.len() == 1;
             self.back(cx);
+            if leave && self.panel == Some(Panel::Settings) && self.settings_pages.is_empty() {
+                self.panel = None;
+            }
         } else if self.find.open {
             self.close_find(window, cx);
         } else if self.searching {
