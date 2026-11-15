@@ -16,6 +16,8 @@ const RECENTS: usize = 32;
 const FILE: &str = "emoji-recents.json";
 /// One cell of the grid, and the height of a row; a category's name takes a row of its own.
 const CELL: f32 = 44.;
+/// Room at each end of the grid, the tabs and the search bar.
+const PAD: f32 = 8.;
 const GLYPH: f32 = 28.;
 /// The panel's height until the keyboard has been seen, and with it up for the search field.
 const PANEL_H: f32 = 300.;
@@ -23,6 +25,9 @@ const PANEL_SEARCH_H: f32 = 220.;
 /// Taller than this at the bottom is the keyboard, not the navigation bar.
 const KEYBOARD_MIN: f32 = 120.;
 const SHEET_W: f32 = 480.;
+/// The skin tone menu's cells, and its gap under the swatch.
+const TONE_CELL: f32 = 40.;
+const TONE_GAP: f32 = 4.;
 const TONES: [SkinTone; 6] =
     [SkinTone::Default, SkinTone::Light, SkinTone::MediumLight, SkinTone::Medium, SkinTone::MediumDark, SkinTone::Dark];
 
@@ -125,6 +130,36 @@ fn matches(e: &emojis::Emoji, query: &str) -> bool {
     e.name().to_lowercase().contains(query) || e.shortcodes().any(|s| s.contains(query))
 }
 
+/// The waving hand in `tone`, the skin tone control's face.
+fn waving(tone: SkinTone) -> &'static str {
+    emojis::get("\u{1F44B}").and_then(|e| if tone == SkinTone::Default { Some(e) } else { e.with_skin_tone(tone) }).map_or("\u{1F44B}", |e| e.as_str())
+}
+
+/// How many columns of at least `CELL` fit across `width` inside `PAD` at each end, and how wide
+/// each is: the remainder widens every column, so the grid fills the row evenly.
+fn columns(width: f32) -> (usize, f32) {
+    let room = (width - 2. * PAD).max(CELL);
+    let cols = ((room / CELL) as usize).max(1);
+    (cols, room / cols as f32)
+}
+
+/// Records the width it is laid out at and redraws `view` when it changed.
+fn width_probe(cell: Rc<Cell<f32>>, view: EntityId) -> impl IntoElement {
+    canvas(
+        move |bounds, window, _| {
+            let got = f32::from(bounds.size.width);
+            if (got - cell.get()).abs() > 0.5 {
+                cell.set(got);
+                // During prepaint, so not `request_animation_frame`, which needs a view being rendered.
+                window.on_next_frame(move |_, cx| cx.notify(view));
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
+}
+
 /// The grid for `cols` columns, plus the row each category starts at.
 fn build(cols: usize, query: &str, tone: usize, recents: &[&'static str], keep: &dyn Fn(&str) -> bool) -> (Vec<Row>, Vec<(Cat, usize)>) {
     let cols = cols.max(1);
@@ -166,6 +201,10 @@ pub(super) struct Picker {
     /// What `rows` was built for: columns, query, tone, recents, the reactions the chat takes.
     built: Option<Built>,
     pub sheet: SheetMotion,
+    /// The panel's width as last laid out: beside a wide window's chat list it is not the window's.
+    width: Rc<Cell<f32>>,
+    /// The skin tone menu is open.
+    tones: bool,
 }
 
 impl Picker {
@@ -183,6 +222,8 @@ impl Picker {
             starts: Vec::new(),
             built: None,
             sheet: SheetMotion::default(),
+            width: Rc::default(),
+            tones: false,
         }
     }
 
@@ -227,7 +268,17 @@ impl BeeperApp {
 
     pub(super) fn close_emoji(&mut self, cx: &mut Context<Self>) {
         self.emoji_open = None;
+        self.emoji_pick.tones = false;
         cx.notify();
+    }
+
+    /// Escape or Back with the skin tone menu open closes only the menu.
+    pub(super) fn close_tone_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = std::mem::take(&mut self.emoji_pick.tones);
+        if open {
+            cx.notify();
+        }
+        open
     }
 
     fn search_emoji(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -259,8 +310,9 @@ impl BeeperApp {
             self.emoji_pick.keyboard = bottom.clamp(PANEL_SEARCH_H, 480.);
         }
         let height = if typing { PANEL_SEARCH_H } else { self.emoji_pick.keyboard };
-        let width = f32::from(window.viewport_size().width);
-        Some(div().id("emoji-panel").w_full().h(px(height)).flex_none().child(self.emoji_body(width, false, cx)).into_any_element())
+        let width = Some(self.emoji_pick.width.get()).filter(|w| *w > 0.).unwrap_or_else(|| f32::from(window.viewport_size().width));
+        let probe = width_probe(self.emoji_pick.width.clone(), cx.entity_id());
+        Some(div().id("emoji-panel").relative().w_full().h(px(height)).flex_none().child(probe).child(self.emoji_body(width, false, window, cx)).into_any_element())
     }
 
     /// The sheet for a reaction: rises from the bottom over a dimmed screen, falls when an emoji is
@@ -297,7 +349,7 @@ impl BeeperApp {
                     cx.notify();
                 }))
             }))
-            .child(self.emoji_body(width, true, cx));
+            .child(self.emoji_body(width, true, window, cx));
         Some(
             sheet::scrim("emoji-sheet-barrier", frame)
                 .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.close_emoji(cx))))
@@ -308,9 +360,9 @@ impl BeeperApp {
 
     /// Search and skin tone on top, the grid, the category tabs under it. `react`: for a reaction,
     /// limited to what the chat takes.
-    fn emoji_body(&mut self, width: f32, react: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn emoji_body(&mut self, width: f32, react: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
-        let cols = (((width - 2. * 8.) / CELL) as usize).max(1);
+        let (cols, cell_w) = columns(width);
         let query = self.emoji_pick.search.read(cx).value().to_string();
         let allowed = if react { self.caps().allowed_reactions.as_deref() } else { None };
         if !self.emoji_pick.fresh(cols, &query, allowed) {
@@ -349,11 +401,12 @@ impl BeeperApp {
                                 .into_any_element(),
                             Row::Cells(cells) => h_flex()
                                 .h(px(CELL))
-                                .px(px(8.))
+                                .px(px(PAD))
                                 .children(cells.iter().enumerate().map(|(n, &emoji)| {
                                     div()
                                         .id(("emoji", ix * 64 + n))
-                                        .size(px(CELL))
+                                        .w(px(cell_w))
+                                        .h(px(CELL))
                                         .flex_none()
                                         .flex()
                                         .items_center()
@@ -377,7 +430,7 @@ impl BeeperApp {
             .min_h_0()
             .into_any_element()
         };
-        let tabs = h_flex().h(px(40.)).px(px(4.)).justify_between().children(Cat::ALL.into_iter().filter(|c| (searching && *c != Cat::Recent) || self.emoji_pick.starts.iter().any(|(s, _)| s == c)).map(|cat| {
+        let tabs = h_flex().h(px(40.)).px(px(PAD)).justify_between().children(Cat::ALL.into_iter().filter(|c| (searching && *c != Cat::Recent) || self.emoji_pick.starts.iter().any(|(s, _)| s == c)).map(|cat| {
             let on = !searching && self.emoji_pick.active == cat;
             let at = self.emoji_pick.starts.iter().find(|(c, _)| *c == cat).map(|(_, at)| *at);
             div()
@@ -399,14 +452,60 @@ impl BeeperApp {
                     }
                 }))
         }));
-        let swatch = TONES[tone];
-        let hand = emojis::get("\u{1F44B}").and_then(|e| if swatch == SkinTone::Default { Some(e) } else { e.with_skin_tone(swatch) }).map_or("\u{1F44B}", |e| e.as_str());
+        let open = self.emoji_pick.tones;
+        let shown = Presence::new("emoji-tones", open).transition(if open { motion::enter() } else { motion::exit() }).sample(window, cx);
+        // Opened from the swatch at the top right, it drops from under it as the app's menus do.
+        let menu = shown.should_render().then(|| {
+            let t = shown.progress;
+            h_flex()
+                .id("emoji-tones")
+                .absolute()
+                .top(px(PAD + 40. + TONE_GAP - 4. * (1. - t)))
+                .right(px(PAD))
+                .p(px(4.))
+                .gap(px(2.))
+                .rounded_full()
+                .bg(p.lifted)
+                .opacity(t)
+                .when(open, |el| el.occlude())
+                .children(TONES.iter().enumerate().map(|(n, &choice)| {
+                    div()
+                        .id(("emoji-tone-choice", n))
+                        .size(px(TONE_CELL))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .when(n == tone, |el| el.border_2().border_color(p.text))
+                        .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.raised)))
+                        .active(|el| el.bg(p.raised))
+                        .text_size(px(GLYPH - 4.))
+                        .line_height(px(TONE_CELL))
+                        .when(open, |el| {
+                            el.on_click(cx.listener(move |this, _, _, cx| {
+                                this.emoji_pick.tones = false;
+                                if this.emoji_pick.tone != n {
+                                    this.emoji_pick.tone = n;
+                                    this.emoji_pick.save(&this.dir);
+                                }
+                                cx.notify();
+                            }))
+                        })
+                        .child(emoji::styled(waving(choice), Vec::new()))
+                }))
+        });
+        // A tap anywhere else in the picker only closes the menu.
+        let barrier = open.then(|| div().id("emoji-tones-barrier").absolute().inset_0().occlude().on_click(cx.listener(|this, _, _, cx| {
+            this.close_tone_menu(cx);
+        })));
         v_flex()
             .size_full()
+            .relative()
             .child(
                 h_flex()
-                    .px(px(8.))
-                    .pt(px(8.))
+                    .px(px(PAD))
+                    .pt(px(PAD))
                     .pb(px(4.))
                     .gap(px(8.))
                     .items_center()
@@ -432,26 +531,28 @@ impl BeeperApp {
                             .justify_center()
                             .rounded_full()
                             .cursor_pointer()
+                            .when(open, |el| el.bg(p.raised))
                             .active(|el| el.bg(p.raised))
                             .text_size(px(GLYPH - 4.))
                             .line_height(px(40.))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.emoji_pick.tone = (this.emoji_pick.tone + 1) % TONES.len();
-                                this.emoji_pick.save(&this.dir);
+                                this.emoji_pick.tones = !this.emoji_pick.tones;
                                 cx.notify();
                             }))
-                            .child(emoji::styled(hand, Vec::new())),
+                            .child(emoji::styled(waving(TONES[tone]), Vec::new())),
                     ),
             )
             .child(grid)
             .child(tabs)
+            .children(barrier)
+            .children(menu)
             .into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cat, RECENTS, Row, build, offered, remember};
+    use super::{CELL, Cat, PAD, RECENTS, Row, build, columns, offered, remember};
 
     fn cells(rows: &[Row]) -> Vec<&'static str> {
         rows.iter().flat_map(|r| if let Row::Cells(c) = r { c.clone() } else { Vec::new() }).collect()
@@ -515,5 +616,18 @@ mod tests {
         let (rows, starts) = build(8, "", 0, &["\u{1F602}"], &|_| true);
         assert_eq!(starts[0], (Cat::Recent, 0));
         assert!(matches!(&rows[1], Row::Cells(c) if c == &["\u{1F602}"]));
+    }
+
+    #[test]
+    fn columns_fill_the_width_evenly() {
+        for width in [320., 360., 384., 412., 480., 600., 1000.] {
+            let (cols, w) = columns(width);
+            assert!(w >= CELL && w < CELL * (1. + 1. / cols as f32), "{width}: {cols} x {w}");
+            assert!((cols as f32 * w + 2. * PAD - width).abs() < 0.01, "{width}: no remainder left over");
+        }
+        // A 360 dp phone: seven columns where 44 px cells left 36 px on the right.
+        assert_eq!(columns(360.).0, 7);
+        // Too narrow for one cell still gives one.
+        assert_eq!(columns(10.), (1, CELL));
     }
 }
