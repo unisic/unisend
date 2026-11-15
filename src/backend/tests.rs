@@ -78,6 +78,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         tasks: Vec::new(),
         verify: verify::Verifier::default(),
         info: None,
+        replaceable: false,
     };
     (st, Seat { rx, rows: Vec::new() })
 }
@@ -743,6 +744,86 @@ async fn store_opens_only_with_its_key() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// What a sealed account leaves on disk, to check that an error path deleted none of it.
+fn sealed_account(dir: &Path) -> Vec<PathBuf> {
+    let files: Vec<PathBuf> = ["store.key", "session.enc", "rooms.enc", "drafts.enc"].iter().map(|f| dir.join(f)).collect();
+    std::fs::create_dir_all(dir.join("store")).unwrap();
+    std::fs::write(dir.join("store").join("matrix-sdk-state.sqlite3"), b"x").unwrap();
+    for f in &files {
+        std::fs::write(f, [1u8; 40]).unwrap();
+    }
+    files
+}
+
+fn all_there(files: &[PathBuf]) -> bool {
+    files.iter().all(|f| f.exists()) && files[0].with_file_name("store").join("matrix-sdk-state.sqlite3").exists()
+}
+
+/// Error paths sign out at most; they never delete. A sign-in replaces an account only once it is
+/// known not to open here.
+#[tokio::test]
+async fn errors_on_start_delete_nothing() {
+    let key = || Seal::Sealed(Arc::new(zeroize::Zeroizing::new([3; crate::vault::KEY_LEN])));
+    // A damaged or newer session file: signed out, kept.
+    for (name, bytes) in [("short", vec![1u8, 0, 0]), ("version", vec![9u8; 40])] {
+        let dir = std::env::temp_dir().join(format!("beeper-gpui-keep-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (mut st, _seat) = state(dir.clone(), "http://127.0.0.1:9");
+        let files = sealed_account(&dir);
+        std::fs::write(dir.join("session.enc"), &bytes).unwrap();
+        st.seal = key();
+        assert!(!st.restore().await.unwrap(), "{name}");
+        assert!(all_there(&files), "{name}: nothing deleted");
+        assert!(st.replaceable && !st.seal.sealed());
+        // The sign-in that follows starts clean (desktop: a plain store).
+        st.fresh_store().unwrap();
+        assert!(!dir.join("store").exists() && !dir.join("session.enc").exists() && !dir.join("drafts.enc").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let dir = std::env::temp_dir().join(format!("beeper-gpui-keep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (mut st, _seat) = state(dir.clone(), "http://127.0.0.1:9");
+    let files = sealed_account(&dir);
+    // A session sealed with another key: the key is lost, the files stay.
+    std::fs::write(dir.join("session.enc"), crate::vault::seal(&[4; crate::vault::KEY_LEN], "session.json", b"{}").unwrap()).unwrap();
+    st.seal = key();
+    assert!(!st.restore().await.unwrap());
+    assert!(all_there(&files) && st.replaceable);
+    // A key that cannot be unwrapped (no key store here): signed out, nothing deleted.
+    st.replaceable = false;
+    assert!(!st.unlock().await);
+    assert!(all_there(&files) && st.replaceable);
+    // An I/O error is no verdict: restore fails, to be retried, and nothing is replaceable.
+    st.replaceable = false;
+    std::fs::remove_file(dir.join("session.enc")).unwrap();
+    std::fs::create_dir(dir.join("session.enc")).unwrap();
+    st.seal = key();
+    assert!(st.restore().await.is_err());
+    assert!(!st.replaceable && dir.join("store.key").exists());
+    // And a sign-in does not replace a session that may still open.
+    assert!(st.fresh_store().is_err());
+    assert!(dir.join("store.key").exists() && dir.join("store").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn old_downloads_are_swept() {
+    let dir = std::env::temp_dir().join(format!("beeper-gpui-media-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // Other tests sign out meanwhile, which moves the generation on; one try of several lands.
+    let path = (0..10).find_map(|_| save_media(&dir, media_generation(), "$event:x", "photo.jpg", b"jpeg").ok()).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"jpeg");
+    sweep_media(&dir, Duration::from_secs(60));
+    assert!(path.exists(), "a fresh download stays");
+    std::thread::sleep(Duration::from_millis(20));
+    sweep_media(&dir, Duration::ZERO);
+    assert!(!path.exists() && dir.exists(), "an old one goes, the folder of folders stays");
+    // Signed out meanwhile: the download writes nothing.
+    assert!(save_media(&dir, media_generation().wrapping_add(1 << 40), "$event:x", "photo.jpg", b"jpeg").is_err());
+    assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn servers_are_read_from_what_was_typed() {
     assert_eq!(server_from_input("matrix.org"), Ok("matrix.org".into()));
@@ -1257,7 +1338,7 @@ async fn a_gif_arrives_as_a_marked_mp4_in_an_encrypted_chat() {
     bob.join_room_by_id(room.room_id()).await.unwrap();
 
     let gif = gifs::parse(include_bytes!("klipy-trending.json")).unwrap().gifs.remove(0);
-    gifs::send(&alice.http, &root, &room, &gif, "", None, None).await.unwrap();
+    gifs::send(&alice.http, &room, &gif, "", None, None).await.unwrap();
 
     let mut content = None;
     for _ in 0..20 {

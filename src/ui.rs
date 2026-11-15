@@ -566,6 +566,8 @@ impl BeeperApp {
         match ev {
             Ev::NeedLogin => {
                 // Signed out, here or by the server: the session is gone, and the app lock with it.
+                // A server sign-out skips the settings button, so the connection, notices and share targets end here too.
+                crate::background(false);
                 if !crate::vault::signed_in(&self.dir) {
                     if self.settings.lock.mode != crate::applock::LockMode::Off {
                         crate::applock::pin::clear(&self.dir);

@@ -175,7 +175,7 @@ public class GpuiActivity extends GpuiInputActivity {
         Uri data = intent.getData();
         if (data != null) {
             String url = data.toString();
-            Log.i("GpuiActivity", "onNewIntent deeplink: " + url);
+            Log.i("GpuiActivity", "onNewIntent deeplink");
             try {
                 nativeOnDeepLink(url);
             } catch (UnsatisfiedLinkError e) {

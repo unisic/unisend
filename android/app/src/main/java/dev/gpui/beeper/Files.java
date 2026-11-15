@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.ContentValues;
+import android.content.res.AssetFileDescriptor;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
@@ -11,7 +12,10 @@ import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.system.ErrnoException;
+import android.system.Os;
 import android.util.Log;
+import android.webkit.MimeTypeMap;
 import androidx.core.content.FileProvider;
 import java.io.File;
 import java.io.FileInputStream;
@@ -19,6 +23,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** File hand-offs between this app and others. All methods are called from Rust over JNI. */
@@ -117,20 +122,42 @@ public final class Files {
     }
 
     /**
-     * Copies a picked document into the cache under its own name and returns the path, or null
-     * when it cannot be read. Each pick gets a directory; ones older than an hour are removed.
+     * Copies a picked or shared document into the cache under a neutral name (image.jpg,
+     * video.mp4, file.pdf) and returns the path, or null when it cannot be read or is this app's
+     * own. Each pick gets a directory; ones older than an hour are removed.
      */
     public static String copyToCache(Activity activity, String uriString) {
         Uri uri = Uri.parse(uriString);
-        String name = "file";
-        try (Cursor c = activity.getContentResolver()
-                .query(uri, new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+        String pkg = activity.getPackageName();
+        if (refused(uri.getScheme(), uri.getAuthority(), pkg)) {
+            Log.w(TAG, "refused a file from this app's own storage");
+            return null;
+        }
+        ContentResolver resolver = activity.getContentResolver();
+        String display = null;
+        try (Cursor c = resolver.query(uri, new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
             if (c != null && c.moveToFirst() && !c.isNull(0)) {
-                name = new File(c.getString(0)).getName();
+                display = c.getString(0);
             }
         } catch (RuntimeException e) {
             // Providers may refuse the query; the file is still readable, under the fallback name.
         }
+        String mime = null;
+        try {
+            mime = resolver.getType(uri);
+        } catch (RuntimeException e) {
+            // As above: the extension alone then names the kind.
+        }
+        String ext = extension(display);
+        MimeTypeMap types = MimeTypeMap.getSingleton();
+        if (ext == null && mime != null) {
+            String guessed = types.getExtensionFromMimeType(mime);
+            ext = guessed == null ? null : extension("." + guessed);
+        }
+        if (mime == null && ext != null) {
+            mime = types.getMimeTypeFromExtension(ext);
+        }
+        String name = neutralName(ext, mime);
 
         File root = new File(activity.getCacheDir(), "outgoing");
         long now = System.currentTimeMillis();
@@ -152,11 +179,32 @@ public final class Files {
             return null;
         }
         File out = new File(dir, name);
-        try (InputStream in = activity.getContentResolver().openInputStream(uri);
-                OutputStream os = new FileOutputStream(out)) {
-            if (in == null) {
+        AssetFileDescriptor afd;
+        try {
+            afd = resolver.openAssetFileDescriptor(uri, "r");
+        } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "open picked file", e);
+            dir.delete();
+            return null;
+        }
+        if (afd == null) {
+            dir.delete();
+            return null;
+        }
+        // Another app's provider can hand back a file of ours: check where the open file really is.
+        try {
+            String real = Os.readlink("/proc/self/fd/" + afd.getParcelFileDescriptor().getFd());
+            if (insideOwn(real, pkg)) {
+                Log.w(TAG, "refused a file from this app's own storage");
+                afd.close();
+                dir.delete();
                 return null;
             }
+        } catch (ErrnoException | IOException e) {
+            // A pipe or socket has no path to check, and none of ours is shared that way.
+        }
+        try (InputStream in = afd.createInputStream();
+                OutputStream os = new FileOutputStream(out)) {
             byte[] buffer = new byte[65536];
             for (int n = in.read(buffer); n > 0; n = in.read(buffer)) {
                 os.write(buffer, 0, n);
@@ -164,7 +212,57 @@ public final class Files {
             return out.getAbsolutePath();
         } catch (IOException e) {
             Log.w(TAG, "copy picked file", e);
+            out.delete();
+            dir.delete();
             return null;
         }
+    }
+
+    /** A file address this app must not read on another's behalf: anything but another app's provider. */
+    static boolean refused(String scheme, String authority, String pkg) {
+        if (!"content".equalsIgnoreCase(scheme) || authority == null) {
+            return true;
+        }
+        String own = pkg.toLowerCase(Locale.ROOT);
+        String a = authority.toLowerCase(Locale.ROOT);
+        // An authority may carry a user: "0@dev.gpui.beeper.files".
+        a = a.substring(a.indexOf('@') + 1);
+        return a.equals(own) || a.startsWith(own + ".");
+    }
+
+    /** Whether a real path lies in this app's own storage, internal or external. */
+    static boolean insideOwn(String path, String pkg) {
+        if (path == null) {
+            return false;
+        }
+        for (String part : path.split("/+")) {
+            // data/data/<pkg>, data/user/0/<pkg>, data/user_de/0/<pkg>, Android/data/<pkg>, ...
+            if (part.equals(pkg)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The lower-case extension of a file name, letters and digits only, or null. */
+    static String extension(String name) {
+        if (name == null) {
+            return null;
+        }
+        int dot = name.lastIndexOf('.');
+        String ext = dot < 0 ? "" : name.substring(dot + 1).toLowerCase(Locale.ROOT);
+        if (ext.isEmpty() || ext.length() > 10 || !ext.matches("[a-z0-9]+")) {
+            return null;
+        }
+        return ext;
+    }
+
+    /** A name that says only the kind: image.jpg, video.mp4, file.pdf, or file. */
+    static String neutralName(String ext, String mime) {
+        String kind = mime == null ? "file"
+                : mime.startsWith("image/") ? "image"
+                : mime.startsWith("video/") ? "video"
+                : "file";
+        return ext == null ? kind : kind + "." + ext;
     }
 }
