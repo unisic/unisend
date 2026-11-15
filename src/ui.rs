@@ -1578,6 +1578,7 @@ impl BeeperApp {
                             (Some(network), time) => format!("{network} · {time}"),
                             (None, time) => time,
                         };
+                        let pan_id = id.clone();
                         let row = h_flex()
                             .id("row")
                             .w_full()
@@ -1587,10 +1588,6 @@ impl BeeperApp {
                             .relative()
                             .left(px(sx))
                             .when(backdrop.is_some(), |el| el.bg(p.ground))
-                            .on_scroll_wheel(cx.listener({
-                                let id = id.clone();
-                                move |this, event: &ScrollWheelEvent, window, cx| this.row_pan(&id, event, window, cx)
-                            }))
                             .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(if selected { p.raised } else { p.surface })))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| this.open_room(id.clone(), cx)))
@@ -1670,6 +1667,8 @@ impl BeeperApp {
                             .h(px(ROOM_ROW_H))
                             .top(px(dy))
                             .when(alpha < 1., |el| el.opacity(alpha))
+                            // A pan's events land where it began, which a swiped row may have left: the slot listens.
+                            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, window, cx| this.row_pan(&pan_id, event, window, cx)))
                             .when_some(backdrop, |el, backdrop| el.overflow_hidden().child(backdrop))
                             .child(row)
                     })
