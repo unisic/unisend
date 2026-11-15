@@ -2,8 +2,11 @@ package dev.gpui.mobile;
 
 import android.app.Activity;
 import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.os.Build;
+import android.os.PersistableBundle;
 
 /**
  * Java helper for clipboard access on Android.
@@ -22,6 +25,10 @@ public final class GpuiClipboard {
         ClipboardManager cm = (ClipboardManager) activity.getSystemService(Context.CLIPBOARD_SERVICE);
         if (cm != null) {
             ClipData clip = ClipData.newPlainText("text", text);
+            // Murmur copies messages, codes and keys: keep them out of the clipboard preview and keyboard suggestions.
+            PersistableBundle extras = new PersistableBundle();
+            extras.putBoolean(Build.VERSION.SDK_INT >= 33 ? ClipDescription.EXTRA_IS_SENSITIVE : "android.content.extra.IS_SENSITIVE", true);
+            clip.getDescription().setExtras(extras);
             cm.setPrimaryClip(clip);
         }
     }
