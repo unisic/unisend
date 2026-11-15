@@ -19,6 +19,7 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputConnectionWrapper;
 import android.view.inputmethod.InputMethodManager;
+import android.view.inputmethod.TextAttribute;
 import android.widget.EditText;
 
 import androidx.core.view.inputmethod.EditorInfoCompat;
@@ -30,6 +31,7 @@ import dev.gpui.beeper.Files;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.BooleanSupplier;
 
 /** NativeActivity with a UI-thread InputConnection for multistage IMEs. */
 public class GpuiInputActivity extends NativeActivity {
@@ -49,6 +51,10 @@ public class GpuiInputActivity extends NativeActivity {
     private long seq;
     // Settings > Privacy > Incognito keyboard, set by src/ime.rs; secrets (type 4) stay incognito.
     private boolean incognito = true;
+    // A text field's keyboard waits this long at most for the field's copy (src/ime.rs) before starting without it.
+    private static final long FIELD_WAIT_MS = 300;
+    private boolean awaitingField;
+    private final Runnable fieldLate = () -> { if (awaitingField) start(); };
 
     private static final class Field {
         final long id, applied;
@@ -90,23 +96,40 @@ public class GpuiInputActivity extends NativeActivity {
             }
             this.keyboardType = keyboardType;
             input.reset(session);
-            if (keyboardType == 0 && latest != null) input.seed(latest);
             input.shown = true;
-            configure();
-            // The EditText creates its spell checker only when attached as a text field with suggestions.
-            if (input.isAttachedToWindow() && !input.spellReady && input.isSuggestionsEnabled()) {
-                ((ViewGroup) input.getParent()).removeView(input);
-                addContentView(input, new ViewGroup.LayoutParams(1, 1));
+            if (keyboardType == 0 && latest == null) {
+                // No copy of the field yet (a recreated Activity, or this call overtook the field's
+                // publish): start once it arrives, not now and again in mirror mode.
+                awaitingField = true;
+                input.removeCallbacks(fieldLate);
+                input.postDelayed(fieldLate, FIELD_WAIT_MS);
+                nativeImeResync();
+                return;
             }
-            input.requestFocus();
-            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-            imm.restartInput(input);
-            imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
-            // A recreated Activity has no copy of the field yet.
-            if (keyboardType == 0 && latest == null) nativeImeResync();
+            start();
         });
     }
 
+    /** Start the keyboard on the proxy as it will stay, seeded and typed, with one input start. */
+    private void start() {
+        awaitingField = false;
+        input.removeCallbacks(fieldLate);
+        if (keyboardType == 0 && latest != null) input.seed(latest);
+        configure();
+        // The EditText creates its spell checker only when attached as a text field with suggestions.
+        if (input.isAttachedToWindow() && !input.spellReady && input.isSuggestionsEnabled()) {
+            ((ViewGroup) input.getParent()).removeView(input);
+            addContentView(input, new ViewGroup.LayoutParams(1, 1));
+        }
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        // Gaining focus starts the input by itself; only a view that already has focus needs a restart.
+        if (input.isFocused()) imm.restartInput(input);
+        else input.requestFocus();
+        if (!imm.isActive(input)) imm.restartInput(input);
+        imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
+    }
+
+    /** Sets the proxy's type and options without restarting the input: callers start or restart it once. */
     private void configure() {
         int type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_AUTO_CORRECT;
         // Sentence capitals need the text before the caret, which only a mirrored field has.
@@ -120,9 +143,10 @@ public class GpuiInputActivity extends NativeActivity {
                     | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS; break;
             case 5: type = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL; break;
         }
-        input.setInputType(type);
         int options = EditorInfo.IME_FLAG_NO_EXTRACT_UI;
         if (incognito || keyboardType == 4) options |= EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING;
+        // setInputType would restart the input itself, a second start next to the caller's.
+        input.setRawInputType(type);
         input.setImeOptions(options);
     }
 
@@ -142,6 +166,8 @@ public class GpuiInputActivity extends NativeActivity {
     public void gpuiHideKeyboard(long session) {
         runOnUiThread(() -> {
             if (input == null) return;
+            awaitingField = false;
+            input.removeCallbacks(fieldLate);
             input.reset(session);
             input.shown = false;
             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
@@ -167,7 +193,9 @@ public class GpuiInputActivity extends NativeActivity {
         Field next = field == 0 ? null : new Field(field, applied, start, selStart, selEnd, length, text);
         runOnUiThread(() -> {
             latest = next;
-            if (input != null) input.sync();
+            if (input == null) return;
+            if (awaitingField) start();
+            else input.sync();
         });
     }
 
@@ -441,35 +469,40 @@ public class GpuiInputActivity extends NativeActivity {
                     if (depth > 0) endEdit();
                     return result;
                 }
-                @Override public boolean setComposingText(CharSequence text, int cursor) {
+                /** One IME edit: rejected when stale, else batched so Rust gets it once, after it is complete. */
+                private boolean edit(BooleanSupplier op) {
                     if (stale()) return false;
                     depth++;
-                    try { return super.setComposingText(text, cursor); }
+                    try { return op.getAsBoolean(); }
                     finally { endEdit(); }
+                }
+                @Override public boolean setComposingText(CharSequence text, int cursor) {
+                    return edit(() -> super.setComposingText(text, cursor));
+                }
+                // InputConnectionWrapper hands the TextAttribute variants (API 33+) straight to the target, past the overrides above.
+                @Override public boolean setComposingText(CharSequence text, int cursor, TextAttribute attribute) {
+                    return edit(() -> super.setComposingText(text, cursor, attribute));
                 }
                 @Override public boolean setComposingRegion(int start, int end) {
-                    if (stale()) return false;
-                    depth++;
-                    try { return super.setComposingRegion(start, end); }
-                    finally { endEdit(); }
+                    return edit(() -> super.setComposingRegion(start, end));
+                }
+                @Override public boolean setComposingRegion(int start, int end, TextAttribute attribute) {
+                    return edit(() -> super.setComposingRegion(start, end, attribute));
                 }
                 @Override public boolean finishComposingText() {
-                    if (stale()) return false;
-                    depth++;
-                    try { return super.finishComposingText(); }
-                    finally { endEdit(); }
+                    return edit(super::finishComposingText);
                 }
                 @Override public boolean commitText(CharSequence text, int cursor) {
-                    if (stale()) return false;
-                    depth++;
-                    try { return super.commitText(text, cursor); }
-                    finally { endEdit(); }
+                    return edit(() -> super.commitText(text, cursor));
+                }
+                @Override public boolean commitText(CharSequence text, int cursor, TextAttribute attribute) {
+                    return edit(() -> super.commitText(text, cursor, attribute));
+                }
+                @Override public boolean replaceText(int start, int end, CharSequence text, int cursor, TextAttribute attribute) {
+                    return edit(() -> super.replaceText(start, end, text, cursor, attribute));
                 }
                 @Override public boolean setSelection(int start, int end) {
-                    if (stale()) return false;
-                    depth++;
-                    try { return super.setSelection(start, end); }
-                    finally { endEdit(); }
+                    return edit(() -> super.setSelection(start, end));
                 }
                 @Override public boolean deleteSurroundingText(int before, int after) {
                     if (stale()) return false;
@@ -477,9 +510,7 @@ public class GpuiInputActivity extends NativeActivity {
                         nativeIme(session, 2, "", before, after);
                         return true;
                     }
-                    depth++;
-                    try { return super.deleteSurroundingText(before, after); }
-                    finally { endEdit(); }
+                    return edit(() -> super.deleteSurroundingText(before, after));
                 }
                 @Override public boolean deleteSurroundingTextInCodePoints(int before, int after) {
                     if (stale()) return false;
@@ -487,9 +518,7 @@ public class GpuiInputActivity extends NativeActivity {
                         nativeIme(session, 3, "", before, after);
                         return true;
                     }
-                    depth++;
-                    try { return super.deleteSurroundingTextInCodePoints(before, after); }
-                    finally { endEdit(); }
+                    return edit(() -> super.deleteSurroundingTextInCodePoints(before, after));
                 }
                 @Override public boolean sendKeyEvent(KeyEvent event) {
                     if (stale()) return false;
