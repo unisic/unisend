@@ -11,14 +11,21 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.BitmapShader;
+import android.graphics.Canvas;
+import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.Shader;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.service.notification.StatusBarNotification;
+import android.util.Log;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.Person;
 import androidx.core.app.RemoteInput;
 import androidx.core.content.ContextCompat;
+import androidx.core.content.pm.ShortcutManagerCompat;
 import androidx.core.graphics.drawable.IconCompat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,8 +53,13 @@ public final class Notify {
     private static final String SUMMARY = "summary";
     /** Messages a conversation notification keeps. */
     private static final int KEPT = 8;
-    /** Chat pictures kept for replies that rebuild a notification, 96 px squares. */
+    /** Chat pictures kept for replies that rebuild a notification, {@link #AVATAR} px circles. */
     private static final int ICONS = 16;
+    /**
+     * Side of the round pictures handed to Android, in px: the stored ones are 96 px squares, so
+     * more would only enlarge them. 37 KB each.
+     */
+    static final int AVATAR = 96;
 
     private static final Map<String, Bitmap> icons = new LinkedHashMap<String, Bitmap>(ICONS, 0.75f, true) {
         @Override
@@ -82,8 +94,8 @@ public final class Notify {
     }
 
     /**
-     * Asks for the notification permission where Android has one (13 and later) and starts the
-     * service that keeps the app connected while it is in the background.
+     * Asks for the notification permission where Android has one (13 and later). Messages are
+     * shown without the background connection too, while the app runs.
      */
     public static void start(Activity activity) {
         channels(activity);
@@ -92,11 +104,33 @@ public final class Notify {
                         != PackageManager.PERMISSION_GRANTED) {
             activity.requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 1);
         }
-        ContextCompat.startForegroundService(activity, new Intent(activity, SyncService.class));
+    }
+
+    /**
+     * Starts the service that keeps the app connected in the background, unless it runs: starting
+     * it again would post its notice again after the user swiped it away. Called while the app is
+     * in front, which Android requires for starting it.
+     */
+    public static void connect(Activity activity) {
+        if (SyncService.running) {
+            return;
+        }
+        channels(activity);
+        try {
+            ContextCompat.startForegroundService(activity, new Intent(activity, SyncService.class));
+        } catch (IllegalStateException e) {
+            // Refused in the background (12 and later); the next time in front tries again.
+            Log.w("Notify", "background connection not started", e);
+        }
+    }
+
+    /** Ends the background connection; message notifications stay. */
+    public static void disconnect(Activity activity) {
+        activity.stopService(new Intent(activity, SyncService.class));
     }
 
     public static void stop(Activity activity) {
-        activity.stopService(new Intent(activity, SyncService.class));
+        disconnect(activity);
         activity.getSystemService(NotificationManager.class).cancelAll();
     }
 
@@ -131,12 +165,20 @@ public final class Notify {
         Context context = any.getApplicationContext();
         channels(context);
         Bitmap picture = icon.isEmpty() ? cached(chat) : load(chat, icon);
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        if (active(manager, chat) == null) {
+            // A conversation notification needs a shortcut to the chat that exists when it is posted.
+            try {
+                ShortcutManagerCompat.pushDynamicShortcut(context, Share.shortcut(context, chat, name, picture, 0));
+            } catch (IllegalStateException | IllegalArgumentException e) {
+                Log.w("Notify", "conversation shortcut", e);
+            }
+        }
         // In a one-to-one chat the picture is the sender's; in a group it is the chat's.
         Person person = new Person.Builder().setName(sender).setKey(sender).build();
         if (!group && picture != null) {
             person = new Person.Builder().setName(sender).setKey(sender).setIcon(IconCompat.createWithBitmap(picture)).build();
         }
-        NotificationManager manager = context.getSystemService(NotificationManager.class);
         NotificationCompat.MessagingStyle old = conversation(manager, chat);
         NotificationCompat.MessagingStyle style = extend(context, old, group ? name : null, group,
                 new NotificationCompat.MessagingStyle.Message(text, time, person));
@@ -237,6 +279,7 @@ public final class Notify {
                 .setAutoCancel(true)
                 .setSilent(!alert)
                 .setContentIntent(tap)
+                .setShortcutId(chat)
                 .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_menu_send, context.getString(R.string.reply), reply)
                         .addRemoteInput(input)
                         .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
@@ -316,7 +359,7 @@ public final class Notify {
     }
 
     private static Bitmap load(String chat, String path) {
-        Bitmap bitmap = BitmapFactory.decodeFile(path);
+        Bitmap bitmap = round(path);
         if (bitmap != null) {
             synchronized (icons) {
                 icons.put(chat, bitmap);
@@ -329,5 +372,40 @@ public final class Notify {
         synchronized (icons) {
             return icons.get(chat);
         }
+    }
+
+    /**
+     * The picture at {@code path} cut to an {@link #AVATAR} px circle, or null when it cannot be
+     * read. Android draws a bitmap icon as it is, square corners included; only adaptive icons get
+     * a mask, and that mask is the maker's shape (a squircle on some phones), so pictures are
+     * rounded here. Decoding is scaled down to at least {@link #AVATAR} px on the short side.
+     */
+    static Bitmap round(String path) {
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(path, options);
+        int shorter = Math.min(options.outWidth, options.outHeight);
+        if (shorter <= 0) {
+            return null;
+        }
+        options.inJustDecodeBounds = false;
+        options.inSampleSize = Integer.highestOneBit(Math.max(1, shorter / AVATAR));
+        Bitmap source = BitmapFactory.decodeFile(path, options);
+        if (source == null) {
+            return null;
+        }
+        int w = source.getWidth(), h = source.getHeight(), side = Math.min(w, h);
+        float scale = (float) AVATAR / side;
+        Matrix fit = new Matrix();
+        fit.setScale(scale, scale);
+        fit.postTranslate((side - w) * scale / 2f, (side - h) * scale / 2f);
+        BitmapShader shader = new BitmapShader(source, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+        shader.setLocalMatrix(fit);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        paint.setShader(shader);
+        Bitmap circle = Bitmap.createBitmap(AVATAR, AVATAR, Bitmap.Config.ARGB_8888);
+        new Canvas(circle).drawCircle(AVATAR / 2f, AVATAR / 2f, AVATAR / 2f, paint);
+        source.recycle();
+        return circle;
     }
 }

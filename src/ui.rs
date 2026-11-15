@@ -375,6 +375,10 @@ impl BeeperApp {
                 this.open_from_notification(cx);
                 this.take_share(Some(window), cx);
                 this.publish_share_targets();
+                // Android 15 ends the service after 6 hours a day in the background; being in front resets that.
+                if this.user.is_some() && this.settings.stay_connected {
+                    crate::stay_connected(true);
+                }
             }
         }));
 
@@ -527,6 +531,7 @@ impl BeeperApp {
             Ev::Ready { user, beeper } => {
                 self.beeper = beeper;
                 crate::background(true);
+                crate::stay_connected(self.settings.stay_connected);
                 // The app may have been started by a tap on a notification.
                 self.open_from_notification(cx);
                 self.load_hidden(&user);
