@@ -75,12 +75,20 @@ impl BeeperApp {
     fn set_language(&mut self, language: LanguageChoice, window: &mut Window, cx: &mut Context<Self>) {
         self.settings.language = language;
         self.settings.save(&self.dir);
+        crate::set_platform_language(language);
         let before = crate::i18n::polish();
         crate::i18n::set(language);
         if crate::i18n::polish() != before {
             self.relabel(window, cx);
         }
         cx.notify();
+    }
+
+    /// The app's language may have been changed in Android's settings while the app was away.
+    pub(super) fn follow_platform_language(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::apply_language(&mut self.settings, &self.dir) {
+            self.relabel(window, cx);
+        }
     }
 
     /// Builds again what was made in the previous language: placeholders, previews, the open chat's rows.
@@ -336,7 +344,6 @@ impl BeeperApp {
                     .child(div().pb(px(8.)).child(themes))
                     .child(row(t!("Language"), "", cx))
                     .child(div().pb(px(8.)).child(languages))
-                    .when(crate::i18n::changed_since_start(), |el| el.child(div().pb(px(8.)).text_size(fs(13.)).text_color(p.muted).child(t!("Some texts change after a restart."))))
                     .child(row(t!("Chat colour"), &t!("{colour}. Your own messages, on this device.", colour = self.settings.chat_colour.label()), cx))
                     .child(swatches)
                     .children(self.render_look(cx))

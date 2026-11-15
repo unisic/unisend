@@ -382,7 +382,6 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Starting the chat…", "Rozpoczynanie czatu…"),
     ("Starting… this can take a minute.", "Uruchamianie… może to potrwać minutę."),
     ("Language", "Język"),
-    ("Some texts change after a restart.", "Część tekstów zmieni się po ponownym uruchomieniu."),
     ("Stay connected in the background", "Połączenie w tle"),
     ("Sticker", "Naklejka"),
     ("Still working on the previous request, try again", "Poprzednia prośba wciąż trwa, spróbuj ponownie"),

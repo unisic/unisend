@@ -141,6 +141,17 @@ fn polish_keeps_the_placeholders() {
 }
 
 #[test]
+fn choices_map_to_android_language_tags_and_back() {
+    for choice in [LanguageChoice::System, LanguageChoice::English, LanguageChoice::Polish] {
+        assert_eq!(from_tag(tag(choice)), choice);
+    }
+    assert_eq!(tag(LanguageChoice::System), "", "no tag: the app follows the phone");
+    assert_eq!(from_tag("pl-PL"), LanguageChoice::Polish);
+    assert_eq!(from_tag("en_GB"), LanguageChoice::English);
+    assert_eq!(from_tag("de"), LanguageChoice::System);
+}
+
+#[test]
 fn tr_in_ignores_the_current_language() {
     assert_eq!(tr_in("You", true), "Ty");
     assert_eq!(tr_in("You", false), "You");

@@ -4,6 +4,7 @@ import android.app.NativeActivity;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Bundle;
@@ -72,6 +73,14 @@ public class GpuiActivity extends GpuiInputActivity {
 
         super.onCreate(savedInstanceState);
         dev.gpui.beeper.AppLock.onCreate(this);
+        dev.gpui.beeper.Lang.configured(this, getResources().getConfiguration());
+    }
+
+    /** The manifest keeps the activity through a change of language, so the app redraws in place. */
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        dev.gpui.beeper.Lang.configured(this, newConfig);
     }
 
     @Override

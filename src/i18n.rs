@@ -12,10 +12,8 @@ use chrono::{DateTime, Datelike as _, Local};
 mod pl;
 
 static POLISH: AtomicBool = AtomicBool::new(false);
-/// What `System` resolves to; set once by `init`.
+/// What `System` resolves to; set by `init`, and again by `set_system` on Android.
 static SYSTEM_POLISH: AtomicBool = AtomicBool::new(false);
-/// The language the first frames and the cached texts were built in.
-static STARTED_POLISH: AtomicBool = AtomicBool::new(false);
 
 /// The user's choice in Settings; language names are shown in their own language, untranslated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -35,20 +33,35 @@ pub(crate) fn decide(choice: LanguageChoice, system_polish: bool) -> bool {
     }
 }
 
-/// Applies the choice now; texts already built and stored keep the language they were built in.
+/// Applies the choice now; texts already built are built again by the caller.
 pub(crate) fn set(choice: LanguageChoice) {
     POLISH.store(decide(choice, SYSTEM_POLISH.load(Ordering::Relaxed)), Ordering::Relaxed);
 }
 
-/// Applies the saved choice before anything is built, and remembers what that built.
-pub(crate) fn start(choice: LanguageChoice) {
-    set(choice);
-    STARTED_POLISH.store(polish(), Ordering::Relaxed);
+/// The phone's own language, apart from the one set for this app; the caller applies the choice again.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn set_system(polish: bool) {
+    SYSTEM_POLISH.store(polish, Ordering::Relaxed);
 }
 
-/// The language differs from the one at start-up, so stored texts are still in the old one.
-pub(crate) fn changed_since_start() -> bool {
-    polish() != STARTED_POLISH.load(Ordering::Relaxed)
+/// The language tag Android keeps for the app: empty for none, so the app follows the phone.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn tag(choice: LanguageChoice) -> &'static str {
+    match choice {
+        LanguageChoice::System => "",
+        LanguageChoice::English => "en",
+        LanguageChoice::Polish => "pl",
+    }
+}
+
+/// The choice for a language Android keeps for the app ("pl", "en-GB"); others follow the phone.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn from_tag(tag: &str) -> LanguageChoice {
+    match tag.split(['-', '_']).next().unwrap_or_default() {
+        "pl" => LanguageChoice::Polish,
+        "en" => LanguageChoice::English,
+        _ => LanguageChoice::System,
+    }
 }
 
 /// `t!("Reply")` is the text in the current language; `t!("Seen by {who}", who = x)` fills in

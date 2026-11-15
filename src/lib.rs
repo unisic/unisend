@@ -101,7 +101,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::init(cx);
     ui::motion::follow_system(cx);
     let mut settings = Settings::load(&dir);
-    i18n::start(settings.language);
+    apply_language(&mut settings, &dir);
     let own = emoji::apply(&mut settings, &dir, cx);
     if !own {
         emoji::use_bundled(&dir, cx);
@@ -121,6 +121,45 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, dir, settings, window, cx)))
         .expect("open main window");
     cx.activate(true);
+}
+
+/// Takes the language Android 13 and later keep for the app (Settings, Apps, Murmur, Language)
+/// into `settings`, so the two never disagree, and applies it. True when the interface language changed.
+pub(crate) fn apply_language(settings: &mut Settings, dir: &std::path::Path) -> bool {
+    let before = i18n::polish();
+    if let Some((app, system_polish)) = platform_language() {
+        i18n::set_system(system_polish);
+        if let Some(app) = app.filter(|app| *app != settings.language) {
+            settings.language = app;
+            settings.save(dir);
+        }
+    }
+    i18n::set(settings.language);
+    i18n::polish() != before
+}
+
+/// Android: the app's language (`None` before 13, which keeps none) and whether the phone's is Polish.
+fn platform_language() -> Option<(Option<i18n::LanguageChoice>, bool)> {
+    #[cfg(target_os = "android")]
+    {
+        android_lang::read()
+            .map(|(app, system)| (app.as_deref().map(i18n::from_tag), system == "pl"))
+            .inspect_err(|e| log::warn!("app language: {e}"))
+            .ok()
+    }
+    #[cfg(not(target_os = "android"))]
+    None
+}
+
+/// Android 13 and later: keeps the choice as the app's language, so the texts Android draws for the
+/// app (notifications, the lock prompt, the player) follow it and the system settings show it.
+pub(crate) fn set_platform_language(choice: i18n::LanguageChoice) {
+    #[cfg(target_os = "android")]
+    if let Err(e) = android_lang::set(i18n::tag(choice)) {
+        log::warn!("app language: {e}");
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = choice;
 }
 
 /// Follows the chosen or the system's light or dark mode and puts the app's colours over the library's.
@@ -797,6 +836,44 @@ pub(crate) fn java_error(env: &jni::Env<'_>, e: jni::errors::Error) -> String {
             format!("{name}: {msg} ({})", stack.lines().next().unwrap_or_default())
         }
         _ => e.to_string(),
+    }
+}
+
+/// Calls into `dev.gpui.beeper.Lang`: the app's language as Android keeps it.
+#[cfg(target_os = "android")]
+mod android_lang {
+    use gpui_mobile::android::jni as helpers;
+    use jni::objects::JValue;
+
+    const CLASS: &str = "dev.gpui.beeper.Lang";
+
+    /// The tag set for the app ("" for none, `None` before Android 13) and the phone's language.
+    pub fn read() -> Result<(Option<String>, String), String> {
+        helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, CLASS)?;
+            let app = env
+                .call_static_method(&class, jni::jni_str!("app"), jni::jni_sig!("(Landroid/content/Context;)Ljava/lang/String;"), &[JValue::Object(&activity)])
+                .and_then(|v| v.l())
+                .map_err(|e| crate::java_error(env, e))?;
+            let app = (!app.is_null()).then(|| helpers::get_string(env, &app));
+            let system = env
+                .call_static_method(&class, jni::jni_str!("system"), jni::jni_sig!("(Landroid/content/Context;)Ljava/lang/String;"), &[JValue::Object(&activity)])
+                .and_then(|v| v.l())
+                .map_err(|e| crate::java_error(env, e))?;
+            Ok((app, helpers::get_string(env, &system)))
+        })
+    }
+
+    pub fn set(tag: &str) -> Result<(), String> {
+        helpers::with_env(|env| {
+            let activity = helpers::activity(env)?;
+            let class = helpers::find_app_class(env, CLASS)?;
+            let tag = env.new_string(tag).map_err(|e| e.to_string())?;
+            env.call_static_method(&class, jni::jni_str!("set"), jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;)V"), &[JValue::Object(&activity), JValue::Object(&tag)])
+                .map(|_| ())
+                .map_err(|e| crate::java_error(env, e))
+        })
     }
 }
 
