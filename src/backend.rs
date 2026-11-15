@@ -1038,7 +1038,7 @@ impl State {
         client
             .matrix_auth()
             .login_custom("org.matrix.login.jwt", data)?
-            .initial_device_display_name("Murmur")
+            .initial_device_display_name("Unisend")
             .await?;
         let session = client.matrix_auth().session().ok_or_else(|| anyhow!(t!("Login returned no session")))?;
         self.seal.write(&self.dir, vault::SESSION, &serde_json::to_vec(&SavedSession { session, homeserver: None })?)?;
@@ -1081,7 +1081,7 @@ impl State {
             )));
 
         }
-        auth.login_username(user, password).initial_device_display_name("Murmur").await.map_err(|e| {
+        auth.login_username(user, password).initial_device_display_name("Unisend").await.map_err(|e| {
             match e.client_api_error_kind() {
                 Some(ErrorKind::Forbidden) => anyhow!(t!("Wrong user name or password.")),
                 Some(ErrorKind::UserDeactivated) => anyhow!(t!("This account has been deactivated.")),

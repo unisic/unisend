@@ -126,7 +126,7 @@ impl BeeperApp {
             Status::Latest => t!("You have the latest version.").to_owned(),
             Status::CheckFailed(e) => t!("Could not check: {error}", error = e),
             Status::Found(r) => r.notes.clone(),
-            Status::Allowing(_) => t!("Allow Murmur to install apps in the settings that opened, then come back.").to_owned(),
+            Status::Allowing(_) => t!("Allow Unisend to install apps in the settings that opened, then come back.").to_owned(),
             Status::Downloading(_, p) => t!("Downloading… {percent}%", percent = p),
             Status::Installing(_) => t!("Installing. Android may ask you to confirm.").to_owned(),
             Status::Failed(_, e) => t!("Not updated: {error}", error = e),
@@ -186,7 +186,7 @@ impl BeeperApp {
             section(t!("Updates"), cx).child(
                 card(cx)
                     .child(
-                        row(t!("Check for updates automatically"), &t!("Once a day Murmur asks {host} for the newest version. It sends nothing about you or this phone.", host = host), cx)
+                        row(t!("Check for updates automatically"), &t!("Once a day Unisend asks {host} for the newest version. It sends nothing about you or this phone.", host = host), cx)
                             .child(auto),
                     )
                     .child(match found {
@@ -204,7 +204,7 @@ impl BeeperApp {
             return None;
         }
         let p = Palette::of(cx);
-        let title = t!("Murmur {version} is available.", version = release.version_name);
+        let title = t!("Unisend {version} is available.", version = release.version_name);
         let line = self.status_line();
         let action = self.update_action("update-notice-install", cx);
         let waiting = matches!(self.updates.status, Status::Found(_) | Status::Failed(..));

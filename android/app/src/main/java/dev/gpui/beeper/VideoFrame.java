@@ -7,7 +7,7 @@ import java.io.ByteArrayOutputStream;
 
 /** A still from a video file, for the preview before sending. Called from Rust over JNI, off the UI thread. */
 public final class VideoFrame {
-    private static final String TAG = "Murmur";
+    private static final String TAG = "Unisend";
     private VideoFrame() {}
 
     /** The first frame as a JPEG with its long side at most {@code max} pixels, or null. */

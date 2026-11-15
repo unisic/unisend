@@ -107,7 +107,7 @@ public class GpuiInputActivity extends NativeActivity {
             case 1: type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS; break;
             case 2: type = InputType.TYPE_CLASS_PHONE; break;
             case 3: type = InputType.TYPE_CLASS_NUMBER; break;
-            // Murmur maps its secrets (recovery keys, codes, passwords, cookies) to 4: no suggestions, nothing learned.
+            // Unisend maps its secrets (recovery keys, codes, passwords, cookies) to 4: no suggestions, nothing learned.
             case 4: type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
                     | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS; break;
             case 5: type = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL; break;

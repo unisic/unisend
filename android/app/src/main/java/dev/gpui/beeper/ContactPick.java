@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * is called from Rust over JNI and blocks until the user is done.
  */
 public final class ContactPick extends Activity {
-    private static final String TAG = "Murmur";
+    private static final String TAG = "Unisend";
     private static final int PICK = 1;
     private static final int ASK = 2;
     private static final long MAX_BYTES = 256 * 1024;

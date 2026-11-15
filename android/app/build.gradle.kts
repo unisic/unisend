@@ -14,8 +14,8 @@ android {
         // rect and the keyboard covers the composer; raise it once IME insets are read via WindowInsets.
         targetSdk = 34
         // Each release must raise the code (scripts/release.sh passes the commit count); a lower one is refused.
-        versionCode = System.getenv("MURMUR_VERSION_CODE")?.toInt() ?: 1
-        versionName = System.getenv("MURMUR_VERSION_NAME") ?: "0.1.0"
+        versionCode = System.getenv("UNISEND_VERSION_CODE")?.toInt() ?: 1
+        versionName = System.getenv("UNISEND_VERSION_NAME") ?: "0.1.0"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
@@ -23,14 +23,14 @@ android {
     }
 
     // The release key is read from the environment only; nothing about it is kept in the repository.
-    val keystore = System.getenv("MURMUR_KEYSTORE")
+    val keystore = System.getenv("UNISEND_KEYSTORE")
     signingConfigs {
         if (keystore != null) {
             create("release") {
                 storeFile = file(keystore)
-                storePassword = System.getenv("MURMUR_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("MURMUR_KEY_ALIAS")
-                keyPassword = System.getenv("MURMUR_KEY_PASSWORD")
+                storePassword = System.getenv("UNISEND_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("UNISEND_KEY_ALIAS")
+                keyPassword = System.getenv("UNISEND_KEY_PASSWORD")
             }
         }
     }

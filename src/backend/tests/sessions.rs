@@ -190,7 +190,7 @@ async fn gui_verify_helper() {
 
     // The sandbox's device: logged in over plain HTTP so that no keys are uploaded for it here.
     let http = http_client().unwrap();
-    let body = serde_json::json!({ "type": "org.matrix.login.jwt", "token": jwt(&secret, &name), "initial_device_display_name": "Murmur" });
+    let body = serde_json::json!({ "type": "org.matrix.login.jwt", "token": jwt(&secret, &name), "initial_device_display_name": "Unisend" });
     let login = http.post(format!("{hs}/_matrix/client/v3/login")).body(body.to_string()).send().await.unwrap().bytes().await.unwrap();
     let login: serde_json::Value = serde_json::from_slice(&login).unwrap();
     let session = serde_json::json!({ "session": { "user_id": login["user_id"], "device_id": login["device_id"], "access_token": login["access_token"] } });

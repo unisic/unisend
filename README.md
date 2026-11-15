@@ -1,6 +1,6 @@
-# Murmur
+# Unisend
 
-Murmur (crate and binary `beeper-gpui`) is a chat client for Beeper accounts, in
+Unisend (crate and binary `beeper-gpui`) is a chat client for Beeper accounts, in
 Rust: [GPUI](https://www.gpui.rs) via gpui-kit for the UI, gpui-mobile for
 Android, matrix-sdk against `matrix.beeper.com`.
 
@@ -45,7 +45,7 @@ Rust targets.
 The GIF picker appears only when the build has a KLIPY key ("Create API Key" on docs.klipy.com):
 `export KLIPY_API_KEY=$(cat ~/.config/murmur/klipy.key)` before `cargo ndk`.
 
-Updates outside an app store: a build with `MURMUR_UPDATE_URL` (https) checks that address for an
+Updates outside an app store: a build with `UNISEND_UPDATE_URL` (https) checks that address for an
 `update.json` (`versionCode`, `versionName`, `url`, `sha256`, `notes`) once a day while
 "Check for updates automatically" is on, and on "Check now". A newer release is downloaded only
 after the user taps Update, checked against its SHA-256 and handed to Android's installer, which

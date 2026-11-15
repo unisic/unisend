@@ -264,7 +264,7 @@ impl BeeperApp {
             Some(Auth::Code { email }) => (t!("Beeper emails a code to {email} to confirm it is you.", email = email), false, Some((t!("Email me a code"), Proof::SendCode))),
             Some(Auth::CodeSent) => (t!("Enter the code from the email.").into(), true, None),
             Some(Auth::Unsupported) => {
-                (t!("This server asks for a kind of confirmation Murmur does not offer. Sign the device out from Beeper or Element.").into(), false, None)
+                (t!("This server asks for a kind of confirmation Unisend does not offer. Sign the device out from Beeper or Element.").into(), false, None)
             }
         };
         form = form.child(text(line));
@@ -324,7 +324,7 @@ impl BeeperApp {
             ),
             Verify::Waiting => (
                 t!("Waiting for the other device"),
-                t!("Open Beeper, Element or Murmur where you are signed in and accept the request there.").into(),
+                t!("Open Beeper, Element or Unisend where you are signed in and accept the request there.").into(),
                 None,
                 (t!("Cancel"), Some(Cmd::VerifyCancel)),
             ),
