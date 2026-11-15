@@ -21,7 +21,7 @@ every file below; run `python3 design/icon/unisend/make.py` (needs ImageMagick 7
 delegate, which this machine has as RSVG 2.63.2, plus Pillow and numpy). It fails if a mark leaves
 the 66-unit safe circle.
 
-Each `candidate-*/` holds the same file roles as `packaging/icon/murmuration.py`, all on the
+Each `candidate-*/` holds the same file roles as the former `packaging/icon/murmuration.py`, all on the
 108-unit Android adaptive canvas: `foreground.svg`, `background.svg` (flat `#8006da`),
 `monochrome.svg` (themed icon, Android 13+), `icon.svg` (desktop tile, rounded square, mark drawn
 1.4 times larger) and `splash.svg`. `preview.png` shows the layer with its 72 viewport and 66 safe
