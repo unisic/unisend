@@ -513,7 +513,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Waiting for the other device…", "Czekanie na drugie urządzenie…"),
     ("Waiting for your answer to the location question.", "Czekanie na Twoją odpowiedź w sprawie lokalizacji."),
     ("We will email you a sign-in code.", "Wyślemy Ci e-mailem kod logowania."),
-    ("Whether you have read them, and whether their sender can see that.", "Czy są już przeczytane i czy nadawca to widzi."),
+    ("What their sender sees: sent, delivered or read.", "Co widzi nadawca: wysłane, dostarczone czy przeczytane."),
     ("Work", "Praca"),
     ("Working…", "Przetwarzanie…"),
     ("Write a question.", "Wpisz pytanie."),

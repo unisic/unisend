@@ -520,7 +520,7 @@ impl BeeperApp {
             .child(
                 card(cx)
                     .child(choice(Page::Receipts, receipts, cx))
-                    .child(row(t!("Status of received messages"), t!("Whether you have read them, and whether their sender can see that."), cx))
+                    .child(row(t!("Status of received messages"), t!("What their sender sees: sent, delivered or read."), cx))
                     .child(div().pb(px(8.)).child(incoming)),
             )
             .child(section(t!("Chat list"), cx).child(card(cx).child(choice(Page::SwipeLeft, left, cx)).child(choice(Page::SwipeRight, right, cx))))
