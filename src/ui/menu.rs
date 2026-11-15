@@ -31,6 +31,8 @@ const EMOJI: f32 = 28.;
 /// The reaction under a sliding finger grows by half and rises.
 const EMOJI_GROWN: f32 = 42.;
 const EMOJI_RISE: f32 = 25.;
+/// The action list slides this far out of the bubble while it fades in.
+const LIST_RISE: f32 = 8.;
 /// A finger that moves no further than this from where the overlay opened has only let go.
 const DEAD_ZONE: f32 = 40.;
 /// A reaction is chosen by sliding only between the bar's top and this far under the finger.
@@ -284,8 +286,8 @@ impl MessageMenu {
         self.closing.is_some_and(|at| ms(at, now) >= 150.)
     }
 
-    fn animating(&self, now: Instant) -> bool {
-        self.closing.is_some() || ms(self.opened, now) < 400. || ms(self.scrub_at, now) < 200.
+    fn animating(&self, now: Instant, still: bool) -> bool {
+        self.closing.is_some() || (!still && (ms(self.opened, now) < 400. || ms(self.scrub_at, now) < 200.))
     }
 
     /// With reduced motion the message jumps instead of gliding.
@@ -419,7 +421,7 @@ impl BeeperApp {
         match chosen {
             Some((id, Some(key))) => self.toggle_reaction(&id, &key, cx),
             Some((id, None)) => {
-                self.menu = None;
+                self.close_menu(cx);
                 self.emoji_open = Some(super::emojipick::Target::React(id));
                 cx.notify();
             }
@@ -640,7 +642,7 @@ impl BeeperApp {
             self.menu = None;
         }
         let menu = self.menu.as_ref()?;
-        if menu.animating(now) {
+        if menu.animating(now, cx.reduce_motion()) {
             window.request_animation_frame();
         }
         match menu.kind {
@@ -676,7 +678,8 @@ impl BeeperApp {
         menu.placed = Some(placed);
         let menu = self.menu.as_ref()?;
         let open = menu.closing.is_none();
-        let shade = menu.reveal(now, 0., 1., |_| 1.);
+        let shade = if still { 1. } else { menu.reveal(now, 0., 200., decelerate) };
+        let v_list = menu.reveal(now, 150., 200., decelerate);
         let rise = |n: f32| if still { 0. } else { EMOJI_RISE * (1. - menu.reveal(now, 100. + 10. * n, 200., decelerate)) };
         let bar = placed.bar.map(|(x, y, _)| {
             let more = self.more_reactions(&id, 1., cx).opacity(menu.reveal(now, 100. + 10. * keys.len() as f32, 200., decelerate));
@@ -699,7 +702,7 @@ impl BeeperApp {
                             .relative()
                             .top(px(rise(n as f32) - EMOJI_RISE * grown))
                             .opacity(menu.reveal(now, 100. + 10. * n as f32, 200., decelerate))
-                            .text_size(px(EMOJI + (EMOJI_GROWN - EMOJI) * grown))
+                            .text_size(px((EMOJI + (EMOJI_GROWN - EMOJI) * grown).round()))
                             .line_height(px(EMOJI_GROWN))
                             .child(label),
                     )
@@ -723,14 +726,14 @@ impl BeeperApp {
         let (lx, ly) = placed.list;
         // Signal's list waits 150 ms for the message to settle, then fades in over 200 ms.
         let list = deferred(
-            div().absolute().left(px(lx)).top(px(ly)).child(
+            div().absolute().left(px(lx)).top(px(if still { ly } else { ly - LIST_RISE * (1. - v_list) })).child(
                 v_flex()
                     .id("message-actions")
                     .w(fs(LIST_W))
                     .py(px(8.))
                     .rounded(px(RADIUS))
                     .bg(p.lifted)
-                    .opacity(menu.reveal(now, 150., 200., decelerate))
+                    .opacity(v_list)
                     .when(open, |el| el.occlude())
                     .children(rows),
             ),
@@ -866,7 +869,7 @@ impl BeeperApp {
             .text_color(p.muted)
             .active(|el| el.bg(p.raised))
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.menu = None;
+                this.close_menu(cx);
                 this.open_emoji(super::emojipick::Target::React(id.clone()), window, cx);
             }))
             .child(Icon::new(IconName::Plus).size_5())
