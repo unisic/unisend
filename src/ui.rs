@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -2426,6 +2428,18 @@ impl BeeperApp {
         // Fades and opens in, closes and fades out; it sits above everything, so opening its
         // height moves the screen down instead of covering it.
         let offline = Presence::new("offline", self.offline).transition(if self.offline { motion::enter() } else { motion::exit() }).sample(window, cx);
+        // The card keeps its words while it leaves; its measured height lets the space open and close with it.
+        let live_error = self.error.is_some();
+        let error = Presence::new("error-card", live_error).transition(if live_error { motion::enter() } else { motion::exit() }).sample(window, cx);
+        let probe = window.use_keyed_state("error-card-last", cx, |_, _| ErrorCard { last: None, height: Rc::new(Cell::new(0.)) });
+        if let Some(e) = &self.error {
+            if probe.read(cx).last.as_ref() != Some(e) {
+                probe.update(cx, |c, _| c.last = Some(e.clone()));
+            }
+        } else if !error.should_render() && probe.read(cx).last.is_some() {
+            probe.update(cx, |c, _| c.last = None);
+        }
+        let (text, card_h) = probe.read_with(cx, |c, _| (c.last.clone().unwrap_or_default(), c.height.clone()));
         let card = || v_flex().mx(px(GUTTER)).mt(px(8.)).p(px(GAP)).gap(px(10.)).rounded(px(RADIUS)).text_size(fs(14.)).line_height(fs(20.));
         v_flex()
             // Being retried: a state, said quietly, that goes away by itself.
@@ -2475,23 +2489,45 @@ impl BeeperApp {
                         ),
                 )
             })
-            .children(self.error.clone().map(|e| {
-                card().bg(p.surface).child(div().text_color(p.negative).child(e)).child(h_flex().justify_end().child(
-                    h_flex()
-                        .id("dismiss-error")
-                        .h(px(TAP))
-                        .px(px(GUTTER + 4.))
-                        .rounded_full()
-                        .bg(p.raised)
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.error = None;
-                            cx.notify();
-                        }))
-                        .child(t!("Dismiss")),
-                ))
-            }))
+            .when(error.should_render(), |el| {
+                let measured = card_h.get();
+                el.child(
+                    div()
+                        .overflow_hidden()
+                        .opacity(error.progress)
+                        .when(error.progress < 1., |el| el.h(px(measured * error.progress)))
+                        .child(
+                            card()
+                                .relative()
+                                .bg(p.surface)
+                                .child(canvas(|_, _, _| {}, move |bounds, _, _, _| card_h.set(f32::from(bounds.size.height))).absolute().inset_0())
+                                .child(div().text_color(p.negative).child(text))
+                                .child(h_flex().justify_end().child(
+                                    h_flex()
+                                        .id("dismiss-error")
+                                        .h(px(TAP))
+                                        .px(px(GUTTER + 4.))
+                                        .rounded_full()
+                                        .bg(p.raised)
+                                        .cursor_pointer()
+                                        .when(live_error, |el| {
+                                            el.on_click(cx.listener(|this, _, _, cx| {
+                                                this.error = None;
+                                                cx.notify();
+                                            }))
+                                        })
+                                        .child(t!("Dismiss")),
+                                )),
+                        ),
+                )
+            })
     }
+}
+
+/// The error card's words, kept while it fades out, and its height as last painted.
+struct ErrorCard {
+    last: Option<SharedString>,
+    height: Rc<Cell<f32>>,
 }
 
 /// Bar across the top of a screen. It shares the ground: no line, no fill.
