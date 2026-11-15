@@ -1817,7 +1817,8 @@ async fn thumbnail(client: &Client, media: &Media) -> Result<Option<Vec<u8>>> {
 }
 
 /// Uploads a file as the message type its content calls for. A picture goes out scaled down and
-/// without metadata unless `hd`; `caption` becomes the message's body (MSC2530).
+/// without metadata unless `hd`; `caption` becomes the message's body (MSC2530), or a text message
+/// right after it where the network drops captions of that type.
 async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &str, hd: bool) -> Result<()> {
     let size = tokio::fs::metadata(path).await?.len();
     if size > MAX_UPLOAD {
@@ -1882,7 +1883,8 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &st
         }
     }
     let caption = caption.trim();
-    if !caption.is_empty() {
+    let apart = !caption.is_empty() && !features::read(room).await.is_none_or(|f| f.keeps_caption(mime.essence_str()));
+    if !caption.is_empty() && !apart {
         config = config.caption(Some(TextMessageEventContent::plain(caption)));
     }
     if let Some(id) = reply_to {
@@ -1894,6 +1896,9 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &st
         config = config.reply(Some(reply));
     }
     room.send_attachment(name, &mime, data, config).await?;
+    if apart {
+        room.send(RoomMessageEventContent::text_plain(caption)).await.context(t!("the caption was not sent"))?;
+    }
     Ok(())
 }
 

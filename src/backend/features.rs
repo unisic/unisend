@@ -34,6 +34,8 @@ pub struct Features {
     pub voice: bool,
     pub gif_video: bool,
     pub gif_image: bool,
+    /// The caption level of `m.image`, `m.video`, `m.audio` and `m.file`, in that order.
+    pub captions: [i64; 4],
 }
 
 impl Features {
@@ -52,6 +54,7 @@ impl Features {
         voice: true,
         gif_video: true,
         gif_image: true,
+        captions: [2; 4],
     };
 
     /// `as_file`: the GIF goes as an `image/gif` (Meta's networks, see `gifs::wants_gif_file`).
@@ -66,6 +69,18 @@ impl Features {
 
     pub fn deletable(&self, ts: u64, now: u64) -> bool {
         self.delete >= 1 && young(self.delete_max_age, ts, now)
+    }
+
+    /// The network keeps the caption of a file of type `mime`, sent as the message type the SDK
+    /// picks for it (`make_media_type`); below partial it is dropped or the file refused.
+    pub fn keeps_caption(&self, mime: &str) -> bool {
+        let ix = match mime.split('/').next().unwrap_or("") {
+            "image" => 0,
+            "video" => 1,
+            "audio" => 2,
+            _ => 3,
+        };
+        self.captions[ix] >= 1
     }
 
     /// The chat takes reaction `key` (with or without U+FE0F: Telegram's list carries it).
@@ -98,6 +113,7 @@ struct Wire {
 #[serde(default)]
 struct WireFile {
     mime_types: HashMap<String, i64>,
+    caption: i64,
 }
 
 impl WireFile {
@@ -146,6 +162,7 @@ pub fn parse(content: &Value) -> Features {
         voice: takes(f, "org.matrix.msc3245.voice", Some("audio/ogg")),
         gif_video: takes(f, "fi.mau.gif", Some("video/mp4")),
         gif_image: takes(f, "m.image", Some("image/gif")),
+        captions: ["m.image", "m.video", "m.audio", "m.file"].map(|t| f.get(t).map_or(0, |f| f.caption)),
     }
 }
 
@@ -267,9 +284,25 @@ mod tests {
         assert!(!off.reacts_with("👍"));
     }
 
+    /// mautrix-meta `igCaps`: Instagram drops every caption.
+    #[test]
+    fn captions_kept_or_dropped() {
+        let mut ig = meta_dm();
+        for t in ["m.image", "m.video", "m.file"] {
+            ig["file"][t]["caption"] = json!(-1);
+        }
+        let ig = parse(&ig);
+        assert!(!ig.keeps_caption("image/jpeg") && !ig.keeps_caption("video/mp4") && !ig.keeps_caption("application/pdf"));
+        let messenger = parse(&meta_dm());
+        assert!(messenger.keeps_caption("image/png") && messenger.keeps_caption("video/mp4") && messenger.keeps_caption("text/vcard"));
+        assert!(!messenger.keeps_caption("audio/mpeg"));
+        assert!(!parse(&json!({ "reply": 2 })).keeps_caption("image/jpeg"), "a bridge that lists no caption level gives none");
+        assert!(Features::ALL.keeps_caption("image/jpeg"), "a plain Matrix room keeps captions");
+    }
+
     #[test]
     fn mime_lookup_follows_mautrix() {
-        let file = WireFile { mime_types: HashMap::from([("audio/*".to_owned(), 1), ("audio/ogg".to_owned(), -2)]) };
+        let file = WireFile { mime_types: HashMap::from([("audio/*".to_owned(), 1), ("audio/ogg".to_owned(), -2)]), caption: 0 };
         assert_eq!(file.level("audio/ogg"), -2);
         assert_eq!(file.level("audio/ogg; codecs=opus"), -2);
         assert_eq!(file.level("audio/mp4"), 1);

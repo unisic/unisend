@@ -505,6 +505,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Your devices", "Twoje urządzenia"),
     ("and {more} more", "i {more} więcej"),
     ("could not remove the location from this photo", "nie udało się usunąć lokalizacji z tego zdjęcia"),
+    ("the caption was not sent", "podpis nie został wysłany"),
     ("could not remove the location from this video", "nie udało się usunąć lokalizacji z tego filmu"),
     ("the bridge did not come up", "mostek się nie uruchomił"),
     ("the file is larger than {mb} MB", "plik jest większy niż {mb} MB"),
