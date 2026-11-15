@@ -373,7 +373,17 @@ pub(crate) struct Palette {
     pub on_own: Hsla,
     /// Whether the user chose a colour, so what is drawn inside the bubble must follow it.
     pub own_coloured: bool,
+    /// Behind a chat row swiped to archive, mark read or unread, pin, mute, set low priority.
+    /// The ground is the icon on each, as on `negative`.
+    pub swipe_archive: Hsla,
+    pub swipe_read: Hsla,
+    pub swipe_pin: Hsla,
+    pub swipe_mute: Hsla,
+    pub swipe_later: Hsla,
 }
+
+/// The `swipe_*` fills, dark then light: muted, so a row being moved does not shout.
+const SWIPE: [[u32; 5]; 2] = [[0x4fae79, 0x6290dc, 0xd29a45, 0xa87fe2, 0x8796ab], [0x237a4b, 0x2d5cbf, 0x9a5c12, 0x6c34b8, 0x4e5c73]];
 
 impl Global for Palette {}
 
@@ -396,7 +406,9 @@ impl Palette {
 fn apply_palette(cx: &mut App) {
     let c = |hex: u32| -> Hsla { rgb(hex).into() };
     let chosen = cx.try_global::<ChatColour>().copied().unwrap_or_default().fill();
-    let mut p = if Theme::global(cx).is_dark() {
+    let dark = Theme::global(cx).is_dark();
+    let [swipe_archive, swipe_read, swipe_pin, swipe_mute, swipe_later] = SWIPE[usize::from(!dark)].map(c);
+    let mut p = if dark {
         Palette {
             ground: c(0x000000),
             surface: c(0x111111),
@@ -415,6 +427,11 @@ fn apply_palette(cx: &mut App) {
             own: c(0x2a2a2a),
             on_own: c(0xffffff),
             own_coloured: false,
+            swipe_archive,
+            swipe_read,
+            swipe_pin,
+            swipe_mute,
+            swipe_later,
         }
     } else {
         Palette {
@@ -435,6 +452,11 @@ fn apply_palette(cx: &mut App) {
             own: c(0xe2e2e2),
             on_own: c(0x000000),
             own_coloured: false,
+            swipe_archive,
+            swipe_read,
+            swipe_pin,
+            swipe_mute,
+            swipe_later,
         }
     };
     if let Some(fill) = chosen {
@@ -1254,6 +1276,16 @@ mod tests {
         }
         assert_eq!(super::ink_on(super::ChatColour::Orange.fill().unwrap()), 0x1a1a1a);
         assert_eq!(super::ink_on(super::ChatColour::Indigo.fill().unwrap()), 0xffffff);
+    }
+
+    #[test]
+    fn swipe_icons_reach_4_5_on_their_fill() {
+        for (fills, ground) in super::SWIPE.iter().zip([0x000000, 0xffffff]) {
+            for fill in fills {
+                let ratio = super::contrast(*fill, ground);
+                assert!(ratio >= 4.5, "{fill:06x}: {ratio}");
+            }
+        }
     }
 
     #[test]
