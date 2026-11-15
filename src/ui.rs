@@ -2313,6 +2313,10 @@ impl BeeperApp {
         }
         let arrival = self.arrivals.iter_mut().find(|a| a.id == m.id)?;
         if !still && arrival.height.is_none() {
+            // Never measured (not laid out, say): drawn as it is rather than kept at no height.
+            if arrival.at.elapsed() > Duration::from_millis(500) {
+                return None;
+            }
             window.request_animation_frame();
             return Some((0., Some(0.)));
         }
