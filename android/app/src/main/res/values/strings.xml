@@ -11,6 +11,7 @@
     <string name="channel_mentions">Mentions</string>
     <string name="channel_connection">Background connection</string>
     <string name="connected_for_new">Connected for new messages</string>
+    <string name="new_message">New message</string>
     <plurals name="chats_with_new">
         <item quantity="one">%d chat has new messages</item>
         <item quantity="other">%d chats have new messages</item>

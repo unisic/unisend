@@ -10,6 +10,7 @@
     <string name="channel_mentions">Wzmianki</string>
     <string name="channel_connection">Połączenie w tle</string>
     <string name="connected_for_new">Połączono, czeka na nowe wiadomości</string>
+    <string name="new_message">Nowa wiadomość</string>
     <plurals name="chats_with_new">
         <item quantity="one">%d czat ma nowe wiadomości</item>
         <item quantity="few">%d czaty mają nowe wiadomości</item>

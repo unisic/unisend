@@ -126,5 +126,10 @@
             android:grantUriPermissions="true">
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- WebView sends nothing to Google: no diagnostics, and no Safe Browsing lookups of the
+             sign-in pages a bridge opens. -->
+        <meta-data android:name="android.webkit.WebView.MetricsOptOut" android:value="true" />
+        <meta-data android:name="android.webkit.WebView.EnableSafeBrowsing" android:value="false" />
     </application>
 </manifest>

@@ -20,8 +20,8 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * One location fix for sharing where the user is, through the platform's LocationManager (no Play
- * Services). Called from Rust over JNI, {@link #fix} off the UI thread.
+ * One location fix for sharing where the user is, from the GPS through the platform's
+ * LocationManager (no Play Services). Called from Rust over JNI, {@link #fix} off the UI thread.
  */
 public final class Where {
     private static final String TAG = "Murmur";
@@ -64,12 +64,10 @@ public final class Where {
         LocationManager manager = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
         if (manager == null) return "off";
         List<String> sources = new ArrayList<>();
+        // GPS only: the network provider on most phones is Google's, which sends nearby Wi-Fi and cells to Google.
         try {
-            if (access.equals("fine") && manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            if (manager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 sources.add(LocationManager.GPS_PROVIDER);
-            }
-            if (manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                sources.add(LocationManager.NETWORK_PROVIDER);
             }
         } catch (SecurityException e) {
             Log.w(TAG, "location sources", e);

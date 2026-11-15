@@ -35,10 +35,17 @@ android {
     lint {
         checkReleaseBuilds = false
     }
+
+    // The dependency block is encrypted for Google Play alone; this app is not shipped there.
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
 }
 
 dependencies {
     implementation("androidx.core:core:1.12.0")
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("androidx.media:media:1.7.1")
+    testImplementation("junit:junit:4.12")
 }

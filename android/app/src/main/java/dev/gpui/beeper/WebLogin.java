@@ -8,6 +8,7 @@ import android.os.Message;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
+import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import java.util.concurrent.CountDownLatch;
@@ -179,9 +180,16 @@ public final class WebLogin extends Activity {
             }
         }
         result = all.length() > 0 ? all.toString() : null;
+        // The bridge has its cookies now: leave no signed-in session of that network in the app.
         if (web != null) {
+            web.clearCache(true);
+            web.clearFormData();
+            web.clearHistory();
             web.destroy();
         }
+        // Removal is asynchronous: write the empty jar to disk once it is done.
+        CookieManager.getInstance().removeAllCookies(removed -> CookieManager.getInstance().flush());
+        WebStorage.getInstance().deleteAllData();
         CountDownLatch wait = latch;
         if (wait != null) {
             wait.countDown();

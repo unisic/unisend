@@ -544,7 +544,7 @@ impl BeeperApp {
     /// A tap on a message does nothing of its own, as in Signal: a double tap likes it.
     pub(super) fn bubble_click(&mut self, id: &str, event: &ClickEvent, cx: &mut Context<Self>) {
         if event.click_count() == 2 && id.starts_with('$') {
-            self.double_tap(id, event.position(), cx);
+            self.double_tap(id, cx);
         }
     }
 

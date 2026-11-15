@@ -383,7 +383,21 @@ impl BeeperApp {
                     ),
                 ).child(
                     row(t!("Stay connected in the background"), t!("On: notifications arrive while Murmur is closed, under a quiet system notice. Off: no notice, messages arrive only while Murmur is open."), cx).child(stay),
-                )))
+                ).when(self.settings.stay_connected, |el| {
+                    el.child(
+                        row(t!("Hide the connection notice"), t!("Opens Android settings for this notice only. Messages keep arriving."), cx).child(
+                            h_flex()
+                                .id("connection-settings")
+                                .h(px(TAP))
+                                .px(px(GAP))
+                                .rounded_full()
+                                .bg(Palette::of(cx).raised)
+                                .cursor_pointer()
+                                .on_click(|_, _, _| crate::connection_notice_settings())
+                                .child(t!("Change")),
+                        ),
+                    )
+                })))
             })
             .child(section(t!("Privacy"), cx).child(card(cx).child(
                 row(t!("Incognito"), t!("Others do not see that you have read their messages."), cx).child(incognito),

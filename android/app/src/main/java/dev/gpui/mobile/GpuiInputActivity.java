@@ -8,6 +8,7 @@ import android.text.InputType;
 import android.text.Selection;
 import android.text.TextWatcher;
 import android.view.KeyEvent;
+import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
@@ -38,6 +39,8 @@ public class GpuiInputActivity extends NativeActivity {
                 input = new InputProxy();
                 input.setAlpha(0f);
                 input.setPadding(0, 0, 0, 0);
+                // The proxy is invisible and holds message text: keep autofill services out of it.
+                input.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS);
                 addContentView(input, new ViewGroup.LayoutParams(1, 1));
             }
             input.reset(session);
@@ -46,11 +49,14 @@ public class GpuiInputActivity extends NativeActivity {
                 case 1: type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS; break;
                 case 2: type = InputType.TYPE_CLASS_PHONE; break;
                 case 3: type = InputType.TYPE_CLASS_NUMBER; break;
-                case 4: type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI; break;
+                // Murmur maps its secrets (recovery keys, codes, passwords, cookies) to 4: no suggestions, nothing learned.
+                case 4: type = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                        | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS; break;
                 case 5: type = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL; break;
             }
             input.setInputType(type);
-            input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+            // Incognito keyboard for every field: the IME must not learn from what is typed here.
+            input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
             input.requestFocus();
             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
             imm.restartInput(input);

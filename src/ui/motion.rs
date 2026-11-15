@@ -20,8 +20,6 @@ pub(crate) const SHEET_OUT: Duration = Duration::from_millis(250);
 /// The message a quote points at stays tinted this long, then the tint fades.
 pub(crate) const FLASH_HOLD: Duration = Duration::from_millis(300);
 pub(crate) const FLASH_FADE: Duration = Duration::from_millis(700);
-/// The heart a double tap pops at the finger.
-pub(crate) const HEART: Duration = Duration::from_millis(700);
 // Sheets
 /// A sheet leaving under the one that replaces it, and how long the new one waits to rise.
 pub(crate) const SHEET_HANDOFF: Duration = Duration::from_millis(200);
@@ -69,8 +67,6 @@ pub(crate) fn exit() -> Transition {
 pub(crate) const RELEASE: Spring = Spring::new(Duration::from_millis(300)).with_damping(0.8).with_epsilon(0.5);
 
 // Chat timeline and composer.
-/// The heart's fade when the system asks for less motion: no pop, only this.
-pub(crate) const HEART_STILL: Duration = Duration::from_millis(300);
 /// The recorder's level ring: critically damped, so its speed carries across the 100 ms level ticks.
 pub(crate) const LEVEL: Spring = Spring::new(Duration::from_millis(200)).with_epsilon(0.005);
 
