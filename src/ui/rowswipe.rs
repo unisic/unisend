@@ -18,6 +18,8 @@ const FLICK_MIN: f32 = 32.;
 const GAP_ROWS: usize = 24;
 /// The fill behind the row brightens to the action's colour this fast when it arms.
 const LIGHT: Duration = Duration::from_millis(150);
+/// A row carried off comes back if its chat has not left the list by then: a sync that stalls.
+const AWAY_FOR: Duration = Duration::from_secs(10);
 
 /// What a swipe one way does, chosen in Settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -164,6 +166,7 @@ struct Away {
     sent: Option<ChatAction>,
     /// The rows that were below it, top first.
     below: Vec<OwnedRoomId>,
+    since: Instant,
 }
 
 #[derive(Default)]
@@ -258,7 +261,7 @@ impl BeeperApp {
         self.rows.glide = Some((id, g, false));
     }
 
-    fn row_away(&mut self, id: OwnedRoomId, sent: Option<ChatAction>, dx: f32, to: f32, vel: f32, cx: &App) {
+    fn row_away(&mut self, id: OwnedRoomId, sent: Option<ChatAction>, dx: f32, to: f32, vel: f32, cx: &mut Context<Self>) {
         let mut g = Glide::new(motion::THROW.0, motion::THROW.1, 0.5, dx);
         if cx.reduce_motion() {
             g.set(to);
@@ -268,7 +271,21 @@ impl BeeperApp {
         let at = self.shown.iter().position(|&ix| self.rooms[ix].id == id);
         let below = at.map(|at| self.shown.iter().skip(at + 1).take(GAP_ROWS).map(|&ix| self.rooms[ix].id.clone()).collect()).unwrap_or_default();
         self.rows.glide = Some((id.clone(), g, true));
-        self.rows.away = Some(Away { id, sent, below });
+        let since = Instant::now();
+        self.rows.away = Some(Away { id, sent, below, since });
+        if sent.is_some() {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(AWAY_FOR).await;
+                this.update(cx, |this, cx| {
+                    if this.rows.away.as_ref().is_some_and(|a| a.since == since) {
+                        this.row_return(cx);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
     }
 
     /// After the list changed: a row carried off and now gone lets the rows below slide up into its
@@ -331,7 +348,7 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let (fill, ink) = match act {
             Act::Delete => (p.negative, p.ground),
-            Act::Chat(ChatAction::Archive(_) | ChatAction::LowPriority(_)) => (p.accent, p.on_accent),
+            // The accent is kept for what is addressed to the user.
             Act::Chat(_) => (p.lifted, p.text),
         };
         let reveal = (dx.abs() / (arm(Self::row_width(window)) * 0.6)).min(1.);
