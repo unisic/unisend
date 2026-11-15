@@ -238,7 +238,7 @@ impl BeeperApp {
         let still = cx.reduce_motion();
         let g = &mut self.gallery;
         let peek = g.peek.as_ref()?;
-        let (id, shown) = (peek.id, peek.shown(now));
+        let (id, shown, leaving) = (peek.id, peek.shown(now), peek.closing.is_some());
         let view = window.viewport_size();
         let (top, bottom) = crate::insets();
         let rect = fit_rect((f32::from(view.width), f32::from(view.height)), top, bottom, peek.dims);
@@ -247,7 +247,7 @@ impl BeeperApp {
         let full = peek.full.clone();
         let sharp = full.as_ref().map_or(0., |(_, at)| motion::ease_out(frac(now - *at, motion::SHARPEN)));
         let entering = peek.closing.is_none() && now - peek.opened < motion::ENTER;
-        if entering || peek.closing.is_some() || full.is_some() && sharp < 1. {
+        if entering || leaving || full.is_some() && sharp < 1. {
             window.request_animation_frame();
         }
         let video = g.items.iter().find(|item| item.id == id).filter(|item| item.video()).map(|item| item.duration_ms);
@@ -258,7 +258,8 @@ impl BeeperApp {
                 .id("gallery-peek")
                 .absolute()
                 .inset_0()
-                .occlude()
+                // Leaving, it lets the next tap through to the grid.
+                .when(!leaving, |el| el.occlude())
                 .bg(gpui_kit::black().opacity(SCRIM * shown))
                 .child(
                     div()
