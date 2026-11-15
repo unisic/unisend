@@ -1804,10 +1804,11 @@ impl BeeperApp {
                             )
                             .child(press::long_press(cx.listener({
                                 let id = room.id.clone();
-                                move |this, _: &LongPressEvent, _, cx| {
+                                move |this, e: &LongPressEvent, _, cx| {
                                     #[cfg(target_os = "android")]
                                     motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Heavy);
-                                    this.open_chat_sheet(id.clone(), None, cx);
+                                    // A held mouse button: the list opens where it is, as for the right button.
+                                    this.open_chat_sheet(id.clone(), Some(e.start_position), cx);
                                 }
                             })))
                             // The right button of a mouse.
