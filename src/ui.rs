@@ -50,6 +50,7 @@ mod signin;
 mod sharein;
 mod video;
 mod rooms;
+mod update;
 pub(crate) mod rowswipe;
 mod viewer;
 mod voice;
@@ -281,6 +282,7 @@ pub struct BeeperApp {
     location: location::Locate,
     poll_form: pollnew::Form,
     gifs: gifs::Picker,
+    updates: update::Updates,
     /// The `@` list over the composer.
     mention: mentions::Mentions,
     voice: voice::Voice,
@@ -357,6 +359,7 @@ impl BeeperApp {
         cx: &mut Context<Self>,
     ) -> Self {
         let cookie_paste = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Paste cookies or a cURL command")));
+        let updates = update::Updates::load(&dir);
         let email = cx.new(|cx| InputState::new(window, cx).placeholder(t!("you@example.com")));
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("123456"));
         let recovery = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Recovery code")));
@@ -424,6 +427,8 @@ impl BeeperApp {
                 this.open_from_notification(cx);
                 this.take_share(Some(window), cx);
                 this.publish_share_targets();
+                this.update_returned(cx);
+                this.check_update_if_due(cx);
                 // Android 15 ends the service after 6 hours a day in the background; being in front resets that.
                 if this.user.is_some() && this.settings.stay_connected {
                     crate::stay_connected(true);
@@ -524,6 +529,7 @@ impl BeeperApp {
             location: location::Locate::default(),
             poll_form: pollnew::Form::default(),
             gifs: gifs::Picker::default(),
+            updates,
             mention: mentions::Mentions::default(),
             voice: voice::Voice::default(),
             attach_queue: VecDeque::new(),
@@ -624,6 +630,7 @@ impl BeeperApp {
                 self.busy = false;
                 self.error = None;
                 self.take_share(None, cx);
+                self.check_update_if_due(cx);
             }
             Ev::NeedRecovery(need) => {
                 if self.need_recovery && !need {
@@ -808,6 +815,7 @@ impl BeeperApp {
                 }
             }
             Ev::Info(room, details) => self.info_details(room, *details, cx),
+            Ev::Update(step) => self.on_update(step),
             Ev::PeerIds(room, ids) => {
                 if self.chat_sheet.as_ref() == Some(&room) {
                     let network = self.rooms.iter().find(|r| r.id == room).and_then(|r| r.network.as_deref());
@@ -2867,6 +2875,7 @@ impl BeeperApp {
             probe.update(cx, |c, _| c.last = None);
         }
         let (text, card_h) = probe.read_with(cx, |c, _| (c.last.clone().unwrap_or_default(), c.height.clone()));
+        let update = self.render_update_notice(cx);
         let card = || v_flex().mx(px(GUTTER)).mt(px(8.)).p(px(GAP)).gap(px(10.)).rounded(px(RADIUS)).text_size(fs(14.)).line_height(fs(20.));
         v_flex()
             // Being retried: a state, said quietly, that goes away by itself.
@@ -2884,6 +2893,7 @@ impl BeeperApp {
                         .child(t!("Connection lost. Reconnecting…")),
                 )
             })
+            .children(update)
             .when(self.need_recovery, |el| {
                 el.child(
                     card()

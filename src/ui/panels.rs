@@ -392,6 +392,7 @@ impl BeeperApp {
         });
         let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
         let security = self.render_security(cx);
+        let updates = self.render_updates(cx);
         v_flex()
             .gap(px(GAP * 2.))
             .child(section(t!("Appearance"), cx).child(
@@ -451,6 +452,7 @@ impl BeeperApp {
             })))
             .child(security)
             .child(self.render_devices(cx))
+            .children(updates)
             .child(
                 section(t!("Account"), cx).child(
                     card(cx).child(row(if self.beeper { "Beeper" } else { "Matrix" }, &user, cx)).child(
