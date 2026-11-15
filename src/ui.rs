@@ -3076,7 +3076,10 @@ impl Render for BeeperApp {
                 let viewer = self.render_viewer(window, cx);
                 // Sampled every frame, so a falling sheet finishes even when a message menu opens.
                 let chat_sheet = self.render_chat_sheet(window, cx);
-                let sheet = self.render_message_menu(window, cx).or(chat_sheet).or_else(|| self.render_emoji_sheet(window, cx)).or_else(|| self.render_attach_menu(window, cx));
+                let attach_menu = self.render_attach_menu(window, cx);
+                let sheet = self.render_message_menu(window, cx).or(chat_sheet).or(attach_menu);
+                // Its own layer over the menu's, so it can rise while the menu fades.
+                let emoji_sheet = self.render_emoji_sheet(window, cx);
                 let gallery = self.render_gallery(window, cx);
                 let heart = self.render_heart(window, cx);
                 let location = self.render_location(window, cx);
@@ -3088,6 +3091,7 @@ impl Render for BeeperApp {
                     .child(self.render_banners(window, cx))
                     .child(div().flex_1().min_h_0().child(body))
                     .children(sheet)
+                    .children(emoji_sheet)
                     .children(gallery)
                     .children(location)
                     .children(poll_form)

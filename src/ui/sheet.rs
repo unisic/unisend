@@ -23,6 +23,7 @@ const THROW_PAST: f32 = 40.;
 const UNMEASURED: f32 = 4000.;
 const MAX_SAMPLES: usize = 6;
 const SCRIM: f32 = 0.6;
+pub(super) const HANDLE_H: f32 = 20.;
 
 /// Whether a sheet let go at `y` px below its open position, moving at `speed` px/s, closes.
 pub(super) fn dismisses(y: f32, speed: f32, h: f32) -> bool {
@@ -203,6 +204,10 @@ impl SheetMotion {
         }
     }
 
+    pub(super) fn is_live(&self) -> bool {
+        self.live
+    }
+
     /// How long ago the rise began, while it is up.
     pub(super) fn risen_for(&self) -> Option<Duration> {
         self.risen.filter(|_| self.live).map(|at| at.elapsed())
@@ -304,7 +309,7 @@ fn probe(cell: Rc<Cell<f32>>, view: EntityId) -> impl IntoElement {
 
 /// The pill on a sheet's top that says it can be dragged down.
 pub(super) fn handle(ink: Hsla) -> Div {
-    div().flex_none().h(px(20.)).flex().items_center().justify_center().child(div().w(px(36.)).h(px(4.)).rounded_full().bg(ink.opacity(0.5)))
+    div().flex_none().h(px(HANDLE_H)).flex().items_center().justify_center().child(div().w(px(36.)).h(px(4.)).rounded_full().bg(ink.opacity(0.5)))
 }
 
 /// The dimmed layer a sheet rises in; it blocks the screen under it only while the sheet is live.
