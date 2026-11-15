@@ -315,6 +315,7 @@ impl BeeperApp {
             .right_0()
             .h(px(BAR_H))
             .px(px(GUTTER - 10.))
+            .pr(px(GUTTER - 10. + self.chat_end(window)))
             .gap(px(4.))
             .items_center()
             .bg(p.ground)

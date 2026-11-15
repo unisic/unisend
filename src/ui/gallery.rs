@@ -306,6 +306,7 @@ impl Attach {
         h_flex()
             .id(self.id())
             .h(px(SHEET_ROW_H))
+            .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.raised)))
             .active(|el| el.bg(p.raised))
             .px(px(GUTTER + 4.))
             .gap(px(GAP))

@@ -13,6 +13,7 @@ use gpui_kit::component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     spinner::Spinner,
+    tooltip::Tooltip,
     v_flex,
 };
 use gpui_kit::base::{Presence, PresencePhase, Transition, spring, transition};
@@ -88,6 +89,10 @@ const JOINED: f32 = 6.;
 /// Width of the navigation and of the chat list beside an open chat on a wide window.
 const NAV_W: f32 = 210.;
 const LIST_W: f32 = 384.;
+/// The navigation as icons alone, on a desktop window narrower than `RAIL_BELOW`.
+const RAIL_W: f32 = 60.;
+/// Where the labelled navigation would leave the conversation under about 800 wide.
+const RAIL_BELOW: f32 = 1400.;
 /// Widest a message and a sheet grow on a wide window.
 const BUBBLE_W: f32 = 560.;
 /// Widest the conversation runs on a wide window; beyond it the pane keeps an even margin.
@@ -1507,9 +1512,19 @@ impl BeeperApp {
     }
 
     /// The destinations: a bar under a phone's screen, a column beside a wide window's.
+    /// A desktop window too narrow for the labelled navigation beside a usable conversation.
+    fn rail(window: &Window) -> bool {
+        !gpui_kit::is_mobile() && frame::viewport(window).width < px(RAIL_BELOW)
+    }
+
+    fn nav_w(window: &Window) -> f32 {
+        if Self::rail(window) { RAIL_W } else { NAV_W }
+    }
+
     fn render_nav(&mut self, narrow: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         let current = self.tab();
+        let rail = !narrow && Self::rail(window);
         let items = TABS.map(|(tab, label, icon)| {
             let ink = if tab == current { p.text } else { p.faint };
             let press = press::area(label, Duration::ZERO, p.surface, window, cx).when(!narrow, |el| el.rounded(px(RADIUS)));
@@ -1527,25 +1542,27 @@ impl BeeperApp {
                         el.flex_1().h_full().flex_col().justify_center().gap(px(4.)).text_size(fs(12.))
                     } else {
                         el.h(px(TAP))
-                            .px(px(GAP))
                             .gap(px(GAP))
                             .rounded(px(RADIUS))
-                            .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.surface)))
+                            .map(|el| if rail { el.justify_center() } else { el.px(px(GAP)) })
+                            .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.surface)).active(|el| el.bg(p.raised)))
                     }
                 })
                 .child(Icon::new(icon).size_5())
-                .child(tr(label))
+                .map(|el| if rail { el.aria_label(tr(label)).tooltip(move |window, cx| Tooltip::new(tr(label)).build(window, cx)) } else { el.child(tr(label)) })
         });
         if narrow {
             h_flex().flex_none().h(px(NAV_H)).border_t_1().border_color(p.rule).children(items)
         } else {
+            let name = h_flex().h(px(BAR_H)).text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD);
+            let name = if rail { name } else { name.px(px(GAP)).child("Unisend") };
             v_flex()
                 .flex_none()
-                .w(px(NAV_W))
+                .w(px(Self::nav_w(window)))
                 .h_full()
                 .px(px(8.))
                 .gap(px(2.))
-                .child(h_flex().h(px(BAR_H)).px(px(GAP)).text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child("Unisend"))
+                .child(frame::drag(name, window, cx))
                 .children(items)
         }
     }
@@ -1581,7 +1598,8 @@ impl BeeperApp {
         .size_0()
     }
 
-    fn render_rooms(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `banners` go over the list, where a wide desktop window keeps them to the list's column.
+    fn render_rooms(&mut self, banners: Option<AnyElement>, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         self.row_settle(cx);
         let list = uniform_list(
@@ -1626,7 +1644,7 @@ impl BeeperApp {
                             .relative()
                             .left(px(sx))
                             .when(backdrop.is_some(), |el| el.bg(p.ground))
-                            .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(if selected { p.raised } else { p.surface })))
+                            .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(if selected { p.raised } else { p.surface })).active(|el| el.bg(p.raised)))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| this.open_room(id.clone(), cx)))
                             .child(div().absolute().inset_0().bg(p.raised).opacity(lit_alpha))
@@ -1752,6 +1770,8 @@ impl BeeperApp {
                 View::LowPriority => t!("Nothing in low priority"),
             }
         };
+        // Alone on a narrow window, the list's top row ends under the window buttons.
+        let end = if frame::viewport(window).width < px(NARROW) { frame::reserve(window) } else { 0. };
         let top = if self.searching {
             h_flex()
                 .flex_1()
@@ -1768,7 +1788,11 @@ impl BeeperApp {
         } else {
             h_flex()
                 .flex_1()
-                .child(div().flex_1().child(screen_title(if archive { t!("Archive") } else { t!("Chats") })))
+                .child(frame::drag(
+                    div().flex_1().when(!gpui_kit::is_mobile(), |el| el.h_full().flex().items_center()).child(screen_title(if archive { t!("Archive") } else { t!("Chats") })),
+                    window,
+                    cx,
+                ))
                 .child(round_button("new-chat", IconName::Plus, cx).on_click(cx.listener(|this, _, window, cx| this.open_new_chat(window, cx))))
                 .child(round_button("search", IconName::Search, cx).on_click(cx.listener(|this, _, window, cx| {
                     this.set_searching(true, window, cx);
@@ -1808,10 +1832,11 @@ impl BeeperApp {
         let filters = h_flex().flex_none().relative().px(px(GUTTER)).pb(px(4.)).gap(px(4.)).child(seg.container()).children(slider).children(filters);
         v_flex()
             .size_full()
-            .child(h_flex().flex_none().h(px(BAR_H)).pl(px(GUTTER)).pr(px(if self.searching { GUTTER } else { GUTTER - 10. })).child(top))
+            .child(h_flex().flex_none().h(px(BAR_H)).pl(px(GUTTER)).pr(px(if self.searching { GUTTER } else { GUTTER - 10. } + end)).child(top))
             .when(!archive && !self.searching, |el| {
                 el.child(filters)
             })
+            .children(banners)
             .child(self.list_touch(cx))
             .child(div().flex_1().min_h_0().child(if state == RoomsView::Skeleton {
                 skeleton(p).into_any_element()
@@ -1824,6 +1849,13 @@ impl BeeperApp {
             } else {
                 list.into_any_element()
             }))
+    }
+
+    /// What the window buttons take from the right end of the chat's top row: all they need,
+    /// unless the chat's info stands to its right.
+    fn chat_end(&self, window: &Window) -> f32 {
+        let narrow = frame::viewport(window).width < px(NARROW);
+        if !narrow && self.info_open() && Self::info_beside(window) { 0. } else { frame::reserve(window) }
     }
 
     fn render_chat(&mut self, narrow: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1843,7 +1875,7 @@ impl BeeperApp {
         // The newest message, when it is the user's: the one whose way to the others is told.
         self.tail = self.msgs.iter().rposition(|m| m.kind == Kind::Message && !self.is_hidden(&m.id)).filter(|&ix| self.msgs[ix].own);
         // A wide pane keeps the conversation to a column a glance can cross, as desktop chat apps do.
-        let column = if narrow { 0. } else { ((f32::from(frame::viewport(window).width) - NAV_W - LIST_W - self.info_aside(window) - THREAD_W) / 2.).max(0.) };
+        let column = if narrow { 0. } else { ((f32::from(frame::viewport(window).width) - Self::nav_w(window) - LIST_W - self.info_aside(window) - THREAD_W) / 2.).max(0.) };
         let timeline = list(
             self.timeline.clone(),
             cx.processor(move |this, ix: usize, window, cx| {
@@ -1867,7 +1899,7 @@ impl BeeperApp {
                 // What a bubble has inside: its share of the row, less its padding and a mention's bar.
                 let row = f32::from(frame::viewport(window).width) - 2. * GUTTER - this.info_aside(window);
                 // Wide, the pane beside the lists also holds a face and the hover buttons.
-                let room = if narrow { row * BUBBLE_SHARE } else { BUBBLE_W.min(row - NAV_W - LIST_W - SENDER - 8. - SIDE_ROOM).max(TAP * 4.) } - 2. * GAP - 9.;
+                let room = if narrow { row * BUBBLE_SHARE } else { BUBBLE_W.min(row - Self::nav_w(window) - LIST_W - SENDER - 8. - SIDE_ROOM).max(TAP * 4.) } - 2. * GAP - 9.;
                 // A picture sits in its bubble with a thin margin, concentric with it; alone, it is the bubble.
                 let pictured = !m.deleted && m.media.as_ref().is_some_and(drawn_as_picture);
                 // A few emoji on their own are drawn large and free, as the phones do.
@@ -2203,14 +2235,17 @@ impl BeeperApp {
         // The send button turns between a microphone (nothing typed) and an arrow; desktop has no microphone.
         let mic = self.mic_shown(cx);
         let send_mode = transition(("send", "mode"), if mic { 0. } else { 1. }, motion::exit(), window, cx);
+        let own_frame = frame::reserve(window) > 0.;
+        let end = self.chat_end(window);
 
         v_flex()
             .size_full()
             .relative()
-            .children(self.find_bar(cx))
+            .children(self.find_bar(cx).map(|el| el.pr(px(GUTTER + end))))
             .child(
                 header()
                     .when(self.find.open, |el| el.hidden())
+                    .when(end > 0., |el| el.pr(px(GUTTER - 10. + end)))
                     .when(narrow, |el| {
                         el.child(round_button("back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.pop_room(cx))))
                     })
@@ -2218,7 +2253,8 @@ impl BeeperApp {
                     .child(
                         h_flex()
                             .id("chat-title")
-                            .flex_1()
+                            // Under the app's own window frame the empty rest of the row moves the window.
+                            .map(|el| if own_frame { el.flex_initial() } else { el.flex_1() })
                             .min_w_0()
                             .h_full()
                             .cursor_pointer()
@@ -2226,13 +2262,14 @@ impl BeeperApp {
                             .children(header_avatar)
                             .child(
                                 v_flex()
-                                    .flex_1()
+                                    .map(|el| if own_frame { el.flex_initial() } else { el.flex_1() })
                                     .min_w_0()
                                     .pl(px(8.))
                                     .child(div().text_size(fs(16.)).line_height(fs(20.)).font_weight(FontWeight::SEMIBOLD).truncate().child(name))
                                     .children(self.header_subline(network, cx)),
                             ),
                     )
+                    .when(own_frame, |el| el.child(frame::drag(div().flex_1().h_full(), window, cx)))
                     .when(room.is_some(), |el| el.child(self.find_button(cx)))
                     .when(room.is_some(), |el| {
                         el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, _, _, cx| {
@@ -3478,6 +3515,7 @@ fn sheet_row_idle(id: &'static str, icon: IconName, label: impl Into<SharedStrin
     h_flex()
         .id(id)
         .h(px(SHEET_ROW_H))
+        .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.raised)))
         .active(|el| el.bg(p.raised))
         .px(px(GUTTER + 4.))
         .gap(px(GAP))
@@ -3607,17 +3645,20 @@ fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperA
 
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let locked = self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked();
+        if locked {
+            let lock = self.render_lock(window, cx);
+            return frame::wrap(lock, window, cx);
+        }
         let screen = self.render_screen(window, cx);
-        frame::wrap(screen, window, cx)
+        // The main screen places the window buttons itself, under its sheets and its viewer.
+        if self.screen == Screen::Main { screen } else { frame::wrap(screen, window, cx) }
     }
 }
 
 impl BeeperApp {
     fn render_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
-        if self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked() {
-            return self.render_lock(window, cx);
-        }
         let (top, bottom) = crate::insets();
         self.apply_draft(window, cx);
         if window.focused(cx).is_none() {
@@ -3650,7 +3691,10 @@ impl BeeperApp {
             Screen::Matrix => root.child(self.render_matrix_login(cx)).into_any_element(),
             Screen::Main => {
                 let narrow = frame::viewport(window).width < px(NARROW);
-                let panel = self.panel.map(|panel| self.render_panel(panel, narrow, window, cx));
+                // A wide desktop window keeps them to the column they are about, not its full width.
+                let in_column = !narrow && !gpui_kit::is_mobile();
+                let mut banners = in_column.then(|| self.render_banners(window, cx).into_any_element());
+                let panel = self.panel.map(|panel| self.render_panel(panel, narrow, banners.take(), window, cx));
                 let body = if narrow {
                     let deep_panel = matches!(self.panel, Some(Panel::Add | Panel::Login | Panel::NewChat));
                     match self.panel {
@@ -3691,14 +3735,14 @@ impl BeeperApp {
                     } else if in_chat {
                         Some(if self.info_open() { self.render_info(false, window, cx) } else { self.render_chat(true, window, cx).into_any_element() })
                     } else {
-                        self.slide.last_panel.map(|last| self.render_panel(last, true, window, cx))
+                        self.slide.last_panel.map(|last| self.render_panel(last, true, None, window, cx))
                     };
                     let g = slide::layers(v, f32::from(frame::viewport(window).width), cx.reduce_motion());
                     let under = if over.is_none() || v < 1. {
                         if deep_panel && let Some(base) = self.slide.base {
-                            panel_base = Some(self.render_panel(base, true, window, cx));
+                            panel_base = Some(self.render_panel(base, true, None, window, cx));
                         }
-                        let screen = panel_base.unwrap_or_else(|| self.render_rooms(window, cx).into_any_element());
+                        let screen = panel_base.unwrap_or_else(|| self.render_rooms(None, window, cx).into_any_element());
                         Some(
                             div().absolute().inset_0().child(
                                 v_flex()
@@ -3744,19 +3788,23 @@ impl BeeperApp {
                             .min_w_0()
                             .h_full()
                             // The one line between the panes, so the list and the conversation read as two.
-                            .child(div().w(px(LIST_W)).flex_none().h_full().border_r_1().border_color(p.rule).child(self.render_rooms(window, cx)))
+                            .child(div().w(px(LIST_W)).flex_none().h_full().border_r_1().border_color(p.rule).child(self.render_rooms(banners.take(), window, cx)))
                             .child(div().flex_1().min_w_0().h_full().child(if self.info_open() && !beside {
                                 self.render_info(false, window, cx)
                             } else if self.open.is_some() {
                                 self.render_chat(false, window, cx).into_any_element()
                             } else {
-                                div()
+                                let strip = frame::drag(div().absolute().top_0().left_0().w_full().h(px(BAR_H)), window, cx);
+                                v_flex()
                                     .size_full()
-                                    .flex()
+                                    .relative()
                                     .items_center()
                                     .justify_center()
+                                    .gap(px(10.))
                                     .text_size(fs(14.))
                                     .text_color(p.faint)
+                                    .child(strip)
+                                    .when(!gpui_kit::is_mobile(), |el| el.child(Icon::new(IconName::MessageCircle).size_8()))
                                     .child(t!("Choose a chat"))
 
                                     .into_any_element()
@@ -3781,8 +3829,9 @@ impl BeeperApp {
                 let preview = self.render_preview(window, cx);
                 let verify = self.render_verify_sheet(window, cx);
                 root.relative()
-                    .child(self.render_banners(window, cx))
+                    .when(!in_column, |el| el.child(self.render_banners(window, cx)))
                     .child(div().flex_1().min_h_0().child(body))
+                    .children(frame::controls(window, cx))
                     .children(sheet)
                     .children(emoji_sheet)
                     .children(gallery)
