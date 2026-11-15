@@ -2,7 +2,7 @@
 
 How Murmur keeps what it stores on the phone. Code: `src/vault.rs`,
 `android/app/src/main/java/dev/gpui/beeper/DataKey.java`, `src/backend.rs` (`unlock`, `lost`,
-`fresh_store`, `wipe_account`), `src/backend/search.rs`.
+`restore`, `fresh_store`, `wipe_account`), `src/backend/search.rs`.
 
 ## Threat model
 
@@ -38,11 +38,14 @@ Not protected:
 | `session.enc` | access token and device | sealed |
 | `rooms.enc` | chat list with names and message previews | sealed |
 | `drafts.enc` | unsent text per chat | sealed |
-| `search.enc` | message search index (FTS5), kept in memory, saved every 5 minutes while it changes | sealed |
+| `search.enc` | message search index (FTS5), kept in memory, saved every 5 minutes while it changes, at most 24 MiB | sealed |
 | `rooms-lang.txt`, `settings.json`, `emoji-recents.json`, `hidden-<account>.txt` (ids of hidden messages), `wallpaper.jpg`, `klipy-id`, app PIN hash, emoji font | no chat content | plain |
 
-A sealed file is `1 | nonce (12, random) | AES-256-GCM ciphertext | tag (16)`, and the plain file
-name is authenticated with it, so one file cannot be swapped for another.
+A sealed file is `1 | nonce (12, random) | AES-256-GCM ciphertext | tag (16)`. The format byte and
+the plain file name are authenticated with it (AAD), so one file cannot be swapped for another and
+the format cannot be changed without the tag failing. `session.enc` is written with fsync. A sealed
+or chat-content file is written only while a session exists, under the same lock that sign-out
+holds while it deletes, so a write racing a sign-out cannot bring a file back.
 
 What the SDK leaves readable in `store/` (matrix-sdk-sqlite 0.19.1): table and index names, row
 counts and sizes, integer columns (timestamps, send queue priority and order, chunk links), the
@@ -54,31 +57,54 @@ neither.
 
 Plain on purpose, short-lived:
 
-- `media/`: attachments downloaded to open in another app. Emptied at start and at sign-out.
+- `media/`: attachments downloaded to open in another app or to play. Each event's folder is
+  deleted 10 minutes after it was written (swept on each download and every 5 minutes), and the
+  whole directory at start and at sign-out. A player or app that already opened the file keeps
+  reading it; one that opens it again later gets an error and the file is downloaded anew.
 - `notify/`: a chat's picture for a notification, deleted as soon as the notification has it.
 - `cache/voice`, `cache/camera`, `cache/outgoing`, shared-in copies: the user's own recordings,
   photos and picked files on the way out; deleted after sending or when stale.
 - Saved to gallery (`Pictures/Murmur`): the user asked for a public copy.
+
+Backup and transfer: `android:allowBackup="false"`, and `res/xml/data_extraction_rules.xml`
+excludes every file from cloud backup, device-to-device transfer (which Android 12+ runs despite
+`allowBackup="false"` on some phones) and transfer to iOS (Android 16 QPR2+).
 
 ## Start, sign-in, sign-out
 
 - Start: no `store.key` means plain (desktop, legacy, or signed out). Otherwise the key is
   unwrapped once and opens everything.
 - Every sign-in on Android removes what an earlier one left and makes a new key before the store
-  is created. A Keystore failure then fails the sign-in; nothing falls back to plain.
-- Sign-out deletes the store, `store.key`, the sealed and plain session, chat list, drafts,
-  search index, downloads and notification pictures. The Keystore alias stays and wraps the next
-  key.
+  is created. A Keystore failure then fails the sign-in; nothing falls back to plain. A sign-in is
+  refused while a session exists that may still open (only signing out deletes it); it replaces
+  the files only when there is no session, or this start found the key lost or the session
+  unreadable.
+- Sign-out, and the server signing the device out (`M_UNKNOWN_TOKEN`), delete the store,
+  `store.key`, the sealed and plain session, chat list, drafts, search index, downloads,
+  notification pictures and any `*.tmp` left by a cut-short write. Sign-out first waits for the
+  sync and recovery tasks to stop, and a download that finishes after it writes nothing. The
+  Keystore alias stays and wraps the next key.
 
 ## Failure handling
 
-- Lost for good: `KeyPermanentlyInvalidatedException`, `UnrecoverableKeyException` (including a
-  missing alias), `AEADBadTagException` on unwrap, a key file that unwraps to the wrong length, a
-  session that does not open with the key, the store refusing the key
-  (`OpenStoreError::InitCipher`), or a `store.key` on a platform without a key store. The device is treated as signed out with a message saying so,
-  and only then are the undecryptable files removed.
-- Transient: any other exception or I/O error. The app says it could not open the data, asks
-  again after 2 s, doubling up to 60 s, and deletes nothing.
+- Permanent key loss signs out; anything else is retried; no error path deletes anything. Only an
+  explicit sign-out, the server's `M_UNKNOWN_TOKEN`, or the next sign-in after a loss deletes.
+- Lost for good: `DataKey` throws `DataKey$Lost` for no key under the alias (`getKey` returns
+  null, which keystore2 does for `KEY_NOT_FOUND`), a key invalidated at `Cipher.init`, a blob
+  shorter than its IV, and `AEADBadTagException` on unwrap (keystore2 throws it only for
+  `KM_ERROR_VERIFICATION_FAILED`). Also a key file that unwraps to the wrong length, a session
+  that does not authenticate with the key, the store refusing the key
+  (`OpenStoreError::InitCipher`), or a `store.key` on a platform without a key store. The device
+  shows the sign-in screen with a message saying so; the files stay until the next sign-in.
+- Unreadable session: `session.enc` cut short, in a newer format (a downgrade), or not valid
+  JSON. Signed out the same way, with the files kept.
+- Transient: every other exception or I/O error, including keystore2's
+  `UnrecoverableKeyException("Failed to obtain information about key")`, which wraps any
+  `getKeyEntry` failure but `KEY_NOT_FOUND` (system error, busy backend, a restarted daemon), and
+  a store that fails to open for a reason other than its key. The app says it could not open the
+  data, asks again after 2 s, doubling up to 60 s, and deletes nothing.
+- Drafts that fail to read for a reason that may pass are not written over: a change waits and
+  the next save reads them again first.
 - A search index that does not open is a lost cache: it starts again empty.
 - Logs name the file and the exception class, never key bytes, tokens or message text.
 
@@ -95,6 +121,11 @@ device). Nothing is converted or deleted automatically.
 - One AES-256-GCM pass per sealed read or write (hardware AES on arm64), plus 29 bytes per file;
   no key derivation, the key is random.
 - The SDK encrypts each value it stores (XChaCha20-Poly1305) and hashes keys (keyed BLAKE3).
-- Search index, sealed: held in memory (up to about 16 MB at its 50 000-message cap); each save
-  copies, seals and writes all of it, at most every 5 minutes and only after a change. A kill
+- Search index: 50 000 messages at most (about 16 MB for short chat lines), the first 4 KB of each
+  message, the oldest pruned once more than 20 MiB of pages are in use, and the database capped at
+  24 MiB. Sealed, it is held in memory (SQLite's memdb), and each save seals one copy in place and
+  writes it: at most 48 MiB for a moment, at most every 5 minutes and only after a change. A
+  start opens the file in the buffer it was read into and gives SQLite one copy, also 2x. A kill
   loses at most the last 5 minutes of indexing.
+- Downloads sweep: one directory listing and a stat per event folder every 5 minutes and per
+  download.
