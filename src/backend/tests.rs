@@ -81,6 +81,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         info: None,
         peer: None,
         replaceable: false,
+        update: None,
     };
     (st, Seat { rx, rows: Vec::new() })
 }
@@ -1797,7 +1798,7 @@ fn previews_are_relabelled_in_the_current_language() {
 
 #[test]
 fn cached_previews_in_another_language_are_relabelled_on_load() {
-    let dir = std::env::temp_dir().join(format!("murmur-rooms-lang-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("unisend-rooms-lang-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let rooms = serde_json::json!({
         "!a:x": { "id": "!a:x", "name": "A", "preview": "Ty: 📷 Zdjęcie", "ts": 5, "dated": true },

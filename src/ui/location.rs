@@ -219,7 +219,7 @@ impl BeeperApp {
             State::Asking => v_flex().gap(px(12.)).child(line(t!("Waiting for your answer to the location question."))),
             State::Denied => v_flex()
                 .gap(px(12.))
-                .child(line(t!("Murmur has no access to your location. Allow it to share where you are.")))
+                .child(line(t!("Unisend has no access to your location. Allow it to share where you are.")))
                 .child(button("location-allow", t!("Allow"), true).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.ask_location(cx))))),
             State::Off => v_flex()
                 .gap(px(12.))
@@ -228,7 +228,7 @@ impl BeeperApp {
             State::Locating => v_flex().gap(px(12.)).child(line(t!("Finding your location. This can take up to 20 seconds."))),
             State::Failed => v_flex()
                 .gap(px(12.))
-                .child(line(t!("No GPS fix in time. Murmur uses only GPS, so try again outdoors or by a window.")))
+                .child(line(t!("No GPS fix in time. Unisend uses only GPS, so try again outdoors or by a window.")))
                 .child(button("location-retry", t!("Try again"), true).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.open_location(cx))))),
             State::Found(fix) => {
                 let fix = *fix;

@@ -41,7 +41,7 @@ public final class SyncService extends Service {
     static Notification notice(Context context) {
         return new Notification.Builder(context, Notify.CONNECTION)
                 .setSmallIcon(android.R.drawable.stat_notify_sync_noanim)
-                .setContentTitle("Murmur")
+                .setContentTitle("Unisend")
                 .setContentText(context.getString(R.string.connected_for_new))
                 .setOngoing(true)
                 .build();

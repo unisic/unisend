@@ -29,7 +29,7 @@ import java.io.InputStream;
  * always off the UI thread.
  */
 public final class Gallery {
-    private static final String TAG = "Murmur";
+    private static final String TAG = "Unisend";
     private static final int TYPE_IMAGE = 1;
     private static final int TYPE_VIDEO = 3;
 

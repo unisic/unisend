@@ -95,8 +95,8 @@ impl BeeperApp {
             let network = self.rooms.iter().find(|r| &r.id == room).and_then(|r| r.network.clone());
             let why = match (&setting.choices, network) {
                 (Some(_), _) => t!("Only the chat's admins can change this.").to_owned(),
-                (None, Some(network)) => t!("This chat's bridge does not take this change from Murmur. Change it in {network}.", network = network),
-                (None, None) => t!("This chat does not take this change from Murmur.").to_owned(),
+                (None, Some(network)) => t!("This chat's bridge does not take this change from Unisend. Change it in {network}.", network = network),
+                (None, None) => t!("This chat does not take this change from Unisend.").to_owned(),
             };
             let p = Palette::of(cx);
             let current = timer_row("disappear-current", Some(IconName::Timer), disappear_label(setting.ms), cx).cursor_default();

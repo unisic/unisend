@@ -400,6 +400,7 @@ impl BeeperApp {
         });
         let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
         let security = self.render_security(cx);
+        let updates = self.render_updates(cx);
         v_flex()
             .gap(px(GAP * 2.))
             .child(section(t!("Appearance"), cx).child(
@@ -439,7 +440,7 @@ impl BeeperApp {
                             .child(t!("Change")),
                     ),
                 ).child(
-                    row(t!("Stay connected in the background"), t!("On: notifications arrive while Murmur is closed, under a quiet system notice. Off: no notice, messages arrive only while Murmur is open."), cx).child(stay),
+                    row(t!("Stay connected in the background"), t!("On: notifications arrive while Unisend is closed, under a quiet system notice. Off: no notice, messages arrive only while Unisend is open."), cx).child(stay),
                 ).when(self.settings.stay_connected, |el| {
                     el.child(
                         row(t!("Hide the connection notice"), t!("Opens Android settings for this notice only. Messages keep arriving."), cx).child(
@@ -463,6 +464,7 @@ impl BeeperApp {
             })))
             .child(security)
             .child(self.render_devices(cx))
+            .children(updates)
             .child(
                 section(t!("Account"), cx).child(
                     card(cx).child(row(if self.beeper { "Beeper" } else { "Matrix" }, &user, cx)).child(
@@ -481,7 +483,7 @@ impl BeeperApp {
                     ),
                 ),
             )
-            .child(div().text_size(fs(12.)).text_color(p.faint).child(concat!("Murmur ", env!("CARGO_PKG_VERSION"))))
+            .child(div().text_size(fs(12.)).text_color(p.faint).child(concat!("Unisend ", env!("CARGO_PKG_VERSION"))))
     }
 
     /// The app lock with its timeout, and screen security. Desktop has the app PIN only, asked at
@@ -519,12 +521,12 @@ impl BeeperApp {
                 .on_click(cx.listener(move |this, _, _, cx| this.set_lock(None, Some(secs), None, cx)))
                 .child(crate::i18n::tr(label))
         }));
-        let pin_detail = if android { t!("4 to 8 digits, set only for Murmur.") } else { t!("4 to 8 digits, asked when Murmur starts.") };
+        let pin_detail = if android { t!("4 to 8 digits, set only for Unisend.") } else { t!("4 to 8 digits, asked when Unisend starts.") };
         let phone_detail =
             if phone { t!("Fingerprint, face or the phone's PIN, pattern or password.") } else { t!("Set a PIN, pattern or password in the phone's settings first.") };
         section(t!("Security"), cx).child(
             card(cx)
-                .child(row(t!("App lock"), t!("Asked for when Murmur opens."), cx))
+                .child(row(t!("App lock"), t!("Asked for when Unisend opens."), cx))
                 .child(choice("lock-off", t!("Off|app lock"), "", LockMode::Off, true, cx))
                 .when(android, |el| el.child(choice("lock-phone", t!("Phone lock"), phone_detail, LockMode::Phone, phone || lock.mode == LockMode::Phone, cx)))
                 .child(choice("lock-pin", t!("App PIN"), pin_detail, LockMode::Pin, true, cx))
@@ -542,7 +544,7 @@ impl BeeperApp {
                 .when(self.unencrypted, |el| {
                     el.child(row(
                         t!("Data on this device is not encrypted"),
-                        t!("Signed in before Murmur encrypted its data. Sign out and in again to encrypt it; keep your recovery key to bring back message history."),
+                        t!("Signed in before Unisend encrypted its data. Sign out and in again to encrypt it; keep your recovery key to bring back message history."),
                         cx,
                     ))
                 }),

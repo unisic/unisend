@@ -1,4 +1,4 @@
-# Murmur
+# Unisend
 
 Privacy-first: the owner wants maximum privacy. For any feature that sends data off the device
 (push, previews, GIFs, maps, analytics, crash reports, fonts, update checks), pick the option

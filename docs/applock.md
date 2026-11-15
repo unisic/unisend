@@ -49,7 +49,7 @@ switched on. If the phone's lock is removed later, the app opens without asking.
 
 ## What it protects against
 
-Someone holding the unlocked phone opening Murmur. It does not encrypt anything: the messages,
+Someone holding the unlocked phone opening Unisend. It does not encrypt anything: the messages,
 keys and session stay as readable as before to anyone who can read the app's files (root, a
 backup tool with that access, a forensic copy), and four to eight digits are guessed offline in
 little time whatever the hash. Notifications still show senders and message text while the app is

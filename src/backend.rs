@@ -189,6 +189,13 @@ pub enum Cmd {
     PeerIds(OwnedRoomId),
     /// Messages matching `query` in one room, or in every room; answered with `Found`.
     Search { room: Option<OwnedRoomId>, query: String },
+    /// Looks for a newer release; answered with `Ev::Update`.
+    UpdateCheck,
+    /// Downloads, checks and installs this release; replaces a download still running.
+    UpdateInstall(update::Release),
+    /// Android did not install the update, for this reason.
+    #[cfg(target_os = "android")]
+    UpdateFailed(String),
 }
 
 pub enum Ev {
@@ -258,6 +265,8 @@ pub enum Ev {
     Features { room: OwnedRoomId, features: Option<Features> },
     /// A chat's details for its info screen; sent again as more is known.
     Info(OwnedRoomId, Box<info::Details>),
+    /// What checking for or installing an update did.
+    Update(update::Step),
     /// The answer to `Cmd::PeerIds`; never sent for a group.
     PeerIds(OwnedRoomId, Vec<String>),
     /// Messages with media, files or links, newest first; `scanned` counts the events read so far.
@@ -635,6 +644,14 @@ pub(crate) fn reply(chat: &str, body: &str) -> bool {
     !body.is_empty() && COMMANDS.get().is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None, mentions: Vec::new() }).is_ok())
 }
 
+/// Android's answer when it did not install an update.
+#[cfg(target_os = "android")]
+pub(crate) fn update_failed(why: String) {
+    if COMMANDS.get().is_none_or(|tx| tx.try_send(Cmd::UpdateFailed(why)).is_err()) {
+        log::warn!("update failure not shown");
+    }
+}
+
 /// Marks a chat read from its notification.
 #[cfg(target_os = "android")]
 pub(crate) fn read_from_notification(chat: &str) {
@@ -720,6 +737,8 @@ struct State {
     /// The account on disk cannot be opened here (key gone, session unreadable), so a sign-in may
     /// replace it; otherwise a sign-in never deletes a session that may still open.
     replaceable: bool,
+    /// The update being downloaded and installed.
+    update: Option<AbortOnDrop>,
 }
 
 /// Room summaries, shared by the sync loop and preview refreshes. Never held across an await.
@@ -734,11 +753,12 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         }
     };
     let _ = std::fs::remove_dir_all(media_dir(&dir));
+    let _ = std::fs::remove_dir_all(update::folder(&dir));
     // Older builds kept KLIPY's customer ID on disk; it now lives only in memory.
     let _ = std::fs::remove_file(dir.join("klipy-id"));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
-        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, replaceable: false };
+        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, replaceable: false, update: None };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
     let restored = if st.unlock().await { st.restore_retrying().await } else { false };
     if !restored {
@@ -1018,7 +1038,7 @@ impl State {
         client
             .matrix_auth()
             .login_custom("org.matrix.login.jwt", data)?
-            .initial_device_display_name("Murmur")
+            .initial_device_display_name("Unisend")
             .await?;
         let session = client.matrix_auth().session().ok_or_else(|| anyhow!(t!("Login returned no session")))?;
         self.seal.write(&self.dir, vault::SESSION, &serde_json::to_vec(&SavedSession { session, homeserver: None })?)?;
@@ -1061,7 +1081,7 @@ impl State {
             )));
 
         }
-        auth.login_username(user, password).initial_device_display_name("Murmur").await.map_err(|e| {
+        auth.login_username(user, password).initial_device_display_name("Unisend").await.map_err(|e| {
             match e.client_api_error_kind() {
                 Some(ErrorKind::Forbidden) => anyhow!(t!("Wrong user name or password.")),
                 Some(ErrorKind::UserDeactivated) => anyhow!(t!("This account has been deactivated.")),
@@ -1462,6 +1482,14 @@ impl State {
             }
             Cmd::GifSearch { query, page } => gifs::search(self.http.clone(), self.ev.clone(), query, page),
             Cmd::GifStop => gifs::stop(),
+            Cmd::UpdateCheck => {
+                tokio::spawn(update::run_check(self.http.clone(), self.ev.clone()));
+            }
+            Cmd::UpdateInstall(release) => {
+                self.update = Some(AbortOnDrop(tokio::spawn(update::run_install(self.http.clone(), self.ev.clone(), self.dir.clone(), release))));
+            }
+            #[cfg(target_os = "android")]
+            Cmd::UpdateFailed(why) => self.emit(Ev::Update(update::Step::Failed(why))).await,
             Cmd::SendGif { room, gif, query, reply_to } => {
                 let network = self.rooms.lock().unwrap().get(&room).and_then(|r| r.network.clone());
                 let room = self.room(&room);
@@ -2923,6 +2951,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
 mod location;
 mod contact;
 mod gifs;
+pub(crate) mod update;
 pub(crate) use gifs::{Found as GifPage, Gif, enabled as gifs_enabled, wants_gif_file};
 pub(crate) mod caption;
 mod strip;

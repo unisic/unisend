@@ -111,17 +111,17 @@ fn wording(c: &Confirm) -> (String, String, &'static str) {
     match (c.network.is_some(), c.delete == Some(true), c.dm) {
         (true, true, true) => (
             t!("Delete {name}?", name = c.name),
-            t!("The chat is deleted from Murmur and from your {network} account. The other person keeps their copy.", network = network),
+            t!("The chat is deleted from Unisend and from your {network} account. The other person keeps their copy.", network = network),
             t!("Delete"),
         ),
         (true, true, false) => (
             t!("Delete {name}?", name = c.name),
-            t!("You leave the group on {network}, and the chat is deleted from Murmur and from your account. The other members keep their copy.", network = network),
+            t!("You leave the group on {network}, and the chat is deleted from Unisend and from your account. The other members keep their copy.", network = network),
             t!("Delete"),
         ),
         (true, false, _) => (
             t!("Leave {name}?", name = c.name),
-            t!("The chat is removed from Murmur only. The {network} bridge cannot delete it there, and new messages may bring it back.", network = network),
+            t!("The chat is removed from Unisend only. The {network} bridge cannot delete it there, and new messages may bring it back.", network = network),
             t!("Leave"),
         ),
         (false, _, true) => (t!("Leave {name}?", name = c.name), t!("The chat is removed from your list. The other person keeps the conversation.").to_owned(), t!("Leave")),

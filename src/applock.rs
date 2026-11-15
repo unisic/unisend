@@ -281,7 +281,7 @@ pub(crate) fn screen(cx: &App) -> Stateful<Div> {
         .bg(p.ground)
         .text_color(p.text)
         .child(Icon::new(IconName::Lock).size_8().text_color(p.muted))
-        .child(div().text_size(px(18.)).child(t!("Murmur is locked")))
+        .child(div().text_size(px(18.)).child(t!("Unisend is locked")))
         .child(
             div()
                 .id("app-lock-unlock")

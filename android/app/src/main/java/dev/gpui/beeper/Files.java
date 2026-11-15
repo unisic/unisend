@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** File hand-offs between this app and others. All methods are called from Rust over JNI. */
 public final class Files {
-    private static final String TAG = "Murmur";
+    private static final String TAG = "Unisend";
     private static final long STALE_MS = 60 * 60 * 1000;
     private static final AtomicInteger PICKS = new AtomicInteger();
     /** Longest document name kept, in UTF-8 bytes; file systems allow 255. */
@@ -71,7 +71,7 @@ public final class Files {
     }
 
     /**
-     * Copies a file into the gallery: Pictures/Murmur, or Movies/Murmur for a video. Returns the
+     * Copies a file into the gallery: Pictures/Unisend, or Movies/Unisend for a video. Returns the
      * folder it went to, or null when it could not be saved.
      */
     public static String save(Activity activity, String path, String name, String mime) {
@@ -79,7 +79,7 @@ public final class Files {
             return null;
         }
         boolean video = mime.startsWith("video/");
-        String folder = (video ? Environment.DIRECTORY_MOVIES : Environment.DIRECTORY_PICTURES) + "/Murmur";
+        String folder = (video ? Environment.DIRECTORY_MOVIES : Environment.DIRECTORY_PICTURES) + "/Unisend";
         Uri collection = video
                 ? MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
                 : MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);

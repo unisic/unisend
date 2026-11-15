@@ -771,7 +771,7 @@ mod tests {
 
     #[test]
     fn hidden_messages_are_kept_per_account_and_the_oldest_go_first() {
-        let dir = std::env::temp_dir().join(format!("murmur-hidden-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("unisend-hidden-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut a = Hidden::load(&dir, "@a:x.org");
         a.add((0..super::MAX_HIDDEN + 2).map(|n| format!("${n}")));
