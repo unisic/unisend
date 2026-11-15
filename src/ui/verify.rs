@@ -2,6 +2,7 @@
 
 use crate::backend::verify::{Auth, CrossSigning, Devices, NAME_MAX, Proof, Trust, Verify};
 
+use super::sheet::{self, SheetMotion};
 use super::*;
 use crate::i18n::t;
 
@@ -27,6 +28,7 @@ pub(super) struct Ui {
     sheet: Option<Verify>,
     /// Drawn while the sheet falls.
     sheet_last: Option<Verify>,
+    motion: SheetMotion,
 }
 
 impl Ui {
@@ -44,9 +46,12 @@ impl Ui {
                 other => keyboard_follows(other, Keyboard::Key, cx),
             }));
         }
-        Self { devices: None, loading: false, failed: None, renaming: false, name, out: None, password, code, sheet: None, sheet_last: None }
+        Self { devices: None, loading: false, failed: None, renaming: false, name, out: None, password, code, sheet: None, sheet_last: None, motion: SheetMotion::default() }
     }
 }
+
+/// Each verification emoji appears this long after the one before it.
+const EMOJI_STEP: Duration = Duration::from_millis(40);
 
 impl BeeperApp {
     pub(super) fn load_devices(&mut self, cx: &mut Context<Self>) {
@@ -297,19 +302,14 @@ impl BeeperApp {
     /// Rises like the chat's sheet. A tap outside closes it only once nothing is running, so a
     /// stray tap does not cancel a comparison.
     pub(super) fn render_verify_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.verify.sheet.is_some();
-        if live {
+        if self.verify.sheet.is_some() {
             self.verify.sheet_last = self.verify.sheet.clone();
-        } else if self.verify.sheet_last.is_none() {
-            return None;
         }
-        let motion =
-            if live { Transition::new(motion::SHEET_IN).easing(motion::EASE_SHEET) } else { Transition::new(motion::SHEET_OUT).easing(motion::EASE_OUT) };
-        let shown = Presence::new("verify-sheet", live).transition(motion).sample(window, cx);
-        if !shown.should_render() {
+        let Some(frame) = self.verify.motion.sample(self.verify.sheet.is_some(), window, cx) else {
             self.verify.sheet_last = None;
             return None;
-        }
+        };
+        let live = frame.live;
         let state = self.verify.sheet_last.clone()?;
         let p = Palette::of(cx);
         let (_, bottom) = crate::insets();
@@ -342,8 +342,13 @@ impl BeeperApp {
         };
         let settled = matches!(state, Verify::Done | Verify::Failed(_));
         let emoji = match &state {
-            Verify::Emoji(list) => Some(h_flex().flex_wrap().justify_center().gap_y(px(12.)).py(px(8.)).children(list.iter().map(|(symbol, name)| {
+            Verify::Emoji(list) => Some(h_flex().flex_wrap().justify_center().gap_y(px(12.)).py(px(8.)).children(list.iter().enumerate().map(|(i, (symbol, name))| {
+                // One after another, so the eye reads them in order.
+                let shown = Presence::new(ElementId::from(("verify-emoji", i)), true).transition(motion::enter().delay(EMOJI_STEP * i as u32)).sample(window, cx).progress;
                 v_flex()
+                    .relative()
+                    .top(px(8. * (1. - shown)))
+                    .opacity(shown)
                     .w(px(80.))
                     .items_center()
                     .gap(px(4.))
@@ -352,8 +357,14 @@ impl BeeperApp {
             }))),
             _ => None,
         };
-        // Its height, for the slide: title, two lines of text, the emoji, the buttons, the padding.
-        let height = 8. + 36. + 48. + if emoji.is_some() { 150. } else { 0. } + (TAP + 8.) * (1 + primary.is_some() as usize) as f32 + bottom + 24.;
+        let key = match &state {
+            Verify::Incoming { .. } => 0,
+            Verify::Waiting => 1,
+            Verify::Emoji(_) => 2,
+            Verify::Confirmed => 3,
+            Verify::Done => 4,
+            Verify::Failed(_) => 5,
+        };
         let mut buttons = v_flex().gap(px(8.)).pt(px(8.));
         if let Some((label, cmd, next)) = primary {
             let cmd = std::cell::Cell::new(Some(cmd));
@@ -381,18 +392,35 @@ impl BeeperApp {
                 }
             }))
         }));
+        // Dragged down only once nothing is running, as a tap outside.
+        let head = div()
+            .id("verify-head")
+            .h(px(44.))
+            .pt(px(8.))
+            .flex()
+            .items_center()
+            .text_size(fs(16.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .when(live && settled, |el| {
+                el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
+                    if this.verify.motion.drag(e) {
+                        this.verify_act_close(cx);
+                    }
+                    cx.notify();
+                }))
+            })
+            .child(title.to_owned());
+        let view = cx.entity_id();
+        let content = v_flex()
+            .child(head)
+            .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(body))
+            .children(emoji)
+            .child(buttons);
+        let content = self.verify.motion.fit("verify-content", key, content, view, window, cx);
         Some(
-            div()
-                .id("verify-sheet")
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .justify_end()
-                .items_center()
-                .bg(gpui_kit::black().opacity(0.6 * shown.progress))
+            sheet::scrim("verify-sheet", frame)
                 .when(live, |el| {
-                    el.occlude().on_click(cx.listener(move |this, _, _, cx| {
+                    el.on_click(cx.listener(move |this, _, _, cx| {
                         if settled {
                             this.verify_act_close(cx);
                         }
@@ -402,19 +430,16 @@ impl BeeperApp {
                     v_flex()
                         .id("verify-sheet-body")
                         .relative()
-                        .top(px(height * (1. - shown.progress)))
+                        .top(px(frame.y))
                         .w_full()
                         .max_w(px(SHEET_W))
                         .px(px(GUTTER + 4.))
-                        .pt(px(8.))
                         .pb(px(bottom + 16.))
                         .rounded_t(px(RADIUS))
                         .bg(p.surface)
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
-                        .child(div().h(px(36.)).flex().items_center().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned()))
-                        .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(body))
-                        .children(emoji)
-                        .child(buttons),
+                        .child(self.verify.motion.probe(view))
+                        .child(content),
                 )
                 .into_any_element(),
         )
