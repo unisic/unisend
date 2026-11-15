@@ -360,21 +360,15 @@ impl BeeperApp {
             let fill = div().child(img(photo).size_full().object_fit(ObjectFit::Cover));
             swatches = swatches.child(swatch(t!("Photo"), self.settings.wallpaper == Wallpaper::Photo, fill, cx, Wallpaper::Photo));
         }
-        let choose = h_flex()
-            .id("choose-photo")
-            .h(px(TAP))
-            .px(px(GAP))
-            .rounded_full()
-            .bg(p.raised)
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, window, cx| this.choose_photo(window, cx)))
-            .child(if self.look.importing { t!("Working…") } else if self.look.photo.is_some() { t!("Change photo") } else { t!("Choose photo") });
+        let choose = if self.look.importing { t!("Working…") } else if self.look.photo.is_some() { t!("Change photo") } else { t!("Choose photo") };
+        let choose = super::panels::link("choose-photo", choose, SharedString::default(), Some(IconName::Image), None, cx).on_click(cx.listener(|this, _, window, cx| this.choose_photo(window, cx)));
         let mut rows = vec![
             row(t!("Text size"), t!("Messages and the rest of the app."), cx).into_any_element(),
             div().pb(px(8.)).child(sizes).into_any_element(),
             div().pb(px(8.)).child(preview).into_any_element(),
-            row(t!("Chat wallpaper"), t!("One for all chats, with the dark theme."), cx).child(choose).into_any_element(),
+            row(t!("Chat wallpaper"), t!("One for all chats, with the dark theme."), cx).into_any_element(),
             swatches.into_any_element(),
+            choose.into_any_element(),
         ];
         if self.settings.wallpaper == Wallpaper::Photo && self.look.photo.is_some() {
             rows.push(row(t!("Dim photo"), "", cx).into_any_element());
