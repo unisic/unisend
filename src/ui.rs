@@ -1320,7 +1320,7 @@ impl BeeperApp {
     }
 
     /// Opens the chat a tapped notification was for.
-    fn open_from_notification(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_from_notification(&mut self, cx: &mut Context<Self>) {
         if self.screen != Screen::Main {
             return;
         }
