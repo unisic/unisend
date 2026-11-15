@@ -120,6 +120,8 @@ const MAX_THUMBS: usize = 60;
 const MAX_FACES: usize = 64;
 /// Messages that can be arriving at once; more in one go is a page of history, not news.
 const MAX_ARRIVALS: usize = 3;
+/// Link and quote pictures fading in at once, at most.
+const MAX_THUMB_FADES: usize = 60;
 /// Pages of older messages loaded to find a quoted one before giving up.
 const SEEK_PAGES: u8 = 5;
 
@@ -226,6 +228,8 @@ pub struct BeeperApp {
     /// Inline thumbnails by event ID, oldest first in `thumb_order`.
     thumbs: HashMap<String, Arc<Image>>,
     thumb_order: VecDeque<String>,
+    /// When a link's or a quote's picture landed, while it fades in; at most `MAX_THUMB_FADES`.
+    thumb_at: HashMap<String, Instant>,
     /// Messages whose thumbnail was requested.
     asked: HashSet<String>,
     /// Image shown full-screen; the picture arrives after the overlay opens.
@@ -468,6 +472,7 @@ impl BeeperApp {
             typing_sent: None,
             tail: None,
             thumbs: HashMap::new(),
+            thumb_at: HashMap::new(),
             thumb_order: VecDeque::new(),
             asked: HashSet::new(),
             viewer: None,
@@ -612,6 +617,11 @@ impl BeeperApp {
                 // Late answers for a chat that was closed meanwhile are dropped.
                 if let (true, Some(format)) = (self.asked.contains(&id), image_format(&bytes)) {
                     self.thumbs.insert(id.clone(), Arc::new(Image::from_bytes(format, bytes)));
+                    // A fade is over in `ENTER`; only those still running are kept.
+                    self.thumb_at.retain(|_, at| at.elapsed() < motion::ENTER);
+                    if (id.ends_with("#link") || id.ends_with("#quote")) && self.thumb_at.len() < MAX_THUMB_FADES {
+                        self.thumb_at.insert(id.clone(), Instant::now());
+                    }
                     self.thumb_order.push_back(id);
                     while self.thumb_order.len() > MAX_THUMBS {
                         let Some(old) = self.thumb_order.pop_front() else { break };
@@ -1211,6 +1221,7 @@ impl BeeperApp {
         self.typing.clear();
         self.asked.clear();
         self.thumb_order.clear();
+        self.thumb_at.clear();
         for (_, image) in self.thumbs.drain() {
             image.remove_asset(cx);
         }
@@ -1672,6 +1683,11 @@ impl BeeperApp {
                 this.want_thumb(ix);
                 this.want_card(ix);
                 let flash = this.flash_level(ix, window, cx);
+                let (link_fade, quote_fade) = if this.thumb_at.is_empty() {
+                    (None, None)
+                } else {
+                    (this.thumb_level(&link_key(&this.msgs[ix].id), window, cx), this.thumb_level(&quote_key(&this.msgs[ix].id), window, cx))
+                };
                 let pressed = this.press_level(&this.msgs[ix].id.clone(), window, cx);
                 let reaction_since = this.reaction_since(ix);
                 let m = &this.msgs[ix];
@@ -1719,7 +1735,7 @@ impl BeeperApp {
                 // A pointer's menu marks its message; the touch overlay lifts it instead.
                 let picked = this.menu.as_ref().is_some_and(|menu| menu.id == m.id && menu.kind != MenuKind::Touch);
                 let quote = m.reply.as_ref().map(|quote| {
-                    let thumb = this.thumbs.get(&quote_key(&m.id)).cloned();
+                    let thumb = this.thumbs.get(&quote_key(&m.id)).cloned().map(|image| (image, quote_fade.unwrap_or(1.)));
                     let target = quote.id.clone();
                     let inset = quote_inset(quote, None, inside_of(m, p), thumb).id(SharedString::from(format!("{}-quote", m.id))).mx(px(8. - pad_x)).mt(px(8. - pad_y));
                     match quote.state {
@@ -1765,6 +1781,7 @@ impl BeeperApp {
                 marks.sort_by_key(|(r, _)| r.start);
                 // The preview its sender attached to a link; a touch opens the link.
                 let link_card = m.link.as_ref().filter(|_| !m.deleted).map(|link| {
+                    let link_shown = link_fade.unwrap_or(1.);
                     let url = link.url.clone();
                     let width = room.min(LINK_W);
                     let picture = link.image.as_ref().map(|image| {
@@ -1773,7 +1790,7 @@ impl BeeperApp {
                         // picture drawn to cover its box is not clipped by it.
                         let height = (width * h.max(1) as f32 / w.max(1) as f32).clamp(60., LINK_PICTURE_H);
                         div().w_full().h(px(height)).overflow_hidden().map(|el| match this.thumbs.get(&link_key(&m.id)) {
-                            Some(thumb) => el.child(img(thumb.clone()).size_full().rounded_t(px(12.)).object_fit(ObjectFit::Cover)),
+                            Some(thumb) => el.child(img(thumb.clone()).size_full().rounded_t(px(12.)).object_fit(ObjectFit::Cover).opacity(link_shown)),
                             None => el,
                         })
                     });
@@ -2335,6 +2352,16 @@ impl BeeperApp {
         }
     }
 
+    /// How far the link or quote picture under `key` has faded in since it landed; None once it has.
+    fn thumb_level(&mut self, key: &str, window: &mut Window, cx: &App) -> Option<f32> {
+        let at = *self.thumb_at.get(key)?;
+        let level = fresh(at, motion::ENTER, window, cx);
+        if level.is_none() {
+            self.thumb_at.remove(key);
+        }
+        level
+    }
+
     fn bubble_pressed(&mut self, id: String, cx: &mut Context<Self>) {
         if self.menu_open() || self.fwd.selecting() {
             return;
@@ -2594,7 +2621,7 @@ impl BeeperApp {
             return None;
         }
         let (icon, title, quote) = self.strip_last.clone()?;
-        let thumb = self.thumbs.get(&quote.id).cloned();
+        let thumb = self.thumbs.get(&quote.id).cloned().map(|image| (image, 1.));
         let leaving = shown.phase == PresencePhase::Exiting;
         let v = shown.progress;
         Some(
@@ -2844,7 +2871,8 @@ fn inside_of(m: &Msg, p: Palette) -> Palette {
 /// A quoted message: who wrote it and what it says, behind a bar that tells it from a link's card.
 /// `heading` takes the place of the sender (the compose strip's "Replying to"), with one line of
 /// text under it. `inside` is the palette of what it sits in.
-fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, inside: Palette, thumb: Option<Arc<Image>>) -> Stateful<Div> {
+/// `thumb` is the quoted picture with how far it has faded in.
+fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, inside: Palette, thumb: Option<(Arc<Image>, f32)>) -> Stateful<Div> {
     let line = |size: f32, height: f32| div().text_size(fs(size)).line_height(fs(height));
     let lines = if heading.is_some() { 1 } else { 2 };
     let top = match heading {
@@ -2894,7 +2922,10 @@ fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, ins
             .overflow_hidden()
             .when(!sticker, |el| el.rounded(px(6.)))
             .map(|el| match thumb {
-                Some(image) => el.child(img(image).size_full().when(!sticker, |el| el.rounded(px(6.))).object_fit(if sticker { ObjectFit::Contain } else { ObjectFit::Cover })),
+                Some((image, shown)) => el
+                    // The placeholder's ground stays under the picture while it fades in.
+                    .when(shown < 1. && !sticker, |el| el.bg(inside.text.opacity(0.07)))
+                    .child(img(image).size_full().when(!sticker, |el| el.rounded(px(6.))).object_fit(if sticker { ObjectFit::Contain } else { ObjectFit::Cover }).opacity(shown)),
                 None => el.flex().items_center().justify_center().bg(inside.text.opacity(0.07)).text_color(inside.faint).child(
                     Icon::new(match media.kind {
                         MediaKind::Video => IconName::Video,
