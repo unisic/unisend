@@ -212,6 +212,8 @@ pub struct BeeperApp {
     msgs: Vec<Msg>,
     /// Who is writing in the open conversation.
     typing: Vec<String>,
+    /// What the typing line said last, drawn while it leaves.
+    typing_last: SharedString,
     /// When the others were last told that the user is writing.
     typing_sent: Option<std::time::Instant>,
     /// Row of the newest message, when it is the user's own.
@@ -235,8 +237,8 @@ pub struct BeeperApp {
     swipe: Option<(String, f32)>,
     /// The message a finger let go of, springing back into place since then.
     swipe_back: Option<(String, Instant)>,
-    /// Messages that just arrived at the end of the open chat, at most `MAX_ARRIVALS`.
-    arrivals: VecDeque<(String, Instant)>,
+    /// Messages that just arrived at the end of the open chat, at most `2 * MAX_ARRIVALS`.
+    arrivals: VecDeque<Arrival>,
     /// When the open chat was opened: what arrives in its first moments is history, not news.
     opened_at: Option<Instant>,
     /// The message a quote led to, tinted for a moment; the tint's clock starts when it is drawn.
@@ -251,6 +253,8 @@ pub struct BeeperApp {
     strip_last: Option<(Option<IconName>, SharedString, Quote)>,
     /// Bumped when the strip must go at once (Escape), so it does not play its exit.
     strip_epoch: usize,
+    /// The strip closes because its message was sent: it shrinks on the new message's clock.
+    strip_sent: bool,
     /// The chat whose actions are showing.
     chat_sheet: Option<OwnedRoomId>,
     /// The attach sheet's photos and videos.
@@ -451,6 +455,7 @@ impl BeeperApp {
             open: None,
             msgs: Vec::new(),
             typing: Vec::new(),
+            typing_last: SharedString::default(),
             typing_sent: None,
             tail: None,
             thumbs: HashMap::new(),
@@ -471,6 +476,7 @@ impl BeeperApp {
             fresh_reaction: None,
             heart_pop: None,
             strip_last: None,
+            strip_sent: false,
             strip_epoch: 0,
             chat_sheet: None,
             gallery: gallery::Gallery::default(),
@@ -646,10 +652,10 @@ impl BeeperApp {
                 for diff in diffs {
                     if let Diff::Set { index, value } = &diff
                         && let Some(old) = self.msgs.get(*index)
-                        && let Some(arrival) = self.arrivals.iter_mut().find(|(id, _)| *id == old.id)
+                        && let Some(arrival) = self.arrivals.iter_mut().find(|a| a.id == old.id)
                     {
                         // The user's message reached the server: its transaction ID became the event's.
-                        arrival.0 = value.id.clone();
+                        arrival.id = value.id.clone();
                     }
                     let len_before = self.msgs.len();
                     match crate::backend::apply(&mut self.msgs, diff) {
@@ -668,8 +674,9 @@ impl BeeperApp {
                 let open_for = self.opened_at.map_or(Duration::ZERO, |at| at.elapsed());
                 let now = Instant::now();
                 for (len_before, new, ids) in ends {
-                    if arrived(len_before, appended, open_for) {
-                        self.arrivals.extend(ids.into_iter().map(|id| (id, now)));
+                    // Scrolled up, the user does not see the end: nothing there moves.
+                    if arrived(len_before, appended, open_for) && !self.place.away {
+                        self.arrivals.extend(ids.into_iter().map(|id| Arrival { id, at: now, height: None, since: None }));
                     }
                     self.count_missed(len_before, new);
                 }
@@ -678,7 +685,7 @@ impl BeeperApp {
                     let id = id.clone();
                     self.reveal(&id, cx);
                 }
-                self.arrivals.retain(|(_, at)| now.duration_since(*at) < Duration::from_secs(1));
+                self.arrivals.retain(|a| now.duration_since(a.at) < Duration::from_secs(1));
                 while self.arrivals.len() > 2 * MAX_ARRIVALS {
                     self.arrivals.pop_front();
                 }
@@ -839,6 +846,7 @@ impl BeeperApp {
         };
         let mentions = self.picked_mentions(cx);
         if self.send(Cmd::Send { room: room.clone(), body, reply_to, edit, mentions }, cx) {
+            self.strip_sent = matches!(self.compose, Compose::Reply(_));
             self.compose = Compose::New;
             self.jump_to_newest(cx);
             // `set_value` emits no change, so the draft would outlive the message it became.
@@ -1726,7 +1734,8 @@ impl BeeperApp {
                 } else {
                     1.
                 };
-                let arriving = this.arrivals.iter().find(|(id, _)| *id == m.id).and_then(|&(_, at)| fresh(at, motion::ENTER, window, cx));
+                // The next message joining this one's run takes its time line; the line shrinks as it arrives.
+                let shrink = next.filter(|n| !last && state.is_none() && joined(m, n)).and_then(|n| this.arrival_level(&n.id, cx));
                 // What is drawn inside the bubble: an own one may carry a colour of the user's choosing.
                 let inside = inside_of(m, p);
                 let ink = HighlightStyle { color: Some(inside.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
@@ -1855,15 +1864,15 @@ impl BeeperApp {
                 if faces && last {
                     this.want_face(ix);
                 }
+                let arriving = this.arriving(ix, window, cx);
                 let m = &this.msgs[ix];
                 let side = if faces { px(SENDER + 8.) } else { px(0.) };
-                // Arriving: the user's own message rises from the composer, another's settles in.
-                let rise = if m.own { 12. } else { 8. };
-                v_flex()
+                let row = v_flex()
                     .group("message")
                     .w_full()
                     .relative()
-                    .when_some(arriving, |el, v| el.top(px(rise * (1. - v))).opacity(v))
+                    // The user's own message is already known; another's fades in as it rises.
+                    .when_some(arriving.filter(|_| !m.own), |el, (v, _)| el.opacity(v))
                     .px(px(GUTTER))
                     .pt(if first { px(GAP) } else { px(3.) })
                     .when(faces && first, |el| {
@@ -1927,7 +1936,7 @@ impl BeeperApp {
                             .pl(side)
                             .map(|el| if m.own { el.items_end() } else { el.items_start() })
                             .children(reactions)
-                            .when(last || state.is_some(), |el| {
+                            .when(last || state.is_some() || shrink.is_some(), |el| {
                                 let failed = state.as_ref().is_some_and(|(_, failed)| *failed);
                                 let text = match (state, last) {
                                     (Some((state, _)), true) => format!("{} \u{b7} {state}", clock(m.ts)),
@@ -1938,6 +1947,8 @@ impl BeeperApp {
                                 el.child(
                                     h_flex()
                                         .gap(px(3.))
+                                        // A little over its padding and one line at GPUI's default 1.618 leading, so it starts unclipped.
+                                        .when_some(shrink, |el, v| el.max_h((px(4.) + fs(20.)) * (1. - v)).overflow_hidden().opacity(1. - v))
                                         .px(px(GAP))
                                         .pt(px(4.))
                                         .text_size(fs(12.))
@@ -1948,8 +1959,16 @@ impl BeeperApp {
                                 )
                             }),
                     )
-                    .children(this.selection_mark(m, cx))
-                    .into_any_element()
+                    .children(this.selection_mark(m, cx));
+                match arriving {
+                    // It grows from nothing over the composer, so the messages above move up with it
+                    // instead of jumping; the row hangs from the top and rises as the space opens.
+                    Some((v, Some(height))) => {
+                        let probe = this.arrival_probe(m.id.clone(), cx);
+                        div().w_full().overflow_hidden().h(px(height * v)).child(row.flex_none().child(probe)).into_any_element()
+                    }
+                    _ => row.into_any_element(),
+                }
             }),
         )
         .size_full();
@@ -2027,36 +2046,7 @@ impl BeeperApp {
                         )
                     }),
             )
-            .when(!self.typing.is_empty(), |el| {
-                let names: Vec<&str> = self.typing.iter().map(String::as_str).collect();
-                let (who, many) = people(&names);
-                let line = if many { t!("{who} are typing…", who = who) } else { t!("{who} is typing…", who = who) };
-                let faint = p.faint;
-                // An activity indicator may loop; at 24 frames a second it costs little while it lasts.
-                let pulse = Animation::new(Duration::from_millis(1200)).repeat().with_max_fps(24.);
-                let dots = h_flex().gap(px(3.)).with_animation("typing-dots", pulse, move |el, t| {
-                    el.children((0..3).map(|n| {
-                        let phase = (t - n as f32 * 0.2).rem_euclid(1.);
-                        let level = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
-                        div().size(px(4.)).rounded_full().bg(faint).opacity(0.3 + 0.7 * level)
-                    }))
-                });
-                el.child(
-                    h_flex()
-                        .px(px(GUTTER + GAP))
-                        .pt(px(6.))
-                        .gap(px(6.))
-                        .text_size(fs(12.))
-                        .text_color(faint)
-                        .child(dots)
-                        .child(line)
-                        .with_animation(
-                            SharedString::from(format!("typing-{}", names.join(","))),
-                            Animation::new(Duration::from_millis(150)).with_easing(motion::ease_out),
-                            |el, t| el.opacity(t),
-                        ),
-                )
-            })
+            .children(self.render_typing(window, cx))
             .children(self.render_compose_strip(window, cx))
             .children(self.render_mentions(cx))
             .when(self.uploads > 0, |el| {
@@ -2257,6 +2247,56 @@ impl BeeperApp {
     }
 
     /// The emoji the user just gave this message and when its badge was first drawn, once it is.
+    /// How far message `ix` has arrived: eased progress and the height its row grows to, while it
+    /// grows. Its first frame has no height yet: it is drawn at none and measured. With less motion
+    /// nothing grows and only another's message fades in, over `EXIT`.
+    fn arriving(&mut self, ix: usize, window: &mut Window, cx: &App) -> Option<(f32, Option<f32>)> {
+        let m = &self.msgs[ix];
+        let still = cx.reduce_motion();
+        if still && m.own {
+            return None;
+        }
+        let arrival = self.arrivals.iter_mut().find(|a| a.id == m.id)?;
+        if !still && arrival.height.is_none() {
+            window.request_animation_frame();
+            return Some((0., Some(0.)));
+        }
+        let since = *arrival.since.get_or_insert_with(Instant::now);
+        let length = if still { motion::EXIT } else { motion::ENTER };
+        let t = since.elapsed().as_secs_f32() / length.as_secs_f32();
+        if t >= 1. {
+            return None;
+        }
+        window.request_animation_frame();
+        Some(if still { (t, None) } else { (motion::ease_out(t), arrival.height) })
+    }
+
+    /// How far message `id` has grown in, read without starting its clock: 0 until it has.
+    fn arrival_level(&self, id: &str, cx: &App) -> Option<f32> {
+        let arrival = self.arrivals.iter().find(|a| a.id == id).filter(|_| !cx.reduce_motion())?;
+        let Some(since) = arrival.since else { return Some(0.) };
+        let t = since.elapsed().as_secs_f32() / motion::ENTER.as_secs_f32();
+        (t < 1.).then(|| motion::ease_out(t))
+    }
+
+    /// Measures an arriving row as it is laid out, for the next frame to grow it to.
+    fn arrival_probe(&self, id: String, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let weak = cx.entity().downgrade();
+        canvas(
+            move |bounds, _, cx| {
+                let height = f32::from(bounds.size.height);
+                let _ = weak.update(cx, |this, _| {
+                    if let Some(arrival) = this.arrivals.iter_mut().find(|a| a.id == id) {
+                        arrival.height = Some(height);
+                    }
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
+    }
+
     fn reaction_since(&mut self, ix: usize) -> Option<(String, Instant)> {
         let (id, key, since) = self.fresh_reaction.as_mut()?;
         let m = &self.msgs[ix];
@@ -2367,6 +2407,46 @@ impl BeeperApp {
         Some(self.sheet(title, rows, shown.progress, live, cx))
     }
 
+    /// Who is writing, over the composer. It grows from nothing and shrinks back, so the messages
+    /// above it move with it instead of jumping; a second writer joining only changes the words.
+    fn render_typing(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let p = Palette::of(cx);
+        let present = !self.typing.is_empty();
+        if present {
+            let names: Vec<&str> = self.typing.iter().map(String::as_str).collect();
+            let (who, many) = people(&names);
+            self.typing_last = if many { t!("{who} are typing…", who = who) } else { t!("{who} is typing…", who = who) }.into();
+        }
+        let room = self.open.as_ref().map(ToString::to_string).unwrap_or_default();
+        let shown = Presence::new(("typing", room), present).transition(if present { motion::enter() } else { motion::exit() }).sample(window, cx);
+        if !shown.should_render() {
+            return None;
+        }
+        let (v, faint) = (shown.progress, p.faint);
+        // An activity indicator may loop; at 24 frames a second it costs little while it lasts.
+        let pulse = Animation::new(Duration::from_millis(1200)).repeat().with_max_fps(24.);
+        let dots = h_flex().gap(px(3.)).with_animation("typing-dots", pulse, move |el, t| {
+            el.children((0..3).map(|n| {
+                let phase = (t - n as f32 * 0.2).rem_euclid(1.);
+                let level = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
+                div().size(px(4.)).rounded_full().bg(faint).opacity(0.3 + 0.7 * level)
+            }))
+        });
+        Some(
+            div().flex_none().overflow_hidden().h((px(6.) + fs(16.)) * v).opacity(v).child(
+                h_flex()
+                    .px(px(GUTTER + GAP))
+                    .pt(px(6.))
+                    .gap(px(6.))
+                    .text_size(fs(12.))
+                    .line_height(fs(16.))
+                    .text_color(faint)
+                    .child(dots)
+                    .child(self.typing_last.clone()),
+            ),
+        )
+    }
+
     /// What the composer is replying to or editing, with a way out. It opens and closes over the
     /// composer rather than pushing the chat at once; Escape takes it away at once.
     fn render_compose_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -2389,13 +2469,17 @@ impl BeeperApp {
         let present = current.is_some();
         if current.is_some() {
             self.strip_last = current;
+            self.strip_sent = false;
         }
         let room = self.open.as_ref().map(ToString::to_string).unwrap_or_default();
+        // Closed by sending, it shrinks as the message grows in, on the same curve and length, so
+        // the two add up to one movement.
         let shown = Presence::new((("compose-strip", self.strip_epoch), room), present)
-            .transition(if present { motion::enter() } else { motion::exit() })
+            .transition(if present || self.strip_sent { motion::enter() } else { motion::exit() })
             .sample(window, cx);
         if !shown.should_render() {
             self.strip_last = None;
+            self.strip_sent = false;
             return None;
         }
         let (icon, title, quote) = self.strip_last.clone()?;
@@ -2761,6 +2845,16 @@ fn rubber(far: f32) -> f32 {
 /// what the chat catches up on just after it opened.
 fn arrived(len_before: usize, appended_in_batch: usize, open_for: Duration) -> bool {
     len_before > 0 && appended_in_batch <= MAX_ARRIVALS && open_for >= Duration::from_millis(500)
+}
+
+/// A message that just arrived at the end of the open chat.
+struct Arrival {
+    id: String,
+    at: Instant,
+    /// Its row's height, measured the frame after it was first drawn with none.
+    height: Option<f32>,
+    /// When it began to grow: the first frame its height was known.
+    since: Option<Instant>,
 }
 
 /// Eased progress of a motion that began at `since`, asking for the next frame while it lasts;
