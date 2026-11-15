@@ -45,18 +45,21 @@ pub(super) fn area(id: impl Into<ElementId>, delay: Duration, tint: Hsla, window
     let policy = if lit { Transition::new(Duration::ZERO) } else { motion::exit() };
     let alpha = transition(child_id(&id, "fade"), if lit { 1.0f32 } else { 0. }, policy, window, cx);
     let probe = canvas(
-        |_, _, _| {},
-        move |bounds, _, window, _| {
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |bounds, hitbox, window, _| {
             let visible = window.content_mask().bounds;
             let s = state.clone();
-            window.on_mouse_event(move |e: &TouchDragEvent, phase, _, cx| {
+            window.on_mouse_event(move |e: &TouchDragEvent, phase, window, cx| {
                 if !phase.bubble() {
                     return;
                 }
                 match e.phase {
-                    TouchPhase::Started if bounds.contains(&e.start_position) && visible.contains(&e.start_position) => {
+                    // Hovered, not only inside: a sheet over the row takes the touch, and its lift
+                    // never reaches here, which left the row lit.
+                    TouchPhase::Started if bounds.contains(&e.start_position) && visible.contains(&e.start_position) && hitbox.is_hovered(window) => {
                         set(&s, cx, Some((Instant::now(), e.start_position)));
                     }
+                    TouchPhase::Started => set(&s, cx, None),
                     TouchPhase::Moved => {
                         let far = s.read(cx).down.is_some_and(|(_, at)| f32::from(e.position.x - at.x).hypot(f32::from(e.position.y - at.y)) > SLOP);
                         if far {
@@ -64,7 +67,6 @@ pub(super) fn area(id: impl Into<ElementId>, delay: Duration, tint: Hsla, window
                         }
                     }
                     TouchPhase::Ended | TouchPhase::Cancelled => set(&s, cx, None),
-                    TouchPhase::Started => {}
                 }
             });
             let s = state.clone();
