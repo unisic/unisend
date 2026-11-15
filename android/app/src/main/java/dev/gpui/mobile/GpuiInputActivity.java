@@ -6,7 +6,11 @@ import android.os.Bundle;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.Selection;
+import android.text.SpanWatcher;
+import android.text.Spannable;
+import android.text.Spanned;
 import android.text.TextWatcher;
+import android.text.style.SuggestionSpan;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -17,11 +21,17 @@ import android.view.inputmethod.InputConnectionWrapper;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 
+import java.util.Arrays;
+
 /** NativeActivity with a UI-thread InputConnection for multistage IMEs. */
 public class GpuiInputActivity extends NativeActivity {
     // Context kept before the caret, in UTF-16 units: src/ime.rs sends 512.
     private static final int TRIM_AT = 1024;
     private static final int REFILL_BELOW = 64;
+    // Misspelled words sent at most, as src/ime.rs keeps; the window holds about 100 words.
+    private static final int MAX_SPELL = 64;
+    // Wait for the spell checker's spans to settle before telling Rust.
+    private static final long SPELL_DELAY_MS = 150;
 
     private InputProxy input;
     private int keyboardType;
@@ -29,6 +39,8 @@ public class GpuiInputActivity extends NativeActivity {
     private Field latest;
     // Last mirror edit sent; Rust publishes the last one it applied.
     private long seq;
+    // Settings > Privacy > Incognito keyboard, set by src/ime.rs; secrets (type 4) stay incognito.
+    private boolean incognito = true;
 
     private static final class Field {
         final long id, applied;
@@ -73,6 +85,11 @@ public class GpuiInputActivity extends NativeActivity {
             if (keyboardType == 0 && latest != null) input.seed(latest);
             input.shown = true;
             configure();
+            // The EditText creates its spell checker only when attached as a text field with suggestions.
+            if (input.isAttachedToWindow() && !input.spellReady && input.isSuggestionsEnabled()) {
+                ((ViewGroup) input.getParent()).removeView(input);
+                addContentView(input, new ViewGroup.LayoutParams(1, 1));
+            }
             input.requestFocus();
             InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
             imm.restartInput(input);
@@ -96,8 +113,22 @@ public class GpuiInputActivity extends NativeActivity {
             case 5: type = InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL; break;
         }
         input.setInputType(type);
-        // Incognito keyboard for every field: the IME must not learn from what is typed here.
-        input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
+        int options = EditorInfo.IME_FLAG_NO_EXTRACT_UI;
+        if (incognito || keyboardType == 4) options |= EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING;
+        input.setImeOptions(options);
+    }
+
+    /** Called by src/ime.rs at start and from Settings; a shown keyboard restarts with the new flags. */
+    public void gpuiImeIncognito(boolean on) {
+        runOnUiThread(() -> {
+            if (incognito == on) return;
+            incognito = on;
+            if (input == null || !input.shown) return;
+            input.reset(input.session);
+            if (keyboardType == 0 && latest != null) input.seed(latest);
+            configure();
+            input.restart();
+        });
     }
 
     public void gpuiHideKeyboard(long session) {
@@ -148,6 +179,10 @@ public class GpuiInputActivity extends NativeActivity {
         // The proxy as Rust was last told.
         private String sentText = "";
         private int sentStart, sentEnd, sentComp0 = -1, sentComp1 = -1;
+        // Misspelled ranges as last sent to Rust, in field offsets; null when the field has none sent yet.
+        private int[] sentSpell;
+        private final Runnable spellSend = this::sendSpell;
+        boolean spellReady;
 
         InputProxy() {
             super(GpuiInputActivity.this);
@@ -160,6 +195,44 @@ public class GpuiInputActivity extends NativeActivity {
                     if (depth == 0) { depth++; endEdit(); }
                 }
             });
+            // The EditText's own spell checker (or the IME) marks words with SuggestionSpans, asynchronously.
+            getText().setSpan(new SpanWatcher() {
+                public void onSpanAdded(Spannable text, Object what, int start, int end) { spellLater(what); }
+                public void onSpanRemoved(Spannable text, Object what, int start, int end) { spellLater(what); }
+                public void onSpanChanged(Spannable text, Object what, int s0, int e0, int s1, int e1) { spellLater(what); }
+            }, 0, 0, Spanned.SPAN_INCLUSIVE_INCLUSIVE);
+        }
+
+        @Override protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            spellReady = isSuggestionsEnabled();
+        }
+
+        private void spellLater(Object what) {
+            if (!(what instanceof SuggestionSpan) || !mirror) return;
+            removeCallbacks(spellSend);
+            postDelayed(spellSend, SPELL_DELAY_MS);
+        }
+
+        /** Send the misspelled words in the window, as field offsets, when they changed. */
+        private void sendSpell() {
+            if (!mirror) return;
+            // Offsets must match what Rust has applied: wait for the IME's batch to be flushed.
+            if (depth > 0) { postDelayed(spellSend, SPELL_DELAY_MS); return; }
+            Editable text = getText();
+            int[] ranges = new int[MAX_SPELL * 2];
+            int n = 0;
+            for (SuggestionSpan span : text.getSpans(0, text.length(), SuggestionSpan.class)) {
+                if ((span.getFlags() & (SuggestionSpan.FLAG_MISSPELLED | SuggestionSpan.FLAG_GRAMMAR_ERROR)) == 0) continue;
+                int s = text.getSpanStart(span), e = text.getSpanEnd(span);
+                if (s < 0 || e <= s || n == ranges.length) continue;
+                ranges[n++] = base + s;
+                ranges[n++] = base + e;
+            }
+            int[] next = Arrays.copyOf(ranges, n);
+            if (Arrays.equals(next, sentSpell)) return;
+            // A full Rust queue drops the report: send it again on the next change.
+            sentSpell = nativeImeSpell(field, next) ? next : null;
         }
 
         @Override public boolean onKeyDown(int code, KeyEvent event) {
@@ -201,6 +274,7 @@ public class GpuiInputActivity extends NativeActivity {
             depth--;
             mirror = true;
             marked = false;
+            if (f.id != field) sentSpell = null;
             field = f.id;
             base = f.start;
             seq = f.applied;
@@ -440,4 +514,6 @@ public class GpuiInputActivity extends NativeActivity {
             int selStart, int selEnd, int c0, int c1);
     // src/ime.rs: publish the focused followed field again.
     private static native void nativeImeResync();
+    // src/ime.rs: every misspelled range of the field as start, end pairs; false if Rust's queue is full.
+    private static native boolean nativeImeSpell(long field, int[] ranges);
 }

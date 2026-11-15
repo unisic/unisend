@@ -547,7 +547,8 @@ impl BeeperApp {
                                 .items_center()
                                 .rounded(px(TAP / 2.))
                                 .bg(p.ground)
-                                .child(Input::new(&self.fwd.search).appearance(false)),
+                                .child(Input::new(&self.fwd.search).appearance(false))
+                                .child(crate::ime::marks(&self.fwd.search)),
                         )
                         .child(div().id("forward-chats").flex_1().min_h_0().overflow_y_scroll().children(rows))
                         .when(send.should_render(), |el| {

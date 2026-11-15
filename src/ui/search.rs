@@ -198,7 +198,7 @@ impl BeeperApp {
                     .rounded_full()
                     .bg(p.surface)
                     .child(Icon::new(IconName::Search).size_4().flex_none().text_color(p.faint))
-                    .child(div().flex_1().min_w_0().child(Input::new(&self.find.input).appearance(false)))
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.find.input).appearance(false)).child(crate::ime::marks(&self.find.input)))
                     .child(round_button("close-find", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx)))),
             )
         })

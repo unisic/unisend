@@ -342,7 +342,7 @@ impl BeeperApp {
             .rounded_full()
             .bg(p.surface)
             .child(Icon::new(IconName::Search).size_4().flex_none().text_color(p.faint))
-            .child(div().flex_1().min_w_0().child(Input::new(&s.query).appearance(false)));
+            .child(div().flex_1().min_w_0().child(Input::new(&s.query).appearance(false)).child(crate::ime::marks(&s.query)));
 
         let empty = if self.rooms.is_empty() { t!("Syncing chats…") } else { t!("No chat matches") };
         let list = uniform_list(
@@ -403,7 +403,8 @@ impl BeeperApp {
                         .items_center()
                         .rounded(px(TAP / 2.))
                         .bg(p.surface)
-                        .child(Input::new(&s.message).appearance(false).large()),
+                        .child(Input::new(&s.message).appearance(false).large())
+                        .child(crate::ime::marks(&s.message)),
                 )
                 .child(
                     div()

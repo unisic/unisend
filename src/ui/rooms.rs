@@ -528,10 +528,10 @@ impl BeeperApp {
             .rounded_full()
             .bg(p.surface)
             .child(Icon::new(IconName::Search).size_4().flex_none().text_color(p.faint))
-            .child(div().flex_1().min_w_0().child(Input::new(&new.query).appearance(false)));
+            .child(div().flex_1().min_w_0().child(Input::new(&new.query).appearance(false)).child(crate::ime::marks(&new.query)));
 
         let name_field = (new.group && group_caps.as_ref().is_some_and(|g| g.name)).then(|| {
-            h_flex().flex_none().mx(px(edge)).h(px(TAP)).px(px(GAP)).rounded_full().bg(p.surface).child(div().flex_1().min_w_0().child(Input::new(&new.name).appearance(false)))
+            h_flex().flex_none().mx(px(edge)).h(px(TAP)).px(px(GAP)).rounded_full().bg(p.surface).child(div().flex_1().min_w_0().child(Input::new(&new.name).appearance(false)).child(crate::ime::marks(&new.name)))
         });
 
         let picked = (new.group && !new.picked.is_empty()).then(|| {

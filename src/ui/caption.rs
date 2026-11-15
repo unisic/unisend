@@ -458,7 +458,7 @@ impl BeeperApp {
             .gap(px(6.))
             .px(px(GUTTER))
             .py(px(8.))
-            .child(div().flex_1().min_w_0().min_h(px(TAP)).px(px(6.)).flex().items_center().rounded(px(TAP / 2.)).bg(p.surface).child(Input::new(&pv.field).appearance(false).large()))
+            .child(div().flex_1().min_w_0().min_h(px(TAP)).px(px(6.)).flex().items_center().rounded(px(TAP / 2.)).bg(p.surface).child(Input::new(&pv.field).appearance(false).large()).child(crate::ime::marks(&pv.field)))
             .child(
                 div()
                     .id("preview-send")

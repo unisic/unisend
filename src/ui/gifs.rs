@@ -181,7 +181,7 @@ impl BeeperApp {
                 .rounded_full()
                 .bg(p.raised)
                 .child(Icon::new(IconName::Search).size_4().flex_none().text_color(p.faint))
-                .child(div().flex_1().min_w_0().child(Input::new(input).appearance(false)))
+                .child(div().flex_1().min_w_0().child(Input::new(input).appearance(false)).child(crate::ime::marks(input)))
         });
 
         let g = &self.gifs;
