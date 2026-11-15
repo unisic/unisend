@@ -105,12 +105,20 @@ struct Saved {
 }
 
 /// The emoji of `group` (or all, for a search) in the chosen tone: the neutral variant of each,
-/// swapped for the tone's when it has one.
-fn shown(tone: usize) -> impl Iterator<Item = &'static emojis::Emoji> {
+/// swapped for the tone's when it has one, each only where `keep` takes it (the neutral one when
+/// it takes only that).
+fn shown(tone: usize, keep: &dyn Fn(&str) -> bool) -> impl Iterator<Item = &'static emojis::Emoji> {
     let tone = TONES.get(tone).copied().unwrap_or(SkinTone::Default);
-    emojis::iter().filter(|e| e.skin_tone().is_none_or(|t| t == SkinTone::Default)).map(move |e| {
-        if tone == SkinTone::Default { e } else { e.with_skin_tone(tone).unwrap_or(e) }
+    emojis::iter().filter(|e| e.skin_tone().is_none_or(|t| t == SkinTone::Default)).filter_map(move |e| {
+        let toned = if tone == SkinTone::Default { None } else { e.with_skin_tone(tone) };
+        toned.filter(|t| keep(t.as_str())).or_else(|| keep(e.as_str()).then_some(e))
     })
+}
+
+/// What the grid offers: what the emoji face draws and, for a reaction in a chat that takes only
+/// some, those.
+fn offered(allowed: Option<&[String]>, emoji: &str) -> bool {
+    emoji::drawable(emoji) && allowed.is_none_or(|list| list.iter().any(|a| super::menu::same_emoji(a, emoji)))
 }
 
 fn matches(e: &emojis::Emoji, query: &str) -> bool {
@@ -118,7 +126,7 @@ fn matches(e: &emojis::Emoji, query: &str) -> bool {
 }
 
 /// The grid for `cols` columns, plus the row each category starts at.
-fn build(cols: usize, query: &str, tone: usize, recents: &[&'static str]) -> (Vec<Row>, Vec<(Cat, usize)>) {
+fn build(cols: usize, query: &str, tone: usize, recents: &[&'static str], keep: &dyn Fn(&str) -> bool) -> (Vec<Row>, Vec<(Cat, usize)>) {
     let cols = cols.max(1);
     let (mut rows, mut starts) = (Vec::new(), Vec::new());
     let query = query.trim().to_lowercase();
@@ -133,16 +141,18 @@ fn build(cols: usize, query: &str, tone: usize, recents: &[&'static str]) -> (Ve
         rows.extend(items.chunks(cols).map(|c| Row::Cells(c.to_vec())));
     };
     if query.is_empty() {
-        push(Some(Cat::Recent), recents.to_vec());
+        push(Some(Cat::Recent), recents.iter().copied().filter(|e| keep(e)).collect());
         for cat in Cat::ALL.into_iter().skip(1) {
             let Cat::Group(g) = cat else { continue };
-            push(Some(cat), shown(tone).filter(|e| e.group() == g).map(|e| e.as_str()).collect());
+            push(Some(cat), shown(tone, keep).filter(|e| e.group() == g).map(|e| e.as_str()).collect());
         }
     } else {
-        push(None, shown(tone).filter(|e| matches(e, &query)).map(|e| e.as_str()).collect());
+        push(None, shown(tone, keep).filter(|e| matches(e, &query)).map(|e| e.as_str()).collect());
     }
     (rows, starts)
 }
+
+type Built = (usize, String, usize, Vec<&'static str>, Option<Vec<String>>);
 
 pub(super) struct Picker {
     pub search: Entity<InputState>,
@@ -153,8 +163,8 @@ pub(super) struct Picker {
     active: Cat,
     rows: Vec<Row>,
     starts: Vec<(Cat, usize)>,
-    /// What `rows` was built for: columns, query, tone, recents.
-    built: Option<(usize, String, usize, Vec<&'static str>)>,
+    /// What `rows` was built for: columns, query, tone, recents, the reactions the chat takes.
+    built: Option<Built>,
     pub sheet: SheetMotion,
 }
 
@@ -183,12 +193,13 @@ impl Picker {
         }
     }
 
-    fn refresh(&mut self, cols: usize, query: &str) {
-        let key = (cols, query.to_owned(), self.tone, self.recents.clone());
-        if self.built.as_ref() != Some(&key) {
-            (self.rows, self.starts) = build(cols, query, self.tone, &self.recents);
-            self.built = Some(key);
-        }
+    fn fresh(&self, cols: usize, query: &str, allowed: Option<&[String]>) -> bool {
+        self.built.as_ref().is_some_and(|(c, q, t, r, a)| (*c, q.as_str(), *t, r, a.as_deref()) == (cols, query, self.tone, &self.recents, allowed))
+    }
+
+    fn rebuild(&mut self, cols: usize, query: &str, allowed: Option<Vec<String>>) {
+        (self.rows, self.starts) = build(cols, query, self.tone, &self.recents, &|e| offered(allowed.as_deref(), e));
+        self.built = Some((cols, query.to_owned(), self.tone, self.recents.clone(), allowed));
     }
 }
 
@@ -249,7 +260,7 @@ impl BeeperApp {
         }
         let height = if typing { PANEL_SEARCH_H } else { self.emoji_pick.keyboard };
         let width = f32::from(window.viewport_size().width);
-        Some(div().id("emoji-panel").w_full().h(px(height)).flex_none().child(self.emoji_body(width, cx)).into_any_element())
+        Some(div().id("emoji-panel").w_full().h(px(height)).flex_none().child(self.emoji_body(width, false, cx)).into_any_element())
     }
 
     /// The sheet for a reaction: rises from the bottom over a dimmed screen, falls when an emoji is
@@ -286,7 +297,7 @@ impl BeeperApp {
                     cx.notify();
                 }))
             }))
-            .child(self.emoji_body(width, cx));
+            .child(self.emoji_body(width, true, cx));
         Some(
             sheet::scrim("emoji-sheet-barrier", frame)
                 .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.close_emoji(cx))))
@@ -295,12 +306,17 @@ impl BeeperApp {
         )
     }
 
-    /// Search and skin tone on top, the grid, the category tabs under it.
-    fn emoji_body(&mut self, width: f32, cx: &mut Context<Self>) -> AnyElement {
+    /// Search and skin tone on top, the grid, the category tabs under it. `react`: for a reaction,
+    /// limited to what the chat takes.
+    fn emoji_body(&mut self, width: f32, react: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         let cols = (((width - 2. * 8.) / CELL) as usize).max(1);
         let query = self.emoji_pick.search.read(cx).value().to_string();
-        self.emoji_pick.refresh(cols, &query);
+        let allowed = if react { self.caps().allowed_reactions.as_deref() } else { None };
+        if !self.emoji_pick.fresh(cols, &query, allowed) {
+            let allowed = allowed.map(<[String]>::to_vec);
+            self.emoji_pick.rebuild(cols, &query, allowed);
+        }
         let tone = self.emoji_pick.tone;
         let searching = !query.trim().is_empty();
         let rows = self.emoji_pick.rows.len();
@@ -361,7 +377,7 @@ impl BeeperApp {
             .min_h_0()
             .into_any_element()
         };
-        let tabs = h_flex().h(px(40.)).px(px(4.)).justify_between().children(Cat::ALL.into_iter().filter(|c| *c != Cat::Recent || !self.emoji_pick.recents.is_empty()).map(|cat| {
+        let tabs = h_flex().h(px(40.)).px(px(4.)).justify_between().children(Cat::ALL.into_iter().filter(|c| (searching && *c != Cat::Recent) || self.emoji_pick.starts.iter().any(|(s, _)| s == c)).map(|cat| {
             let on = !searching && self.emoji_pick.active == cat;
             let at = self.emoji_pick.starts.iter().find(|(c, _)| *c == cat).map(|(_, at)| *at);
             div()
@@ -435,7 +451,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cat, RECENTS, Row, build, remember};
+    use super::{Cat, RECENTS, Row, build, offered, remember};
 
     fn cells(rows: &[Row]) -> Vec<&'static str> {
         rows.iter().flat_map(|r| if let Row::Cells(c) = r { c.clone() } else { Vec::new() }).collect()
@@ -443,7 +459,7 @@ mod tests {
 
     #[test]
     fn grid_has_every_group_and_skips_tone_variants() {
-        let (rows, starts) = build(8, "", 0, &[]);
+        let (rows, starts) = build(8, "", 0, &[], &|_| true);
         assert_eq!(starts.len(), 9, "no recents, nine groups");
         let all = cells(&rows);
         assert!(all.len() > 1500 && all.len() < 2200, "{}", all.len());
@@ -469,7 +485,7 @@ mod tests {
 
     #[test]
     fn tone_swaps_the_variant() {
-        let (rows, _) = build(8, "", 3, &[]);
+        let (rows, _) = build(8, "", 3, &[], &|_| true);
         let all = cells(&rows);
         assert!(all.contains(&"\u{1F44B}\u{1F3FD}"));
         assert!(!all.contains(&"\u{1F44B}"));
@@ -477,16 +493,26 @@ mod tests {
 
     #[test]
     fn search_finds_by_name_and_shortcode() {
-        let (rows, starts) = build(8, " Thumbs ", 0, &[]);
+        let (rows, starts) = build(8, " Thumbs ", 0, &[], &|_| true);
         assert!(starts.is_empty());
         assert!(cells(&rows).contains(&"\u{1F44D}"));
-        assert!(cells(&build(8, "joy", 0, &[]).0).contains(&"\u{1F602}"));
-        assert!(build(8, "zzzzqq", 0, &[]).0.is_empty());
+        assert!(cells(&build(8, "joy", 0, &[], &|_| true).0).contains(&"\u{1F602}"));
+        assert!(build(8, "zzzzqq", 0, &[], &|_| true).0.is_empty());
+    }
+
+    #[test]
+    fn a_chat_that_takes_some_reactions_offers_only_those() {
+        let allowed = ["\u{2764}".to_owned(), "\u{1F44D}".to_owned()];
+        let keep = |e: &str| offered(Some(&allowed), e);
+        let (rows, starts) = build(8, "", 3, &["\u{1F602}", "\u{1F44D}"], &keep);
+        assert_eq!(cells(&rows), ["\u{1F44D}", "\u{2764}\u{FE0F}", "\u{1F44D}"], "recents, then each group: the neutral thumb, as the toned one is not taken");
+        assert_eq!(starts.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [Cat::Recent, Cat::Group(emojis::Group::SmileysAndEmotion), Cat::Group(emojis::Group::PeopleAndBody)]);
+        assert!(cells(&build(8, "", 0, &[], &|e| offered(None, e)).0).len() > 1500, "unrestricted with no face set");
     }
 
     #[test]
     fn recents_lead_when_there_are_some() {
-        let (rows, starts) = build(8, "", 0, &["\u{1F602}"]);
+        let (rows, starts) = build(8, "", 0, &["\u{1F602}"], &|_| true);
         assert_eq!(starts[0], (Cat::Recent, 0));
         assert!(matches!(&rows[1], Row::Cells(c) if c == &["\u{1F602}"]));
     }

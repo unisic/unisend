@@ -7,6 +7,7 @@
 //! is renamed to those names and given an 'm', which lets it also be the root text style's
 //! fallback family (see `fallbacks`).
 
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -63,6 +64,9 @@ pub(crate) fn use_bundled(dir: &Path, cx: &mut gpui_kit::App) {
     }
     #[cfg(target_os = "android")]
     if has_bitmaps(Path::new("/system/fonts/NotoColorEmoji.ttf")) {
+        // Android keeps the flags in a font of their own, next to it in the system's fallback.
+        let maps = ["NotoColorEmoji.ttf", "NotoColorEmojiFlags.ttf"].map(|f| map(&Path::new("/system/fonts").join(f)));
+        let _ = COVER.set(maps.iter().flatten().flat_map(|m| coverage(m)).collect());
         return;
     }
     take_family(include_bytes!("../assets/fonts/NotoColorEmoji.ttf"), cx);
@@ -79,7 +83,39 @@ fn take_family(bytes: &'static [u8], cx: &mut gpui_kit::App) -> bool {
     }
     let _ = cx.text_system().resolve_font(&gpui_kit::font(FAMILY));
     let _ = CHAIN.set(gpui_kit::FontFallbacks::from_fonts(vec![FAMILY.into()]));
+    let _ = COVER.set(coverage(bytes));
     true
+}
+
+/// The characters the emoji face in use maps, set once at start with the face; unset where the
+/// system draws emoji itself (macOS, iOS), which then offers every emoji.
+static COVER: OnceLock<HashSet<u32>> = OnceLock::new();
+
+/// Every character a Unicode `cmap` subtable of the font's first face maps to a real glyph.
+/// About 3,700 on Noto and Samsung: one walk of the table, some 30 KB kept.
+fn coverage(bytes: &[u8]) -> HashSet<u32> {
+    let mut set = HashSet::new();
+    let Ok(face) = ttf_parser::Face::parse(bytes, 0) else { return set };
+    for sub in face.tables().cmap.into_iter().flat_map(|c| c.subtables).filter(|s| s.is_unicode()) {
+        sub.codepoints(|c| {
+            if sub.glyph_index(c).is_some_and(|g| g.0 != 0) {
+                set.insert(c);
+            }
+        });
+    }
+    set
+}
+
+/// Whether `set` has every character of `emoji` but the selectors and joiners, which a face
+/// handles in its substitutions rather than its `cmap`.
+fn covers(set: &HashSet<u32>, emoji: &str) -> bool {
+    emoji.chars().filter(|c| !matches!(c, '\u{FE0E}' | '\u{FE0F}' | '\u{200D}')).all(|c| set.contains(&u32::from(c)))
+}
+
+/// Whether the emoji face in use can draw `emoji`, as far as its characters go.
+/// shortcut: a ZWJ sequence whose parts are all mapped passes even when the face has no ligature for it; read GSUB if that shows.
+pub(crate) fn drawable(emoji: &str) -> bool {
+    COVER.get().is_none_or(|set| covers(set, emoji))
 }
 
 const SYSTEM_PREFIX: &str = "emoji-system-v1-";
@@ -627,6 +663,30 @@ mod tests {
         fs::write(path(&dir), b"garbage").unwrap();
         assert!(load(&dir).is_none());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn coverage_follows_the_face() {
+        let bundled = coverage(include_bytes!("../assets/fonts/NotoColorEmoji.ttf"));
+        let seed = Path::new("/tmp/beeper-gpui-seed/fonts");
+        let mut sets = vec![("bundled", bundled)];
+        for name in ["NotoColorEmoji.ttf", "SamsungColorEmoji.ttf"] {
+            if let Some(map) = map(&seed.join(name)) {
+                sets.push((name, coverage(&map)));
+            }
+        }
+        for (name, set) in &sets {
+            let all = emojis::iter().count();
+            let flag = |e: &&str| e.starts_with(|c| ('\u{1F1E6}'..='\u{1F1FF}').contains(&c));
+            // Android's own Noto leaves the flags to NotoColorEmojiFlags.ttf.
+            let missing: Vec<&str> = emojis::iter().map(|e| e.as_str()).filter(|e| !covers(set, e) && !(*name == "NotoColorEmoji.ttf" && flag(e))).collect();
+            eprintln!("{name}: {} characters, {} of {all} emoji missing", set.len(), missing.len());
+            assert!(set.len() > 1000 && missing.len() < all / 10, "{name}");
+            assert!(!covers(set, "\u{1FAEB}"), "{name}: cracking face");
+            for e in ["\u{1F600}", "\u{2764}\u{FE0F}", "\u{1F44B}\u{1F3FD}", "#\u{FE0F}\u{20E3}", "\u{1F1F5}\u{1F1F1}", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"] {
+                assert!(covers(set, e) || (*name == "NotoColorEmoji.ttf" && flag(&e)), "{name}: {e:?}");
+            }
+        }
     }
 
     #[test]
