@@ -2005,7 +2005,7 @@ impl BeeperApp {
                     .children(self.wallpaper_layer(0., cx))
                     .child(timeline)
                     .child(self.press_tracker(cx))
-                    .children(self.jump_button(cx))
+                    .children(self.jump_button(window, cx))
                     .children(self.find_results(cx))
                     .when(self.loading && self.msgs.is_empty(), |el| {
                         el.child(

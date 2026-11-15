@@ -150,17 +150,22 @@ impl BeeperApp {
         }
     }
 
-    pub(super) fn jump_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.place.away {
+    pub(super) fn jump_button(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let room = self.open.as_ref().map(ToString::to_string).unwrap_or_default();
+        let away = self.place.away;
+        let shown = Presence::new(("jump-to-newest", room), away).transition(if away { motion::enter() } else { motion::exit() }).sample(window, cx);
+        if !shown.should_render() {
             return None;
         }
+        let v = shown.progress;
         let p = Palette::of(cx);
         let missed = self.place.missed;
         Some(
             div()
                 .absolute()
-                .bottom(px(12.))
+                .bottom(px(4. + 8. * v))
                 .right(px(GUTTER))
+                .opacity(v)
                 .child(
                     div()
                         .id("jump-to-newest")
@@ -177,7 +182,7 @@ impl BeeperApp {
                         .cursor_pointer()
                         .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.lifted)))
                         .active(|el| el.bg(p.lifted))
-                        .on_click(cx.listener(|this, _, _, cx| this.jump_to_newest(cx)))
+                        .when(away, |el| el.on_click(cx.listener(|this, _, _, cx| this.jump_to_newest(cx))))
                         .child(Icon::new(IconName::ArrowDown).size_5())
                         .when(missed > 0, |el| {
                             el.child(
@@ -201,7 +206,6 @@ impl BeeperApp {
                             )
                         }),
                 )
-                .with_animation("jump-to-newest", Animation::new(motion::ENTER).with_easing(motion::ease_out), |el, t| el.opacity(t).bottom(px(4. + 8. * t)))
                 .into_any_element(),
         )
     }
