@@ -6,8 +6,12 @@
 //! and GPUI drops a face without a Latin 'm' when its family is requested. So the copy kept here
 //! is renamed to those names and given an 'm', which lets it also be the root text style's
 //! fallback family (see `fallbacks`).
+//!
+//! When that face is not Noto (the user's, or Samsung's on its phones), Noto is kept behind it
+//! under a family of its own (`NOTO_FAMILY`), and each emoji the face does not draw as one glyph
+//! is set in Noto instead (see `styled` and `drawable`).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::ops::Range;
@@ -24,6 +28,9 @@ const PART: &str = "emoji-font.part";
 const LIMIT: u64 = 300 * 1024 * 1024;
 const FAMILY: &str = "Noto Color Emoji";
 const POSTSCRIPT: &str = "NotoColorEmoji";
+const NOTO_FAMILY: &str = "Noto Color Emoji Fallback";
+const SYSTEM_NOTO: &str = "/system/fonts/NotoColorEmoji.ttf";
+static BUNDLED: &[u8] = include_bytes!("../assets/fonts/NotoColorEmoji.ttf");
 
 fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
@@ -45,7 +52,7 @@ pub(crate) fn apply(settings: &mut Settings, dir: &Path, cx: &mut gpui_kit::App)
         let _ = fs::remove_file(path(dir));
         return false;
     };
-    take_family(bytes, cx)
+    take_family(bytes, Some(dir), cx)
 }
 
 /// Adds the device's own colour emoji font on Android when GPUI can draw it (see `system`), else
@@ -59,63 +66,142 @@ pub(crate) fn use_bundled(dir: &Path, cx: &mut gpui_kit::App) {
     }
     // Android's font directory; elsewhere it does not exist and nothing is found.
     if let Some(bytes) = system(Path::new("/system/fonts"), dir) {
-        take_family(bytes, cx);
+        take_family(bytes, Some(dir), cx);
         return;
     }
     #[cfg(target_os = "android")]
-    if has_bitmaps(Path::new("/system/fonts/NotoColorEmoji.ttf")) {
+    if has_bitmaps(Path::new(SYSTEM_NOTO)) {
         // Android keeps the flags in a font of their own, next to it in the system's fallback.
-        let maps = ["NotoColorEmoji.ttf", "NotoColorEmojiFlags.ttf"].map(|f| map(&Path::new("/system/fonts").join(f)));
-        let _ = COVER.set(maps.iter().flatten().flat_map(|m| coverage(m)).collect());
+        let active = [SYSTEM_NOTO, "/system/fonts/NotoColorEmojiFlags.ttf"].into_iter().filter_map(|f| leak(map(Path::new(f))?)).collect();
+        let _ = FACES.set(Faces { active, noto: None });
         return;
     }
-    take_family(include_bytes!("../assets/fonts/NotoColorEmoji.ttf"), cx);
+    take_family(BUNDLED, None, cx);
 }
 
 /// Makes `bytes`, a face named FAMILY with an 'm', the only face of that family and the fallback
 /// chain. Added first: requesting the family then drops the other faces of it (none has an 'm')
 /// and still finds ours, where requesting a family with no face left would panic in GPUI.
+/// With `dir`, the face is not Noto, which is then prepared behind it (see `noto`).
 /// shortcut: leans on that dropping, which removes the system's face; replace once GPUI can draw COLRv1.
-fn take_family(bytes: &'static [u8], cx: &mut gpui_kit::App) -> bool {
+fn take_family(bytes: &'static [u8], dir: Option<&Path>, cx: &mut gpui_kit::App) -> bool {
     if let Err(e) = cx.text_system().add_fonts(vec![bytes.into()]) {
         log::warn!("emoji font: {e}");
         return false;
     }
     let _ = cx.text_system().resolve_font(&gpui_kit::font(FAMILY));
-    let _ = CHAIN.set(gpui_kit::FontFallbacks::from_fonts(vec![FAMILY.into()]));
-    let _ = COVER.set(coverage(bytes));
+    let noto = dir.and_then(|dir| noto(Path::new(SYSTEM_NOTO), dir, bytes)).filter(|noto| {
+        let added = cx.text_system().add_fonts(vec![(*noto).into()]);
+        added.map_err(|e| log::warn!("emoji font: Noto: {e}")).is_ok()
+    });
+    let families = std::iter::once(FAMILY).chain(noto.map(|_| NOTO_FAMILY)).map(Into::into).collect();
+    let _ = CHAIN.set(gpui_kit::FontFallbacks::from_fonts(families));
+    let _ = FACES.set(Faces { active: vec![bytes], noto });
     true
 }
 
-/// The characters the emoji face in use maps, set once at start with the face; unset where the
-/// system draws emoji itself (macOS, iOS), which then offers every emoji.
-static COVER: OnceLock<HashSet<u32>> = OnceLock::new();
+/// The emoji faces, set once at start: the one in use (with Android's flag font beside it) and,
+/// when that is not Noto, Noto behind it. Unset where the system draws emoji itself (macOS, iOS),
+/// which then offers every emoji.
+struct Faces {
+    active: Vec<&'static [u8]>,
+    noto: Option<&'static [u8]>,
+}
 
-/// Every character a Unicode `cmap` subtable of the font's first face maps to a real glyph.
-/// About 3,700 on Noto and Samsung: one walk of the table, some 30 KB kept.
-fn coverage(bytes: &[u8]) -> HashSet<u32> {
-    let mut set = HashSet::new();
-    let Ok(face) = ttf_parser::Face::parse(bytes, 0) else { return set };
-    for sub in face.tables().cmap.into_iter().flat_map(|c| c.subtables).filter(|s| s.is_unicode()) {
-        sub.codepoints(|c| {
-            if sub.glyph_index(c).is_some_and(|g| g.0 != 0) {
-                set.insert(c);
+static FACES: OnceLock<Faces> = OnceLock::new();
+
+/// What draws an emoji the face in use does not.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Draw {
+    Noto,
+    Neither,
+}
+
+/// Every emoji of the `emojis` list, with each skin tone.
+fn universe() -> impl Iterator<Item = &'static emojis::Emoji> {
+    emojis::iter().flat_map(|e| std::iter::once(e).chain(e.skin_tones().into_iter().flatten().skip(1)))
+}
+
+/// The emoji of `universe` the active faces do not draw, each with what draws it instead.
+/// About 20 on Samsung's font: one shaping walk of 3,963 sequences per face, a few ms.
+fn gaps(active: &[ttf_parser::Face], noto: Option<&ttf_parser::Face>) -> HashMap<&'static str, Draw> {
+    let pick = |emoji: &str| match noto {
+        Some(noto) if draws(noto, emoji) => Draw::Noto,
+        _ => Draw::Neither,
+    };
+    universe().map(|e| e.as_str()).filter(|e| !active.iter().any(|face| draws(face, e))).map(|e| (e, pick(e))).collect()
+}
+
+static GAPS: OnceLock<HashMap<&'static str, Draw>> = OnceLock::new();
+
+/// `gaps` of the faces in use, worked out on first use rather than at start.
+fn gaps_in_use() -> Option<&'static HashMap<&'static str, Draw>> {
+    let faces = FACES.get()?;
+    Some(GAPS.get_or_init(|| {
+        let parse = |bytes: &&'static [u8]| ttf_parser::Face::parse(bytes, 0).ok();
+        gaps(&faces.active.iter().filter_map(parse).collect::<Vec<_>>(), faces.noto.as_ref().and_then(parse).as_ref())
+    }))
+}
+
+/// How a shaper treats a character when matching ligatures: selectors may stay behind unmatched,
+/// joiners and tags may be skipped inside a ligature but left over mean it was not joined.
+#[derive(Clone, Copy, PartialEq)]
+enum Part {
+    Base,
+    Selector,
+    Joiner,
+}
+
+/// Whether `face` draws `emoji` as one glyph: each character mapped and a sequence (ZWJ, skin
+/// tone, flag, keycap, tag) joined by the face's ligatures, applied in lookup order as a shaper
+/// does. Agrees with harfrust on all 3,963 emoji for Samsung's font and the bundled Noto, but for
+/// one flag Noto draws as its placeholder.
+/// shortcut: only ligature lookups of every feature are applied; read contextual ones if a font builds sequences with them.
+fn draws(face: &ttf_parser::Face, emoji: &str) -> bool {
+    use ttf_parser::{GlyphId, gsub::SubstitutionSubtable};
+    let part = |c| match c {
+        '\u{FE0E}' | '\u{FE0F}' => Part::Selector,
+        '\u{200D}' | '\u{E0020}'..='\u{E007F}' => Part::Joiner,
+        _ => Part::Base,
+    };
+    let mut run: Vec<(u16, Part)> = emoji.chars().map(|c| (face.glyph_index(c).map_or(0, |g| g.0), part(c))).collect();
+    for lookup in face.tables().gsub.into_iter().flat_map(|gsub| gsub.lookups) {
+        for sub in lookup.subtables.into_iter::<SubstitutionSubtable>() {
+            let SubstitutionSubtable::Ligature(lig) = sub else { continue };
+            let mut i = 0;
+            while i < run.len() {
+                let set = (run[i].1 == Part::Base).then(|| lig.coverage.get(GlyphId(run[i].0))).flatten().and_then(|ix| lig.ligature_sets.get(ix));
+                let joined = set.into_iter().flatten().find_map(|l| {
+                    let mut j = i + 1;
+                    for want in l.components {
+                        loop {
+                            let &(glyph, part) = run.get(j)?;
+                            j += 1;
+                            if glyph == want.0 {
+                                break;
+                            }
+                            if part == Part::Base {
+                                return None;
+                            }
+                        }
+                    }
+                    Some((j, l.glyph.0))
+                });
+                if let Some((end, glyph)) = joined {
+                    run.splice(i..end, [(glyph, Part::Base)]);
+                }
+                i += 1;
             }
-        });
+        }
     }
-    set
+    let mut bases = run.iter().filter(|(_, p)| *p == Part::Base);
+    matches!((bases.next(), bases.next()), (Some(&(g, _)), None) if g != 0) && run.iter().all(|(_, p)| *p != Part::Joiner)
 }
 
-/// Whether `set` has every character of `emoji` but the selectors and joiners, which a face
-/// handles in its substitutions rather than its `cmap`.
-fn covers(set: &HashSet<u32>, emoji: &str) -> bool {
-    emoji.chars().filter(|c| !matches!(c, '\u{FE0E}' | '\u{FE0F}' | '\u{200D}')).all(|c| set.contains(&u32::from(c)))
-}
-
-/// Whether the emoji face in use can draw `emoji`, as far as its characters go.
-/// shortcut: a ZWJ sequence whose parts are all mapped passes even when the face has no ligature for it; read GSUB if that shows.
+/// Whether the face in use or Noto behind it draws `emoji`, one of the `emojis` list as written
+/// there; a sequence outside it counts as drawable.
 pub(crate) fn drawable(emoji: &str) -> bool {
-    COVER.get().is_none_or(|set| covers(set, emoji))
+    gaps_in_use().is_none_or(|gaps| gaps.get(emoji) != Some(&Draw::Neither))
 }
 
 const SYSTEM_PREFIX: &str = "emoji-system-v1-";
@@ -148,37 +234,100 @@ fn candidates(fonts: &Path) -> Vec<PathBuf> {
     found.into_iter().filter(|p| has_bitmaps(p)).collect()
 }
 
-/// The device's own emoji font, prepared once into `dir` (not the user's slot) and mapped. The copy
-/// is named after the source's size and modification time, so it is redone only when the system
-/// font changes; written under a part name and renamed in, and the only one kept. The first start
-/// pays for copying the source (about 20 MB on Samsung); later ones only map it.
+/// The device's own emoji font, prepared once into `dir` (not the user's slot) and mapped. The
+/// first start pays for copying the source (about 20 MB on Samsung); later ones only map it.
 fn system(fonts: &Path, dir: &Path) -> Option<&'static [u8]> {
     let src = candidates(fonts).into_iter().next()?;
-    let meta = fs::metadata(&src).ok()?;
+    let kept = kept(dir, SYSTEM_PREFIX, &stamp(&src)?, |part| {
+        fs::copy(&src, part).map_err(|e| format!("system copy of {}: {e}", src.display()))?;
+        prepare(part, FAMILY).map(drop)
+    })?;
+    load_file(&kept, FAMILY)
+}
+
+const NOTO_PREFIX: &str = "emoji-noto-v1-";
+
+/// Noto, for the emoji the face in use (`active`) lacks: the device's copy at `system` where GPUI
+/// can draw it, else the bundled one. Prepared once into `dir` under `NOTO_FAMILY` and with the
+/// line metrics of `active` (see `fit`), so an emoji drawn from it neither moves the baseline nor
+/// changes the line's height; redone when either font changes. About 10 MB on disk, written on
+/// the first start; mapped, so only the pages of the glyphs drawn are read.
+fn noto(system: &Path, dir: &Path, active: &[u8]) -> Option<&'static [u8]> {
+    let metrics = line_metrics(&ttf_parser::Face::parse(active, 0).ok()?);
+    let device = has_bitmaps(system);
+    let source = if device { stamp(system)? } else { format!("bundled-{}", BUNDLED.len()) };
+    let [em, ascent, descent, gap] = metrics;
+    let kept = kept(dir, NOTO_PREFIX, &format!("{source}-{em}_{ascent}_{descent}_{gap}"), |part| {
+        let copied = if device { fs::copy(system, part).map(drop) } else { fs::write(part, BUNDLED) };
+        copied.map_err(|e| format!("Noto copy: {e}"))?;
+        fit(part, metrics)?;
+        prepare(part, NOTO_FAMILY).map(drop)
+    })?;
+    load_file(&kept, NOTO_FAMILY)
+}
+
+/// A name for `src` from its size and modification time, which change when the system's font does.
+fn stamp(src: &Path) -> Option<String> {
+    let meta = fs::metadata(src).ok()?;
     let age = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
-    let kept = dir.join(format!("{SYSTEM_PREFIX}{}-{}.{}", meta.len(), age.as_secs(), age.subsec_nanos()));
+    Some(format!("{}-{}.{}", meta.len(), age.as_secs(), age.subsec_nanos()))
+}
+
+/// `dir`/`prefix``stamp`, made by `make` under a part name and renamed in unless it is there
+/// already, and then the only file of `prefix` kept.
+fn kept(dir: &Path, prefix: &str, stamp: &str, make: impl FnOnce(&Path) -> Result<(), String>) -> Option<PathBuf> {
+    let kept = dir.join(format!("{prefix}{stamp}"));
     if !kept.exists() {
-        let part = dir.join(format!("{SYSTEM_PREFIX}part"));
-        let made = fs::copy(&src, &part).map_err(|e| e.to_string()).and_then(|_| prepare(&part)).and_then(|_| fs::rename(&part, &kept).map_err(|e| e.to_string()));
-        if let Err(e) = made {
-            log::warn!("emoji font: system copy of {} failed: {e}", src.display());
+        let part = dir.join(format!("{prefix}part"));
+        if let Err(e) = make(&part).and_then(|()| fs::rename(&part, &kept).map_err(|e| e.to_string())) {
+            log::warn!("emoji font: {e}");
             let _ = fs::remove_file(&part);
             return None;
         }
     }
     for old in fs::read_dir(dir).into_iter().flatten().flatten() {
-        if old.path() != kept && old.file_name().to_str().is_some_and(|n| n.starts_with(SYSTEM_PREFIX)) {
+        if old.path() != kept && old.file_name().to_str().is_some_and(|n| n.starts_with(prefix)) {
             let _ = fs::remove_file(old.path());
         }
     }
-    load_file(&kept)
+    Some(kept)
+}
+
+/// Units per em, ascent, descent and line gap, read as swash (cosmic-text's) reads them: OS/2's
+/// typographic values where the font says to use them, else `hhea`'s.
+fn line_metrics(face: &ttf_parser::Face) -> [i32; 4] {
+    let hhea = face.tables().hhea;
+    let (ascent, descent, gap) = match face.tables().os2.filter(|os2| os2.use_typographic_metrics() && os2.typographic_ascender() != 0) {
+        Some(os2) => (os2.typographic_ascender(), os2.typographic_descender(), os2.typographic_line_gap()),
+        None => (hhea.ascender, hhea.descender, hhea.line_gap),
+    };
+    [face.units_per_em().into(), ascent.into(), descent.into(), gap.into()]
+}
+
+/// Writes `metrics` (see `line_metrics`), scaled to the font's own em, over both of the font's sets
+/// of line metrics, so the text system reads them whichever set it picks.
+fn fit(path: &Path, [em, ascent, descent, gap]: [i32; 4]) -> Result<(), String> {
+    let not_font = || "Noto copy: not a font".to_owned();
+    let mut file = OpenOptions::new().read(true).write(true).open(path).map_err(|e| e.to_string())?;
+    let count = be16(&read_at(&mut file, 0, 12).map_err(|e| e.to_string())?, 4).ok_or_else(not_font)?;
+    let records = read_at(&mut file, 12, 16 * usize::from(count)).map_err(|e| e.to_string())?;
+    let table = |tag: &[u8]| records.chunks(16).find(|r| r.starts_with(tag)).and_then(|r| Some((u64::from(be32(r, 8)?), be32(r, 12)?)));
+    let (head, _) = table(b"head").ok_or_else(not_font)?;
+    let own = be16(&read_at(&mut file, head + 18, 2).map_err(|e| e.to_string())?, 0).ok_or_else(not_font)?;
+    let scaled: Vec<u8> = [ascent, descent, gap].iter().flat_map(|&v| ((f64::from(v) * f64::from(own) / f64::from(em.max(1))).round() as i16).to_be_bytes()).collect();
+    let (hhea, _) = table(b"hhea").ok_or_else(not_font)?;
+    write_at(&mut file, hhea + 4, &scaled).map_err(|e| e.to_string())?;
+    if let Some((os2, _)) = table(b"OS/2").filter(|&(_, len)| len >= 74) {
+        write_at(&mut file, os2 + 68, &scaled).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 static CHAIN: OnceLock<gpui_kit::FontFallbacks> = OnceLock::new();
 
 /// For the root text style, once an emoji face with an 'm' is in (the user's or the bundled
-/// one): it then draws every grapheme whose
-/// first character the app's face lacks, before cosmic-text's fallback list, whose text fonts
+/// one): it then draws every grapheme whose first character the app's face lacks (and Noto behind
+/// it those whose first character it lacks too), before cosmic-text's fallback list, whose text fonts
 /// come first (on Linux U+263A U+FE0F is otherwise a white glyph from Noto Sans Symbols). GPUI
 /// keeps a grapheme on the app's face when it has the first character: keycaps (ASCII) and, where
 /// the system's Inter 4 is the face picked, U+2764.
@@ -188,14 +337,14 @@ pub(crate) fn fallbacks() -> Option<gpui_kit::FontFallbacks> {
 
 /// The kept font, mapped for the life of the process: only the pages of glyphs drawn are read.
 fn load(dir: &Path) -> Option<&'static [u8]> {
-    load_file(&path(dir))
+    load_file(&path(dir), FAMILY)
 }
 
-fn load_file(path: &Path) -> Option<&'static [u8]> {
-    let map = map(path)?;
-    if !usable(&map) {
-        return None;
-    }
+fn load_file(path: &Path, family: &str) -> Option<&'static [u8]> {
+    leak(map(path).filter(|map| usable(map, family))?)
+}
+
+fn leak(map: Arc<memmap2::Mmap>) -> Option<&'static [u8]> {
     let map = Arc::try_unwrap(map).ok()?;
     Some(&Box::leak(Box::new(map))[..])
 }
@@ -208,12 +357,12 @@ fn map(path: &Path) -> Option<Arc<memmap2::Mmap>> {
     Some(Arc::new(unsafe { memmap2::Mmap::map(&file) }.ok()?))
 }
 
-/// Whether every face has the names and the 'm' that `rename` gives: without the 'm', requesting
-/// the family would drop the face.
-fn usable(map: &Arc<memmap2::Mmap>) -> bool {
+/// Whether every face has the names (`family`) and the 'm' that `rename` gives: without the 'm',
+/// requesting the family would drop the face.
+fn usable(map: &Arc<memmap2::Mmap>, family: &str) -> bool {
     let faces = faces(Source::Binary(map.clone()));
     let m = ttf_parser::Face::parse(map, 0).is_ok_and(|face| face.glyph_index('m').is_some());
-    m && !faces.is_empty() && faces.iter().all(|(family, ps)| family == FAMILY && ps == POSTSCRIPT)
+    m && !faces.is_empty() && faces.iter().all(|(name, ps)| name == family && ps == POSTSCRIPT)
 }
 
 /// Each face's family name (English if it has one) and PostScript name, as the text system reads them.
@@ -237,7 +386,7 @@ pub(crate) fn import(src: &Path, dir: &Path) -> Result<String, String> {
         return Err(t!("The file is larger than 300 MB.").into());
     }
     let part = dir.join(PART);
-    let made = place(src, &part).and_then(|()| prepare(&part));
+    let made = place(src, &part).and_then(|()| prepare(&part, FAMILY));
     let kept = made.and_then(|family| fs::rename(&part, path(dir)).map(|()| family).map_err(|_| t!("The font cannot be saved.").to_owned()));
     if kept.is_err() {
         let _ = fs::remove_file(&part);
@@ -263,16 +412,17 @@ fn place(src: &Path, part: &Path) -> Result<(), String> {
     fs::copy(src, part).map(drop).map_err(|_| t!("The file cannot be read.").to_owned())
 }
 
-fn prepare(part: &Path) -> Result<String, String> {
+/// Renames the font at `part` to `family` (see `rename`) and returns its family name before.
+fn prepare(part: &Path, family: &str) -> Result<String, String> {
     let not_font = || t!("Not a font file.").to_owned();
-    let family = map(part).map_or_else(Vec::new, |map| faces(Source::Binary(map))).into_iter().next().map(|(family, _)| family).ok_or_else(not_font)?;
+    let was = map(part).map_or_else(Vec::new, |map| faces(Source::Binary(map))).into_iter().next().map(|(was, _)| was).ok_or_else(not_font)?;
     let mut file = OpenOptions::new().read(true).write(true).open(part).map_err(|_| not_font())?;
-    rename(&mut file)?;
+    rename(&mut file, family)?;
     file.sync_all().map_err(|_| t!("The font cannot be saved.").to_owned())?;
-    if !map(part).is_some_and(|map| usable(&map)) {
+    if !map(part).is_some_and(|map| usable(&map, family)) {
         return Err(not_font());
     }
-    Ok(family)
+    Ok(was)
 }
 
 fn be16(b: &[u8], at: usize) -> Option<u16> {
@@ -295,10 +445,11 @@ fn write_at(file: &mut File, at: u64, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)
 }
 
-/// Gives the font the names the text system knows (see the module comment) and a Latin 'm', so
-/// it can be a requested fallback family: new `name` and `cmap` tables are appended and the
-/// face's table directory pointed at them. A collection keeps its first face.
-fn rename(file: &mut File) -> Result<(), String> {
+/// Gives the font the names the text system knows (`family` and the PostScript name in the module
+/// comment) and a Latin 'm', so it can be a requested fallback family: new `name` and `cmap`
+/// tables are appended and the face's table directory pointed at them. A collection keeps its
+/// first face.
+fn rename(file: &mut File, family: &str) -> Result<(), String> {
     let not_font = || t!("Not a font file.").to_owned();
     let io = |_| not_font();
     let head = read_at(file, 0, 16).map_err(io)?;
@@ -323,7 +474,7 @@ fn rename(file: &mut File) -> Result<(), String> {
         });
     }
     let (names, cmap) = (table(b"name").ok_or_else(not_font)?, table(b"cmap").ok_or_else(not_font)?);
-    let renamed = renamed(&read_table(names)?).ok_or_else(not_font)?;
+    let renamed = renamed(&read_table(names)?, family).ok_or_else(not_font)?;
     let with_m = with_m(&read_table(cmap)?).ok_or_else(|| t!("Not a colour emoji font.").to_owned())?;
     for (r, bytes) in [(names, renamed), (cmap, with_m)] {
         append_table(file, u64::from(face) + 12 + r as u64, bytes).map_err(io)?;
@@ -405,7 +556,7 @@ fn with_m(table: &[u8]) -> Option<Vec<u8>> {
 
 /// The `name` table with the family, full and PostScript names replaced. The old strings stay;
 /// the replacements are added after them.
-fn renamed(table: &[u8]) -> Option<Vec<u8>> {
+fn renamed(table: &[u8], family: &str) -> Option<Vec<u8>> {
     let count = usize::from(be16(table, 2)?);
     let storage = usize::from(be16(table, 4)?);
     let base = table.len().checked_sub(storage)?;
@@ -415,7 +566,7 @@ fn renamed(table: &[u8]) -> Option<Vec<u8>> {
         let r = 6 + 12 * i;
         let (platform, encoding, id) = (be16(table, r)?, be16(table, r + 2)?, be16(table, r + 6)?);
         let text = match id {
-            1 | 4 | 16 | 21 => FAMILY,
+            1 | 4 | 16 | 21 => family,
             6 => POSTSCRIPT,
             _ => continue,
         };
@@ -489,20 +640,63 @@ fn spans(text: &str) -> Vec<Range<usize>> {
     out
 }
 
-/// `text` with `marks` (sorted, apart) as `StyledText`, and, once `CHAIN` is set, each emoji
-/// sequence of `spans` set in the emoji family. Without `CHAIN` the face by that name lacks an
-/// 'm' and requesting the family would drop it. Marks are cut at the sequences' edges so a link
-/// or mention keeps its colour around them.
+/// Characters in the longest emoji of the `emojis` list (a kiss with two skin tones).
+const LONGEST: usize = 10;
+
+/// Byte ranges of the emoji in `text` that `gaps` sets in Noto, each the longest of the `emojis`
+/// list at its place. A text-default symbol without U+FE0F stays text, as in `spans`.
+fn noto_spans(text: &str, gaps: &HashMap<&'static str, Draw>) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    if !gaps.values().any(|d| *d == Draw::Noto) {
+        return out;
+    }
+    let mut at = 0;
+    while let Some(c) = text[at..].chars().next() {
+        let next = text[at + c.len_utf8()..].chars().next();
+        let keycap = matches!(c, '#' | '*' | '0'..='9') && matches!(next, Some('\u{FE0F}' | '\u{20E3}'));
+        let starts = keycap || matches!(c, '\u{A9}' | '\u{AE}' | '\u{2000}'..='\u{2BFF}' | '\u{3030}' | '\u{303D}' | '\u{3297}' | '\u{3299}' | '\u{1F000}'..);
+        let ends: Vec<usize> = if starts { text[at..].char_indices().map(|(i, c)| at + i + c.len_utf8()).take(LONGEST).collect() } else { Vec::new() };
+        let Some((end, emoji)) = ends.into_iter().rev().find_map(|end| Some((end, emojis::get(&text[at..end])?))) else {
+            at += c.len_utf8();
+            continue;
+        };
+        let written = &text[at..end];
+        let plain = written.chars().count() == 1 && emoji.as_str().contains('\u{FE0F}') && !written.contains('\u{FE0F}');
+        if !plain && gaps.get(emoji.as_str()) == Some(&Draw::Noto) {
+            out.push(at..end);
+        }
+        at = end;
+    }
+    out
+}
+
+/// The sequences of `text` set in an emoji family, by start: each of `spans` in the face in use,
+/// and each of `noto_spans` in Noto. Empty without `CHAIN`: the face by that name then lacks an
+/// 'm' and requesting the family would drop it.
+fn families(text: &str) -> Vec<(Range<usize>, &'static str)> {
+    if CHAIN.get().is_none() {
+        return Vec::new();
+    }
+    let noto = gaps_in_use().map_or_else(Vec::new, |gaps| noto_spans(text, gaps));
+    let apart = |s: &Range<usize>| !noto.iter().any(|n| n.start < s.end && s.start < n.end);
+    let mut found: Vec<_> = spans(text).into_iter().filter(apart).map(|s| (s, FAMILY)).collect();
+    found.extend(noto.into_iter().map(|n| (n, NOTO_FAMILY)));
+    found.sort_by_key(|(r, _)| r.start);
+    found
+}
+
+/// `text` with `marks` (sorted, apart) as `StyledText`, and each sequence of `families` set in its
+/// family. Marks are cut at the sequences' edges so a link or mention keeps its colour around them.
 pub(crate) fn styled(text: impl Into<gpui_kit::SharedString>, marks: Vec<(Range<usize>, gpui_kit::HighlightStyle)>) -> gpui_kit::StyledText {
     let text = text.into();
-    let found = if CHAIN.get().is_some() { spans(&text) } else { Vec::new() };
+    let found = families(&text);
     if found.is_empty() {
         return gpui_kit::StyledText::new(text).with_highlights(marks);
     }
     let mut out = Vec::new();
     for (range, style) in marks {
         let mut at = range.start;
-        for s in &found {
+        for (s, _) in &found {
             for cut in [s.start, s.end] {
                 if cut > at && cut < range.end {
                     out.push((at..cut, style));
@@ -513,7 +707,7 @@ pub(crate) fn styled(text: impl Into<gpui_kit::SharedString>, marks: Vec<(Range<
         out.push((at..range.end, style));
     }
     let marked = out.clone();
-    for s in &found {
+    for (s, _) in &found {
         let mut at = s.start;
         for (r, _) in marked.iter().filter(|(r, _)| r.start < s.end && r.end > s.start) {
             if r.start > at {
@@ -526,7 +720,7 @@ pub(crate) fn styled(text: impl Into<gpui_kit::SharedString>, marks: Vec<(Range<
         }
     }
     out.sort_by_key(|(r, _)| r.start);
-    gpui_kit::StyledText::new(text).with_highlights(out).with_font_family_overrides(found.into_iter().map(|r| (r, FAMILY.into())))
+    gpui_kit::StyledText::new(text).with_highlights(out).with_font_family_overrides(found.into_iter().map(|(r, family)| (r, family.into())))
 }
 
 #[cfg(test)]
@@ -578,7 +772,7 @@ mod tests {
         assert!(system(&fonts, &data).is_some());
         let first = stamped(&data);
         assert_eq!(first.len(), 1);
-        assert!(usable(&map(&data.join(&first[0])).unwrap()));
+        assert!(usable(&map(&data.join(&first[0])).unwrap(), FAMILY));
         assert!(system(&fonts, &data).is_some());
         assert_eq!(stamped(&data), first);
         fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoColorEmoji.ttf"), &sam).unwrap();
@@ -612,7 +806,7 @@ mod tests {
     #[test]
     fn the_bundled_font_is_ready_to_be_requested() {
         let bundled = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/NotoColorEmoji.ttf");
-        assert!(usable(&map(Path::new(bundled)).unwrap()));
+        assert!(usable(&map(Path::new(bundled)).unwrap(), FAMILY));
     }
 
     #[test]
@@ -666,27 +860,100 @@ mod tests {
     }
 
     #[test]
-    fn coverage_follows_the_face() {
-        let bundled = coverage(include_bytes!("../assets/fonts/NotoColorEmoji.ttf"));
+    fn draws_follows_the_face() {
         let seed = Path::new("/tmp/beeper-gpui-seed/fonts");
-        let mut sets = vec![("bundled", bundled)];
-        for name in ["NotoColorEmoji.ttf", "SamsungColorEmoji.ttf"] {
-            if let Some(map) = map(&seed.join(name)) {
-                sets.push((name, coverage(&map)));
-            }
-        }
-        for (name, set) in &sets {
-            let all = emojis::iter().count();
+        let mut maps: Vec<(&str, &[u8])> = vec![("bundled", BUNDLED)];
+        let found: Vec<_> = ["NotoColorEmoji.ttf", "SamsungColorEmoji.ttf"].into_iter().filter_map(|name| Some((name, map(&seed.join(name))?))).collect();
+        maps.extend(found.iter().map(|(name, map)| (*name, &map[..])));
+        let all = universe().count();
+        for (name, bytes) in maps {
+            let face = ttf_parser::Face::parse(bytes, 0).unwrap();
             let flag = |e: &&str| e.starts_with(|c| ('\u{1F1E6}'..='\u{1F1FF}').contains(&c));
             // Android's own Noto leaves the flags to NotoColorEmojiFlags.ttf.
-            let missing: Vec<&str> = emojis::iter().map(|e| e.as_str()).filter(|e| !covers(set, e) && !(*name == "NotoColorEmoji.ttf" && flag(e))).collect();
-            eprintln!("{name}: {} characters, {} of {all} emoji missing", set.len(), missing.len());
-            assert!(set.len() > 1000 && missing.len() < all / 10, "{name}");
-            assert!(!covers(set, "\u{1FAEB}"), "{name}: cracking face");
-            for e in ["\u{1F600}", "\u{2764}\u{FE0F}", "\u{1F44B}\u{1F3FD}", "#\u{FE0F}\u{20E3}", "\u{1F1F5}\u{1F1F1}", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"] {
-                assert!(covers(set, e) || (*name == "NotoColorEmoji.ttf" && flag(&e)), "{name}: {e:?}");
+            let missing: Vec<&str> = universe().map(|e| e.as_str()).filter(|e| !draws(&face, e) && !(name == "NotoColorEmoji.ttf" && flag(e))).collect();
+            eprintln!("{name}: {} of {all} emoji missing", missing.len());
+            assert!(missing.len() < all / 10, "{name}");
+            for e in ["\u{1F600}", "\u{2764}\u{FE0F}", "\u{1F44B}\u{1F3FD}", "#\u{FE0F}\u{20E3}", "\u{1F1F5}\u{1F1F1}", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}"] {
+                assert!(draws(&face, e) || (name == "NotoColorEmoji.ttf" && flag(&e)), "{name}: {e:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_sequence_is_drawn_only_when_joined() {
+        let fixture = fs::read(Path::new(FIXTURES).join("emoji-sbix.ttf")).unwrap();
+        let face = ttf_parser::Face::parse(&fixture, 0).unwrap();
+        // The fixture joins a family, a toned thumb, the Polish flag and keycap one.
+        for e in ["\u{1F600}", "\u{2764}\u{FE0F}", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", "\u{1F44D}\u{1F3FD}", "\u{1F1F5}\u{1F1F1}", "1\u{FE0F}\u{20E3}"] {
+            assert!(draws(&face, e), "{e:?}");
+        }
+        // Every part is mapped, but no ligature joins them: a shaper draws them side by side.
+        for e in ["\u{1F600}\u{200D}\u{1F600}", "\u{1F600}\u{1F600}", "\u{1F600}\u{1F3FD}", "\u{1F1F1}\u{1F1F5}", "\u{1F600}\u{E0067}\u{E007F}", "\u{1F466}"] {
+            assert!(!draws(&face, e), "{e:?}");
+        }
+    }
+
+    fn named(name: &str) -> &'static str {
+        universe().find(|e| e.name() == name).unwrap().as_str()
+    }
+
+    #[test]
+    fn noto_fills_what_the_face_lacks() {
+        let fixture = fs::read(Path::new(FIXTURES).join("emoji-sbix.ttf")).unwrap();
+        let active = [ttf_parser::Face::parse(&fixture, 0).unwrap()];
+        let noto = ttf_parser::Face::parse(BUNDLED, 0).unwrap();
+        let with = gaps(&active, Some(&noto));
+        let without = gaps(&active, None);
+        let (family, couple) = (named("family: man, woman, girl"), named("couple with heart: man, man"));
+        assert_eq!((with.get("\u{1F600}"), with.get(family)), (None, None));
+        // Man, heart and joiner are in the fixture, the ligature for the couple only in Noto.
+        assert_eq!((with.get(couple), with.get(named("boy"))), (Some(&Draw::Noto), Some(&Draw::Noto)));
+        assert_eq!(with.get(named("cracking face")), Some(&Draw::Neither));
+        assert!(without.values().all(|d| *d == Draw::Neither) && without.len() == with.len());
+        let shown = |gaps: &HashMap<&str, Draw>| universe().filter(|e| gaps.get(e.as_str()) != Some(&Draw::Neither)).count();
+        let either = universe().filter(|e| draws(&active[0], e.as_str()) || draws(&noto, e.as_str())).count();
+        assert_eq!(shown(&with), either);
+        assert_eq!(shown(&without), universe().filter(|e| draws(&active[0], e.as_str())).count());
+        assert!(shown(&without) < 20 && shown(&with) > 3000);
+    }
+
+    #[test]
+    fn samsung_gaps_when_present() {
+        let Some(samsung) = map(Path::new("/tmp/samsung-emoji/SamsungColorEmoji.ttf")) else { return };
+        let active = [ttf_parser::Face::parse(&samsung, 0).unwrap()];
+        let gaps = gaps(&active, Some(&ttf_parser::Face::parse(BUNDLED, 0).unwrap()));
+        let neither = gaps.values().filter(|d| **d == Draw::Neither).count();
+        eprintln!("samsung: {} lacking, {neither} in neither, {} of {} shown", gaps.len(), universe().count() - neither, universe().count());
+        assert_eq!(gaps.get(named("eye in speech bubble")), Some(&Draw::Noto));
+        assert_eq!(gaps.get(named("cracking face")), Some(&Draw::Neither));
+    }
+
+    #[test]
+    fn noto_spans_take_the_whole_sequence() {
+        assert_eq!(universe().map(|e| e.as_str().chars().count()).max(), Some(LONGEST));
+        let eye = named("eye in speech bubble");
+        let gaps = HashMap::from([(eye, Draw::Noto), ("\u{2764}\u{FE0F}", Draw::Noto), ("\u{1F600}", Draw::Neither)]);
+        let text = format!("a {eye}\u{1F600} \u{2764} \u{2764}\u{FE0F}1\u{FE0F}\u{20E3}");
+        let got: Vec<&str> = noto_spans(&text, &gaps).into_iter().map(|r| &text[r]).collect();
+        assert_eq!(got, [eye, "\u{2764}\u{FE0F}"]);
+        assert!(noto_spans(&text, &HashMap::from([("\u{1F600}", Draw::Neither)])).is_empty());
+    }
+
+    #[test]
+    fn noto_is_prepared_with_the_face_line_metrics() {
+        let data = dir("noto");
+        let fixture = fs::read(Path::new(FIXTURES).join("emoji-sbix.ttf")).unwrap();
+        let none = Path::new("/nonexistent/NotoColorEmoji.ttf");
+        let em = |m: [i32; 4]| [m[1], m[2], m[3]].map(|v| f64::from(v) / f64::from(m[0]));
+        let want = line_metrics(&ttf_parser::Face::parse(&fixture, 0).unwrap());
+        assert_ne!(em(want), em(line_metrics(&ttf_parser::Face::parse(BUNDLED, 0).unwrap())));
+        let got = line_metrics(&ttf_parser::Face::parse(noto(none, &data, &fixture).unwrap(), 0).unwrap());
+        assert!(em(got).iter().zip(em(want)).all(|(g, w)| (g - w).abs() < 1e-3), "{got:?} {want:?}");
+        let named = |prefix| fs::read_dir(&data).unwrap().flatten().filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(prefix))).count();
+        assert_eq!(named(NOTO_PREFIX), 1);
+        assert!(noto(none, &data, BUNDLED).is_some());
+        assert_eq!(named(NOTO_PREFIX), 1);
+        fs::remove_dir_all(data).unwrap();
     }
 
     #[test]
