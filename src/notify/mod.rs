@@ -30,6 +30,9 @@ const MAX_CHATS: usize = 64;
 const KEPT: usize = 8;
 /// Characters of one message in a notification.
 const MAX_LINE: usize = 300;
+/// Messages a notification shows: toasts and banners have room for about four lines, and the
+/// newest must be among them.
+const SHOWN: usize = if cfg!(target_os = "linux") { KEPT } else { 3 };
 /// Requests, button presses and UI calls waiting; more are dropped.
 const QUEUE: usize = 64;
 /// macOS takes the bundle's identifier, the same.
@@ -39,7 +42,8 @@ const APP_ID: &str = "dev.gpui.beeper";
 enum Req {
     Show { chat: String, name: String, icon: String, line: String, alert: bool },
     Close(String),
-    CloseAll,
+    /// Answered once every notification is closed.
+    CloseAll(Option<tokio::sync::oneshot::Sender<()>>),
 }
 
 /// Which notification a platform's event is about: the server's number on Linux, the chat elsewhere.
@@ -103,7 +107,13 @@ pub(crate) fn close(chat: &str) {
 }
 
 pub(crate) fn close_all() {
-    request(Req::CloseAll);
+    request(Req::CloseAll(None));
+}
+
+/// While the app PIN is asked, notifications say only which chat has a new message and offer no
+/// buttons; the app's lock on desktop is the PIN alone.
+fn locked() -> bool {
+    crate::applock::is_locked()
 }
 
 pub(crate) fn take_pending() -> Option<String> {
@@ -120,11 +130,22 @@ pub(crate) fn attach(window: AnyWindowHandle, app: WeakEntity<crate::ui::BeeperA
     cx.set_app_identity(APP_ID, "Unisend");
     #[cfg(target_os = "macos")]
     macos::attach(cx);
+    // GPUI waits a moment for this before the process ends.
+    cx.on_app_quit(|_| {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        request(Req::CloseAll(Some(tx)));
+        async move {
+            let _ = rx.await;
+        }
+    })
+    .detach();
     cx.spawn(async move |cx| {
         while let Some(msg) = rx.recv().await {
             cx.update(|cx| match msg {
                 ToUi::Open => {
                     let _ = window.update(cx, |_, window, cx| {
+                        #[cfg(target_os = "linux")]
+                        linux::hand_token();
                         window.activate_window();
                         let _ = app.update(cx, |app, cx| app.open_from_notification(cx));
                     });
@@ -151,12 +172,31 @@ struct Entry {
 }
 
 impl Entry {
-    fn push(&mut self, line: String) {
+    fn push(&mut self, line: &str) {
         if self.lines.len() == KEPT {
             self.lines.pop_front();
         }
-        self.lines.push_back(line);
+        self.lines.push_back(kept(line));
     }
+
+    /// The notification's text: the last `SHOWN` messages, or only that there is one while locked.
+    fn text(&self, markup: bool, locked: bool) -> String {
+        if locked {
+            return t!("New message").to_owned();
+        }
+        body(self.lines.iter().skip(self.lines.len().saturating_sub(SHOWN)), markup)
+    }
+}
+
+/// Text as kept for a notification: without the control characters that end a D-Bus string or
+/// make a toast's XML invalid, and cut to `MAX_LINE` characters.
+fn kept(text: &str) -> String {
+    let mut chars = text.chars().filter(|&c| c == '\n' || (c >= ' ' && c != '\u{7f}'));
+    let mut cut: String = chars.by_ref().take(MAX_LINE).collect();
+    if chars.next().is_some() {
+        cut.push('…');
+    }
+    cut
 }
 
 /// Live notifications, least recently updated first.
@@ -166,9 +206,9 @@ struct Shown(VecDeque<Entry>);
 impl Shown {
     /// Adds a line to the chat's notification and moves it to the back. Returns the entry dropped
     /// to stay within `MAX_CHATS`.
-    fn add(&mut self, chat: &str, name: String, line: String, icon: String) -> Option<Entry> {
+    fn add(&mut self, chat: &str, name: &str, line: &str, icon: String) -> Option<Entry> {
         let mut entry = self.remove(chat).unwrap_or_else(|| Entry { chat: chat.into(), name: String::new(), id: 0, lines: VecDeque::new(), icon: String::new() });
-        entry.name = name;
+        entry.name = kept(name);
         entry.push(line);
         if !icon.is_empty() {
             entry.icon = icon;
@@ -195,25 +235,34 @@ impl Shown {
     }
 }
 
-/// The notification's text: one line per message, each cut to `MAX_LINE` characters, escaped when
-/// the server reads markup.
+/// The notification's text: one line per message, escaped when the server reads markup.
 fn body<'a>(lines: impl IntoIterator<Item = &'a String>, markup: bool) -> String {
     let mut out = String::new();
     for line in lines {
         if !out.is_empty() {
             out.push('\n');
         }
-        let flat = line.replace(['\n', '\r'], " ");
-        let mut cut: String = flat.chars().take(MAX_LINE).collect();
-        if cut.len() < flat.len() {
-            cut.push('…');
-        }
+        let mut flat = line.replace('\n', " ");
         if markup {
-            cut = cut.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            flat = flat.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
         }
-        out.push_str(&cut);
+        out.push_str(&flat);
     }
     out
+}
+
+/// `image-path` and a toast's image take a `file://` URI.
+#[cfg(not(target_os = "macos"))]
+fn file_uri(path: &str) -> String {
+    let mut uri = String::from("file://");
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || b"/._-~:".contains(&b) {
+            uri.push(b as char);
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri
 }
 
 #[derive(Debug, PartialEq)]
@@ -248,14 +297,19 @@ pub(crate) async fn serve(dir: PathBuf) {
     let mut shown = Shown::default();
     loop {
         tokio::select! {
+            // A notification closed before a newer message came is forgotten first, so the closing
+            // cannot take the newer one's entry.
+            biased;
+            Some(ev) = events.recv() => on_event(&mut sink, &mut shown, ev).await,
             req = requests.recv() => match req {
                 Some(Req::Show { chat, name, icon, line, alert }) => {
-                    if let Some(old) = shown.add(&chat, name, line, icon) {
+                    if let Some(old) = shown.add(&chat, &name, &line, icon) {
                         drop_entry(&mut sink, old).await;
                     }
                     if let Some(entry) = shown.get(&chat) {
-                        let text = body(&entry.lines, sink.markup());
-                        sink.post(entry, &text, alert).await;
+                        let locked = locked();
+                        let text = entry.text(sink.markup(), locked);
+                        sink.post(entry, &text, alert, !locked).await;
                     }
                 }
                 Some(Req::Close(chat)) => {
@@ -263,14 +317,18 @@ pub(crate) async fn serve(dir: PathBuf) {
                         drop_entry(&mut sink, old).await;
                     }
                 }
-                Some(Req::CloseAll) => {
+                Some(Req::CloseAll(done)) => {
                     for old in std::mem::take(&mut shown.0) {
                         drop_entry(&mut sink, old).await;
+                    }
+                    #[cfg(target_os = "windows")]
+                    sink.clear();
+                    if let Some(done) = done {
+                        let _ = done.send(());
                     }
                 }
                 None => break,
             },
-            Some(ev) = events.recv() => on_event(&mut sink, &mut shown, ev).await,
         }
     }
 }
@@ -284,6 +342,10 @@ async fn drop_entry(sink: &mut Sink, entry: Entry) {
 }
 
 async fn on_event(sink: &mut Sink, shown: &mut Shown, ev: Event) {
+    // A notification from before the lock can still be clicked: it opens the app, to its PIN.
+    if locked() && matches!(ev, Event::Replied(..) | Event::Act(_, Act::Read | Act::Mute)) {
+        return;
+    }
     match ev {
         Event::Act(target, act) => {
             let Some(chat) = shown.chat_of(target) else { return };
@@ -313,7 +375,7 @@ async fn on_event(sink: &mut Sink, shown: &mut Shown, ev: Event) {
             if crate::backend::reply(&chat, &text) {
                 // The next message's notification shows the answer above it, as Android's does.
                 if let Some(entry) = shown.get(&chat) {
-                    entry.push(format!("{}: {}", t!("You"), text.trim()));
+                    entry.push(&format!("{}: {}", t!("You"), text.trim()));
                 }
             } else {
                 quiet_line(sink, shown, &chat, format!("Unisend: {}", t!("Not sent"))).await;
@@ -333,9 +395,9 @@ async fn on_event(sink: &mut Sink, shown: &mut Shown, ev: Event) {
 /// Adds the app's own line to a chat's notification without a sound.
 async fn quiet_line(sink: &mut Sink, shown: &mut Shown, chat: &str, line: String) {
     let Some(entry) = shown.get(chat) else { return };
-    entry.push(line);
-    let text = body(&entry.lines, sink.markup());
-    sink.post(entry, &text, false).await;
+    entry.push(&line);
+    let text = entry.text(sink.markup(), false);
+    sink.post(entry, &text, false, true).await;
 }
 
 #[cfg(test)]
@@ -346,33 +408,50 @@ mod tests {
     fn a_body_keeps_the_last_messages_on_one_line_each_and_escapes_markup() {
         let mut shown = Shown::default();
         for n in 0..KEPT + 2 {
-            shown.add("!a:x", "Ann".into(), format!("Ann: {n}"), String::new());
+            shown.add("!a:x", "Ann", &format!("Ann: {n}"), String::new());
         }
         let entry = shown.get("!a:x").unwrap();
-        let text = body(&entry.lines, false);
-        assert_eq!(text.lines().count(), KEPT);
-        assert!(text.starts_with("Ann: 2\n") && text.ends_with("Ann: 9"));
+        assert_eq!(entry.lines.len(), KEPT);
+        let text = entry.text(false, false);
+        assert_eq!(text.lines().count(), SHOWN);
+        assert!(text.ends_with("Ann: 9"), "the newest message shows");
         assert_eq!(body(&["a <b> & c\nd".to_owned()], true), "a &lt;b&gt; &amp; c d");
-        let long = body(&["é".repeat(MAX_LINE + 5)], false);
+        assert_eq!(entry.text(false, true), t!("New message"), "no text while the app is locked");
+    }
+
+    #[test]
+    fn lines_are_kept_without_control_characters_and_cut() {
+        let mut shown = Shown::default();
+        shown.add("!a:x", "A\0nn\u{1b}", "Ann: a\0b\u{7f}c\td\r\ne\u{1f}", String::new());
+        let entry = shown.get("!a:x").unwrap();
+        assert_eq!((entry.name.as_str(), entry.lines[0].as_str()), ("Ann", "Ann: abcd\ne"));
+        let long = kept(&"é".repeat(MAX_LINE + 5));
         assert_eq!(long.chars().count(), MAX_LINE + 1);
         assert!(long.ends_with('…'));
-        assert_eq!(body(&["é".repeat(MAX_LINE)], false).chars().count(), MAX_LINE);
+        assert_eq!(kept(&"é".repeat(MAX_LINE)).chars().count(), MAX_LINE);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_picture_path_becomes_a_file_uri() {
+        assert_eq!(file_uri("/home/a b/notify/_x_y"), "file:///home/a%20b/notify/_x_y");
+        assert_eq!(file_uri("/C:/Users/Ł/x#1"), "file:///C:/Users/%C5%81/x%231");
     }
 
     #[test]
     fn one_notification_per_chat_and_the_oldest_goes_past_the_cap() {
         let mut shown = Shown::default();
-        assert!(shown.add("!a:x", "A".into(), "1".into(), "/p/a".into()).is_none());
+        assert!(shown.add("!a:x", "A", "1", "/p/a".into()).is_none());
         shown.get("!a:x").unwrap().id = 7;
-        shown.add("!a:x", "A2".into(), "2".into(), String::new());
+        shown.add("!a:x", "A2", "2", String::new());
         let entry = shown.get("!a:x").unwrap();
         assert_eq!((entry.id, entry.icon.as_str(), entry.name.as_str()), (7, "/p/a", "A2"), "the next message replaces the chat's notification");
         assert_eq!(shown.chat_of(Target::Id(7)).as_deref(), Some("!a:x"));
         assert_eq!(shown.chat_of(Target::Id(0)), None);
         for n in 1..MAX_CHATS {
-            assert!(shown.add(&format!("!{n}:x"), "n".into(), "m".into(), String::new()).is_none());
+            assert!(shown.add(&format!("!{n}:x"), "n", "m", String::new()).is_none());
         }
-        let dropped = shown.add("!new:x", "n".into(), "m".into(), String::new());
+        let dropped = shown.add("!new:x", "n", "m", String::new());
         assert_eq!(dropped.map(|e| e.chat).as_deref(), Some("!a:x"), "the least recently updated chat goes");
         assert_eq!(shown.0.len(), MAX_CHATS);
         assert_eq!(shown.remove("!new:x").map(|e| e.lines.len()), Some(1));

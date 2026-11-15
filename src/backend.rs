@@ -1362,6 +1362,9 @@ impl State {
                 (self.open, self.info) = (None, None);
                 self.rooms.lock().unwrap().clear();
                 wipe_account(&self.dir);
+                // One posted between the window's sign-out and the wipe.
+                #[cfg(not(target_os = "android"))]
+                crate::notify::close_all();
                 (self.homeserver, self.beeper, self.seal) = (beeper_homeserver(), true, Seal::Plain);
                 self.emit(Ev::NeedLogin).await;
             }
@@ -1597,7 +1600,7 @@ impl State {
                 }
             }
             let _ = ev.send(Ev::Paged { room, more }).await;
-            if first && let Err(e) = mark_read(timeline.room(), timeline.latest_event_id().await, incognito.load(Ordering::Relaxed)).await {
+            if first && !crate::LOCKED.load(Ordering::Relaxed) && let Err(e) = mark_read(timeline.room(), timeline.latest_event_id().await, incognito.load(Ordering::Relaxed)).await {
                 log::warn!("mark read: {e:#}");
             }
         });
@@ -1991,7 +1994,7 @@ fn notes(msgs: &[Msg], now_ms: i64) -> Vec<Note> {
 
 /// Notifies while the window is not in front; clears the chat's notification once it has been
 /// read somewhere.
-fn announce(client: &Client, dir: &Path, summary: &RoomSummary, prev: Option<&RoomSummary>, msgs: &[Msg]) {
+fn announce(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, prev: Option<&RoomSummary>, msgs: &[Msg]) {
     let chat = summary.id.as_str();
     if summary.unread == 0 && prev.is_some_and(|p| p.unread > 0) {
         crate::clear_notification(chat);
@@ -2000,17 +2003,30 @@ fn announce(client: &Client, dir: &Path, summary: &RoomSummary, prev: Option<&Ro
         return;
     }
     let notes = notes(msgs, now_ms());
-    if notes.is_empty() {
+    // Read on another device already. The server cannot count a mention in an encrypted chat that
+    // notifies of mentions only, so a mention is not judged by the count.
+    let mention = notes.iter().any(|n| n.mention);
+    let waiting = move |r: &RoomSummary| r.is_unread() || mention;
+    if notes.is_empty() || !waiting(summary) {
         return;
     }
-    let (client, dir, summary) = (client.clone(), dir.to_owned(), summary.clone());
+    let (client, dir, rooms, summary) = (client.clone(), dir.to_owned(), rooms.clone(), summary.clone());
+    let generation = media_generation();
     // Off the sync loop: the picture may have to be fetched.
     tokio::spawn(async move {
-        let file = tokio::time::timeout(ICON_WAIT, notification_icon(&client, &dir, &summary.id)).await.ok().flatten();
+        let file = tokio::time::timeout(ICON_WAIT, notification_icon(&client, &dir, &summary.id, generation)).await.ok().flatten();
         let icon = file.as_deref().and_then(Path::to_str).unwrap_or_default();
-        for (n, note) in notes.iter().enumerate() {
-            let alert = n + 1 == notes.len();
-            crate::notify(&crate::Notice { chat: summary.id.as_str(), name: &summary.name, group: !summary.dm, icon, note, alert });
+        {
+            // Under the lock a sign-out moves the generation on with: nothing is shown after it.
+            let current = MEDIA.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            // The chat may have been read while the picture was on its way.
+            let still = rooms.lock().unwrap().get(&summary.id).is_some_and(waiting);
+            if *current == generation && still {
+                for (n, note) in notes.iter().enumerate() {
+                    let alert = n + 1 == notes.len();
+                    crate::notify(&crate::Notice { chat: summary.id.as_str(), name: &summary.name, group: !summary.dm, icon, note, alert });
+                }
+            }
         }
         // `Notify` has decoded and kept the picture by now; a chat's face does not stay on disk in clear.
         // A desktop notification reads it later: `notify` removes it with the notification.
@@ -2023,12 +2039,20 @@ fn announce(client: &Client, dir: &Path, summary: &RoomSummary, prev: Option<&Ro
 }
 
 /// The chat's picture as a file Android can read, one small file per chat that has notified.
-async fn notification_icon(client: &Client, dir: &Path, room: &RoomId) -> Option<PathBuf> {
-    let bytes = avatar(client, room).await.ok()??;
+/// Desktop keeps it while the chat's notification shows: then it is not fetched again.
+async fn notification_icon(client: &Client, dir: &Path, room: &RoomId, generation: u64) -> Option<PathBuf> {
     let folder = dir.join("notify");
-    std::fs::create_dir_all(&folder).ok()?;
     let name: String = room.as_str().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     let path = folder.join(name);
+    if path.exists() {
+        return Some(path);
+    }
+    let bytes = avatar(client, room).await.ok()??;
+    let current = MEDIA.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *current != generation {
+        return None;
+    }
+    std::fs::create_dir_all(&folder).ok()?;
     write_private(&path, &bytes).ok()?;
     Some(path)
 }
@@ -2435,8 +2459,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
             };
             let mut summary = summarize(&room, &notif, peer, seen).await;
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);
-            announce(&client, &dir, &summary, prev.as_ref(), &msgs);
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
+            announce(&client, &dir, &rooms, &summary, prev.as_ref(), &msgs);
             changed.push(summary);
         }
         let mut gone = false;
@@ -2837,7 +2861,8 @@ async fn face(client: &Client, room_id: &RoomId, user: &UserId) -> Result<Option
 async fn picture(client: &Client, url: matrix_sdk::ruma::OwnedMxcUri) -> Result<Vec<u8>> {
     let format = MediaFormat::Thumbnail(MediaThumbnailSettings::with_method(Method::Crop, uint!(96), uint!(96)));
     let request = MediaRequestParameters { source: MediaSource::Plain(url), format };
-    Ok(square(client.media().get_media_content(&request, true).await?))
+    let bytes = client.media().get_media_content(&request, true).await?;
+    Ok(tokio::task::spawn_blocking(move || square(bytes)).await?)
 }
 
 /// Side of a stored avatar, in pixels.

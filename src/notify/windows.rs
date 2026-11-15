@@ -8,7 +8,7 @@ use windows::Foundation::{IPropertyValue, TypedEventHandler};
 use windows::UI::Notifications::{ToastActivatedEventArgs, ToastNotification, ToastNotificationManager, ToastNotifier};
 use windows::core::{HSTRING, IInspectable, Interface as _, h};
 
-use super::{APP_ID, Entry, Event, Target, act, event};
+use super::{APP_ID, Entry, Event, Target, act, event, file_uri};
 use crate::i18n::t;
 
 /// Every chat's toast is in this group; its tag says which chat.
@@ -29,7 +29,12 @@ impl Sink {
             log::warn!("desktop notifications may not show: {e}");
         }
         match ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID)) {
-            Ok(notifier) => Some(Self { notifier, toasts: HashMap::new() }),
+            Ok(notifier) => {
+                let sink = Self { notifier, toasts: HashMap::new() };
+                // Toasts left in the Action Center by an earlier run, whose buttons no longer answer.
+                sink.clear();
+                Some(sink)
+            }
             Err(e) => {
                 log::warn!("no desktop notifications: {e}");
                 None
@@ -41,16 +46,23 @@ impl Sink {
         false
     }
 
-    pub(super) async fn post(&mut self, entry: &mut Entry, body: &str, alert: bool) {
-        match self.show(entry, body, alert) {
+    /// Takes every toast of the app away, also those `toasts` no longer holds.
+    pub(super) fn clear(&self) {
+        if let Err(e) = ToastNotificationManager::History().and_then(|history| history.ClearWithId(&HSTRING::from(APP_ID))) {
+            log::debug!("clearing notifications: {e}");
+        }
+    }
+
+    pub(super) async fn post(&mut self, entry: &mut Entry, body: &str, alert: bool, buttons: bool) {
+        match self.show(entry, body, alert, buttons) {
             Ok(toast) => drop(self.toasts.insert(entry.chat.clone(), toast)),
             Err(e) => log::warn!("notification: {e}"),
         }
     }
 
-    fn show(&self, entry: &Entry, body: &str, alert: bool) -> windows::core::Result<ToastNotification> {
+    fn show(&self, entry: &Entry, body: &str, alert: bool, buttons: bool) -> windows::core::Result<ToastNotification> {
         let document = XmlDocument::new()?;
-        document.LoadXml(&HSTRING::from(toast_xml(entry, body, alert)))?;
+        document.LoadXml(&HSTRING::from(toast_xml(entry, body, alert, buttons)))?;
         let toast = ToastNotification::CreateToastNotification(&document)?;
         // A later toast with the same tag and group takes this one's place.
         toast.SetTag(&HSTRING::from(tag(&entry.chat)))?;
@@ -90,27 +102,31 @@ fn tag(chat: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn toast_xml(entry: &Entry, body: &str, alert: bool) -> String {
+fn toast_xml(entry: &Entry, body: &str, alert: bool, buttons: bool) -> String {
     let image = if entry.icon.is_empty() {
         String::new()
     } else {
-        format!(r#"<image placement="appLogoOverride" hint-crop="circle" src="{}"/>"#, escape(&format!("file:///{}", entry.icon.replace('\\', "/"))))
+        format!(r#"<image placement="appLogoOverride" hint-crop="circle" src="{}"/>"#, escape(&file_uri(&format!("/{}", entry.icon.replace('\\', "/")))))
     };
     let audio = if alert { r#"<audio src="ms-winsoundevent:Notification.IM"/>"# } else { r#"<audio silent="true"/>"# };
+    let actions = if buttons {
+        format!(
+            concat!(
+                r#"<actions><input id="reply" type="text" placeHolderContent="{reply}"/>"#,
+                r#"<action content="{reply}" arguments="reply" hint-inputId="reply"/>"#,
+                r#"<action content="{read}" arguments="read"/><action content="{mute}" arguments="mute"/></actions>"#,
+            ),
+            reply = escape(t!("Reply")),
+            read = escape(t!("Mark as read")),
+            mute = escape(t!("Mute")),
+        )
+    } else {
+        String::new()
+    };
     format!(
-        concat!(
-            r#"<toast launch="default"><visual><binding template="ToastGeneric"><text>{name}</text><text>{body}</text>{image}</binding></visual>"#,
-            r#"<actions><input id="reply" type="text" placeHolderContent="{reply}"/>"#,
-            r#"<action content="{reply}" arguments="reply" hint-inputId="reply"/>"#,
-            r#"<action content="{read}" arguments="read"/><action content="{mute}" arguments="mute"/></actions>{audio}</toast>"#,
-        ),
+        r#"<toast launch="default"><visual><binding template="ToastGeneric"><text>{name}</text><text>{body}</text>{image}</binding></visual>{actions}{audio}</toast>"#,
         name = escape(&entry.name),
         body = escape(body),
-        image = image,
-        reply = escape(t!("Reply")),
-        read = escape(t!("Mark as read")),
-        mute = escape(t!("Mute")),
-        audio = audio,
     )
 }
 

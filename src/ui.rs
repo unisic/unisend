@@ -3652,6 +3652,13 @@ fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperA
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let locked = self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked();
+        // The chat left open behind the lock is read once the lock is passed, as an opening is.
+        if crate::LOCKED.swap(locked, std::sync::atomic::Ordering::Relaxed)
+            && !locked
+            && let Some(id) = self.open.clone()
+        {
+            self.send(Cmd::Chat(id, ChatAction::Unread(false)), cx);
+        }
         if locked {
             let lock = self.render_lock(window, cx);
             return frame::wrap(lock, window, cx);
