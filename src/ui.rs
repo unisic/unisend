@@ -265,8 +265,6 @@ pub struct BeeperApp {
     seek: Option<(String, u8)>,
     /// The user's reaction just given: message, emoji, and when its badge was first drawn.
     fresh_reaction: Option<(String, String, Option<Instant>)>,
-    /// Where and when a double tap last gave a heart.
-    heart_pop: Option<(Point<Pixels>, Instant)>,
     /// What the compose strip showed last, drawn while it leaves.
     strip_last: Option<(Option<IconName>, SharedString, Quote)>,
     /// Bumped when the strip must go at once (Escape), so it does not play its exit.
@@ -503,7 +501,6 @@ impl BeeperApp {
             flash: None,
             seek: None,
             fresh_reaction: None,
-            heart_pop: None,
             strip_last: None,
             strip_sent: false,
             bubble_press: None,
@@ -3586,7 +3583,6 @@ impl Render for BeeperApp {
                 // Its own layer over the menu's, so it can rise while the menu fades.
                 let emoji_sheet = self.render_emoji_sheet(window, cx);
                 let gallery = self.render_gallery(window, cx);
-                let heart = self.render_heart(window, cx);
                 let location = self.render_location(window, cx);
                 let poll_form = self.render_poll_form(window, cx);
                 let gifs = self.render_gifs(window, cx);
@@ -3604,7 +3600,6 @@ impl Render for BeeperApp {
                     .children(preview)
                     .children(self.render_forward_layers(window, cx))
                     .children(viewer)
-                    .children(heart)
                     .children(self.render_confirm(window, cx))
                     .children(verify)
                     .into_any_element()

@@ -58,7 +58,7 @@ is not started.
 | Local drafts | done | per chat, kept in `drafts.json` (200 chats, 4 KB each), restored on open, "Draft:" in the chat list; not synced |
 | Jump to newest | done | button once scrolled over a screen up, counts messages from others that arrived meanwhile |
 | Replies (quote shown) | done | `m.in_reply_to`; a quoted message that is not loaded is fetched; a touch goes to it when it is loaded |
-| Reactions (show, add, remove) | part | `m.reaction`; Signal's six in a bar over the held message (touch) or from the react button beside it (pointer), a double tap for the heart (short pop at the finger, light tick on Android), the user's own reaction marked and taken back with a second touch. The + at the end of the bar opens the emoji picker for any other emoji. No custom emoji |
+| Reactions (show, add, remove) | part | `m.reaction`; Signal's six in a bar over the held message (touch) or from the react button beside it (pointer), a double tap for the heart (its badge rises under the bubble, light tick on Android), the user's own reaction marked and taken back with a second touch. The + at the end of the bar opens the emoji picker for any other emoji. No custom emoji |
 | Deleted messages | done | `m.room.redaction`; stays a "Message deleted" row |
 | Images, stickers | done | inline thumbnail (800px at most), full-screen view (2048px); plain and encrypted |
 | Audio, voice notes, files | part | shown with name, length or size; a tap downloads and opens them in the system's app. Voice notes and audio play inside the bubble on Android (waveform, seek, 1×/1.5×/2×, one at a time); desktop shows the waveform and opens the system's player |
