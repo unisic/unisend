@@ -927,13 +927,13 @@ fn notifications_follow_the_push_rules() {
 
 #[test]
 fn mentions_are_found_in_the_body() {
-    let html = r#"Liquid chc\u{119} <a href="https://matrix.to/#/@facebookgo_1:beeper.local">Piotr Iwan</a> i <a href="https://matrix.to/#/%40me%3Abeeper.com?via=beeper.com"><b>Jan &amp; Ola</b></a>, <a href="https://example.org">link</a>"#;
+    let html = r#"Liquid chc\u{119} <a href="https://matrix.to/#/@facebookgo_1:beeper.local">Adam Nowak</a> i <a href="https://matrix.to/#/%40me%3Abeeper.com?via=beeper.com"><b>Ala &amp; Ola</b></a>, <a href="https://example.org">link</a>"#;
     let linked = linked_users(html);
-    assert_eq!(linked, [("@facebookgo_1:beeper.local".to_owned(), "Piotr Iwan".to_owned()), ("@me:beeper.com".to_owned(), "Jan & Ola".to_owned())]);
+    assert_eq!(linked, [("@facebookgo_1:beeper.local".to_owned(), "Adam Nowak".to_owned()), ("@me:beeper.com".to_owned(), "Ala & Ola".to_owned())]);
 
-    let body = "Liquid chc\u{119} @Piotr Iwan, Piotr Iwanowski nie";
-    let marked: Vec<&str> = mention_ranges(body, &["Piotr Iwan"], false).into_iter().map(|r| &body[r]).collect();
-    assert_eq!(marked, ["@Piotr Iwan"], "the @ belongs to the mention; a longer word is not one");
+    let body = "Liquid chc\u{119} @Adam Nowak, Adam Nowakowski nie";
+    let marked: Vec<&str> = mention_ranges(body, &["Adam Nowak"], false).into_iter().map(|r| &body[r]).collect();
+    assert_eq!(marked, ["@Adam Nowak"], "the @ belongs to the mention; a longer word is not one");
 
     let body = "@wszyscy mail a@b.pl @ @Ann";
     let marked: Vec<&str> = mention_ranges(body, &["Ann"], true).into_iter().map(|r| &body[r]).collect();
