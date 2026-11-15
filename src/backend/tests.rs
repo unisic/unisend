@@ -81,6 +81,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         info: None,
         peer: None,
         replaceable: false,
+        update: None,
     };
     (st, Seat { rx, rows: Vec::new() })
 }

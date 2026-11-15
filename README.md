@@ -45,6 +45,17 @@ Rust targets.
 The GIF picker appears only when the build has a KLIPY key ("Create API Key" on docs.klipy.com):
 `export KLIPY_API_KEY=$(cat ~/.config/murmur/klipy.key)` before `cargo ndk`.
 
+Updates outside an app store: a build with `MURMUR_UPDATE_URL` (https) checks that address for an
+`update.json` (`versionCode`, `versionName`, `url`, `sha256`, `notes`) once a day while
+"Check for updates automatically" is on, and on "Check now". A newer release is downloaded only
+after the user taps Update, checked against its SHA-256 and handed to Android's installer, which
+refuses one signed with another key. The request is a plain GET without a user agent, cookie or
+identifier: the host (and, for GitHub, the download servers it redirects to) sees the phone's IP
+address, the time and the URL. Without the variable, Settings has no Updates
+section. `scripts/release.sh` builds a release signed with a key from the environment and writes
+`update.json`; a GitHub release can serve it at the stable
+`https://github.com/<owner>/<repo>/releases/latest/download/update.json`, any static host works.
+
 The Java classes in `android/app/src/main/java/dev/gpui/mobile` come from
 gpui-mobile (Apache-2.0, see the README there).
 
