@@ -2,10 +2,11 @@
 //! entrances, springs only where a finger let go, nothing on keyboard actions. GPUI and gpui-kit skip
 //! every animation when `App::reduce_motion` is set; `follow_system` sets it from Android.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::App;
 use gpui_kit::base::{Easing, Spring, Transition};
+use gpui_kit::gpui::{SpringConfig, SpringState};
 
 /// Something small arriving: a message, a reaction, the compose strip, a pointer menu.
 pub(crate) const ENTER: Duration = Duration::from_millis(200);
@@ -86,4 +87,145 @@ fn animations_off() -> Result<bool, String> {
         .map(|scale| scale == 0.)
         .map_err(|e| crate::java_error(env, e))
     })
+}
+
+/// Lands a page or a sheet against an edge: 300 ms, critically damped, no overshoot.
+#[allow(dead_code, reason = "used by the motion wave that lands next")]
+pub(crate) const SETTLE: (Duration, f32) = (Duration::from_millis(300), 1.0);
+/// Throws something off screen at the finger's speed: 350 ms, critically damped.
+#[allow(dead_code, reason = "used by the motion wave that lands next")]
+pub(crate) const THROW: (Duration, f32) = (Duration::from_millis(350), 1.0);
+
+/// A spring the app steps itself, so a released finger's speed carries into it.
+/// Call `step` and `window.request_animation_frame()` only during render: requesting a frame elsewhere panicked.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code, reason = "used by the motion wave that lands next")]
+pub(crate) struct Glide {
+    pub pos: f32,
+    pub vel: f32,
+    target: f32,
+    config: SpringConfig,
+    epsilon: f32,
+    last: Option<Instant>,
+}
+
+#[allow(dead_code, reason = "used by the motion wave that lands next")]
+impl Glide {
+    /// response = period of the undamped spring, damping = ratio (1.0 critical). Mass 1: stiffness (2π/response)², damping coefficient 4π·ratio/response.
+    pub(crate) fn new(response: Duration, damping: f32, epsilon: f32, pos: f32) -> Self {
+        let w = std::f32::consts::TAU / response.as_secs_f32();
+        Self { pos, vel: 0.0, target: pos, config: SpringConfig::new(w * w, 2.0 * w * damping, 1.0), epsilon, last: None }
+    }
+
+    /// The finger holds it: follows `pos`, no velocity, not running.
+    pub(crate) fn hold(&mut self, pos: f32) {
+        self.set(pos);
+    }
+
+    /// The finger let go at `vel` px/s (clamped to ±8000); springs toward `target` from the current pos.
+    pub(crate) fn release(&mut self, target: f32, vel: f32, now: Instant) {
+        self.target = target;
+        self.vel = vel.clamp(-8000.0, 8000.0);
+        self.last = Some(now);
+    }
+
+    /// Retarget while running, keeping the current velocity (interruptible).
+    pub(crate) fn retarget(&mut self, target: f32) {
+        self.target = target;
+    }
+
+    /// Advances to `now` (delta capped at 50 ms so a stalled frame does not jump) and returns pos. Snaps to the target and stops once |pos-target| < epsilon and |vel| < epsilon*10.
+    pub(crate) fn step(&mut self, now: Instant) -> f32 {
+        let Some(last) = self.last else { return self.pos };
+        let dt = now.saturating_duration_since(last).min(Duration::from_millis(50)).as_secs_f32();
+        let next = self.config.step(SpringState { position: self.pos, velocity: self.vel }, self.target, dt);
+        self.pos = next.position;
+        self.vel = next.velocity;
+        if (self.pos - self.target).abs() < self.epsilon && self.vel.abs() < self.epsilon * 10.0 {
+            self.set(self.target);
+        } else {
+            self.last = Some(now);
+        }
+        self.pos
+    }
+
+    /// True while it still needs frames.
+    pub(crate) fn running(&self) -> bool {
+        self.last.is_some()
+    }
+
+    /// Jumps to `pos` and stops (reduce motion, or a value set without animation).
+    pub(crate) fn set(&mut self, pos: f32) {
+        self.pos = pos;
+        self.target = pos;
+        self.vel = 0.0;
+        self.last = None;
+    }
+
+    pub(crate) fn target(&self) -> f32 {
+        self.target
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DT: Duration = Duration::from_millis(8);
+
+    fn glide() -> Glide {
+        Glide::new(SETTLE.0, SETTLE.1, 0.5, 0.0)
+    }
+
+    #[test]
+    fn critical_glide_settles_without_overshoot() {
+        let t0 = Instant::now();
+        let mut g = glide();
+        g.release(100.0, 0.0, t0);
+        for i in 1..=125 {
+            assert!(g.step(t0 + DT * i) <= 100.0);
+        }
+        assert!(!g.running());
+        assert_eq!(g.pos, 100.0);
+    }
+
+    #[test]
+    fn release_carries_velocity() {
+        let t0 = Instant::now();
+        let mut g = glide();
+        g.release(100.0, 2000.0, t0);
+        let moved = g.step(t0 + DT);
+        assert!((moved - 16.0).abs() < 16.0 * 0.3, "moved {moved}");
+    }
+
+    #[test]
+    fn stalled_frame_is_capped() {
+        let t0 = Instant::now();
+        let (mut a, mut b) = (glide(), glide());
+        a.release(100.0, 0.0, t0);
+        b.release(100.0, 0.0, t0);
+        assert_eq!(a.step(t0 + Duration::from_millis(500)), b.step(t0 + Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn hold_stops() {
+        let t0 = Instant::now();
+        let mut g = glide();
+        g.release(100.0, 500.0, t0);
+        assert!(g.running());
+        g.hold(10.0);
+        assert!(!g.running());
+        assert_eq!((g.pos, g.vel), (10.0, 0.0));
+    }
+
+    #[test]
+    fn retarget_keeps_velocity_sign() {
+        let t0 = Instant::now();
+        let mut g = glide();
+        g.release(100.0, 2000.0, t0);
+        g.step(t0 + DT);
+        g.retarget(0.0);
+        assert_eq!(g.target(), 0.0);
+        assert!(g.vel > 0.0);
+    }
 }
