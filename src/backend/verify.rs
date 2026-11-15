@@ -149,7 +149,13 @@ impl Verifier {
         self.watch = Some(
             tokio::spawn(async move {
                 let mut states = watched.encryption().verification_state();
-                while states.next().await.is_some() {
+                // Listing the devices queries this account's keys, and the SDK sets the state again
+                // after every such query, changed or not: without this check that is a loop.
+                let mut last = None;
+                while let Some(state) = states.next().await {
+                    if last.replace(state) == Some(state) {
+                        continue;
+                    }
                     match devices(&watched).await {
                         Ok(list) => {
                             if tx.send(Ev::Devices(list)).await.is_err() {
