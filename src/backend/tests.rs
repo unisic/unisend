@@ -1755,6 +1755,8 @@ fn cached_previews_in_another_language_are_relabelled_on_load() {
         "!a:x": { "id": "!a:x", "name": "A", "preview": "Ty: 📷 Zdjęcie", "ts": 5, "dated": true },
         "!b:x": { "id": "!b:x", "name": "B", "preview": null, "ts": 0, "dated": true },
     });
+    // The vault writes the chat list only for a signed-in account.
+    std::fs::write(dir.join(crate::vault::SESSION), b"{}").unwrap();
     Seal::Plain.write(&dir, ROOMS, &serde_json::to_vec(&rooms).unwrap()).unwrap();
     std::fs::write(rooms_lang_path(&dir), "pl").unwrap();
     // Tests run in English.
