@@ -16,6 +16,7 @@
         <item quantity="other">%d chats have new messages</item>
     </plurals>
     <string name="unlock_app">Unlock Murmur</string>
+    <string name="confirm_lock">Confirm it is you</string>
     <string name="close">Close</string>
     <string name="mute">Mute</string>
     <string name="unmute">Unmute</string>

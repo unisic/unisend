@@ -811,6 +811,7 @@ dependencies = [
  "android-activity",
  "android_logger",
  "anyhow",
+ "aws-lc-rs",
  "base64 0.22.1",
  "chrono",
  "dirs 6.0.0",

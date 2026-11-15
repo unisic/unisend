@@ -17,6 +17,7 @@
         <item quantity="other">%d czatu ma nowe wiadomości</item>
     </plurals>
     <string name="unlock_app">Odblokuj Murmur</string>
+    <string name="confirm_lock">Potwierdź, że to Ty</string>
     <string name="close">Zamknij</string>
     <string name="mute">Wycisz</string>
     <string name="unmute">Wyłącz wyciszenie</string>

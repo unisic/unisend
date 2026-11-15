@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use gpui_kit::component::switch::Switch;
 
 use super::*;
+use crate::applock::{Goal, LockMode};
 use crate::{ChatColour, ThemeChoice};
 
 /// A settings row, and the widest a settings page grows.
@@ -37,6 +38,9 @@ impl BeeperApp {
 
     /// One level up: a login leads back to the networks, a destination back to the chats.
     pub(super) fn back(&mut self, cx: &mut Context<Self>) {
+        if self.cancel_change(cx) {
+            return;
+        }
         let group = self.panel == Some(Panel::NewChat) && self.new_chat_back(cx);
         self.panel = match self.panel {
             Some(Panel::Login) => {
@@ -88,12 +92,12 @@ impl BeeperApp {
         cx.notify();
     }
 
-    fn set_lock(&mut self, lock: Option<bool>, timeout: Option<u32>, secure: Option<bool>, cx: &mut Context<Self>) {
+    pub(super) fn set_lock(&mut self, mode: Option<LockMode>, timeout: Option<u32>, secure: Option<bool>, cx: &mut Context<Self>) {
         let l = &mut self.settings.lock;
-        (l.lock, l.timeout, l.secure) = (lock.unwrap_or(l.lock), timeout.unwrap_or(l.timeout_secs()), secure.unwrap_or(l.secure));
+        (l.mode, l.timeout, l.secure) = (mode.unwrap_or(l.mode), timeout.unwrap_or(l.timeout_secs()), secure.unwrap_or(l.secure));
         self.settings.save(&self.dir);
         let l = &self.settings.lock;
-        crate::applock::configure(l.lock, l.timeout, l.secure);
+        crate::applock::configure(l.mode, l.timeout, l.secure);
         cx.notify();
     }
 
@@ -181,13 +185,14 @@ impl BeeperApp {
     pub(super) fn render_panel(&mut self, panel: Panel, narrow: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let (title, body) = match panel {
             Panel::NewChat => return self.render_new_chat(narrow, window, cx),
+            Panel::Settings if self.pad_page() => (t!("App lock"), self.render_lock_change(window, cx)),
             Panel::Settings => (t!("Settings"), self.render_settings(cx).into_any_element()),
             Panel::Networks => (t!("Networks"), self.render_networks(cx).into_any_element()),
             Panel::Add => (t!("Add an account"), self.render_add(cx).into_any_element()),
             Panel::Login => (t!("Sign in"), self.render_login_step(window, cx).into_any_element()),
         };
         // The destinations are reached from the navigation; only what lies under them leads back.
-        let deep = matches!(panel, Panel::Add | Panel::Login);
+        let deep = matches!(panel, Panel::Add | Panel::Login) || (panel == Panel::Settings && self.pad_page());
         let edge = if narrow { GUTTER } else { GUTTER + 6. };
         v_flex()
             .size_full()
@@ -264,7 +269,7 @@ impl BeeperApp {
             let _ = weak.update(cx, |this, cx| this.set_stay_connected(*on, cx));
         });
         let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
-        let security = cfg!(target_os = "android").then(|| self.render_security(cx));
+        let security = self.render_security(cx);
         v_flex()
             .gap(px(GAP * 2.))
             .child(section(t!("Appearance"), cx).child(
@@ -297,7 +302,7 @@ impl BeeperApp {
             .child(section(t!("Privacy"), cx).child(card(cx).child(
                 row(t!("Incognito"), t!("Others do not see that you have read their messages."), cx).child(incognito),
             )))
-            .children(security)
+            .child(security)
             .child(self.render_devices(cx))
             .child(
                 section(t!("Account"), cx).child(
@@ -320,18 +325,22 @@ impl BeeperApp {
             .child(div().text_size(fs(12.)).text_color(p.faint).child(concat!("Murmur ", env!("CARGO_PKG_VERSION"))))
     }
 
-    /// Screen lock with its timeout, and screen security. Android only: desktop has neither.
+    /// The app lock with its timeout, and screen security. Desktop has the app PIN only, asked at
+    /// start, and no screen security.
     fn render_security(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         let lock = self.settings.lock.clone();
-        let can_lock = crate::applock::available();
+        let android = cfg!(target_os = "android");
+        let phone = android && crate::applock::available();
+        let choice = |id: &'static str, label: &'static str, detail: &'static str, mode: LockMode, enabled: bool, cx: &mut Context<Self>| {
+            let on = lock.mode == mode;
+            row(label, detail, cx)
+                .id(id)
+                .when(!enabled, |el| el.text_color(p.faint))
+                .when(enabled && !on, |el| el.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.change_lock(Goal::Mode(mode), cx))))
+                .when(on, |el| el.child(Icon::new(IconName::Check).size_5()))
+        };
         let weak = cx.entity().downgrade();
-        let lock_switch = Switch::new("screen-lock").checked(lock.lock && can_lock).on_click({
-            let weak = weak.clone();
-            move |on, _, cx| {
-                let _ = weak.update(cx, |this, cx| this.set_lock(Some(*on), None, None, cx));
-            }
-        });
         let secure_switch = Switch::new("screen-security").checked(lock.secure).on_click(move |on, _, cx| {
             let _ = weak.update(cx, |this, cx| this.set_lock(None, None, Some(*on), cx));
         });
@@ -351,22 +360,26 @@ impl BeeperApp {
                 .on_click(cx.listener(move |this, _, _, cx| this.set_lock(None, Some(secs), None, cx)))
                 .child(crate::i18n::tr(label))
         }));
+        let pin_detail = if android { t!("4 to 8 digits, set only for Murmur.") } else { t!("4 to 8 digits, asked when Murmur starts.") };
+        let phone_detail =
+            if phone { t!("Fingerprint, face or the phone's PIN, pattern or password.") } else { t!("Set a PIN, pattern or password in the phone's settings first.") };
         section(t!("Security"), cx).child(
             card(cx)
-                .child(
-                    row(
-                        t!("Screen lock"),
-                        if can_lock {
-                            t!("Ask for your fingerprint, face or device lock when the app is opened.")
-                        } else {
-                            t!("Set a PIN, pattern or password in the system settings first.")
-                        },
-                        cx,
+                .child(row(t!("App lock"), t!("Asked for when Murmur opens."), cx))
+                .child(choice("lock-off", t!("Off|app lock"), "", LockMode::Off, true, cx))
+                .when(android, |el| el.child(choice("lock-phone", t!("Phone lock"), phone_detail, LockMode::Phone, phone || lock.mode == LockMode::Phone, cx)))
+                .child(choice("lock-pin", t!("App PIN"), pin_detail, LockMode::Pin, true, cx))
+                .when(lock.mode == LockMode::Pin, |el| {
+                    el.child(
+                        row(t!("Change PIN"), "", cx)
+                            .id("lock-change-pin")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.change_lock(Goal::ChangePin, cx)))
+                            .child(Icon::new(IconName::ChevronRight).size_5().text_color(p.faint)),
                     )
-                    .when(can_lock, |el| el.child(lock_switch)),
-                )
-                .when(lock.lock && can_lock, |el| el.child(row(t!("Lock after leaving the app"), "", cx)).child(timeouts))
-                .child(row(t!("Screen security"), t!("Blocks screenshots and hides the app in the recent apps list."), cx).child(secure_switch)),
+                })
+                .when(android && lock.mode != LockMode::Off, |el| el.child(row(t!("Lock after leaving the app"), "", cx)).child(timeouts))
+                .when(android, |el| el.child(row(t!("Screen security"), t!("Blocks screenshots and hides the app in the recent apps list."), cx).child(secure_switch))),
         )
         .into_any_element()
     }

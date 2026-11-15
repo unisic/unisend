@@ -37,6 +37,7 @@ mod menu;
 mod navigate;
 pub(crate) mod motion;
 mod panels;
+mod pinpad;
 mod pollnew;
 mod rich;
 mod search;
@@ -303,6 +304,8 @@ pub struct BeeperApp {
     /// Leaving chats and starting new ones.
     people: rooms::People,
     disappear: disappear::Disappear,
+    /// The app PIN's keypad, on the lock screen and in the settings.
+    pad: pinpad::Pad,
 }
 
 impl BeeperApp {
@@ -500,6 +503,7 @@ impl BeeperApp {
             _events: events,
             people: Default::default(),
             disappear: disappear::Disappear::default(),
+            pad: Default::default(),
         }
     }
 
@@ -515,6 +519,11 @@ impl BeeperApp {
     fn on_event(&mut self, ev: Ev, cx: &mut Context<Self>) {
         match ev {
             Ev::NeedLogin => {
+                // Signed out, here or by the server: the session is gone, and the app lock with it.
+                if !self.dir.join("session.json").exists() && self.settings.lock.mode != crate::applock::LockMode::Off {
+                    crate::applock::pin::clear(&self.dir);
+                    self.set_lock(Some(crate::applock::LockMode::Off), None, None, cx);
+                }
                 (self.panel, self.networks, self.user) = (None, None, None);
                 self.rooms.clear();
                 self.refilter(cx);
@@ -538,7 +547,7 @@ impl BeeperApp {
                 self.user = Some(user);
                 self.send(Cmd::Incognito(self.settings.incognito), cx);
                 let l = &self.settings.lock;
-                crate::applock::configure(l.lock, l.timeout_secs(), l.secure);
+                crate::applock::configure(l.mode, l.timeout_secs(), l.secure);
                 self.screen = Screen::Main;
                 self.busy = false;
                 self.error = None;
@@ -2936,9 +2945,8 @@ fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperA
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
-        if self.settings.lock.lock && crate::applock::is_locked() {
-            crate::applock::watch(cx);
-            return crate::applock::screen(cx).into_any_element();
+        if self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked() {
+            return self.render_lock(window, cx);
         }
         let (top, bottom) = crate::insets();
         self.apply_draft(window, cx);
@@ -2948,7 +2956,7 @@ impl Render for BeeperApp {
         let root = v_flex()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if (event.keystroke.key == "escape" && this.go_back(window, cx)) || this.viewer_key(&event.keystroke.key, cx) {
+                if this.pad_keystroke(&event.keystroke.key, cx) || (event.keystroke.key == "escape" && this.go_back(window, cx)) || this.viewer_key(&event.keystroke.key, cx) {
                     cx.stop_propagation();
                 }
             }))
