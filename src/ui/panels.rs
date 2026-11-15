@@ -434,7 +434,8 @@ impl BeeperApp {
         let selected = self.settings_pages.first().copied().filter(|_| split);
         let category = |page: Page, icon: IconName, summary: SharedString, cx: &mut Context<Self>| {
             link(page.id(), page.title(), summary, Some(icon), Some(IconName::ChevronRight), cx)
-                .when(selected == Some(page), |el| el.bg(p.raised))
+                // A step above the hover's fill, so the chosen page reads apart from the one under the pointer.
+                .when(selected == Some(page), |el| el.bg(p.lifted))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if split {
                         this.settings_pages.clear();

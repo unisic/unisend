@@ -24,9 +24,11 @@ const TAG_LEN: usize = 16;
 /// `VERSION` and the nonce, in front of the ciphertext.
 const HEADER: usize = 1 + NONCE_LEN;
 /// Files that hold chat content, by their plain names; sealed, each is `<stem>.enc`.
-const SENSITIVE: [&str; 3] = ["session.json", "rooms.json", "drafts.json"];
+const SENSITIVE: [&str; 4] = ["session.json", "rooms.json", "drafts.json", "recovery.txt"];
 pub const SESSION: &str = SENSITIVE[0];
 pub const DRAFTS: &str = SENSITIVE[2];
+/// The account's recovery code as last typed or made here, to copy to another device.
+pub const RECOVERY: &str = SENSITIVE[3];
 
 pub type Key = Zeroizing<[u8; KEY_LEN]>;
 

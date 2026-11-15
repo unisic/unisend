@@ -51,7 +51,7 @@ const PICK_GROWN: f32 = 42.;
 const PICK_RISE: f32 = 16.;
 /// Between the react button and the picker.
 const PICK_OFFSET: f32 = 4.;
-const POINTER_ROW_H: f32 = 40.;
+pub(super) const POINTER_ROW_H: f32 = 40.;
 const POINTER_LIST_W: f32 = 232.;
 /// The buttons beside a message, as tall as they lay out; each takes pointer input over
 /// `SIDE_HIT`, the dense-desktop minimum.
@@ -339,6 +339,13 @@ impl MessageMenu {
 }
 
 impl BeeperApp {
+    /// The user's last message, when the chat's network still takes an edit to it: what Up in an
+    /// empty composer edits.
+    pub(super) fn last_editable(&self) -> Option<String> {
+        let m = self.msgs.iter().rev().find(|m| m.own && !m.deleted)?;
+        taken(acts(m, MenuKind::List, true), m, self.caps()).contains(&Act::Edit).then(|| m.id.clone())
+    }
+
     pub(super) fn menu_open(&self) -> bool {
         self.menu.as_ref().is_some_and(|m| m.closing.is_none())
     }

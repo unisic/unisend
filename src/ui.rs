@@ -106,6 +106,8 @@ const BUBBLE_SHARE: f32 = 0.8;
 const SIDE_ROOM: f32 = 3. * 28. + 2. * 4. + 8.;
 const SHEET_W: f32 = 480.;
 const SHEET_ROW_H: f32 = 52.;
+/// A sheet's rows as a list at the pointer, on a desktop: room for "Move to low priority" in Polish.
+const POINTER_SHEET_W: f32 = 320.;
 /// How long a finger rests on a chat row before the row shows the press: Android's tap timeout.
 const ROW_PRESS_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 /// Sender's picture beside a run of messages in a group.
@@ -290,6 +292,8 @@ pub struct BeeperApp {
     strip_sent: bool,
     /// The chat whose actions are showing.
     chat_sheet: Option<OwnedRoomId>,
+    /// Where a mouse opened the chat's or the attach sheet: on a desktop it opens there as a list.
+    sheet_at: Option<Point<Pixels>>,
     /// The sheet's chat and its other person's page in their network's app, as `(app, link)`.
     peer_link: Option<(OwnedRoomId, &'static str, String)>,
     /// The attach sheet's photos and videos.
@@ -431,6 +435,13 @@ impl BeeperApp {
             other => keyboard_follows(other, Keyboard::Text, cx),
         }));
 
+        // Ahead of the focused field, which binds Up to its caret and would never let it reach the app.
+        let me = cx.weak_entity();
+        subs.push(cx.intercept_keystrokes(move |e, window, cx| {
+            if !gpui_kit::is_mobile() && me.update(cx, |this, cx| this.shortcut(&e.keystroke, window, cx)).unwrap_or(false) {
+                cx.stop_propagation();
+            }
+        }));
         subs.push(cx.observe_window_appearance(window, |_, window, cx| crate::sync_theme(Some(window), cx)));
         subs.push(cx.observe_window_activation(window, |this, window, cx| {
             let active = window.is_window_active();
@@ -544,6 +555,7 @@ impl BeeperApp {
             status_last: None,
             strip_epoch: 0,
             chat_sheet: None,
+            sheet_at: None,
             peer_link: None,
             gallery: gallery::Gallery::default(),
             location: location::Locate::default(),
@@ -660,6 +672,10 @@ impl BeeperApp {
                     self.peeked.clear();
                     if let Some(id) = self.open.take() {
                         self.open_room(id, cx);
+                    }
+                    // The device is verified now and keeps the code: its page says so at once.
+                    if self.panel == Some(Panel::Settings) {
+                        self.load_devices(cx);
                     }
                 }
                 self.need_recovery = need;
@@ -834,7 +850,7 @@ impl BeeperApp {
             Ev::GifSent => self.uploads = self.uploads.saturating_sub(1),
             Ev::Members { room, list } => self.members_arrived(room, list, cx),
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
-            ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_)) => self.on_verify_event(ev, cx),
+            ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_) | Ev::RecoveryCode(_)) => self.on_verify_event(ev, cx),
             Ev::Disappear { room, setting } => self.on_disappear(room, setting),
             Ev::Features { room, features } => {
                 if self.open.as_ref() == Some(&room) {
@@ -1113,11 +1129,11 @@ impl BeeperApp {
         }
     }
 
-    fn attach(&mut self, cx: &mut Context<Self>) {
+    fn attach(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         if gallery::enabled() {
             self.open_gallery(cx);
         } else {
-            self.gallery.menu = true;
+            (self.gallery.menu, self.sheet_at) = (true, Some(at));
             cx.notify();
         }
     }
@@ -1127,17 +1143,43 @@ impl BeeperApp {
         let picked = crate::pick_file(cx);
         cx.spawn(async move |this, cx| {
             let Some(path) = picked.await else { return };
-            let _ = this.update(cx, |this, cx| {
-                let Some(room) = this.open.clone() else { return };
-                let reply_to = match std::mem::replace(&mut this.compose, Compose::New) {
-                    Compose::Reply(id) => Some(id),
-                    _ => None,
-                };
-                this.uploads += 1;
-                this.queue_attach(room, vec![path], reply_to, cx);
-            });
+            let _ = this.update(cx, |this, cx| this.attach_paths(vec![path], cx));
         })
         .detach();
+    }
+
+    /// Files for the open chat, from the picker, a drop or a paste.
+    fn attach_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(room) = self.open.clone().filter(|_| !paths.is_empty()) else { return };
+        let reply_to = match std::mem::replace(&mut self.compose, Compose::New) {
+            Compose::Reply(id) => Some(id),
+            _ => None,
+        };
+        self.uploads += paths.len();
+        self.queue_attach(room, paths, reply_to, cx);
+    }
+
+    /// Ctrl+V of a picture or of copied files: they go out as attachments. Text is the field's.
+    fn paste_files(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(item) = cx.read_from_clipboard() else { return false };
+        let (mut paths, mut images) = (Vec::new(), Vec::new());
+        for entry in item.into_entries() {
+            match entry {
+                ClipboardEntry::ExternalPaths(copied) => paths.extend(copied.paths().iter().filter(|p| p.is_file()).cloned()),
+                ClipboardEntry::Image(image) => images.push(image),
+                ClipboardEntry::String(_) => {}
+            }
+        }
+        if paths.is_empty() && images.is_empty() {
+            return false;
+        }
+        let dir = self.dir.join(crate::backend::PASTED);
+        cx.spawn(async move |this, cx| {
+            let saved = cx.background_spawn(async move { save_pasted(&dir, images) }).await;
+            let _ = this.update(cx, |this, cx| this.attach_paths(paths.into_iter().chain(saved).collect(), cx));
+        })
+        .detach();
+        true
     }
 
     /// `room` is the width a bubble has for its content.
@@ -1506,6 +1548,50 @@ impl BeeperApp {
         self.set_view(view, cx);
     }
 
+    /// The keys a desktop chat app answers: Ctrl+K searches, Ctrl+N starts a chat, Alt+Up and
+    /// Alt+Down step through the list, Up in an empty composer edits the last message.
+    fn shortcut(&mut self, k: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let m = &k.modifiers;
+        let locked = self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked();
+        if self.screen != Screen::Main || locked {
+            return false;
+        }
+        let only_secondary = m.secondary() && !m.alt && !m.shift;
+        let only_alt = m.alt && !m.control && !m.platform && !m.shift;
+        let plain = !(m.control || m.alt || m.platform || m.shift || m.function);
+        match k.key.as_str() {
+            "k" if only_secondary => self.set_searching(true, window, cx),
+            "n" if only_secondary => self.open_new_chat(window, cx),
+            "up" | "down" if only_alt => self.step_chat(k.key == "down", cx),
+            "v" if only_secondary && self.open.is_some() && self.composer.read(cx).focus_handle(cx).is_focused(window) => return self.paste_files(cx),
+            "up" if plain && self.composer_idle(window, cx) => match self.last_editable() {
+                Some(id) => self.start_compose(Compose::Edit(id), window, cx),
+                None => return false,
+            },
+            _ => return false,
+        }
+        true
+    }
+
+    /// A chat is open and its composer has the keyboard, empty, writing nothing but a new message.
+    fn composer_idle(&self, window: &Window, cx: &App) -> bool {
+        let composer = self.composer.read(cx);
+        self.open.is_some() && matches!(self.compose, Compose::New) && composer.value().is_empty() && composer.focus_handle(cx).is_focused(window)
+    }
+
+    /// Opens the chat under (`down`) or above the open one in the list, or the first when none is open.
+    fn step_chat(&mut self, down: bool, cx: &mut Context<Self>) {
+        let at = self.open.as_ref().and_then(|open| self.shown.iter().position(|&ix| &self.rooms[ix].id == open));
+        let next = match at {
+            Some(ix) if down => ix + 1,
+            Some(ix) => ix.wrapping_sub(1),
+            None => 0,
+        };
+        if let Some(&ix) = self.shown.get(next) {
+            self.open_room(self.rooms[ix].id.clone(), cx);
+        }
+    }
+
     fn set_searching(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.searching = on;
         if on {
@@ -1708,7 +1794,7 @@ impl BeeperApp {
                                 move |this, _: &LongPressEvent, _, cx| {
                                     #[cfg(target_os = "android")]
                                     motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Heavy);
-                                    this.open_chat_sheet(id.clone(), cx);
+                                    this.open_chat_sheet(id.clone(), None, cx);
                                 }
                             })))
                             // The right button of a mouse.
@@ -1716,7 +1802,7 @@ impl BeeperApp {
                                 let id = room.id.clone();
                                 move |this, event: &ClickEvent, _, cx| {
                                     if event.is_secondary() {
-                                        this.open_chat_sheet(id.clone(), cx);
+                                        this.open_chat_sheet(id.clone(), Some(event.position()), cx);
                                     }
                                 }
                             }));
@@ -1817,12 +1903,12 @@ impl BeeperApp {
             let on = chosen == Some(ix);
             let press = (!on).then(|| press::area(label, Duration::ZERO, p.surface, window, cx).rounded_full());
             // The pill is slimmer than what a finger needs; the target around it is not.
-            h_flex().id(label).h(px(TAP)).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.set_filter(view, only_unread, cx))).child(
+            h_flex().id(label).flex_none().h(px(TAP)).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.set_filter(view, only_unread, cx))).child(
                 h_flex()
                     .id("pill")
                     .relative()
                     .h(px(36.))
-                    .px(px(GAP))
+                    .px(px(if gpui_kit::is_mobile() { GAP } else { 10. }))
                     .gap(px(6.))
                     .rounded_full()
                     .text_size(fs(14.))
@@ -1834,7 +1920,8 @@ impl BeeperApp {
                     .when(count > 0, |el| el.child(div().text_color(p.faint).font_features(tabular()).child(count.to_string()))),
             )
         });
-        let filters = h_flex().flex_none().relative().px(px(GUTTER)).pb(px(4.)).gap(px(4.)).child(seg.container()).children(slider).children(filters);
+        // A mouse has no finger to drag the row along: a larger text size or a longer language scrolls it under the wheel.
+        let filters = h_flex().id("filter-row").flex_none().relative().px(px(GUTTER)).pb(px(4.)).gap(px(4.)).when(!gpui_kit::is_mobile(), |el| el.overflow_x_scroll()).child(seg.container()).children(slider).children(filters);
         v_flex()
             .size_full()
             .child(h_flex().flex_none().h(px(BAR_H)).pl(px(GUTTER)).pr(px(if self.searching { GUTTER } else { GUTTER - 10. } + end)).child(top))
@@ -2244,9 +2331,14 @@ impl BeeperApp {
         let own_frame = frame::reserve(window) > 0.;
         let end = self.chat_end(window);
 
+        let drop_tint = p.surface;
         v_flex()
             .size_full()
             .relative()
+            .when(self.open.is_some(), |el| {
+                el.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_tint))
+                    .on_drop(cx.listener(|this, dropped: &ExternalPaths, _, cx| this.attach_paths(dropped.paths().iter().filter(|p| p.is_file()).cloned().collect(), cx)))
+            })
             .children(self.find_bar(cx).map(|el| el.pr(px(GUTTER + end))))
             .child(
                 header()
@@ -2278,9 +2370,9 @@ impl BeeperApp {
                     .when(own_frame, |el| el.child(frame::drag(div().flex_1().h_full(), window, cx)))
                     .when(room.is_some(), |el| el.child(self.find_button(cx)))
                     .when(room.is_some(), |el| {
-                        el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, _, _, cx| {
+                        el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
                             if let Some(id) = this.open.clone() {
-                                this.open_chat_sheet(id, cx);
+                                this.open_chat_sheet(id, Some(e.position()), cx);
                             }
                         })))
                     }),
@@ -2336,11 +2428,14 @@ impl BeeperApp {
                             .pl(px(GUTTER - 10.))
                             .pr(px(GUTTER))
                             .py(px(8.))
-                            .child(round_button("attach", IconName::Paperclip, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| this.attach(cx))))
+                            .child(round_button("attach", IconName::Paperclip, cx).text_color(p.muted).on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.attach(e.position(), cx))))
                             .child(
                                 round_button("emoji", IconName::FaceSlightlySmiling, cx)
                                     .text_color(if self.emoji_open == Some(emojipick::Target::Composer) { p.text } else { p.muted })
-                                    .on_click(cx.listener(|this, _, window, cx| this.toggle_emoji_panel(window, cx))),
+                                    .on_click(cx.listener(|this, e: &ClickEvent, window, cx| {
+                                        this.emoji_pick.at = e.position();
+                                        this.toggle_emoji_panel(window, cx);
+                                    })),
                             )
                             .child(
                                 div()
@@ -2425,6 +2520,9 @@ impl BeeperApp {
             this.gallery.menu = false;
             cx.notify();
         };
+        if let Some(at) = self.sheet_at.filter(|_| !gpui_kit::is_mobile()) {
+            return self.pointer_sheet(at, key, title, rows, live, window, cx);
+        }
         let head = div()
             .id("sheet-title")
             .h(px(44.))
@@ -2466,7 +2564,49 @@ impl BeeperApp {
             .into_any_element()
     }
 
-    /// "New messages", above the first one the user had not seen when the chat opened.
+    /// A sheet a mouse opened on a desktop: a list where the pointer is, like a message's menu.
+    /// A click or right click outside closes it, and nothing is dimmed.
+    #[expect(clippy::too_many_arguments, reason = "the sheet's own arguments, handed on")]
+    fn pointer_sheet(&self, at: Point<Pixels>, key: usize, title: String, rows: Vec<Stateful<Div>>, live: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if !live {
+            return div().into_any_element();
+        }
+        let p = Palette::of(cx);
+        let view = frame::viewport(window);
+        let (top, bottom) = crate::insets();
+        let (head_h, row_h) = (32., menu::POINTER_ROW_H);
+        let h = head_h + row_h * rows.len() as f32 + 12.;
+        let w = f32::from(fs(POINTER_SHEET_W));
+        let at = frame::local(window, at);
+        let (ax, ay, vw, vh) = (f32::from(at.x), f32::from(at.y), f32::from(view.width), f32::from(view.height));
+        let x = if ax + w <= vw - GUTTER { ax } else { ax - w };
+        let y = if ay + h <= vh - bottom - GUTTER { ay } else { ay - h };
+        let x = x.clamp(GUTTER, (vw - w - GUTTER).max(GUTTER));
+        let y = y.clamp(top + GUTTER, (vh - bottom - h - GUTTER).max(top + GUTTER));
+        let close = |this: &mut Self, cx: &mut Context<Self>| {
+            (this.chat_sheet, this.gallery.menu) = (None, false);
+            cx.notify();
+        };
+        let head = div().h(px(head_h)).px(px(GUTTER)).flex().items_center().truncate().text_size(fs(13.)).text_color(p.faint).child(title);
+        let rows = rows.into_iter().map(|row| row.h(px(row_h)).px(px(GUTTER)).gap(px(GUTTER)));
+        let list = div()
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .child(v_flex().id("sheet-list").w(px(w)).pb(px(6.)).rounded(px(14.)).bg(p.lifted).occlude().child(head).children(rows))
+            .with_animation(SharedString::from(format!("sheet-list-{key}-{ax}-{ay}")), Animation::new(motion::ENTER).with_easing(motion::ease_out), move |el, t| {
+                el.top(px(y + 4. * (1. - t))).opacity(t)
+            });
+        div()
+            .id("sheet-list-barrier")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_click(cx.listener(move |this, _, _, cx| close(this, cx)))
+            .on_aux_click(cx.listener(move |this, _, _, cx| close(this, cx)))
+            .child(list)
+            .into_any_element()
+    }
     fn unread_line(cx: &App) -> Div {
         let p = Palette::of(cx);
         let rule = || div().h(px(1.)).flex_1().bg(p.rule);
@@ -2805,7 +2945,7 @@ impl BeeperApp {
         }
     }
 
-    fn open_chat_sheet(&mut self, id: OwnedRoomId, cx: &mut Context<Self>) {
+    fn open_chat_sheet(&mut self, id: OwnedRoomId, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
         let network = self.rooms.iter().find(|r| r.id == id).and_then(|r| r.network.as_deref());
         // One profile lookup at the homeserver, which already holds it, so the row shows only when it leads somewhere.
         if self.peer_link.as_ref().is_none_or(|(room, ..)| *room != id) && crate::backend::links_profiles(network) {
@@ -2813,6 +2953,7 @@ impl BeeperApp {
             self.send(Cmd::PeerIds(id.clone()), cx);
         }
         self.chat_sheet = Some(id);
+        self.sheet_at = at;
         self.disappear.picking = false;
         cx.notify();
     }
@@ -3008,7 +3149,7 @@ impl BeeperApp {
                     card()
                         .bg(p.warning_bg)
                         .child(div().text_color(p.warning).child(
-                            t!("Encrypted messages are locked on this device. Copy your recovery code from a device where you are signed in, then paste it here."),
+                            t!("Encrypted messages are locked on this device. Copy your recovery code from another device where you are signed in (in Unisend: Settings, Devices), then paste it here."),
                         ))
                         .child(div().w_full().child(Input::new(&self.recovery)))
                         .child(
@@ -3180,6 +3321,30 @@ fn picture_size(media: &Media, room: f32) -> (f32, f32) {
     let (w, h) = media.dims.map_or((max_w, max_w * 0.75), |(w, h)| (w.max(1) as f32, h.max(1) as f32));
     let scale = (max_w / w).min(max_h / h).min(1.);
     ((w * scale).max(80.), (h * scale).max(60.))
+}
+
+/// Writes pasted pictures to `dir` as files to send, named only by kind and order.
+fn save_pasted(dir: &std::path::Path, images: Vec<Image>) -> Vec<PathBuf> {
+    if images.is_empty() {
+        return Vec::new();
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::warn!("pasted picture: {e}");
+        return Vec::new();
+    }
+    let one = images.len() == 1;
+    images
+        .into_iter()
+        .enumerate()
+        .filter_map(|(ix, image)| {
+            // The name travels with a picture sent as a file; the stamp keeps two pastes apart on disk.
+            let name = if one { format!("image.{}", image.format.extension()) } else { format!("image-{}.{}", ix + 1, image.format.extension()) };
+            let folder = dir.join(format!("{stamp}-{ix}"));
+            let path = folder.join(name);
+            std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(&path, &image.bytes)).map_err(|e| log::warn!("pasted picture: {e}")).ok().map(|()| path)
+        })
+        .collect()
 }
 
 /// Rounds a bubble: `top` and `bottom` are its corners on the sender's side.
@@ -3852,6 +4017,7 @@ impl BeeperApp {
                     .children(frame::controls(window, cx))
                     .children(sheet)
                     .children(emoji_sheet)
+                    .children(self.render_emoji_popover(window, cx))
                     .children(gallery)
                     .children(location)
                     .children(poll_form)
@@ -3870,8 +4036,21 @@ impl BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, swipe_step, urls, RoomsView};
+    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView};
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
+
+    #[test]
+    fn pasted_pictures_land_apart_and_plainly_named() {
+        let dir = std::env::temp_dir().join(format!("unisend-pasted-{}", std::process::id()));
+        let image = |format| gpui_kit::Image { format, bytes: vec![1, 2, 3], id: 0 };
+        let saved = save_pasted(&dir, vec![image(gpui_kit::ImageFormat::Png), image(gpui_kit::ImageFormat::Jpeg)]);
+        let names: Vec<_> = saved.iter().map(|p| p.file_name().unwrap().to_str().unwrap().to_owned()).collect();
+        assert_eq!(names, ["image-1.png", "image-2.jpg"]);
+        assert!(saved.iter().all(|p| std::fs::read(p).unwrap() == [1, 2, 3]));
+        assert_ne!(saved[0].parent(), saved[1].parent());
+        assert_eq!(save_pasted(&dir, vec![image(gpui_kit::ImageFormat::Gif)])[0].file_name().unwrap(), "image.gif");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn chat_list_state_follows_sync_and_filter() {

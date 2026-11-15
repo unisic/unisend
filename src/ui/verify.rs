@@ -14,6 +14,20 @@ struct SignOut {
     error: Option<SharedString>,
 }
 
+/// The recovery code row: the code stays off the screen until asked for, and leaves it with the page.
+#[derive(Default)]
+enum Recovery {
+    #[default]
+    Hidden,
+    Busy,
+    Shown { code: SharedString, copied: bool },
+    /// None is kept on this device.
+    Absent,
+    /// A new code was asked for; it waits for a second press, since it retires the old one.
+    Confirm,
+    Failed(SharedString),
+}
+
 pub(super) struct Ui {
     devices: Option<Devices>,
     loading: bool,
@@ -29,6 +43,7 @@ pub(super) struct Ui {
     /// Drawn while the sheet falls.
     sheet_last: Option<Verify>,
     motion: SheetMotion,
+    recovery: Recovery,
 }
 
 impl Ui {
@@ -47,7 +62,7 @@ impl Ui {
                 other => keyboard_follows(other, Keyboard::Key, cx),
             }));
         }
-        Self { devices: None, loading: false, failed: None, renaming: false, name, out: None, password, code, sheet: None, sheet_last: None, motion: SheetMotion::default() }
+        Self { devices: None, loading: false, failed: None, renaming: false, name, out: None, password, code, sheet: None, sheet_last: None, motion: SheetMotion::default(), recovery: Recovery::Hidden }
     }
 }
 
@@ -57,7 +72,19 @@ const EMOJI_STEP: Duration = Duration::from_millis(40);
 impl BeeperApp {
     pub(super) fn load_devices(&mut self, cx: &mut Context<Self>) {
         self.verify.loading = self.send(Cmd::Devices, cx);
-        self.verify.failed = None;
+        (self.verify.failed, self.verify.recovery) = (None, Recovery::Hidden);
+    }
+
+    fn recovery_ask(&mut self, cmd: Cmd, cx: &mut Context<Self>) {
+        if self.send(cmd, cx) {
+            self.verify.recovery = Recovery::Busy;
+        }
+        cx.notify();
+    }
+
+    fn recovery_set(&mut self, to: Recovery, cx: &mut Context<Self>) {
+        self.verify.recovery = to;
+        cx.notify();
     }
 
     pub(super) fn on_verify_event(&mut self, ev: Ev, cx: &mut Context<Self>) {
@@ -68,6 +95,13 @@ impl BeeperApp {
                 (v.loading, v.renaming, v.failed) = (false, false, None);
             }
             Ev::DevicesFailed(e) => (v.loading, v.failed) = (false, Some(e.into())),
+            Ev::RecoveryCode(kept) => {
+                v.recovery = match kept {
+                    Ok(Some(code)) => Recovery::Shown { code: code.into(), copied: false },
+                    Ok(None) => Recovery::Absent,
+                    Err(e) => Recovery::Failed(e.into()),
+                }
+            }
             // The end of a verification the user already closed stays closed.
             Ev::Verify(state @ (Verify::Done | Verify::Failed(_))) => {
                 if v.sheet.is_some() {
@@ -221,8 +255,65 @@ impl BeeperApp {
                     }))
                     .child(panels::row(t!("Cross-signing"), keys, cx)),
             )
+            .child(panels::card(cx).child(self.recovery_row(devices.cross_signing == CrossSigning::Here, cx)))
             .child(panels::card(cx).children(rows))
             .children(self.verify.failed.clone().map(|e| div().px(px(GAP)).text_size(fs(14.)).text_color(p.negative).child(e)))
+    }
+
+    /// The account's recovery code, to copy here and paste on another device. `holds` says this
+    /// device has the keys a new code would lock away.
+    fn recovery_row(&self, holds: bool, cx: &mut Context<Self>) -> Div {
+        let p = Palette::of(cx);
+        let label = t!("Recovery code");
+        let to = |state: fn() -> Recovery| cx.listener(move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx| this.recovery_set(state(), cx));
+        match &self.verify.recovery {
+            Recovery::Hidden => panels::row(label, t!("Unlocks encrypted messages on another device. Copy it here, paste it there."), cx)
+                .child(pill("recovery-show", t!("Show|recovery code"), p.text, cx).on_click(cx.listener(|this, _, _, cx| this.recovery_ask(Cmd::RecoveryCode, cx)))),
+            Recovery::Busy => panels::row(label, t!("Loading…"), cx),
+            Recovery::Shown { code, copied } => {
+                let copy = code.to_string();
+                v_flex()
+                    .py(px(8.))
+                    .gap(px(8.))
+                    .child(div().text_size(fs(16.)).line_height(fs(22.)).child(label))
+                    .child(div().font_family(super::rich::MONO).text_size(fs(15.)).line_height(fs(22.)).child(code.clone()))
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(pill("recovery-copy", if *copied { t!("Copied") } else { t!("Copy") }, p.text, cx).on_click(cx.listener(move |this, _, _, cx| {
+                                crate::copy(cx, copy.clone());
+                                // A desktop clipboard has no "sensitive" mark: the code leaves it after a minute
+                                // unless something else was copied since. A clipboard history may still keep it.
+                                #[cfg(not(target_os = "android"))]
+                                {
+                                    let code = copy.clone();
+                                    cx.spawn(async move |_, cx| {
+                                        cx.background_executor().timer(std::time::Duration::from_secs(60)).await;
+                                        cx.update(|cx| {
+                                            if crate::paste(cx).as_deref() == Some(code.as_str()) {
+                                                crate::copy(cx, String::new());
+                                            }
+                                        });
+                                    })
+                                    .detach();
+                                }
+                                if let Recovery::Shown { copied, .. } = &mut this.verify.recovery {
+                                    *copied = true;
+                                }
+                                cx.notify();
+                            })))
+                            .child(pill("recovery-hide", t!("Hide"), p.text, cx).on_click(to(|| Recovery::Hidden))),
+                    )
+            }
+            Recovery::Absent if holds => panels::row(label, t!("None is kept on this device. Make a new one here; the old one stops working."), cx)
+                .child(pill("recovery-new", t!("New code"), p.text, cx).on_click(to(|| Recovery::Confirm))),
+            Recovery::Absent => panels::row(label, t!("None is kept on this device. Unlock it with your code once and it is kept here."), cx),
+            Recovery::Confirm => panels::row(label, t!("The old code stops working in every app, Beeper too. Keep the new one somewhere safe."), cx)
+                .child(pill("recovery-cancel", t!("Cancel"), p.text, cx).on_click(to(|| Recovery::Absent)))
+                .child(pill("recovery-make", t!("Make it"), p.negative, cx).on_click(cx.listener(|this, _, _, cx| this.recovery_ask(Cmd::NewRecoveryCode, cx)))),
+            Recovery::Failed(e) => panels::row(label, e, cx)
+                .child(pill("recovery-retry", t!("Try again"), p.text, cx).on_click(to(|| Recovery::Hidden))),
+        }
     }
 
     fn device_row(&self, d: &crate::backend::verify::Device, cx: &mut Context<Self>) -> AnyElement {

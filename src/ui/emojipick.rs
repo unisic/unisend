@@ -25,6 +25,9 @@ const PANEL_SEARCH_H: f32 = 220.;
 /// Taller than this at the bottom is the keyboard, not the navigation bar.
 const KEYBOARD_MIN: f32 = 120.;
 const SHEET_W: f32 = 480.;
+/// The desktop composer's picker: eight columns of cells, and as tall as the mobile panel with its search.
+const POPOVER_W: f32 = 8. * CELL + 2. * PAD;
+const POPOVER_H: f32 = 420.;
 /// The skin tone menu's cells, and its gap under the swatch.
 const TONE_CELL: f32 = 40.;
 const TONE_GAP: f32 = 4.;
@@ -205,6 +208,8 @@ pub(super) struct Picker {
     width: Rc<Cell<f32>>,
     /// The skin tone menu is open.
     tones: bool,
+    /// Where the pointer opened the composer's picker: on a desktop it opens there, over the chat.
+    pub at: Point<Pixels>,
 }
 
 impl Picker {
@@ -222,6 +227,7 @@ impl Picker {
             starts: Vec::new(),
             built: None,
             sheet: SheetMotion::default(),
+            at: Point::default(),
             width: Rc::default(),
             tones: false,
         }
@@ -301,7 +307,7 @@ impl BeeperApp {
 
     /// The panel under the composer, in the keyboard's place.
     pub(super) fn render_emoji_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.emoji_open != Some(Target::Composer) {
+        if self.emoji_open != Some(Target::Composer) || !gpui_kit::is_mobile() {
             return None;
         }
         let (_, bottom) = crate::insets();
@@ -313,6 +319,50 @@ impl BeeperApp {
         let width = Some(self.emoji_pick.width.get()).filter(|w| *w > 0.).unwrap_or_else(|| f32::from(frame::viewport(window).width));
         let probe = width_probe(self.emoji_pick.width.clone(), cx.entity_id());
         Some(div().id("emoji-panel").relative().w_full().h(px(height)).flex_none().child(probe).child(self.emoji_body(width, false, window, cx)).into_any_element())
+    }
+
+    /// The composer's picker on a desktop: a card above the button the pointer pressed, which the
+    /// composer keeps typing beside. A click anywhere else closes it; nothing is dimmed.
+    pub(super) fn render_emoji_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.emoji_open != Some(Target::Composer) || gpui_kit::is_mobile() {
+            return None;
+        }
+        let p = Palette::of(cx);
+        let view = frame::viewport(window);
+        let (top, bottom) = crate::insets();
+        let (vw, vh) = (f32::from(view.width), f32::from(view.height));
+        let w = POPOVER_W.min(vw - 2. * PAD);
+        let h = POPOVER_H.min(vh - top - bottom - 2. * PAD);
+        let at = frame::local(window, self.emoji_pick.at);
+        // Its corner over the button, its body rising above the composer.
+        let x = (f32::from(at.x) - CELL / 2.).clamp(PAD, (vw - w - PAD).max(PAD));
+        let y = (f32::from(at.y) - CELL / 2. - PAD - h).clamp(top + PAD, (vh - bottom - h - PAD).max(top + PAD));
+        let card = v_flex()
+            .id("emoji-popover")
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(w))
+            .h(px(h))
+            .rounded(px(14.))
+            .overflow_hidden()
+            .bg(p.surface)
+            .border_1()
+            .border_color(p.rule)
+            .occlude()
+            .child(self.emoji_body(w, false, window, cx))
+            .with_animation("emoji-popover-in", Animation::new(motion::ENTER).with_easing(motion::ease_out), move |el, t| el.top(px(y + 4. * (1. - t))).opacity(t));
+        Some(
+            div()
+                .id("emoji-popover-barrier")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_click(cx.listener(|this, _, _, cx| this.close_emoji(cx)))
+                .on_aux_click(cx.listener(|this, _, _, cx| this.close_emoji(cx)))
+                .child(card)
+                .into_any_element(),
+        )
     }
 
     /// The sheet for a reaction: rises from the bottom over a dimmed screen, falls when an emoji is

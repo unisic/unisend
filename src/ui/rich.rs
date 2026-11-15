@@ -12,9 +12,9 @@ use crate::backend::{Block, Msg, Rich, Run};
 
 /// Monospace face for code. GPUI resolves a family by name only, so the name is the platform's.
 #[cfg(not(target_os = "android"))]
-const MONO: &str = "Noto Sans Mono";
+pub(super) const MONO: &str = "Noto Sans Mono";
 #[cfg(target_os = "android")]
-const MONO: &str = "Droid Sans Mono";
+pub(super) const MONO: &str = "Droid Sans Mono";
 
 /// What the drawing needs besides the message: its palette and how a mention is drawn.
 #[derive(Clone, Copy)]

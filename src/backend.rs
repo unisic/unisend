@@ -84,6 +84,9 @@ const VIEW_PX: u32 = 2048;
 /// Larger files are not fetched to make a thumbnail, and not sent.
 const MAX_THUMB_SOURCE: u64 = 16 * 1024 * 1024;
 pub(crate) const MAX_UPLOAD: u64 = 100 * 1024 * 1024;
+/// Pictures pasted into the composer, under the data directory: each goes once it is sent, and
+/// what a closed preview left goes at the next start.
+pub(crate) const PASTED: &str = "pasted";
 /// A message older than this when it arrives is history, not news.
 const NOTIFY_WINDOW: Duration = Duration::from_secs(300);
 /// History pages read back looking for a chat's last message.
@@ -100,6 +103,10 @@ pub enum Cmd {
     /// Sign in to any Matrix homeserver. `server` is a server name or URL, as typed.
     PasswordLogin { server: String, user: String, password: String },
     Recover(String),
+    /// The recovery code kept on this device, for the settings to show.
+    RecoveryCode,
+    /// Replaces the account's recovery code with a new one and keeps it here.
+    NewRecoveryCode,
     Open(OwnedRoomId),
     /// The conversation left the screen.
     Close,
@@ -210,6 +217,8 @@ pub enum Ev {
     Synced,
     /// True while this device lacks the secrets needed to decrypt history.
     NeedRecovery(bool),
+    /// The recovery code kept on this device, `None` when none is kept.
+    RecoveryCode(Result<Option<String>, String>),
     Rooms(Vec<RoomSummary>),
     RoomGone(OwnedRoomId),
     /// Changes to the rows of the open conversation, in order.
@@ -762,6 +771,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         }
     };
     let _ = std::fs::remove_dir_all(media_dir(&dir));
+    let _ = std::fs::remove_dir_all(dir.join(PASTED));
     let _ = std::fs::remove_dir_all(update::folder(&dir));
     // Older builds kept KLIPY's customer ID on disk; it now lives only in memory.
     let _ = std::fs::remove_file(dir.join("klipy-id"));
@@ -1142,6 +1152,9 @@ impl State {
                         e => anyhow::Error::new(e).context(t!("Recovery code was not accepted")),
                     });
                 }
+                if let Err(e) = self.seal.write(&self.dir, vault::RECOVERY, key.trim().as_bytes()) {
+                    log::warn!("keep recovery code: {e}");
+                }
                 if let Some(open) = &self.open {
                     timeline::unlock(&open.timeline).await;
                 }
@@ -1151,6 +1164,36 @@ impl State {
                     self.emit(Ev::Error(t!("Recovery code accepted, but the account's key storage is incomplete").into()))
                         .await;
                 }
+            }
+            Cmd::RecoveryCode => {
+                let kept = match self.seal.read(&self.dir, vault::RECOVERY) {
+                    Ok(bytes) => Ok(Some(String::from_utf8_lossy(&zeroize::Zeroizing::new(bytes)).into_owned())),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e.to_string()),
+                };
+                self.emit(Ev::RecoveryCode(kept)).await;
+            }
+            Cmd::NewRecoveryCode => {
+                let enc = self.client()?.encryption();
+                let recovery = enc.recovery();
+                // The new code replaces the old one everywhere, so it must lock away every secret the old one did.
+                let whole = recovery.state() == RecoveryState::Enabled
+                    && enc.cross_signing_status().await.is_some_and(|s| s.is_complete())
+                    && enc.backups().are_enabled().await;
+                let made = if !whole {
+                    Err(t!("This device does not hold all of the account's keys, so it cannot make a new recovery code.").to_owned())
+                } else {
+                    match recovery.reset_key().await {
+                        Ok(code) => {
+                            if let Err(e) = self.seal.write(&self.dir, vault::RECOVERY, code.as_bytes()) {
+                                log::warn!("keep recovery code: {e}");
+                            }
+                            Ok(Some(code))
+                        }
+                        Err(e) => Err(format!("{:#}", anyhow::Error::new(e).context(t!("Could not make a new recovery code")))),
+                    }
+                };
+                self.emit(Ev::RecoveryCode(made)).await;
             }
             Cmd::Open(room_id) => {
                 // The old conversation stops being followed before the new one starts.
@@ -1305,11 +1348,16 @@ impl State {
                 // `Attached` follows every attachment, sent or not: the next one waits for it.
                 let room = self.room(&room);
                 let ev = self.ev.clone();
+                // A pasted picture sits in a folder of its own there, which goes with it.
+                let pasted = path.parent().filter(|folder| folder.parent() == Some(self.dir.join(PASTED).as_path())).map(Path::to_path_buf);
                 tokio::spawn(async move {
                     let sent = match room {
                         Ok(room) => attach(&room, &path, reply_to, &caption, hd).await,
                         Err(e) => Err(e),
                     };
+                    if let Some(folder) = pasted {
+                        let _ = tokio::fs::remove_dir_all(folder).await;
+                    }
                     if let Err(e) = sent {
                         let _ = ev.send(Ev::Error(t!("Attachment not sent: {error}", error = format!("{e:#}")))).await;
                     }

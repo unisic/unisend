@@ -171,7 +171,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Edited", "Edytowano"),
     ("Editing", "Edycja"),
     ("Email me a code", "Wyślij mi kod"),
-    ("Encrypted messages are locked on this device. Copy your recovery code from a device where you are signed in, then paste it here.", "Zaszyfrowane wiadomości są zablokowane na tym urządzeniu. Skopiuj kod odzyskiwania z innego zalogowanego urządzenia i wklej go tutaj."),
+    ("Encrypted messages are locked on this device. Copy your recovery code from another device where you are signed in (in Unisend: Settings, Devices), then paste it here.", "Zaszyfrowane wiadomości są zablokowane na tym urządzeniu. Skopiuj kod odzyskiwania z innego zalogowanego urządzenia (w Unisend: Ustawienia, Urządzenia) i wklej go tutaj."),
     ("End poll", "Zakończ ankietę"),
     ("Enter a full Matrix ID, like @name:matrix.org", "Wpisz pełny identyfikator Matrix, np. @nazwa:matrix.org"),
     ("Enter a name for this device.", "Wpisz nazwę urządzenia."),
@@ -611,6 +611,18 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Unlocked with the phone lock", "Odblokowanie blokadą telefonu"),
     ("Version {version}", "Wersja {version}"),
     ("{theme}, text {size}%", "{theme}, tekst {size}%"),
+    ("Copied", "Skopiowano"),
+    ("Copy", "Kopiuj"),
+    ("Could not make a new recovery code", "Nie udało się utworzyć nowego kodu odzyskiwania"),
+    ("Hide", "Ukryj"),
+    ("Make it", "Utwórz"),
+    ("New code", "Nowy kod"),
+    ("None is kept on this device. Make a new one here; the old one stops working.", "Na tym urządzeniu nie ma zapisanego kodu. Utwórz tu nowy; stary przestanie działać."),
+    ("None is kept on this device. Unlock it with your code once and it is kept here.", "Na tym urządzeniu nie ma zapisanego kodu. Odblokuj je raz swoim kodem, a zostanie tu zapisany."),
+    ("Show|recovery code", "Pokaż"),
+    ("The old code stops working in every app, Beeper too. Keep the new one somewhere safe.", "Stary kod przestanie działać we wszystkich aplikacjach, także w Beeperze. Zapisz nowy w bezpiecznym miejscu."),
+    ("This device does not hold all of the account's keys, so it cannot make a new recovery code.", "To urządzenie nie ma wszystkich kluczy konta, więc nie może utworzyć nowego kodu odzyskiwania."),
+    ("Unlocks encrypted messages on another device. Copy it here, paste it there.", "Odblokowuje zaszyfrowane wiadomości na innym urządzeniu. Skopiuj go tutaj, wklej tam."),
 ];
 
 /// Keyed by the English singular; the forms are one (1), few (2-4, 22-24) and many (0, 5-21, 25...).
