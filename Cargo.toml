@@ -39,7 +39,7 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled", 
 # All already in the tree (cosmic-text): reading and mapping a user's own emoji font.
 fontdb = { version = "0.23", default-features = false }
 memmap2 = "0.9"
-ttf-parser = { version = "0.25", default-features = false }
+ttf-parser = { version = "0.25", default-features = false, features = ["opentype-layout"] }
 # Already in the tree (gpui-kit's Markdown view): the composer's CommonMark turned into Matrix HTML.
 markdown = { version = "1", default-features = false }
 # Already in the tree (rustls through matrix-sdk), same features: the app PIN's salt, PBKDF2 and
