@@ -2175,10 +2175,10 @@ impl BeeperApp {
                 // A picture sits in its bubble with a thin margin, concentric with it; alone, it is the bubble.
                 let pictured = !m.deleted && m.media.as_ref().is_some_and(drawn_as_picture);
                 // A few emoji on their own are drawn large and free, as the phones do.
-                let jumbo = m.media.is_none() && m.reply.is_none() && m.link.is_none() && m.poll.is_none() && m.place.is_none() && !m.edited && emoji_only(&m.body);
-                let bare = jumbo || (pictured && m.body.is_empty() && m.reply.is_none() && !m.edited && m.link.is_none());
+                let jumbo = m.media.is_none() && m.reply.is_none() && m.link.is_none() && m.poll.is_none() && m.place.is_none() && emoji_only(&m.body);
+                let bare = jumbo || (pictured && m.body.is_empty() && m.reply.is_none() && m.link.is_none());
                 // A place alone fills its bubble, its card concentric with it.
-                let place_only = !m.deleted && m.place.is_some() && m.body.is_empty() && m.reply.is_none() && !m.edited;
+                let place_only = !m.deleted && m.place.is_some() && m.body.is_empty() && m.reply.is_none();
                 let (pad_x, pad_y) = if bare {
                     (0., 0.)
                 } else if pictured {
@@ -2203,6 +2203,8 @@ impl BeeperApp {
                 let first = prev.is_none_or(|p| !joined(p, m));
                 let last = next.is_none_or(|n| !joined(m, n));
                 let faded = m.deleted || crate::backend::undecrypted(&m.body);
+                // As in Signal, an edit is told in the line under the bubble, before the time.
+                let edited = m.edited && !m.deleted;
                 // Where a run's bubbles meet, their corners on the sender's side are tighter; a picture
                 // keeps its round corners.
                 let joins = !pictured;
@@ -2310,7 +2312,7 @@ impl BeeperApp {
                     .min_w_0()
                     .px(px(pad_x))
                     .pt(px(pad_y))
-                    .pb(px(if pictured && !(m.body.is_empty() && !m.edited) { 9. } else { pad_y }))
+                    .pb(px(if pictured && !m.body.is_empty() { 9. } else { pad_y }))
                     .gap(px(4.))
                     .when_some(framed_w, |el, w| el.w(px(w)))
                     .map(|el| corners(el, m.own, top_r, bottom_r))
@@ -2348,8 +2350,7 @@ impl BeeperApp {
                     })
                     .children(link_card)
                     .children(poll_card)
-                    .children(place_card)
-                    .when(m.edited && !m.deleted, |el| el.child(div().px(px(text_x)).text_size(fs(12.)).text_color(inside.faint).child(t!("Edited"))));
+                    .children(place_card);
                 // Badges pinned over the bubble's lower edge, ringed in the ground's colour: standing
                 // free under it they read as small messages of their own.
                 let reactions = (!m.reactions.is_empty()).then(|| {
@@ -2465,15 +2466,12 @@ impl BeeperApp {
                             .pl(side)
                             .map(|el| if m.own { el.items_end() } else { el.items_start() })
                             .children(reactions)
-                            .when(last || state.is_some() || shrink.is_some(), |el| {
+                            .when(last || state.is_some() || shrink.is_some() || edited, |el| {
                                 let failed = state.as_ref().is_some_and(|(_, r)| matches!(r, Receipt::Failed(_)));
                                 // Words follow the time after a dot, icons after a space.
                                 let worded = state.as_ref().is_some_and(|(mark, _)| matches!(mark, Mark::Words(_) | Mark::Failed { .. }));
                                 // A new state fades in where the old one was; the time stays.
-                                let time = match &state {
-                                    Some(_) if worded => Some(format!("{} \u{b7} ", clock(m.ts))),
-                                    _ => Some(clock(m.ts)),
-                                };
+                                let time = if worded { format!("{} \u{b7} ", clock(m.ts)) } else { clock(m.ts) };
                                 let said = state.as_ref().map(|(mark, r)| this.receipt_mark(r, mark, state_level.as_ref().map(|(v, before)| (before.as_ref(), *v)), cx));
                                 let ink = if failed { p.negative } else { this.on_wallpaper(p.faint, cx) };
                                 let read = state.as_ref().is_some_and(|(_, r)| matches!(r, Receipt::Seen { .. }));
@@ -2499,7 +2497,13 @@ impl BeeperApp {
                                         .text_color(ink)
                                         .when(this.disappears(ix), |el| el.child(Icon::new(IconName::Timer).size_3().text_color(ink)))
                                         // One line however many read it: the time stays whole, the words end in an ellipsis.
-                                        .child(h_flex().min_w_0().children(time.map(|time| div().flex_none().child(time))).children(said)),
+                                        .child(
+                                            h_flex()
+                                                .min_w_0()
+                                                .when(edited, |el| el.child(div().flex_none().child(format!("{} \u{b7} ", t!("Edited")))))
+                                                .child(div().flex_none().child(time))
+                                                .children(said),
+                                        ),
                                 )
                             }),
                     )
