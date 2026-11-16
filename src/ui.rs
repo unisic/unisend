@@ -228,6 +228,9 @@ pub struct BeeperApp {
     /// The chat list's unlock row shows its field; `recovery_later` puts the row away until the next start.
     recovery_open: bool,
     recovery_later: bool,
+    /// A code is being tried; its refusal goes under the field, where the keyboard does not hide it.
+    recovering: bool,
+    recovery_error: Option<SharedString>,
     /// The connection is lost and being retried.
     offline: bool,
     /// Holds keyboard focus when no input does, so Escape (Android's back) still reaches the app.
@@ -590,6 +593,8 @@ impl BeeperApp {
             need_recovery: false,
             recovery_open: false,
             recovery_later: false,
+            recovering: false,
+            recovery_error: None,
             offline: false,
             focus: cx.focus_handle(),
             dir,
@@ -798,6 +803,7 @@ impl BeeperApp {
                 }
                 self.need_recovery = need;
                 self.busy = false;
+                self.recovering = false;
             }
             Ev::Avatar(id, bytes) => {
                 // One evicted while it loaded is asked for again when it is shown.
@@ -986,7 +992,8 @@ impl BeeperApp {
             Ev::Exported(id, path, what) => self.exported(id, path, what, cx),
             Ev::Error(e) => {
                 self.row_return(cx);
-                self.error = Some(crate::backend::plain(&e).into());
+                let e = Some(crate::backend::plain(&e).into());
+                if std::mem::take(&mut self.recovering) { self.recovery_error = e } else { self.error = e }
                 self.busy = false;
                 self.loading = false;
                 // A browser sign-in that failed is over; the backend has let it go.
@@ -1050,8 +1057,9 @@ impl BeeperApp {
         if key.is_empty() || self.busy {
             return;
         }
-        self.error = None;
+        (self.error, self.recovery_error) = (None, None);
         self.busy = self.send(Cmd::Recover(key), cx);
+        self.recovering = self.busy;
     }
 
     fn paste_recovery(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1913,7 +1921,7 @@ impl BeeperApp {
                 .map(|el| if rail { el.aria_label(tr(label)).tooltip(move |window, cx| Tooltip::new(tr(label)).build(window, cx)) } else { el.child(tr(label)) })
         });
         if narrow {
-            h_flex().flex_none().h(px(NAV_H)).border_t_1().border_color(p.rule).children(items)
+            h_flex().flex_none().h(px(NAV_H)).bg(p.ground).border_t_1().border_color(p.rule).children(items)
         } else {
             let name = h_flex().h(px(BAR_H)).text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD);
             let name = if rail { name } else { name.px(px(GAP)).child("Unisend") };
@@ -3676,6 +3684,7 @@ impl BeeperApp {
                                 "Encrypted messages are locked on this device. Copy your recovery code from another device where you are signed in (in Unisend: Settings, Devices), then paste it here."
                             )))
                             .child(div().w_full().child(Input::new(&self.recovery)))
+                            .children(self.recovery_error.clone().map(|e| div().text_color(p.negative).child(e)))
                             .child(
                                 h_flex()
                                     .gap(px(8.))
@@ -4581,7 +4590,7 @@ impl BeeperApp {
                                     .relative()
                                     .left(px(g.under_x))
                                     .child(div().flex_1().min_h_0().child(screen))
-                                    .when(!self.searching, |el| el.child(self.render_nav(true, window, cx)))
+                                    .when(!self.searching && !crate::keyboard_up(), |el| el.child(self.render_nav(true, window, cx)))
                                     .when(over.is_some() && v > 0., |el| el.child(div().absolute().inset_0().occlude().bg(p.ground).opacity(g.veil))),
                             ),
                         )

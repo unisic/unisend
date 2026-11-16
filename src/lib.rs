@@ -1360,6 +1360,11 @@ pub(crate) fn insets() -> (f32, f32) {
     (0., 0.)
 }
 
+/// The soft keyboard is up: no navigation bar is this tall.
+pub(crate) fn keyboard_up() -> bool {
+    insets().1 > 120.
+}
+
 /// Repaints the window when the keyboard or the navigation bar changes the bottom inset.
 pub(crate) fn watch_insets(window: &mut Window, cx: &mut App) {
     #[cfg(target_os = "android")]
