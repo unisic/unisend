@@ -38,6 +38,10 @@ pub struct Features {
     pub captions: [i64; 4],
     /// The user's power level lets them send messages here; below it the composer gives way.
     pub post: bool,
+    /// The most characters the network takes in one message; 0 when it names no limit.
+    pub max_text: usize,
+    /// The most options of a poll; 0 when it names no limit.
+    pub poll_max: usize,
 }
 
 impl Features {
@@ -58,6 +62,8 @@ impl Features {
         gif_image: true,
         captions: [2; 4],
         post: true,
+        max_text: 0,
+        poll_max: 0,
     };
 
     /// `as_file`: the GIF goes as an `image/gif` (Meta's networks, see `gifs::wants_gif_file`).
@@ -103,6 +109,8 @@ struct Wire {
     file: HashMap<String, WireFile>,
     location_message: i64,
     poll: i64,
+    poll_max_options: i64,
+    max_text_length: i64,
     reply: i64,
     edit: i64,
     edit_max_age: Option<f64>,
@@ -167,6 +175,8 @@ pub fn parse(content: &Value) -> Features {
         gif_image: takes(f, "m.image", Some("image/gif")),
         captions: ["m.image", "m.video", "m.audio", "m.file"].map(|t| f.get(t).map_or(0, |f| f.caption)),
         post: true,
+        max_text: usize::try_from(wire.max_text_length).unwrap_or(0),
+        poll_max: usize::try_from(wire.poll_max_options).unwrap_or(0),
     }
 }
 
@@ -339,6 +349,14 @@ mod tests {
         assert_eq!(file.level("audio/ogg; codecs=opus"), -2);
         assert_eq!(file.level("audio/mp4"), 1);
         assert_eq!(file.level("video/mp4"), -2);
+    }
+
+    #[test]
+    fn limits_are_read_and_nonsense_is_none() {
+        let f = parse(&json!({ "max_text_length": 1000, "poll_max_options": 10 }));
+        assert_eq!((f.max_text, f.poll_max), (1000, 10));
+        let f = parse(&json!({ "max_text_length": -5 }));
+        assert_eq!((f.max_text, f.poll_max), (0, 0));
     }
 
     #[test]

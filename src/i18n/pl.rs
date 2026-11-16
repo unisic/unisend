@@ -505,6 +505,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("This server asks for a kind of confirmation Unisend does not offer. Sign the device out from Beeper or Element.", "Ten serwer wymaga potwierdzenia, którego Unisend nie obsługuje. Wyloguj urządzenie w Beeperze lub Elemencie."),
     ("Ticks", "Ptaszki"),
     ("Today", "Dzisiaj"),
+    ("Too long for this network: {len} of {max}", "Za długa dla tej sieci: {len} z {max}"),
     ("Too many attachments waiting, try again when these are sent", "Za dużo czekających załączników, spróbuj po ich wysłaniu"),
     ("Too many attempts. Wait a minute and try again.", "Za dużo prób. Odczekaj minutę i spróbuj ponownie."),
     ("Transient disconnect", "Chwilowo rozłączono"),

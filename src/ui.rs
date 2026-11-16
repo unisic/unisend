@@ -985,7 +985,7 @@ impl BeeperApp {
         }
         let body = self.composer.read(cx).value().trim().to_string();
         let Some(room) = self.open.clone() else { return };
-        if body.is_empty() {
+        if body.is_empty() || self.text_limit(cx).is_some_and(|(len, max)| len > max) {
             return;
         }
         let (reply_to, edit) = match self.compose.clone() {
@@ -1353,6 +1353,12 @@ impl BeeperApp {
     /// The open chat's features as its bridge publishes them; `None` without a bridge or until read.
     fn published(&self) -> Option<&crate::backend::Features> {
         self.features.as_ref().filter(|(room, _)| self.open.as_ref() == Some(room)).and_then(|(_, f)| f.as_ref())
+    }
+
+    /// The composer's characters and the network's limit, when the chat has one.
+    fn text_limit(&self, cx: &App) -> Option<(usize, usize)> {
+        let max = self.published().map_or(0, |f| f.max_text);
+        (max > 0).then(|| (self.composer.read(cx).value().chars().count(), max))
     }
 
     /// The open chat's network, by its bridge's name.
@@ -2380,6 +2386,8 @@ impl BeeperApp {
         // The send button turns between a microphone (nothing typed) and an arrow; desktop has no microphone.
         let mic = self.mic_shown(cx);
         let read_only = self.published().is_some_and(|f| !f.post);
+        let limit = self.text_limit(cx);
+        let over = limit.is_some_and(|(len, max)| len > max);
         let send_mode = transition(("send", "mode"), if mic { 0. } else { 1. }, motion::exit(), window, cx);
         let own_frame = frame::reserve(window) > 0.;
         let end = self.chat_end(window);
@@ -2473,6 +2481,22 @@ impl BeeperApp {
                     .children(self.render_typing(window, cx))
                     .children(self.render_compose_strip(window, cx))
                     .children(self.render_mentions(cx))
+                    .when_some(limit.filter(|&(len, max)| len * 5 >= max * 4), |el, (len, max)| {
+                        el.child(
+                            div()
+                                .px(px(GUTTER))
+                                .pt(px(8.))
+                                .text_right()
+                                .text_size(fs(12.))
+                                .font_features(tabular())
+                                .text_color(if over { p.negative } else { p.faint })
+                                .child(if over {
+                                    t!("Too long for this network: {len} of {max}", len = len, max = max)
+                                } else {
+                                    format!("{len} / {max}")
+                                }),
+                        )
+                    })
                     .when(self.uploads > 0, |el| {
                         el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(fs(12.)).text_color(p.faint).child(t!("Sending attachment…")))
                     })
@@ -2538,6 +2562,7 @@ impl BeeperApp {
                                     .rounded_full()
                                     .bg(p.text)
                                     .text_color(p.ground)
+                                    .when(over, |el| el.opacity(0.4))
                                     .cursor_pointer()
                                     .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
                                     .active(|el| el.bg(p.muted))

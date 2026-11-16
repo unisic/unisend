@@ -1,4 +1,4 @@
-//! The form that starts a poll: a question, 2 to 20 options, one answer or several.
+//! The form that starts a poll: a question, 2 to 20 options (fewer where the network takes fewer), one answer or several.
 
 use gpui_kit::component::switch::Switch;
 
@@ -50,8 +50,13 @@ impl BeeperApp {
         was
     }
 
+    /// The most options the open chat's network takes in a poll.
+    fn poll_limit(&self) -> usize {
+        self.published().map_or(MAX_ANSWERS, |f| if f.poll_max == 0 { MAX_ANSWERS } else { f.poll_max.clamp(MIN_ANSWERS, MAX_ANSWERS) })
+    }
+
     fn add_poll_option(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.poll_form.fields.as_ref().is_none_or(|f| f.options.len() >= MAX_ANSWERS) {
+        if self.poll_form.fields.as_ref().is_none_or(|f| f.options.len() >= self.poll_limit()) {
             return;
         }
         let new = field(t!("Option"), window, cx);
@@ -131,7 +136,7 @@ impl BeeperApp {
                         }),
                 )
         });
-        let add = (n < MAX_ANSWERS).then(|| {
+        let add = (n < self.poll_limit()).then(|| {
             h_flex()
                 .id("poll-add")
                 .h(px(TAP))
