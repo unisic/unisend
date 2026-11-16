@@ -52,6 +52,7 @@ pub(crate) mod motion;
 mod mute;
 mod panels;
 mod pinpad;
+mod pins;
 mod press;
 mod slide;
 mod people;
@@ -446,6 +447,9 @@ pub struct BeeperApp {
     disappear: disappear::Disappear,
     /// What the open chat's network takes, once read.
     features: Option<(OwnedRoomId, Option<crate::backend::Features>, bool)>,
+    /// The open chat's pinned messages, and the one the pinned bar shows next.
+    pins: Option<(OwnedRoomId, crate::backend::Pins)>,
+    pin_shown: Option<String>,
     /// View-once media the user opened this session, so it is not offered again while the bridge
     /// takes it away; at most `MAX_OPENED_ONCE`.
     opened_once: Vec<String>,
@@ -733,6 +737,8 @@ impl BeeperApp {
             people: Default::default(),
             disappear: disappear::Disappear::default(),
             features: None,
+            pins: None,
+            pin_shown: None,
             opened_once: Vec::new(),
             pad: Default::default(),
         }
@@ -1031,6 +1037,7 @@ impl BeeperApp {
                     self.features = Some((room, features, moderate));
                 }
             }
+            Ev::Pins { room, pins } => self.on_pins(room, pins),
             Ev::Info(room, details) => self.info_details(room, *details, cx),
             Ev::Group { room, change } => self.group_changed(room, change, cx),
             Ev::Candidates { room, list } => self.candidates_arrived(room, list, cx),
@@ -1716,6 +1723,7 @@ impl BeeperApp {
         self.sizes.clear();
         (self.swipe, self.swipe_back, self.flash, self.seek, self.fresh_reaction, self.strip_last) = (None, None, None, None, None, None);
         (self.bubble_press, self.status_last, self.tapped) = (None, None, None);
+        (self.pins, self.pin_shown) = (None, None);
         self.expanded.clear();
         self.own_read = OwnRead::default();
         self.arrivals.clear();
@@ -2823,6 +2831,7 @@ impl BeeperApp {
                     }),
             )
             .children(self.selection_bar(window, cx))
+            .children(self.pin_bar(end, cx))
             .child(
                 div()
                     .relative()

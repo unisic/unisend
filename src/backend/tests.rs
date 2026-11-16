@@ -2607,3 +2607,51 @@ async fn a_person_is_blocked_unblocked_and_a_change_elsewhere_is_told() {
     wait_for(&mut seat, "the refusal", |e| matches!(e, Ev::Error(_)).then_some(())).await;
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Pin and unpin from the commands, and a pin made by someone else, each seen as `Ev::Pins` with the
+/// message resolved by its event id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn a_message_is_pinned_and_unpinned_and_others_pins_arrive() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-pins-{tag}"));
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    let room = alice.client().unwrap().create_dm(bob.user_id().unwrap()).await.unwrap();
+    let room_id = room.room_id().to_owned();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    bob.join_room_by_id(&room_id).await.unwrap();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+
+    alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
+    alice.handle(Cmd::Send { room: room_id.clone(), body: "pin me".into(), reply_to: None, edit: None, mentions: Vec::new() }).await.unwrap();
+    until(&mut seat, "the message", |rows| rows.iter().any(|m| m.body == "pin me" && m.id.starts_with('$'))).await;
+    let id = seat.rows.iter().find(|m| m.body == "pin me").unwrap().id.clone();
+
+    let pins_with = |want: Vec<String>| {
+        move |e: Ev| match e {
+            Ev::Pins { pins, .. } if pins.list.iter().map(|q| q.id.clone()).collect::<Vec<_>>() == want => Some(pins),
+            _ => None,
+        }
+    };
+    alice.handle(Cmd::Pin { room: room_id.clone(), target: id.clone(), pin: true }).await.unwrap();
+    let pins = wait_for(&mut seat, "the pin", pins_with(vec![id.clone()])).await;
+    assert!(pins.can);
+    assert_eq!((pins.list[0].text.as_str(), pins.list[0].own), ("pin me", true));
+    alice.handle(Cmd::Pin { room: room_id.clone(), target: id.clone(), pin: false }).await.unwrap();
+    wait_for(&mut seat, "the unpin", pins_with(Vec::new())).await;
+
+    // A pin from another device, of a message that was never loaded here.
+    let from_bob = bob.get_room(&room_id).unwrap().send(RoomMessageEventContent::text_plain("from bob")).await.unwrap().response.event_id;
+    assert!(bob.get_room(&room_id).unwrap().pin_event(&from_bob).await.unwrap());
+    let pins = wait_for(&mut seat, "bob's pin", pins_with(vec![from_bob.to_string()])).await;
+    assert_eq!((pins.list[0].text.as_str(), pins.list[0].own), ("from bob", false));
+}
