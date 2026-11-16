@@ -820,6 +820,13 @@ fn named_groups_of_two_are_not_one_to_one() {
 }
 
 #[test]
+fn encrypted_chats_count_unread_on_the_device() {
+    assert_eq!(unread(true, (9, 0), Some((2, 1))), (2, 1));
+    assert_eq!(unread(true, (9, 0), None), (9, 0), "no read receipt found yet: the server's count");
+    assert_eq!(unread(false, (3, 1), Some((5, 0))), (3, 1));
+}
+
+#[test]
 fn old_downloads_are_swept() {
     let dir = std::env::temp_dir().join(format!("beeper-gpui-media-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

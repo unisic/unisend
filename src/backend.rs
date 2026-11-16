@@ -2438,6 +2438,37 @@ async fn probe(room: &Room, rooms: &Rooms) -> Option<RoomSummary> {
     Some(r.clone())
 }
 
+/// Unread counts of encrypted chats are the SDK's, which it works out from the events and receipts
+/// after the sync loop has summed the chat up: the row is summed up again once they changed.
+/// rooms.json picks the change up on the sync loop's next save.
+async fn recount(client: Client, notif: NotificationSettings, rooms: Rooms, ev: mpsc::Sender<Ev>) {
+    let mut updates = client.room_info_notable_update_receiver();
+    loop {
+        let id = match updates.recv().await {
+            Ok(update) => update.room_id,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+        let Some(room) = client.get_room(&id) else { continue };
+        let receipts = room.read_receipts();
+        if !room.encryption_state().is_encrypted() || receipts.latest_active.is_none() {
+            continue;
+        }
+        let Some(seen) = rooms.lock().unwrap().get(&id).cloned().filter(|s| s.unread != receipts.num_notifications) else { continue };
+        let fresh = summarize(&room, &notif, other_person(&room).await, seen).await;
+        let changed = rooms.lock().unwrap().get_mut(&id).map(|r| {
+            (r.unread, r.mentions, r.archived) = (fresh.unread, fresh.mentions, fresh.archived);
+            r.clone()
+        });
+        if let Some(summary) = changed {
+            UNSAVED_PROBES.store(true, std::sync::atomic::Ordering::Relaxed);
+            if ev.send(Ev::Rooms(vec![summary])).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 /// Looks up the last message of chats where it is not known, a few at a time, as their IDs come in.
 async fn probe_queue(client: Client, rooms: Rooms, ev: mpsc::Sender<Ev>, queue: mpsc::Receiver<OwnedRoomId>) {
     let ids = futures_util::stream::unfold(queue, |mut queue| async { queue.recv().await.map(|id| (id, queue)) });
@@ -2488,7 +2519,10 @@ async fn summarize(
         Ok(Some(raw)) => raw.get_field::<Done>("content").ok().flatten().unwrap_or_default(),
         _ => Done::default(),
     };
-    let counts = room.unread_notification_counts();
+    let server = room.unread_notification_counts();
+    let receipts = room.read_receipts();
+    let client = receipts.latest_active.is_some().then_some((receipts.num_notifications, receipts.num_mentions));
+    let (unread, highlights) = unread(room.encryption_state().is_encrypted(), (server.notification_count, server.highlight_count), client);
     let mut s = RoomSummary {
         name,
         network,
@@ -2496,9 +2530,9 @@ async fn summarize(
         dm: peer.is_some(),
         preview: current(seen.preview),
         preview_id: seen.preview_id,
-        unread: counts.notification_count,
+        unread,
         // Once the chat is read nothing in it is an unread mention.
-        mentions: seen.mentions.max(counts.highlight_count).min(counts.notification_count),
+        mentions: seen.mentions.max(highlights).min(unread),
         pinned: room.is_favourite(),
         low_priority: room.is_low_priority(),
         muted: matches!(mode, Some(RoomNotificationMode::Mute | RoomNotificationMode::MentionsAndKeywordsOnly)),
@@ -2509,6 +2543,17 @@ async fn summarize(
     s.pending = request(room).await.then_some(Pending::Request);
     s.moved_to = room.successor_room().map(|next| next.room_id);
     s
+}
+
+/// A chat's unread messages that notify, and its mentions among them. In an encrypted chat the
+/// server counts every event it cannot read, reactions and edits too, and cannot see mentions or
+/// mutes; the SDK's own count from the decrypted events is used once it has found the user's read
+/// receipt among them.
+fn unread(encrypted: bool, server: (u64, u64), client: Option<(u64, u64)>) -> (u64, u64) {
+    match client {
+        Some(counts) if encrypted => counts,
+        _ => server,
+    }
 }
 
 /// Removes cached chats the account is no longer in. The sync filter does not ask for left rooms
@@ -2573,6 +2618,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
     let (to_probe, queue) = mpsc::channel(PROBE_QUEUE);
     let prober = tokio::spawn(probe_queue(client.clone(), rooms.clone(), ev.clone(), queue));
     let _stop_prober = AbortOnDrop(prober);
+    let _stop_recount = AbortOnDrop(tokio::spawn(recount(client.clone(), notif.clone(), rooms.clone(), ev.clone())));
     // Top of the list first: those are the rows in view.
     let mut undated: Vec<&RoomSummary> = cached.iter().filter(|r| !r.dated).collect();
     undated.sort_unstable_by_key(|r| std::cmp::Reverse(r.ts));
