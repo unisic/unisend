@@ -469,7 +469,11 @@ async fn note(client: &Client) -> Result<OwnedRoomId> {
     request.preset = Some(create_room::v3::RoomPreset::PrivateChat);
     let mark = Raw::new(&json!({ "type": super::NOTE_TO_SELF, "state_key": "", "content": {} }))?.cast_unchecked();
     request.initial_state = vec![InitialStateEvent::with_empty_state_key(RoomEncryptionEventContent::with_recommended_defaults()).to_raw_any(), mark];
-    Ok(client.create_room(request).await?.room_id().to_owned())
+    let room = client.create_room(request).await?;
+    // The chat opens once its state has come back in a sync: before that it does not know it is a
+    // note and opens as a group ("You created the group"). Bounded: sync may be down.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), room.sync_up()).await;
+    Ok(room.room_id().to_owned())
 }
 
 async fn group(client: &Client, api: Option<&Api>, target: &Target, kind: &str, name: &str, people: Vec<String>) -> Result<OwnedRoomId> {
