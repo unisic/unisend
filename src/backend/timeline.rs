@@ -46,6 +46,7 @@ use crate::i18n::t;
 
 /// Beeper's bridges say in events of this type what the network did with a message.
 const SEND_STATUS: &str = "com.beeper.message_send_status";
+const STABLE_POLL: &str = "m.poll.start";
 /// People named as typing, readers kept per row, replies whose original is asked for: each is
 /// someone else's data and gets a ceiling.
 const MAX_TYPING: usize = 8;
@@ -352,6 +353,8 @@ fn shown(event: &AnySyncTimelineEvent, rules: &RoomVersionRules, dm: bool, big: 
     match event {
         AnySyncTimelineEvent::MessageLike(message) if message.event_type().to_string() == SEND_STATUS => true,
         AnySyncTimelineEvent::MessageLike(_) if default_event_filter(event, rules) => true,
+        // The SDK reads only the unstable poll; a stable one is shown from its content, without votes.
+        AnySyncTimelineEvent::MessageLike(message) if message.event_type().to_string() == STABLE_POLL => true,
         // A message type the SDK does not know is read by its body, as the chat list reads it.
         AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Original(e))) => {
             !matches!(e.content.relates_to, Some(Relation::Replacement(_))) && !e.content.body().trim().is_empty()
@@ -380,7 +383,7 @@ fn shown(event: &AnySyncTimelineEvent, rules: &RoomVersionRules, dm: bool, big: 
 
 /// An event that shows as a row of its own: not a state of delivery, which only marks its message.
 pub fn drawn(item: &TimelineItem) -> bool {
-    item.as_event().is_some_and(|e| !matches!(e.content(), TimelineItemContent::MsgLike(like) if matches!(like.kind, MsgLikeKind::Other(_))))
+    item.as_event().is_some_and(|e| !matches!(e.content(), TimelineItemContent::MsgLike(like) if matches!(&like.kind, MsgLikeKind::Other(o) if o.event_type().to_string() == SEND_STATUS)))
 }
 
 /// A timeline item as a row.
@@ -428,6 +431,10 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
             match &like.kind {
                 MsgLikeKind::Message(_) if json.as_ref().is_some_and(disappear::repeats_state) => m.kind = Kind::Hidden,
                 MsgLikeKind::Message(_) => m.link = json.as_ref().and_then(link_preview),
+                MsgLikeKind::Other(other) if other.event_type().to_string() == STABLE_POLL => {
+                    m.poll = json.as_ref().and_then(|c| Poll::parse(c, false));
+                    m.kind = if m.poll.is_some() { Kind::Message } else { Kind::Hidden };
+                }
                 // The filter lets one custom type through.
                 MsgLikeKind::Other(_) => {
                     m.kind = json.as_ref().and_then(send_status).map_or(Kind::Hidden, |(target, delivery)| Kind::Status { target, delivery });
@@ -644,6 +651,9 @@ mod tests {
             "m.relates_to": { "rel_type": "m.replace", "event_id": "$o" } });
         assert!(!shows("m.room.message", edit));
         assert!(shows("m.room.message", json!({ "msgtype": "m.text", "body": "hi" })));
+        assert!(shows("m.poll.start", json!({ "m.text": [{ "body": "Q?" }], "m.poll": { "kind": "m.disclosed", "max_selections": 1,
+            "question": { "m.text": [{ "body": "Q?" }] }, "answers": [{ "m.id": "a", "m.text": [{ "body": "A" }] }] } })));
+        assert!(!shows("m.poll.response", json!({ "m.selections": ["a"], "m.relates_to": { "rel_type": "m.reference", "event_id": "$o" } })));
         assert!(!shows("m.reaction", json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": "$o", "key": "x" } })));
     }
     #[test]

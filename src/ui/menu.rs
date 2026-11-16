@@ -149,7 +149,7 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
     // An edit sends text: a picture, poll or place edited this way would turn into text.
     let editable = m.own && sent && m.media.is_none() && m.poll.is_none() && m.place.is_none() && !m.deleted;
     let link = m.link.as_ref().map(|link| link.url.clone()).or_else(|| urls(&m.body).into_iter().next().map(|r| m.body[r].to_owned()));
-    let ends = m.own && sent && !m.deleted && m.poll.as_ref().is_some_and(|p| p.ended.is_none());
+    let ends = m.own && sent && !m.deleted && m.poll.as_ref().is_some_and(|p| p.ended.is_none() && p.unstable);
     let mut out = Vec::new();
     let saveable = crate::can_save() && sent && m.media.as_ref().is_some_and(|media| !media.once && matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
     // Reply and React head the list only where no buttons beside the message offer them; the touch

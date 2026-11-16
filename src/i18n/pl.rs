@@ -541,6 +541,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Voice message", "Wiadomość głosowa"),
     ("Voice message not sent: {error}", "Nie wysłano wiadomości głosowej: {error}"),
     ("Voice messages need the microphone.", "Wiadomości głosowe wymagają mikrofonu."),
+    ("Vote in another app", "Głosuj w innej aplikacji"),
     ("Waiting for the other device", "Czekanie na drugie urządzenie"),
     ("Waiting for the other device…", "Czekanie na drugie urządzenie…"),
     ("Waiting for your answer to the location question.", "Czekanie na Twoją odpowiedź w sprawie lokalizacji."),

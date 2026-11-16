@@ -9,7 +9,7 @@ impl BeeperApp {
     fn vote(&mut self, target: &str, answer: &str, cx: &mut Context<Self>) {
         let (Some(room), Some(me)) = (self.open.clone(), self.user.clone()) else { return };
         let Some(poll) = self.msgs.iter().rfind(|m| m.id == target).and_then(|m| m.poll.as_ref()) else { return };
-        if poll.ended.is_some() {
+        if poll.ended.is_some() || !poll.unstable {
             return;
         }
         if let Some(answers) = poll.touch(me.as_str(), answer) {
@@ -44,7 +44,9 @@ fn answer_touch(id: String, n: usize, cx: &mut Context<BeeperApp>) -> impl IntoE
 pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p: Palette, pressed: Option<(usize, f32)>, window: &mut Window, cx: &mut Context<BeeperApp>) -> AnyElement {
     let (counts, voters) = poll.tally();
     let mine = me.map_or(&[][..], |me| poll.choice(me.as_str()));
-    let open = poll.ended.is_none();
+    // The app counts and casts only the unstable poll's votes; a stable poll is shown, not voted in.
+    let counted = poll.unstable;
+    let open = poll.ended.is_none() && counted;
     let rows = poll.answers.iter().zip(counts).enumerate().map(|(n, (answer, count))| {
         let chosen = mine.contains(&answer.id);
         let (target, id) = (m.id.clone(), answer.id.clone());
@@ -77,11 +79,12 @@ pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p
                     .text_size(fs(14.))
                     .when(chosen, |el| el.child(Icon::new(IconName::Check).size_4()))
                     .child(div().flex_1().min_w_0().line_clamp(2).text_ellipsis().child(answer.text.clone()))
-                    .child(div().text_color(p.muted).font_features(tabular()).child(count.to_string())),
+                    .when(counted, |el| el.child(div().text_color(p.muted).font_features(tabular()).child(count.to_string()))),
             )
     });
     let rows: Vec<_> = rows.collect();
     let total = match voters {
+        _ if !counted => t!("Vote in another app").to_owned(),
         0 => t!("No votes").to_owned(),
         n => tn!(n, "{n} vote", "{n} votes"),
     };
@@ -91,7 +94,7 @@ pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p
         .child(div().text_size(fs(16.)).line_height(fs(22.)).font_weight(FontWeight::SEMIBOLD).child(poll.question.clone()))
         .children(rows)
         .child(div().text_size(fs(12.)).text_color(p.faint).child(total))
-        .when(!open, |el| el.child(div().text_size(fs(12.)).text_color(p.faint).child(t!("Poll ended"))))
+        .when(poll.ended.is_some(), |el| el.child(div().text_size(fs(12.)).text_color(p.faint).child(t!("Poll ended"))))
         .into_any_element()
 }
 
