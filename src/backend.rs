@@ -204,6 +204,10 @@ pub enum Cmd {
     Candidates(OwnedRoomId),
     /// How a member of a group is known on its network; answered with `MemberIds`.
     MemberIds(OwnedRoomId, OwnedUserId),
+    /// The user's own name and picture; answered with `Profile`.
+    Profile,
+    /// Changes the user's own name or picture; answered with `Profile`, else `Ev::Error`.
+    SetProfile(group::Mine),
     /// Messages matching `query` in one room, or in every room; answered with `Found`.
     Search { room: Option<OwnedRoomId>, query: String },
     /// Looks for a newer release; answered with `Ev::Update`.
@@ -287,6 +291,7 @@ pub enum Ev {
     Group { room: OwnedRoomId, change: group::Change },
     Candidates { room: OwnedRoomId, list: Vec<(OwnedUserId, String)> },
     MemberIds(OwnedUserId, Vec<String>),
+    Profile(group::Profile),
     /// What checking for or installing an update did.
     Update(update::Step),
     /// The answer to `Cmd::PeerIds`; never sent for a group.
@@ -1736,6 +1741,31 @@ impl State {
                 tokio::spawn(async move {
                     let ids = info::identifiers_of(&room, &user).await;
                     let _ = ev.send(Ev::MemberIds(user, ids)).await;
+                });
+            }
+            Cmd::Profile => {
+                let (client, ev) = (self.client()?.clone(), self.ev.clone());
+                tokio::spawn(async move {
+                    match group::profile(&client).await {
+                        Ok(profile) => {
+                            let _ = ev.send(Ev::Profile(profile)).await;
+                        }
+                        Err(e) => log::debug!("own profile: {e:#}"),
+                    }
+                });
+            }
+            Cmd::SetProfile(mine) => {
+                let (client, ev) = (self.client()?.clone(), self.ev.clone());
+                tokio::spawn(async move {
+                    let done = match group::set_profile(&client, mine).await {
+                        Ok(()) => group::profile(&client).await.map(Ev::Profile),
+                        Err(e) => Err(e),
+                    };
+                    let ev_out = done.unwrap_or_else(|e| {
+                        log::warn!("profile change: {e:#}");
+                        Ev::Error(t!("Could not change your profile: {error}", error = format!("{e:#}")))
+                    });
+                    let _ = ev.send(ev_out).await;
                 });
             }
             Cmd::PeerIds(room_id) => {

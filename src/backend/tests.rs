@@ -1875,7 +1875,7 @@ async fn a_read_chat_opens_again_without_the_new_messages_divider() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a local homeserver with JWT login, see module docs"]
-async fn a_group_is_changed_by_its_admin_only() {
+async fn a_group_is_changed_by_its_admin_only_and_the_profile_by_its_owner() {
     let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
     let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
     let tag = tag();
@@ -1934,4 +1934,10 @@ async fn a_group_is_changed_by_its_admin_only() {
     assert!(invited.iter().any(|m| Some(m.user_id()) == carol.user_id()));
     let joined = room.members_no_sync(RoomMemberships::JOIN).await.unwrap();
     assert!(!joined.iter().any(|m| Some(m.user_id()) == bob.user_id()));
+
+    group::set_profile(&alice, group::Mine::Name("Alicja".into())).await.unwrap();
+    group::set_profile(&alice, group::Mine::Photo(photo)).await.unwrap();
+    let me = group::profile(&alice).await.unwrap();
+    assert_eq!(me.name, "Alicja");
+    assert!(me.picture.is_some_and(|p| !p.is_empty()));
 }

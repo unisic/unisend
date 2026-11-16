@@ -1301,6 +1301,7 @@ mod tests {
             include_str!("ui/navigate.rs"),
             include_str!("ui/panels.rs"),
             include_str!("ui/pollnew.rs"),
+            include_str!("ui/profile.rs"),
             include_str!("ui/receipt.rs"),
             include_str!("ui/rich.rs"),
             include_str!("ui/rooms.rs"),

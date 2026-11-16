@@ -39,6 +39,7 @@ mod gifs;
 mod mentions;
 mod info;
 mod group;
+mod profile;
 mod menu;
 mod navigate;
 pub(crate) mod motion;
@@ -364,6 +365,8 @@ pub struct BeeperApp {
     audience: people::People,
     /// Settings' devices and the verification sheet.
     verify: verify::Ui,
+    /// The user's own name and picture.
+    profile: profile::Ui,
     info: info::Info,
     _subs: Vec<Subscription>,
     _events: Task<()>,
@@ -429,6 +432,7 @@ impl BeeperApp {
         let matrix = signin::Form::new(window, cx, &mut subs);
         let share = sharein::ShareIn::new(window, cx, &mut subs);
         let verify = verify::Ui::new(window, cx, &mut subs);
+        let profile = profile::Ui::new(window, cx, &mut subs);
         let find = search::Find::new(window, cx, &mut subs);
         subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
@@ -614,6 +618,7 @@ impl BeeperApp {
             fwd,
             audience: people::People::default(),
             verify,
+            profile,
             info: info::Info::default(),
             _subs: subs,
             _events: events,
@@ -878,6 +883,7 @@ impl BeeperApp {
             Ev::Group { room, change } => self.group_changed(room, change, cx),
             Ev::Candidates { room, list } => self.candidates_arrived(room, list, cx),
             Ev::MemberIds(user, ids) => self.member_ids(user, ids, cx),
+            Ev::Profile(profile) => self.profile_arrived(profile, cx),
             Ev::Update(step) => self.on_update(step),
             Ev::PeerIds(room, ids) => {
                 if self.chat_sheet.as_ref() == Some(&room) {

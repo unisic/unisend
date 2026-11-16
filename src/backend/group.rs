@@ -1,4 +1,4 @@
-//! Changing a group: name, picture, description, members. A group is
+//! Changing a group (name, picture, description, members) and the user's own profile. A group is
 //! changed where the room's power levels let the user and, in a bridged room, where the bridge's
 //! `com.beeper.room_features` says it carries the change to the network (`state` by event type,
 //! `member_actions` by action; mautrix-go `event/capabilities.go`). The bridge then makes the
@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use matrix_sdk::{
     Client, Room, RoomMemberships,
     ruma::{OwnedUserId, UserId, events::StateEventType},
@@ -32,6 +32,11 @@ pub enum Change {
     Remove(OwnedUserId),
 }
 
+pub enum Mine {
+    Name(String),
+    Photo(PathBuf),
+}
+
 /// What the user may change in a group.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Can {
@@ -47,6 +52,13 @@ impl Can {
     pub fn edit(&self) -> bool {
         self.name || self.photo || self.topic
     }
+}
+
+/// The user's display name and picture, as the homeserver keeps them.
+#[derive(Clone, Default)]
+pub struct Profile {
+    pub name: String,
+    pub picture: Option<Vec<u8>>,
 }
 
 /// Whether the bridge's features let a change through. Without the event the room is plain
@@ -152,6 +164,32 @@ pub(super) async fn candidates(client: &Client, group: &Room) -> Vec<(OwnedUserI
     }
     out.sort_by_cached_key(|(_, name)| name.to_lowercase());
     out
+}
+
+pub(super) async fn profile(client: &Client) -> Result<Profile> {
+    let account = client.account();
+    let name = account.get_display_name().await?.unwrap_or_default();
+    let picture = match account.get_avatar_url().await? {
+        Some(url) => super::picture(client, url).await.map_err(|e| log::debug!("own picture: {e:#}")).ok(),
+        None => None,
+    };
+    Ok(Profile { name, picture })
+}
+
+pub(super) async fn set_profile(client: &Client, mine: Mine) -> Result<()> {
+    let account = client.account();
+    match mine {
+        Mine::Name(name) => {
+            let name = clip(&name, NAME_MAX);
+            account.set_display_name((!name.is_empty()).then_some(name.as_str())).await?;
+        }
+        Mine::Photo(path) => {
+            let (mime, bytes) = photo(&path).await?;
+            let url = account.upload_avatar(&mime, bytes).await?;
+            account.set_avatar_url(Some(&url)).await.context("set avatar")?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
