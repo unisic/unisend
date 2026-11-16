@@ -90,6 +90,7 @@ pub(super) fn poll(m: &Msg, poll: &Poll, me: Option<&OwnedUserId>, width: f32, p
     };
     v_flex()
         .w(px(width.min(BUBBLE_W)))
+        .max_w_full()
         .gap(px(6.))
         .child(div().text_size(fs(16.)).line_height(fs(22.)).font_weight(FontWeight::SEMIBOLD).child(poll.question.clone()))
         .children(rows)
