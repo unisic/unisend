@@ -39,32 +39,20 @@ pub(super) struct Sink {
 }
 
 impl Sink {
-    /// One connection for the app's lifetime; `None`, logged once, when there is no server.
-    pub(super) async fn open() -> Option<Self> {
+    /// One connection for the app's lifetime, once the server answers.
+    pub(super) async fn open() -> Result<Self, String> {
         let proxy = match tokio::time::timeout(CALL_TIMEOUT, connect()).await {
             Ok(Ok(p)) => p,
-            Ok(Err(e)) => {
-                log::warn!("no desktop notifications: {e}");
-                return None;
-            }
-            Err(_) => {
-                log::warn!("no desktop notifications: the session bus did not answer");
-                return None;
-            }
+            Ok(Err(e)) => return Err(e.to_string()),
+            Err(_) => return Err("the session bus did not answer".into()),
         };
-        let caps: Vec<String> = match proxy.call("GetCapabilities", &()).await {
-            Ok(caps) => caps,
-            Err(e) => {
-                log::warn!("no desktop notifications: {e}");
-                return None;
-            }
-        };
+        let caps: Vec<String> = proxy.call("GetCapabilities", &()).await.map_err(|e| e.to_string())?;
         match proxy.receive_all_signals().await {
             // Ends with the connection, or with the backend's runtime.
             Ok(signals) => drop(tokio::spawn(signals.for_each(|msg| async move { on_signal(&msg) }))),
             Err(e) => log::warn!("desktop notification buttons: {e}"),
         }
-        Some(Self { proxy, markup: caps.iter().any(|c| c == "body-markup") })
+        Ok(Self { proxy, markup: caps.iter().any(|c| c == "body-markup") })
     }
 
     pub(super) fn markup(&self) -> bool {
@@ -85,6 +73,7 @@ impl Sink {
         hints.insert("category", "im.received".into());
         hints.insert("urgency", 1u8.into());
         hints.insert("x-kde-reply-placeholder-text", t!("Reply").into());
+        hints.insert("x-kde-reply-submit-button-text", t!("Send").into());
         if !entry.icon.is_empty() {
             hints.insert("image-path", file_uri(&entry.icon).into());
         }
@@ -118,6 +107,27 @@ impl Sink {
         {
             log::debug!("closing a notification: {e}");
         }
+    }
+}
+
+/// A chat's picture as a circle: servers show `image-path` as it is, where Android and Windows
+/// crop it round. Pictures come as small squares (`backend::square`); anything that does not
+/// decode is passed on as it came.
+pub(crate) fn round(bytes: Vec<u8>) -> Vec<u8> {
+    let Ok(picture) = image::load_from_memory(&bytes) else { return bytes };
+    let mut picture = picture.to_rgba8();
+    let (w, h) = picture.dimensions();
+    let (cx, cy, r) = (w as f32 / 2.0, h as f32 / 2.0, w.min(h) as f32 / 2.0);
+    for (x, y, px) in picture.enumerate_pixels_mut() {
+        let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+        // One pixel of soft edge.
+        let cover = (r - d + 0.5).clamp(0.0, 1.0);
+        px[3] = (f32::from(px[3]) * cover).round() as u8;
+    }
+    let mut out = Vec::new();
+    match picture.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png) {
+        Ok(()) => out,
+        Err(_) => bytes,
     }
 }
 
@@ -171,5 +181,20 @@ fn on_signal(msg: &zbus::Message) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_picture_turns_round_with_clear_corners() {
+        let square = image::RgbImage::from_pixel(16, 16, image::Rgb([200, 40, 40]));
+        let mut png = Vec::new();
+        square.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let round = image::load_from_memory(&super::round(png)).unwrap().to_rgba8();
+        assert_eq!(round.get_pixel(0, 0)[3], 0, "a corner is clear");
+        assert_eq!(*round.get_pixel(8, 8), image::Rgba([200, 40, 40, 255]), "the middle stays");
+        assert!(round.get_pixel(0, 8)[3] > 240, "the circle reaches the edge");
+        assert_eq!(super::round(b"not a picture".to_vec()), b"not a picture");
     }
 }

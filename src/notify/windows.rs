@@ -2,6 +2,7 @@
 //! `HKCU\Software\Classes\AppUserModelId`; buttons and the reply box answer while the app runs.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use windows::Data::Xml::Dom::XmlDocument;
 use windows::Foundation::{IPropertyValue, TypedEventHandler};
@@ -20,26 +21,29 @@ pub(super) struct Sink {
     toasts: HashMap<String, ToastNotification>,
 }
 
+/// Names the app and gives it its icon for toasts and the notification settings: an unpackaged
+/// app has them only from its AppUserModelID's key. The icon is a file in the app's data folder.
+pub(super) fn register(dir: &Path) {
+    let icon = dir.join("icon.png");
+    if let Err(e) = std::fs::write(&icon, include_bytes!("../../packaging/linux/icons/hicolor/256x256/apps/dev.gpui.beeper.png")) {
+        log::warn!("notification icon: {e}");
+    }
+    let registered = windows_registry::CURRENT_USER.create(format!(r"Software\Classes\AppUserModelId\{APP_ID}")).and_then(|key| {
+        key.set_string("DisplayName", "Unisend")?;
+        key.set_string("IconUri", icon.to_string_lossy().as_ref())
+    });
+    if let Err(e) = registered {
+        log::warn!("desktop notifications may not show: {e}");
+    }
+}
+
 impl Sink {
-    pub(super) async fn open() -> Option<Self> {
-        let registered = windows_registry::CURRENT_USER
-            .create(format!(r"Software\Classes\AppUserModelId\{APP_ID}"))
-            .and_then(|key| key.set_string("DisplayName", "Unisend"));
-        if let Err(e) = registered {
-            log::warn!("desktop notifications may not show: {e}");
-        }
-        match ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID)) {
-            Ok(notifier) => {
-                let sink = Self { notifier, toasts: HashMap::new() };
-                // Toasts left in the Action Center by an earlier run, whose buttons no longer answer.
-                sink.clear();
-                Some(sink)
-            }
-            Err(e) => {
-                log::warn!("no desktop notifications: {e}");
-                None
-            }
-        }
+    pub(super) async fn open() -> Result<Self, String> {
+        let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID)).map_err(|e| e.to_string())?;
+        let sink = Self { notifier, toasts: HashMap::new() };
+        // Toasts left in the Action Center by an earlier run, whose buttons no longer answer.
+        sink.clear();
+        Ok(sink)
     }
 
     pub(super) fn markup(&self) -> bool {

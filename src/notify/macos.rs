@@ -10,8 +10,8 @@ use crate::i18n::t;
 pub(super) struct Sink;
 
 impl Sink {
-    pub(super) async fn open() -> Option<Self> {
-        Some(Self)
+    pub(super) async fn open() -> Result<Self, String> {
+        Ok(Self)
     }
 
     pub(super) fn markup(&self) -> bool {

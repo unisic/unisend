@@ -736,7 +736,7 @@ async fn test_notice(client: Client, dir: PathBuf) {
         let bytes = picture(&client, client.account().get_avatar_url().await.ok()??).await.ok()?;
         let path = dir.join("notify").join(TEST_CHAT);
         std::fs::create_dir_all(path.parent()?).ok()?;
-        write_private(&path, &bytes).ok()?;
+        write_private(&path, &notification_face(bytes)).ok()?;
         Some(path)
     };
     let file = tokio::time::timeout(ICON_WAIT, face).await.ok().flatten();
@@ -2418,6 +2418,15 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>, live: bool) -> Room
     }
 }
 
+/// A chat's face as its notification shows it: Linux servers show the picture as given, the other
+/// systems crop it round themselves.
+fn notification_face(bytes: Vec<u8>) -> Vec<u8> {
+    #[cfg(target_os = "linux")]
+    return crate::notify::round(bytes);
+    #[cfg(not(target_os = "linux"))]
+    bytes
+}
+
 /// The chat's picture as a file Android can read, one small file per chat that has notified.
 /// Desktop keeps it while the chat's notification shows: then it is not fetched again.
 async fn notification_icon(client: &Client, dir: &Path, room: &RoomId, generation: u64) -> Option<PathBuf> {
@@ -2433,7 +2442,7 @@ async fn notification_icon(client: &Client, dir: &Path, room: &RoomId, generatio
         return None;
     }
     std::fs::create_dir_all(&folder).ok()?;
-    write_private(&path, &bytes).ok()?;
+    write_private(&path, &notification_face(bytes)).ok()?;
     Some(path)
 }
 

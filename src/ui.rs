@@ -530,7 +530,17 @@ impl BeeperApp {
                 // The animation setting may have changed while the app was away.
                 motion::follow_system(cx);
                 this.follow_platform_language(window, cx);
+                let was_open = this.open.clone();
                 this.open_from_notification(cx);
+                // Messages that came to the open chat while the window was away are read now that it
+                // is back (another chat opened here is read as it opens); the lock's screen reads them
+                // once passed.
+                if let Some(id) = this.open.clone().filter(|id| was_open.as_ref() == Some(id))
+                    && this.rooms.iter().any(|r| r.id == id && r.unread > 0)
+                    && !(this.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked())
+                {
+                    this.send(Cmd::Chat(id, ChatAction::Unread(false)), cx);
+                }
                 this.take_share(Some(window), cx);
                 this.publish_share_targets();
                 this.update_returned(cx);

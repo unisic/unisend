@@ -844,7 +844,7 @@ pub(crate) fn stay_connected(on: bool) {
 pub(crate) struct Notice<'a> {
     pub chat: &'a str,
     pub name: &'a str,
-    #[cfg_attr(not(target_os = "android"), expect(dead_code, reason = "desktop notifications name the sender in every chat"))]
+    /// A group names each message's sender; a direct chat's name already does.
     pub group: bool,
     /// Path of the chat's picture, or empty.
     pub icon: &'a str,

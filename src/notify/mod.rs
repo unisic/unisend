@@ -4,7 +4,9 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use gpui_kit::{AnyWindowHandle, App, WeakEntity};
 use tokio::sync::mpsc;
@@ -13,6 +15,8 @@ use crate::i18n::t;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+pub(crate) use self::linux::round;
 #[cfg(target_os = "linux")]
 use self::linux::Sink;
 #[cfg(target_os = "macos")]
@@ -35,6 +39,12 @@ const MAX_LINE: usize = 300;
 const SHOWN: usize = if cfg!(target_os = "linux") { KEPT } else { 3 };
 /// Requests, button presses and UI calls waiting; more are dropped.
 const QUEUE: usize = 64;
+/// Pause before the notification service is asked again after it did not answer (at login the app
+/// can start before the desktop's service); doubles up to `RETRY_MAX`.
+const RETRY_FIRST: Duration = Duration::from_secs(2);
+const RETRY_MAX: Duration = Duration::from_secs(5 * 60);
+/// A message waiting for a service that is not there asks again, at most this often.
+const RETRY_SOON: Duration = Duration::from_secs(5);
 /// macOS takes the bundle's identifier, the same.
 #[cfg(not(target_os = "macos"))]
 const APP_ID: &str = "dev.gpui.beeper";
@@ -48,7 +58,7 @@ enum Req {
 
 /// Which notification a platform's event is about: the server's number on Linux, the chat elsewhere.
 enum Target {
-    #[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "only Linux numbers notifications"))]
+    #[cfg_attr(all(not(target_os = "linux"), not(test)), expect(dead_code, reason = "only Linux numbers notifications"))]
     Id(u32),
     #[cfg_attr(target_os = "linux", expect(dead_code, reason = "Linux numbers notifications"))]
     Chat(String),
@@ -79,8 +89,13 @@ static TO_UI: OnceLock<mpsc::Sender<ToUi>> = OnceLock::new();
 static PENDING: Mutex<Option<String>> = Mutex::new(None);
 
 fn request(req: Req) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
     if REQUESTS.get().is_some_and(|tx| tx.try_send(req).is_err()) {
-        log::debug!("notification dropped");
+        if WARNED.swap(true, Ordering::Relaxed) {
+            log::debug!("notification dropped");
+        } else {
+            log::warn!("notification dropped: {QUEUE} waiting");
+        }
     }
 }
 
@@ -98,7 +113,8 @@ fn to_ui(msg: ToUi) {
 }
 
 pub(crate) fn show(notice: &crate::Notice) {
-    let line = format!("{}: {}", notice.note.sender, notice.note.text);
+    // A direct chat's title already names the sender, as Signal and Android show it.
+    let line = if notice.group { format!("{}: {}", notice.note.sender, notice.note.text) } else { notice.note.text.clone() };
     request(Req::Show { chat: notice.chat.into(), name: notice.name.into(), icon: notice.icon.into(), line, alert: notice.alert });
 }
 
@@ -126,6 +142,8 @@ pub(crate) fn attach(window: AnyWindowHandle, app: WeakEntity<crate::ui::BeeperA
     if TO_UI.set(tx).is_err() {
         return;
     }
+    // A window that never had the focus since it opened (started behind others) is not in front.
+    let _ = window.update(cx, |_, window, _| crate::FOREGROUND.store(window.is_window_active(), Ordering::Relaxed));
     #[cfg(target_os = "windows")]
     cx.set_app_identity(APP_ID, "Unisend");
     #[cfg(target_os = "macos")]
@@ -227,6 +245,16 @@ impl Shown {
         self.0.remove(at)
     }
 
+    /// A server that started again (Plasma's shell restarts) numbers from 1 anew: another chat's
+    /// entry holding the number the chat's notification just got is no longer showing, and must
+    /// not take its buttons or close it.
+    fn renumbered(&mut self, chat: &str) {
+        let Some(id) = self.0.iter().find(|e| e.chat == chat).map(|e| e.id).filter(|&id| id != 0) else { return };
+        for entry in self.0.iter_mut().filter(|e| e.id == id && e.chat != chat) {
+            entry.id = 0;
+        }
+    }
+
     fn chat_of(&self, target: Target) -> Option<String> {
         match target {
             Target::Id(id) => self.0.iter().find(|e| id != 0 && e.id == id).map(|e| e.chat.clone()),
@@ -293,38 +321,52 @@ pub(crate) async fn serve(dir: PathBuf) {
     }
     // Pictures left by a run that ended with notifications showing.
     let _ = std::fs::remove_dir_all(dir.join("notify"));
-    let Some(mut sink) = Sink::open().await else { return };
+    #[cfg(target_os = "windows")]
+    windows::register(&dir);
+    let mut service = Service { sink: None, tried: Instant::now(), wait: RETRY_FIRST };
+    service.open().await;
     let mut shown = Shown::default();
     loop {
         tokio::select! {
             // A notification closed before a newer message came is forgotten first, so the closing
             // cannot take the newer one's entry.
             biased;
-            Some(ev) = events.recv() => on_event(&mut sink, &mut shown, ev).await,
+            Some(ev) = events.recv() => {
+                if let Some(sink) = service.sink.as_mut() {
+                    on_event(sink, &mut shown, ev).await;
+                }
+            }
+            () = tokio::time::sleep_until((service.tried + service.wait).into()), if service.sink.is_none() => service.open().await,
             req = requests.recv() => match req {
                 Some(Req::Show { chat, name, icon, line, alert }) => {
                     if let Some(old) = shown.add(&chat, &name, &line, icon) {
-                        drop_entry(&mut sink, old).await;
+                        drop_entry(service.sink.as_mut(), old).await;
                     }
                     // Earlier messages of one sync only add their lines: the last one posts them all.
-                    if alert && let Some(entry) = shown.get(&chat) {
+                    if alert
+                        && let Some(sink) = service.sink().await
+                        && let Some(entry) = shown.get(&chat)
+                    {
                         // Showing nothing reads as the lock does: "New message" under the app's name, no buttons.
                         let locked = locked() || crate::NotifyShows::current() == crate::NotifyShows::Nothing;
                         let text = entry.text(sink.markup(), locked);
                         sink.post(entry, &text, alert, !locked).await;
+                        shown.renumbered(&chat);
                     }
                 }
                 Some(Req::Close(chat)) => {
                     if let Some(old) = shown.remove(&chat) {
-                        drop_entry(&mut sink, old).await;
+                        drop_entry(service.sink.as_mut(), old).await;
                     }
                 }
                 Some(Req::CloseAll(done)) => {
                     for old in std::mem::take(&mut shown.0) {
-                        drop_entry(&mut sink, old).await;
+                        drop_entry(service.sink.as_mut(), old).await;
                     }
                     #[cfg(target_os = "windows")]
-                    sink.clear();
+                    if let Some(sink) = &service.sink {
+                        sink.clear();
+                    }
                     if let Some(done) = done {
                         let _ = done.send(());
                     }
@@ -335,9 +377,48 @@ pub(crate) async fn serve(dir: PathBuf) {
     }
 }
 
+/// The system's notification service, asked again with growing pauses while it is not there.
+struct Service {
+    sink: Option<Sink>,
+    tried: Instant,
+    wait: Duration,
+}
+
+impl Service {
+    async fn open(&mut self) {
+        self.tried = Instant::now();
+        match Sink::open().await {
+            Ok(sink) => {
+                if self.wait > RETRY_FIRST {
+                    log::info!("desktop notifications available");
+                }
+                self.sink = Some(sink);
+            }
+            Err(e) => {
+                if self.wait == RETRY_FIRST {
+                    log::warn!("no desktop notifications for now: {e}");
+                } else {
+                    log::debug!("no desktop notifications: {e}");
+                }
+                self.wait = (self.wait * 2).min(RETRY_MAX);
+            }
+        }
+    }
+
+    /// The service for a message, asked once more when the last try was a while ago.
+    async fn sink(&mut self) -> Option<&mut Sink> {
+        if self.sink.is_none() && self.tried.elapsed() >= RETRY_SOON {
+            self.open().await;
+        }
+        self.sink.as_mut()
+    }
+}
+
 /// Closes the notification and removes the chat's picture.
-async fn drop_entry(sink: &mut Sink, entry: Entry) {
-    sink.close(&entry).await;
+async fn drop_entry(sink: Option<&mut Sink>, entry: Entry) {
+    if let Some(sink) = sink {
+        sink.close(&entry).await;
+    }
     if !entry.icon.is_empty() {
         let _ = std::fs::remove_file(&entry.icon);
     }
@@ -361,12 +442,12 @@ async fn on_event(sink: &mut Sink, shown: &mut Shown, ev: Event) {
                 Act::Read => {
                     crate::backend::read_from_notification(&chat);
                     if let Some(old) = shown.remove(&chat) {
-                        drop_entry(sink, old).await;
+                        drop_entry(Some(sink), old).await;
                     }
                 }
                 Act::Mute if crate::backend::mute_from_notification(&chat) => {
                     if let Some(old) = shown.remove(&chat) {
-                        drop_entry(sink, old).await;
+                        drop_entry(Some(sink), old).await;
                     }
                 }
                 Act::Mute => quiet_line(sink, shown, &chat, format!("Unisend: {}", t!("Not muted"))).await,
@@ -400,6 +481,7 @@ async fn quiet_line(sink: &mut Sink, shown: &mut Shown, chat: &str, line: String
     entry.push(&line);
     let text = entry.text(sink.markup(), false);
     sink.post(entry, &text, false, true).await;
+    shown.renumbered(chat);
 }
 
 #[cfg(test)]
@@ -458,6 +540,18 @@ mod tests {
         assert_eq!(shown.0.len(), MAX_CHATS);
         assert_eq!(shown.remove("!new:x").map(|e| e.lines.len()), Some(1));
         assert!(shown.chat_of(Target::Id(7)).is_none());
+    }
+
+    #[test]
+    fn a_number_given_again_after_a_server_restart_belongs_to_the_newer_notification() {
+        let mut shown = Shown::default();
+        shown.add("!old:x", "Old", "1", String::new());
+        shown.get("!old:x").unwrap().id = 1;
+        shown.add("!new:x", "New", "2", String::new());
+        shown.get("!new:x").unwrap().id = 1;
+        shown.renumbered("!new:x");
+        assert_eq!(shown.chat_of(Target::Id(1)).as_deref(), Some("!new:x"));
+        assert_eq!(shown.get("!old:x").unwrap().id, 0, "the old one is not closed by number");
     }
 
     #[test]
