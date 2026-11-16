@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" translatable="false">Unisend</string>
     <string name="you">You</string>
     <string name="chat">Chat</string>
     <string name="reply">Reply</string>

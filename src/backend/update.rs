@@ -29,9 +29,12 @@ const MAX_NOTES: usize = 2000;
 /// At most one automatic check in this many seconds.
 const EVERY: u64 = 24 * 60 * 60;
 
-/// Whether this build looks for updates: Android, with a manifest URL.
+/// The developer build (UNISEND_DEV=1 at compile time): a separate app that must never be offered the stable release.
+pub(crate) const DEV: bool = option_env!("UNISEND_DEV").is_some();
+
+/// Whether this build looks for updates: Android, with a manifest URL, and not the developer build.
 pub(crate) fn enabled() -> bool {
-    cfg!(target_os = "android") && manifest_url().is_some()
+    cfg!(target_os = "android") && !DEV && manifest_url().is_some()
 }
 
 fn manifest_url() -> Option<&'static str> {
