@@ -32,6 +32,7 @@ bridges bring WhatsApp, Signal, Messenger, Instagram, Telegram and other network
 - Message requests and invitations to accept, decline or block
 - Groups: add and remove members, change the name and picture, where your role allows it
 - Search across all chats in a local index on the device
+- Note to self, the same chat Beeper keeps
 - Messages you send wait in a queue that survives going offline and restarting the app
 
 ### Media
@@ -49,6 +50,7 @@ bridges bring WhatsApp, Signal, Messenger, Instagram, Telegram and other network
 - Sign in to Beeper with an email code
 - With a Beeper account: list your chat networks, sign in to them, see when one needs a new
   sign-in
+- Messenger: unlock encrypted history with its 6-digit PIN, when the bridge asks for it
 
 ### Privacy and security
 
@@ -98,8 +100,8 @@ not generate link previews.
 
 ## Status
 
-- Android (the main target) and the Linux desktop are in daily use by the author.
-- Windows and macOS builds compile in CI only; they have not been run.
+- Android (the main target) and the Linux desktop are where it is built and tested.
+- Windows passes a compile check only, and macOS has not been built yet; neither has been run.
 - Creating a new account is not supported: sign in to an existing one.
 - Some things bridges cannot carry at all, such as calls and view-once media: see
   [docs/parity-apps.md](docs/parity-apps.md).
