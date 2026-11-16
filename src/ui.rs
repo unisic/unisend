@@ -1996,17 +1996,29 @@ impl BeeperApp {
         let archive = self.view == View::Archive;
         let has_query = !self.search.read(cx).value().trim().is_empty();
         let state = list_state(self.synced, self.rooms.is_empty(), has_query);
-        let empty = if has_query {
-            t!("No chat or message matches")
+        // How a chat gets there: a long press on a phone, the right button under a mouse.
+        let how = |action: &str| {
+            if gpui_kit::is_mobile() { t!("Hold a chat and choose \"{action}\".", action = action) } else { t!("Right-click a chat and choose \"{action}\".", action = action) }
+        };
+        let (empty, hint) = if has_query {
+            (t!("No chat or message matches"), None)
         } else if self.only_unread {
-            t!("Nothing unread")
+            (t!("Nothing unread"), None)
         } else {
             match self.view {
-                View::Inbox => t!("No chats here yet"),
-                View::Archive => t!("Nothing archived"),
-                View::LowPriority => t!("Nothing in low priority"),
+                View::Inbox => (t!("No chats here yet"), None),
+                View::Archive => (t!("Nothing archived"), Some(how(t!("Archive|verb")))),
+                View::LowPriority => (t!("Nothing in low priority"), Some(how(t!("Move to low priority")))),
             }
         };
+        let show_all = (self.only_unread && !has_query).then(|| {
+            Button::new("show-all")
+                .mt(px(10.))
+                .h(px(TAP))
+                .px(px(GUTTER))
+                .label(t!("Show all"))
+                .on_click(cx.listener(|this, _, _, cx| this.set_filter(View::Inbox, false, cx)))
+        });
         // Alone on a narrow window, the list's top row ends under the window buttons.
         let end = if frame::viewport(window).width < px(NARROW) { frame::reserve(window) } else { 0. };
         let top = if self.searching {
@@ -2086,7 +2098,17 @@ impl BeeperApp {
                 let note = note.child(div().text_size(fs(16.)).text_color(p.muted).child(t!("No chats yet")));
                 note.child(div().text_size(fs(14.)).text_color(p.faint).child(t!("Start one with +."))).into_any_element()
             } else if self.shown.is_empty() && self.message_rows() == 0 {
-                div().px(px(GUTTER)).py(px(GAP)).text_size(fs(14.)).text_color(p.faint).child(empty).into_any_element()
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(4.))
+                    .px(px(GUTTER))
+                    .text_center()
+                    .child(div().text_size(fs(16.)).text_color(p.muted).child(empty))
+                    .children(hint.map(|hint| div().text_size(fs(14.)).text_color(p.faint).child(hint)))
+                    .children(show_all)
+                    .into_any_element()
             } else {
                 list.into_any_element()
             }))
