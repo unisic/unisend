@@ -5,6 +5,7 @@
 use super::*;
 use super::disappear::timer_row;
 use matrix_sdk::notification_settings::RoomNotificationMode;
+use std::collections::BTreeMap;
 
 /// Timed mutes kept at once; past this the one ending soonest is dropped, and stays muted.
 const MAX_TIMED: usize = 256;
@@ -28,29 +29,40 @@ impl BeeperApp {
             None => {}
         }
         self.settings.save(&self.dir);
-        self.unmute_due(cx);
+        self.unmute_due(false, cx);
         true
     }
 
-    /// Lifts the mutes whose time is up, then waits for the next one to end. Called once signed in
-    /// and when the window comes back, as a suspended machine's timer runs late.
-    pub(super) fn unmute_due(&mut self, cx: &mut Context<Self>) {
+    /// Lifts the mutes whose time is up, then waits for the next one to end. Called once signed in,
+    /// back online and when the window comes back, as a suspended machine's timer runs late, and
+    /// on every change of the chats with `send` off, to forget the ends of mutes lifted.
+    pub(super) fn unmute_due(&mut self, send: bool, cx: &mut Context<Self>) {
         let now = now_ms();
-        let due: Vec<OwnedRoomId> = self.settings.mute_until.iter().filter(|(_, at)| **at <= now).map(|(id, _)| id.clone()).collect();
-        for room in &due {
+        let rooms = &self.rooms;
+        let (lift, forget, next) = due(&self.settings.mute_until, now, |id| match rooms.iter().find(|r| &r.id == id) {
+            Some(r) => Some(r.muted),
+            // Before the list is read nothing is known; after, a chat missing from it is gone.
+            None if rooms.is_empty() => Some(true),
+            None => None,
+        });
+        if send {
+            // The end is kept until the chat notifies again: an unmute that fails offline is sent again.
             // shortcut: a chat muted for good elsewhere after a timed mute here is unmuted at its end; a
             // mode change on another client would need to clear the time, read from the push rules.
-            if self.send(Cmd::Chat(room.clone(), ChatAction::Mute(RoomNotificationMode::AllMessages)), cx) {
-                self.settings.mute_until.remove(room);
+            for room in lift {
+                self.send(Cmd::Chat(room, ChatAction::Mute(RoomNotificationMode::AllMessages)), cx);
             }
         }
-        if due.iter().any(|room| !self.settings.mute_until.contains_key(room)) {
+        if !forget.is_empty() {
+            for room in &forget {
+                self.settings.mute_until.remove(room);
+            }
             self.settings.save(&self.dir);
         }
-        self.mute_timer = self.settings.mute_until.values().filter(|at| **at > now).min().map(|&next| {
+        self.mute_timer = next.map(|next| {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(Duration::from_millis(next - now)).await;
-                this.update(cx, |this, cx| this.unmute_due(cx)).ok();
+                this.update(cx, |this, cx| this.unmute_due(true, cx)).ok();
             })
         });
     }
@@ -121,8 +133,19 @@ impl BeeperApp {
     }
 }
 
+/// The timed mutes at `now`: the chats whose time is up and that are still muted, so to unmute;
+/// those whose time is up and that notify again or are gone (`muted` says `None`), so to forget;
+/// and when the next one ends.
+fn due(ends: &BTreeMap<OwnedRoomId, u64>, now: u64, muted: impl Fn(&OwnedRoomId) -> Option<bool>) -> (Vec<OwnedRoomId>, Vec<OwnedRoomId>, Option<u64>) {
+    let (mut lift, mut forget) = (Vec::new(), Vec::new());
+    for (id, _) in ends.iter().filter(|(_, at)| **at <= now) {
+        if muted(id) == Some(true) { lift.push(id.clone()) } else { forget.push(id.clone()) }
+    }
+    (lift, forget, ends.values().copied().filter(|at| *at > now).min())
+}
+
 /// Keeps when the chat's mute ends, within `MAX_TIMED` chats.
-fn remember(ends: &mut std::collections::BTreeMap<OwnedRoomId, u64>, room: OwnedRoomId, at: u64) {
+fn remember(ends: &mut BTreeMap<OwnedRoomId, u64>, room: OwnedRoomId, at: u64) {
     if ends.len() >= MAX_TIMED
         && !ends.contains_key(&room)
         && let Some(soonest) = ends.iter().min_by_key(|(_, at)| **at).map(|(id, _)| id.clone())
@@ -134,7 +157,22 @@ fn remember(ends: &mut std::collections::BTreeMap<OwnedRoomId, u64>, room: Owned
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_TIMED, OwnedRoomId, remember};
+    use super::{BTreeMap, MAX_TIMED, OwnedRoomId, due, remember};
+
+    #[test]
+    fn a_mute_whose_time_is_up_is_forgotten_only_once_the_chat_notifies() {
+        let id = |n: usize| OwnedRoomId::try_from(format!("!r{n}:x")).unwrap();
+        let ends: BTreeMap<_, _> = [(id(1), 100), (id(2), 100), (id(3), 100), (id(4), 500), (id(5), 300)].into();
+        let muted = |r: &OwnedRoomId| match r.as_str() {
+            "!r1:x" => Some(true),
+            "!r2:x" => Some(false),
+            "!r3:x" => None,
+            _ => Some(true),
+        };
+        assert_eq!(due(&ends, 200, muted), (vec![id(1)], vec![id(2), id(3)], Some(300)));
+        assert_eq!(due(&ends, 50, muted), (vec![], vec![], Some(100)));
+        assert_eq!(due(&ends, 600, muted).2, None);
+    }
 
     #[test]
     fn timed_mutes_stay_bounded_and_drop_the_soonest() {

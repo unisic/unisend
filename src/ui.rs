@@ -496,7 +496,7 @@ impl BeeperApp {
                 this.update_returned(cx);
                 this.check_update_if_due(cx);
                 if this.synced {
-                    this.unmute_due(cx);
+                    this.unmute_due(true, cx);
                 }
                 // Android 15 ends the service after 6 hours a day in the background; being in front resets that.
                 if this.user.is_some() && this.settings.stay_connected {
@@ -796,6 +796,9 @@ impl BeeperApp {
                     self.fly.start(change, ROOM_ROW_H);
                 }
                 self.publish_share_targets();
+                if !self.settings.mute_until.is_empty() {
+                    self.unmute_due(false, cx);
+                }
             }
             Ev::RoomGone(id) => {
                 self.rooms.retain(|r| r.id != id);
@@ -886,10 +889,15 @@ impl BeeperApp {
                     self.own_read = read;
                 }
             }
-            Ev::Online(online) => self.offline = !online,
+            Ev::Online(online) => {
+                self.offline = !online;
+                if online && self.synced {
+                    self.unmute_due(true, cx);
+                }
+            }
             Ev::Synced => {
                 self.synced = true;
-                self.unmute_due(cx);
+                self.unmute_due(true, cx);
             }
             Ev::SyncStopped => self.sync_stopped = true,
             Ev::Exported(id, path, what) => self.exported(id, path, what, cx),
