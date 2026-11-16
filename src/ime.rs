@@ -347,7 +347,12 @@ mod android {
             });
             if let Some(target) = find(edit.field) {
                 target.update(cx, |state, cx| {
+                    // The keyboard's Enter arrives as a typed newline, which a one-line field drops.
+                    let enter = state.is_single_line() && edit.replace.as_ref().is_some_and(|(_, text)| text == "\n");
                     apply(state, edit, window, cx);
+                    if enter {
+                        cx.emit(InputEvent::PressEnter { secondary: false, shift: false });
+                    }
                     // A composition that only ended changes no text, yet its underline must go.
                     cx.notify();
                 });

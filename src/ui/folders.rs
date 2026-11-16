@@ -3,7 +3,7 @@
 //! ones are a name and a set of chats the user picks. Custom folders, the hidden built-ins and the
 //! chosen chip live in `settings.json` on this device and nowhere else.
 
-use super::panels::{Page, ROW_H, card, footnote, row, section};
+use super::panels::{Page, ROW_H, card, footnote, link, row, section};
 use super::disappear::timer_row;
 use super::*;
 use crate::i18n::{t, tn};
@@ -205,6 +205,8 @@ pub(super) struct Ui {
     field: Entity<InputState>,
     /// What the field is for: `Some(None)` a new folder, `Some(Some(id))` a rename.
     edit: Option<Option<u32>>,
+    /// The chat whose sheet started the new folder, put into it once it is added.
+    with: Option<OwnedRoomId>,
     /// The chat sheet shows the folders to put the chat in.
     pub(super) picking: bool,
     /// The chosen chip is brought into view once the row has been measured (after a restart).
@@ -220,7 +222,7 @@ impl Ui {
             InputEvent::PressEnter { shift: false, .. } => this.save_folder(cx),
             other => keyboard_follows(other, Keyboard::Text, cx),
         }));
-        Self { pick, field, edit: None, picking: false, reveal: true, scroll: ScrollHandle::new() }
+        Self { pick, field, edit: None, with: None, picking: false, reveal: true, scroll: ScrollHandle::new() }
     }
 }
 
@@ -329,7 +331,7 @@ impl BeeperApp {
             input.set_value(name, window, cx);
             input.focus(window, cx);
         });
-        self.folders.edit = Some(target);
+        (self.folders.edit, self.folders.with) = (Some(target), None);
         cx.notify();
     }
 
@@ -337,7 +339,14 @@ impl BeeperApp {
         let Some(target) = self.folders.edit else { return };
         let name = self.folders.field.read(cx).value().to_string();
         let done = match target {
-            None => add(&mut self.settings.folders, &name).is_some(),
+            None => add(&mut self.settings.folders, &name)
+                .inspect(|&id| {
+                    if let Some(room) = self.folders.with.take() {
+                        let rooms = &self.rooms;
+                        toggle(&mut self.settings.folders, id, &room, |r| rooms.iter().any(|s| &s.id == r));
+                    }
+                })
+                .is_some(),
             Some(id) => rename(&mut self.settings.folders, id, &name),
         };
         if done {
@@ -382,6 +391,10 @@ impl BeeperApp {
             let el = round_button(id, icon, cx);
             if on { el } else { el.opacity(0.4).cursor_default() }
         };
+        let add = (self.folders.edit.is_none() && count < MAX_FOLDERS).then(|| {
+            link("folder-new", t!("New folder"), SharedString::default(), Some(IconName::Plus), None, cx).on_click(cx.listener(|this, _, window, cx| this.start_edit(None, window, cx)))
+        });
+        let listed = count > 0 || add.is_some();
         let mine = card(cx).children(self.settings.folders.iter().enumerate().map(|(ix, f)| {
             let id = f.id;
             let detail = tn!(f.rooms.len(), "{n} chat", "{n} chats");
@@ -392,7 +405,7 @@ impl BeeperApp {
                 .child(tool(("folder-down", id), IconName::ArrowDown, ix + 1 < count, cx).when(ix + 1 < count, |el| el.on_click(cx.listener(move |this, _, _, cx| this.move_folder(id, true, cx)))))
                 .child(tool(("folder-rename", id), IconName::Pencil, true, cx).on_click(cx.listener(move |this, _, window, cx| this.start_edit(Some(id), window, cx))))
                 .child(tool(("folder-delete", id), IconName::Trash, true, cx).on_click(cx.listener(move |this, _, _, cx| this.delete_folder(id, cx))))
-        }));
+        })).children(add);
         let editor = self.folders.edit.map(|target| {
             card(cx)
                 .py(px(8.))
@@ -411,9 +424,6 @@ impl BeeperApp {
                         }))),
                 )
         });
-        let add = (self.folders.edit.is_none() && count < MAX_FOLDERS).then(|| {
-            Button::new("folder-new").label(t!("New folder")).on_click(cx.listener(|this, _, window, cx| this.start_edit(None, window, cx)))
-        });
         let note = if count > 0 {
             t!("Folders are kept on this device only.").to_owned()
         } else if gpui_kit::is_mobile() {
@@ -427,9 +437,8 @@ impl BeeperApp {
             .child(
                 v_flex()
                     .gap(px(8.))
-                    .child(section(t!("Your folders"), cx).when(count > 0, |el| el.child(mine)))
+                    .child(section(t!("Your folders"), cx).when(listed, |el| el.child(mine)))
                     .children(editor)
-                    .children(add.map(|b| h_flex().px(px(GAP)).child(b)))
                     .child(footnote(&note, cx)),
             )
             .into_any_element()
@@ -479,13 +488,15 @@ impl BeeperApp {
             .collect();
         if self.settings.folders.len() < MAX_FOLDERS {
             let row = timer_row("folder-pick-new", Some(IconName::Plus), t!("New folder"), cx);
+            let room = room.clone();
             rows.push(if live {
-                row.on_click(cx.listener(|this, _, window, cx| {
+                row.on_click(cx.listener(move |this, _, window, cx| {
                     (this.chat_sheet, this.folders.picking) = (None, false);
                     this.set_tab(Tab::Settings, window, cx);
                     this.open_page(Page::Chats, cx);
                     this.open_folders_page(cx);
                     this.start_edit(None, window, cx);
+                    this.folders.with = Some(room.clone());
                 }))
             } else {
                 row
