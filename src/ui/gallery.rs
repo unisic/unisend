@@ -630,12 +630,7 @@ impl BeeperApp {
             .id("gallery-head")
             .flex_none()
             .when(live, |el| {
-                el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
-                    if this.gallery.sheet.drag(e) {
-                        this.close_gallery(cx);
-                    }
-                    cx.notify();
-                }))
+                el.child(sheet::grip(cx, |this: &mut Self| &mut this.gallery.sheet, |this, cx| this.close_gallery(cx)))
             })
             .child(sheet::handle(p.faint))
             .child(

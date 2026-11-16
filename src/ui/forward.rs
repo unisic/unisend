@@ -521,12 +521,7 @@ impl BeeperApp {
                                 .id("forward-head")
                                 .flex_none()
                                 .when(live, |el| {
-                                    el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
-                                        if this.fwd.sheet.drag(e) {
-                                            this.fwd.picking = None;
-                                        }
-                                        cx.notify();
-                                    }))
+                                    el.child(sheet::grip(cx, |this: &mut Self| &mut this.fwd.sheet, |this, _| this.fwd.picking = None))
                                 })
                                 .child(sheet::handle(p.faint))
                                 .child(

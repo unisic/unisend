@@ -234,6 +234,7 @@ impl BeeperApp {
         div()
             .id("receipt")
             .relative()
+            .min_w_0()
             .role(Role::Image)
             .aria_label(receipt.words())
             .when(now.drawn(), |el| el.ml(px(4.)))

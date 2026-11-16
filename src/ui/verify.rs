@@ -505,12 +505,7 @@ impl BeeperApp {
             .text_size(fs(16.))
             .font_weight(FontWeight::SEMIBOLD)
             .when(live && settled, |el| {
-                el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
-                    if this.verify.motion.drag(e) {
-                        this.verify_act_close(cx);
-                    }
-                    cx.notify();
-                }))
+                el.child(sheet::grip(cx, |this: &mut Self| &mut this.verify.motion, |this, cx| this.verify_act_close(cx)))
             })
             .child(title.to_owned());
         let view = cx.entity_id();

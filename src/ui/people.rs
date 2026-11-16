@@ -220,12 +220,7 @@ impl BeeperApp {
             .id("people-head")
             .flex_none()
             .when(live, |el| {
-                el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
-                    if this.audience.sheet.drag(e) {
-                        this.audience.open = None;
-                    }
-                    cx.notify();
-                }))
+                el.child(sheet::grip(cx, |this: &mut Self| &mut this.audience.sheet, |this, _| this.audience.open = None))
             })
             .child(sheet::handle(p.faint))
             .child(div().h(px(36.)).px(px(GUTTER + 4.)).flex().items_center().truncate().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(title));

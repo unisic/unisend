@@ -392,12 +392,7 @@ impl BeeperApp {
             .when(live, |el| el.occlude())
             .child(self.emoji_pick.sheet.probe(cx.entity_id()))
             .child(sheet::handle(p.faint).id("emoji-sheet-handle").when(live, |el| {
-                el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
-                    if this.emoji_pick.sheet.drag(e) {
-                        this.close_emoji(cx);
-                    }
-                    cx.notify();
-                }))
+                el.child(sheet::grip(cx, |this: &mut Self| &mut this.emoji_pick.sheet, |this, cx| this.close_emoji(cx)))
             }))
             .child(self.emoji_body(width, true, window, cx));
         Some(

@@ -245,12 +245,7 @@ impl BeeperApp {
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))
                         .child(self.gifs.sheet.probe(cx.entity_id()))
                         .child(sheet::handle(p.faint).id("gifs-handle").when(live, |el| {
-                            el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
-                                if this.gifs.sheet.drag(e) {
-                                    this.close_gifs(cx);
-                                }
-                                cx.notify();
-                            }))
+                            el.child(sheet::grip(cx, |this: &mut Self| &mut this.gifs.sheet, |this, cx| this.close_gifs(cx)))
                         }))
                         .children(search)
                         .child(grid)

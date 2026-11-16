@@ -265,12 +265,7 @@ impl BeeperApp {
             .id("location-head")
             .gap(px(12.))
             .when(live, |el| {
-                el.on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| {
-                    if this.location.sheet.drag(e) {
-                        this.close_location(cx);
-                    }
-                    cx.notify();
-                }))
+                el.child(sheet::grip(cx, |this: &mut Self| &mut this.location.sheet, |this, cx| this.close_location(cx)))
             })
             .child(sheet::handle(p.faint))
             .child(div().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(t!("Share location")));

@@ -2319,6 +2319,7 @@ impl BeeperApp {
                                 let ink = if failed { p.negative } else { this.on_wallpaper(p.faint, cx) };
                                 el.child(
                                     h_flex()
+                                        .max_w_full()
                                         .gap(px(3.))
                                         // A little over its padding and one line at GPUI's default 1.618 leading, so it starts unclipped.
                                         .when_some(shrink, |el, v| el.max_h((px(4.) + fs(20.)) * (1. - v)).overflow_hidden().opacity(1. - v))
@@ -2328,7 +2329,8 @@ impl BeeperApp {
                                         .font_features(tabular())
                                         .text_color(ink)
                                         .when(this.disappears(ix), |el| el.child(Icon::new(IconName::Timer).size_3().text_color(ink)))
-                                        .child(h_flex().children(time).children(said)),
+                                        // A group's readers can be longer than the column: their words wrap.
+                                        .child(h_flex().min_w_0().when(worded, |el| el.items_start()).children(time).children(said)),
                                 )
                             }),
                     )

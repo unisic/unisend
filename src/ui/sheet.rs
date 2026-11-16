@@ -214,6 +214,10 @@ impl SheetMotion {
         self.live
     }
 
+    fn held(&self) -> bool {
+        matches!(self.drive, Drive::Finger { .. })
+    }
+
     /// How long ago the rise began, while it is up.
     pub(super) fn risen_for(&self) -> Option<Duration> {
         self.risen.filter(|_| self.live).map(|at| at.elapsed())
@@ -308,6 +312,45 @@ fn probe(cell: Rc<Cell<f32>>, view: EntityId) -> impl IntoElement {
             }
         },
         |_, _, _, _| {},
+    )
+    .absolute()
+    .inset_0()
+}
+
+/// The finger's hold on a sheet, laid over its header; `closed` runs when it let go so as to close.
+/// A pan reports every move at the point it began, which the header leaves behind as it follows the
+/// finger down, so once held the moves and the release are taken before hit-testing, wherever they land.
+pub(super) fn grip<V, M, C>(cx: &Context<V>, motion: M, closed: C) -> impl IntoElement + use<V, M, C>
+where
+    V: 'static,
+    M: Fn(&mut V) -> &mut SheetMotion + 'static,
+    C: Fn(&mut V, &mut Context<V>) + 'static,
+{
+    let view = cx.entity().downgrade();
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
+            window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+                let start = e.touch_phase == TouchPhase::Started;
+                if !phase.capture() || (start && !hitbox.is_hovered(window)) {
+                    return;
+                }
+                let took = view.update(cx, |this, cx| {
+                    if !start && !motion(this).held() {
+                        return false;
+                    }
+                    if motion(this).drag(e) {
+                        closed(this, cx);
+                    }
+                    cx.notify();
+                    true
+                });
+                // What lies under the point the pan began must not scroll as well.
+                if !start && took.unwrap_or(false) {
+                    cx.stop_propagation();
+                }
+            });
+        },
     )
     .absolute()
     .inset_0()
