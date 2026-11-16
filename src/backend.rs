@@ -231,7 +231,8 @@ pub enum Ev {
     OwnRead { room: OwnedRoomId, read: OwnRead },
     /// Thumbnail bytes as served (PNG, JPEG, ...).
     Avatar(OwnedRoomId, Vec<u8>),
-    Face(OwnedUserId, Vec<u8>),
+    /// A member's name in the chat and picture as served, whichever they have.
+    Face(OwnedUserId, Option<String>, Option<Vec<u8>>),
     /// JPEG or PNG, at most `THUMB_PX` on its longest side.
     Thumb(String, Vec<u8>),
     /// JPEG or PNG, at most `VIEW_PX`.
@@ -1265,10 +1266,10 @@ impl State {
                 tokio::spawn(async move {
                     let Ok(_permit) = permits.acquire().await else { return };
                     match face(&client, &room_id, &user).await {
-                        Ok(Some(bytes)) => {
-                            let _ = ev.send(Ev::Face(user, bytes)).await;
+                        Ok((None, None)) => {}
+                        Ok((name, bytes)) => {
+                            let _ = ev.send(Ev::Face(user, name, bytes)).await;
                         }
-                        Ok(None) => {}
                         Err(e) => log::debug!("face {user}: {e:#}"),
                     }
                 });
@@ -2897,12 +2898,16 @@ async fn avatar(client: &Client, room_id: &RoomId) -> Result<Option<Vec<u8>>> {
     Ok(Some(picture(client, url).await?))
 }
 
-/// A member's picture in a chat; bridges set it per chat, so the member event is asked, not the
-/// profile.
-async fn face(client: &Client, room_id: &RoomId, user: &UserId) -> Result<Option<Vec<u8>>> {
-    let Some(room) = client.get_room(room_id) else { return Ok(None) };
-    let Some(url) = room.get_member_no_sync(user).await?.and_then(|m| m.avatar_url().map(ToOwned::to_owned)) else { return Ok(None) };
-    Ok(Some(picture(client, url).await?))
+/// A member's name and picture in a chat; bridges set them per chat, so the member event is
+/// asked, not the profile.
+async fn face(client: &Client, room_id: &RoomId, user: &UserId) -> Result<(Option<String>, Option<Vec<u8>>)> {
+    let Some(room) = client.get_room(room_id) else { return Ok((None, None)) };
+    let Some(member) = room.get_member_no_sync(user).await? else { return Ok((None, None)) };
+    let name = member.display_name().map(str::to_owned);
+    let Some(url) = member.avatar_url().map(ToOwned::to_owned) else { return Ok((name, None)) };
+    // The name still counts when the picture cannot be had.
+    let picture = picture(client, url).await.inspect_err(|e| log::debug!("face {user}: {e:#}")).ok();
+    Ok((name, picture))
 }
 
 /// A small square thumbnail of an avatar, from the media cache when it is there.

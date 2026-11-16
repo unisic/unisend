@@ -633,6 +633,7 @@ pub(super) static PLURAL: &[(&str, [&str; 3])] = &[
     ("Forwarded to {n} chat", ["Przekazano do {n} czatu", "Przekazano do {n} czatów", "Przekazano do {n} czatów"]),
     ("Invalid code, {n} attempt left", ["Błędny kod, została {n} próba", "Błędny kod, zostały {n} próby", "Błędny kod, zostało {n} prób"]),
     ("Preparing {n} file…", ["Przygotowywanie {n} pliku…", "Przygotowywanie {n} plików…", "Przygotowywanie {n} plików…"]),
+    ("Seen by {n} person: {who}", ["Przeczytała {n} osoba: {who}", "Przeczytały {n} osoby: {who}", "Przeczytało {n} osób: {who}"]),
     ("Send to {n} chat", ["Wyślij do {n} czatu", "Wyślij do {n} czatów", "Wyślij do {n} czatów"]),
     ("Too many wrong tries. Try again in {n} minute.", ["Zbyt wiele błędnych prób. Spróbuj ponownie za {n} minutę.", "Zbyt wiele błędnych prób. Spróbuj ponownie za {n} minuty.", "Zbyt wiele błędnych prób. Spróbuj ponownie za {n} minut."]),
     ("Too many wrong tries. Try again in {n} second.", ["Zbyt wiele błędnych prób. Spróbuj ponownie za {n} sekundę.", "Zbyt wiele błędnych prób. Spróbuj ponownie za {n} sekundy.", "Zbyt wiele błędnych prób. Spróbuj ponownie za {n} sekund."]),
