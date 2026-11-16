@@ -2525,6 +2525,7 @@ impl BeeperApp {
         let read_only = self.published().is_some_and(|f| !f.post);
         let limit = self.text_limit(cx);
         let over = limit.is_some_and(|(len, max)| len > max);
+        let idle = !mic && self.composer.read(cx).value().trim().is_empty();
         let send_mode = transition(("send", "mode"), if mic { 0. } else { 1. }, motion::exit(), window, cx);
         let own_frame = frame::reserve(window) > 0.;
         let end = self.chat_end(window);
@@ -2697,12 +2698,14 @@ impl BeeperApp {
                                     .items_center()
                                     .justify_center()
                                     .rounded_full()
-                                    .bg(p.text)
-                                    .text_color(p.ground)
-                                    .when(over, |el| el.opacity(0.4))
-                                    .cursor_pointer()
-                                    .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
-                                    .active(|el| el.bg(p.muted))
+                                    // Lit only when there is something to send.
+                                    .map(|el| {
+                                        if idle {
+                                            el.bg(p.raised).text_color(p.faint)
+                                        } else {
+                                            el.bg(p.text).text_color(p.ground).when(over, |el| el.opacity(0.4)).cursor_pointer().when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted))).active(|el| el.bg(p.muted))
+                                        }
+                                    })
                                     .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
                                     .relative()
                                     .children([(IconName::ArrowUp, send_mode), (IconName::Mic, 1. - send_mode)].into_iter().filter(|(_, v)| *v > 0.).map(|(icon, v)| {
