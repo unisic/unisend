@@ -1,103 +1,150 @@
-# Unisend
+<p align="center">
+  <img src="packaging/linux/icons/hicolor/128x128/apps/dev.gpui.beeper.png" alt="" width="96" height="96">
+</p>
 
-Unisend is a Matrix chat client written in Rust, for Linux, Windows, macOS and Android. The UI is
-[GPUI](https://www.gpui.rs) through gpui-kit (gpui-mobile on Android); the protocol, end-to-end
-encryption and key backup come from matrix-sdk. The crate and binary are still named `beeper-gpui`.
+<h1 align="center">Unisend</h1>
 
-Accounts: any Matrix homeserver, signed in through its OAuth 2.0 service (MSC3861, as on
-matrix.org), single sign-on or a password, whichever it offers. Registration is not supported
-yet. Beeper accounts work as well, through Beeper's
-email-code sign-in (`api.beeper.com/user/login`, then Matrix JWT login on `matrix.beeper.com`);
-chats from other networks (WhatsApp, Signal, Messenger and the rest) arrive through Beeper's
-bridges, so the Networks page needs a Beeper account. Encrypted history is unlocked with the
-account's recovery code; Settings > Devices shows it on a device that has it, to copy to another.
+<p align="center">A privacy-first Matrix chat client for Android and the Linux desktop.</p>
 
-Emoji: on Linux and Android, Settings > Emoji can use a colour emoji font file of your own (sbix,
-CBDT or COLRv0, up to 300 MB; applies after a restart); the app ships no such font, so use one you
-are licensed to use on that device. macOS draws with the system's emoji.
+Unisend is written in Rust with [GPUI](https://www.gpui.rs). Android is the main target, and it
+runs on the Linux desktop too. It works with any Matrix homeserver and with Beeper accounts, whose
+bridges bring WhatsApp, Signal, Messenger, Instagram, Telegram and other networks into one inbox.
 
-What works and what is still missing: [docs/parity.md](docs/parity.md).
+<p align="center">
+  <img src="docs/screenshots/chat-list.png" alt="Chat list" width="250">
+  <img src="docs/screenshots/chat.png" alt="A group chat with a photo, a reply, reactions and a poll" width="250">
+  <img src="docs/screenshots/settings.png" alt="Appearance settings: theme, language, chat colour, text size" width="250">
+</p>
 
-## Desktop (Linux)
+<p align="center">
+  <img src="docs/screenshots/desktop.png" alt="Desktop layout: the chat list beside an open chat">
+</p>
 
-    cargo run --release
+## Features
 
-Fedora without `libxkbcommon-x11-devel`: the linker needs the unversioned
-`libxkbcommon-x11.so`. Without root:
+### Chats
 
-    mkdir -p target/linkshim
-    ln -sf /usr/lib64/libxkbcommon-x11.so.0 target/linkshim/libxkbcommon-x11.so
-    RUSTFLAGS="-L $PWD/target/linkshim" cargo run --release
+- Replies, reactions, edits, delete for everyone or only for you, forward to up to 5 chats
+- Markdown formatting when you type, mentions, drafts kept per chat
+- Polls (create, vote, end), contact cards, disappearing messages where the network allows them
+- Read and typing state, hidden from others by default ("Hide reading and typing")
+- Archive, pin, mute for a set time, mark as unread, swipe actions on chat rows
+- Message requests and invitations to accept, decline or block
+- Groups: add and remove members, change the name and picture, where your role allows it
+- Search across all chats in a local index on the device
+- Messages you send wait in a queue that survives going offline and restarting the app
 
-To install for your user (binary in `~/.local/bin`, launcher and icons in `~/.local/share`; run
-again to update): `cargo build --release && packaging/linux/install.sh`.
+### Media
 
-Windows and macOS: `.github/workflows/build.yml` builds both on GitHub's runners (also Linux and
-the Android APK); it has never run, because the repository has never been pushed. A Windows
-build cannot be made on Linux: GPUI compiles its shaders with `fxc.exe`, on a Windows host only.
-iOS has no port yet: see `docs/parity.md`.
+- Photos, videos and files, with a caption; drag and drop or paste on desktop
+- Full-screen picture viewer with zoom; a video player on Android
+- Voice messages: recorded and played in the chat on Android
+- Emoji picker with search, recents and skin tones; a GIF picker in builds with a KLIPY key
+- Each chat's media, links and files in its info page
+- Sending your location from Android
 
-## Android
+### Networks
 
-Needs the NDK, `cargo-ndk` and the `aarch64-linux-android` / `x86_64-linux-android`
-Rust targets.
+- Sign in to any Matrix homeserver with its OAuth 2.0 service, single sign-on or a password
+- Sign in to Beeper with an email code
+- With a Beeper account: list your chat networks, sign in to them, see when one needs a new
+  sign-in
+
+### Privacy and security
+
+- End-to-end encryption, and encrypted history unlocked with the account's recovery code
+- Device list: verify a device by comparing emoji, sign one out
+- App lock with the phone's lock (Android) or an app PIN
+- Screen security on Android: blocks screenshots and hides the app in the recent apps list
+- On Android the app's data is encrypted with a key held in the Android Keystore
+- Incognito keyboard switch on Android (asks the keyboard not to learn from what you type)
+
+### Notifications
+
+- Android: one notification per chat, with reply and mark as read
+- Android keeps its own background connection to the homeserver, with no push service
+- Linux desktop notifications with reply, mark as read and mute
+- Choose what notifications show: name and message, name only, or neither
+
+### Desktop
+
+- Chat list and chat side by side, chat info in a panel beside them
+- Keeps running with the window closed, with a tray icon on Linux
+- Its own title bar and window controls on Linux, where the compositor allows it
+
+Also: dark, light or system theme, chat colours, a chat wallpaper, text size, English and Polish.
+
+## Privacy
+
+What leaves the device, and who sees it:
+
+- **Your homeserver** sees what any Matrix server sees: your account, the rooms you are in,
+  message metadata, your IP address, and the content of unencrypted rooms. Encrypted rooms are
+  end-to-end encrypted. Media and avatars are loaded from the homeserver.
+- **Beeper**, only with a Beeper account: the sign-in at `api.beeper.com`, the homeserver
+  `matrix.beeper.com`, and the bridges. A bridge has to read a message to pass it between Matrix and
+  the other network, so Beeper's bridges see the content of bridged chats, and the other network
+  (WhatsApp, Messenger and so on) sees what it always sees. Signing in to some networks opens that
+  network's own login page.
+- **KLIPY**, only in builds with a KLIPY key and only when you open the GIF picker: your IP
+  address, what you search for, the GIF you send and a random ID made once per app start.
+- **The update host**, only in Android builds made with `UNISEND_UPDATE_URL`: a plain request for
+  `update.json` with no identifier, once a day or when you tap Check now.
+- **Maps**: a received location opens in your maps app on Android, or on openstreetmap.org in the
+  browser on desktop, only when you tap it. The app loads no map tiles itself.
+
+There are no Google services, no telemetry, no crash reporting and no push service. Unisend does
+not generate link previews.
+
+## Status
+
+- Android (the main target) and the Linux desktop are in daily use by the author.
+- Windows and macOS builds compile in CI only; they have not been run.
+- Creating a new account is not supported: sign in to an existing one.
+- Some things bridges cannot carry at all, such as calls and view-once media: see
+  [docs/parity-apps.md](docs/parity-apps.md).
+
+## Install
+
+There are no prebuilt packages and no app store listing yet. The app is called Unisend, but the
+crate and binary are still named `beeper-gpui`, and the Android app id is `dev.gpui.beeper`.
+
+### Linux
+
+Needs a stable Rust toolchain and the development packages for xcb, xkbcommon (with x11),
+fontconfig, freetype and wayland. Then:
+
+    cargo build --release
+    packaging/linux/install.sh
+
+This puts the binary in `~/.local/bin` and the launcher and icons in `~/.local/share`; run both
+again to update. On Fedora without `libxkbcommon-x11-devel`, see the linker note in
+[docs/development.md](docs/development.md).
+
+### Android
+
+Needs the Android SDK and NDK, `cargo-ndk` and the `aarch64-linux-android` Rust target. Android 8.0
+(API 26) or newer.
 
     cargo ndk -t arm64-v8a -P 26 -o android/app/src/main/jniLibs build --release --lib
     cd android && ./gradlew assembleDebug
     adb install -r app/build/outputs/apk/debug/app-debug.apk
 
-The GIF picker appears only when the build has a KLIPY key ("Create API Key" on docs.klipy.com):
-`export KLIPY_API_KEY=$(cat ~/.config/murmur/klipy.key)` before `cargo ndk`.
+## Documentation
 
-Updates outside an app store: a build with `UNISEND_UPDATE_URL` (https) checks that address for an
-`update.json` (`versionCode`, `versionName`, `url`, `sha256`, `notes`) once a day while
-"Check for updates automatically" is on, and on "Check now". A newer release is downloaded only
-after the user taps Update, checked against its SHA-256 and handed to Android's installer, which
-refuses one signed with another key. The request is a plain GET without a user agent, cookie or
-identifier: the host (and, for GitHub, the download servers it redirects to) sees the phone's IP
-address, the time and the URL. Without the variable, Settings has no Updates
-section. `scripts/release.sh` builds a release signed with a key from the environment and writes
-`update.json`; a GitHub release can serve it at the stable
-`https://github.com/<owner>/<repo>/releases/latest/download/update.json`, any static host works.
+- [docs/development.md](docs/development.md): tests, environment variables, KLIPY and update
+  builds, other platforms
+- [docs/parity.md](docs/parity.md): feature status against Beeper, and how chat state is stored
+- [docs/parity-apps.md](docs/parity-apps.md): features compared with Signal, WhatsApp, Instagram and
+  Messenger, and what bridges make impossible
+- [docs/applock.md](docs/applock.md): how the app lock works
+- [docs/data-encryption.md](docs/data-encryption.md): how data is stored on the device, and what
+  that protects against
+- [docs/design.md](docs/design.md): the design system
+- [docs/i18n.md](docs/i18n.md): translations and how to add a string
 
-### Java in a Rust app
+## Development
 
-Everything the app does is Rust: the UI, Matrix, encryption, storage. Java is there only where
-Android accepts nothing else: some platform parts exist only as Java classes to extend or
-register (the Activity, the keyboard's `InputConnection`, a foreground `Service`, the receiver of
-notification buttons, the share sheet), and Rust reaches the rest of the Android API over JNI
-through small Java helpers. `android/app/src/main/java/dev/gpui/mobile` comes from gpui-mobile
-(Apache-2.0, see the README there, which names the files changed here);
-`android/app/src/main/java/dev/gpui/beeper` holds this app's Android ends: notifications and the
-background connection, sharing, files and the gallery, camera, voice messages, video playback,
-location, contacts, app lock, the Keystore-wrapped data key, network sign-in, updates and the
-per-app language.
-
-## Tests
-
-`src/backend/tests.rs` runs login, sync, E2EE send/decrypt and key recovery
-(wrong key, malformed key, history and previews decrypted from the key backup)
-against a local Synapse with JWT login enabled:
-
-    MATRIX_TEST_HS=http://127.0.0.1:8008 MATRIX_TEST_JWT_SECRET=... \
-      cargo test --lib login_sync -- --ignored
-
-`password_login_restore_sign_out` signs in with a password (wrong password,
-http refused, unknown server, restore after restart, sign out); it creates its
-user through Synapse's shared-secret registration:
-
-    MATRIX_TEST_HS=http://127.0.0.1:8008 MATRIX_TEST_REGISTRATION_SECRET=... \
-      cargo test --lib password_login -- --ignored
-
-`gui_fixture` seeds the same server for manual GUI runs: encrypted chats with a
-key backup, a room avatar, a bridged room. It reads `avatar.png` from
-`GUI_FIXTURE_DIR` and writes `session.json` (a new device) and `recovery-key`
-there:
-
-    GUI_FIXTURE_DIR=/tmp/fixture MATRIX_TEST_HS=... MATRIX_TEST_JWT_SECRET=... \
-      cargo test --lib gui_fixture -- --ignored
-
-Debug desktop builds read `BEEPER_GPUI_HOMESERVER` to point at such a server,
-and `BEEPER_GPUI_API` and `BEEPER_GPUI_BRIDGES` to point the account API and the
-bridge login API at stand-ins; `BEEPER_GPUI_DATA_DIR` picks the data directory
-(with a pre-seeded `session.json`, and `settings.json` for the theme).
+Build, test and packaging details are in [docs/development.md](docs/development.md). The app is
+Rust; there is some Java under `android/` only where Android accepts nothing else, such as the
+Activity, the keyboard connection and the background service.
