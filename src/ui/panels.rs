@@ -484,12 +484,16 @@ impl BeeperApp {
         };
         let look = t!("{theme}, text {size}%", theme = theme, size = s.text_size.percent());
         let chats = t!("Message status: {style}", style = s.receipts.label());
-        let notices = if !cfg!(target_os = "android") {
-            t!("Send a test notification")
+        let notices: SharedString = if !cfg!(target_os = "android") {
+            // A summary states the setting; the test notification is a row inside the page.
+            match self.rooms.iter().filter(|r| r.muted).count() {
+                0 => t!("On|notifications").into(),
+                n => tn!(n, "On, {n} chat muted", "On, {n} chats muted").into(),
+            }
         } else if s.stay_connected {
-            t!("Arrive while Unisend is closed")
+            t!("Arrive while Unisend is closed").into()
         } else {
-            t!("Only while Unisend is open")
+            t!("Only while Unisend is open").into()
         };
         let privacy = match s.lock.mode {
             _ if self.unencrypted => t!("Data on this device is not encrypted"),
@@ -519,7 +523,7 @@ impl BeeperApp {
                 card(cx)
                     .child(category(Page::Appearance, IconName::Palette, look.into(), cx))
                     .child(category(Page::Chats, IconName::MessageCircle, chats.into(), cx))
-                    .child(category(Page::Notifications, IconName::Bell, notices.into(), cx)),
+                    .child(category(Page::Notifications, IconName::Bell, notices, cx)),
             )
             .child(
                 card(cx)
