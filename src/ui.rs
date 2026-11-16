@@ -468,6 +468,8 @@ impl BeeperApp {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search chats")));
         let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search emoji")));
         let emoji_pick = emojipick::Picker::new(emoji_search.clone(), &dir);
+        #[cfg(target_os = "linux")]
+        Self::voice_setup(cx);
 
         for input in [&composer, &search, &emoji_search] {
             crate::ime::follow(input, window, cx);
@@ -1643,8 +1645,10 @@ impl BeeperApp {
     /// Desktop: the window closed while the app runs on. A closing window is not always told it
     /// went to the background first.
     #[cfg(not(target_os = "android"))]
-    pub(crate) fn hidden(&mut self) {
+    pub(crate) fn hidden(&mut self, cx: &mut Context<Self>) {
         crate::FOREGROUND.store(false, std::sync::atomic::Ordering::Relaxed);
+        // Nothing records or plays without a window.
+        self.stop_voice(cx);
         self.drafts.save();
         crate::backend::save_search();
         // Desktop shows no auto-lock choice: leaving locks at once, as Android's "Immediately".
@@ -2789,7 +2793,7 @@ impl BeeperApp {
             }),
         )
         .size_full();
-        // The send button turns between a microphone (nothing typed) and an arrow; desktop has no microphone.
+        // The send button turns between a microphone (nothing typed) and an arrow; Windows and macOS have no microphone.
         let mic = self.mic_shown(cx);
         let read_only = self.published().is_some_and(|f| !f.post);
         let limit = self.text_limit(cx);
@@ -2976,7 +2980,13 @@ impl BeeperApp {
                                             el.bg(p.text).text_color(p.ground).when(over, |el| el.opacity(0.4)).cursor_pointer().when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted))).active(|el| el.bg(p.muted))
                                         }
                                     })
-                                    .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if cfg!(not(target_os = "android")) && this.mic_shown(cx) {
+                                            this.mic_click(cx);
+                                        } else {
+                                            this.send_message(window, cx);
+                                        }
+                                    }))
                                     .relative()
                                     .children([(IconName::ArrowUp, send_mode), (IconName::Mic, 1. - send_mode)].into_iter().filter(|(_, v)| *v > 0.).map(|(icon, v)| {
                                         let scale = 0.5 + 0.5 * v;

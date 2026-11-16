@@ -60,6 +60,8 @@ zbus = { version = "5.19", default-features = false, features = ["async-io"] }
 # The platform layer gpui-kit already builds: hands a notification's activation token to the
 # next window raise (vendor/gpui-pre-linux/PATCHES.md). Features come from gpui-kit.
 gpui-pre-linux = { version = "0.3.6", default-features = false }
+# Voice messages: plays and records through the system's GStreamer, linked at build time.
+gstreamer = "0.25"
 
 # Toasts; the versions GPUI already builds on Windows.
 [target.'cfg(target_os = "windows")'.dependencies]
