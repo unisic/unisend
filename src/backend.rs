@@ -2426,9 +2426,10 @@ fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary,
             // The chat may have been read while the picture was on its way.
             let still = unread();
             if !still {
-                log::debug!(target: "notify", "not shown: read already");
+                log::debug!(target: "notify", "not shown: read already ({})", counts(&client, &summary.id));
             }
             if *current == generation && still {
+                log::debug!(target: "notify", "shown ({})", counts(&client, &summary.id));
                 let chat = crate::accounts::key(crate::accounts::slot_of(&dir), summary.id.as_str());
                 for (n, note) in notes.iter().enumerate() {
                     let alert = n + 1 == notes.len();
@@ -2452,6 +2453,19 @@ fn counted(client: &Client, id: &RoomId) -> bool {
         let receipts = room.read_receipts();
         room.encryption_state().is_encrypted() && receipts.latest_active.is_some() && receipts.num_notifications > 0
     })
+}
+
+/// Where a chat's unread count comes from, for the notify debug log.
+fn counts(client: &Client, id: &RoomId) -> String {
+    let Some(room) = client.get_room(id) else { return "no room".into() };
+    let (server, receipts) = (room.unread_notification_counts(), room.read_receipts());
+    format!(
+        "encrypted {}, server {}, own receipt {}, sdk {}",
+        room.encryption_state().is_encrypted(),
+        server.notification_count,
+        receipts.latest_active.is_some(),
+        receipts.num_notifications
+    )
 }
 
 /// Notifies of a new invitation once, unless the account's push rules turned invitations off.

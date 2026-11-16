@@ -947,12 +947,21 @@ pub(crate) fn notify(notice: &Notice) {
     NotifyShows::current().redact(notice, notify_as_shown);
 }
 
+/// The chats tests would have notified of, in order, instead of the system's notifications.
+#[cfg(test)]
+pub(crate) static SHOWN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 fn notify_as_shown(notice: &Notice) {
-    #[cfg(target_os = "android")]
+    #[cfg(test)]
+    SHOWN.lock().unwrap().push(notice.chat.to_owned());
+    // Tests keep the desktop path compiled without reaching the session bus.
+    #[cfg(all(test, not(target_os = "android")))]
+    let _ = notify::show;
+    #[cfg(all(target_os = "android", not(test)))]
     if let Err(e) = android_files::message(notice) {
         log::warn!("notification: {e}");
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", test)))]
     notify::show(notice);
 }
 

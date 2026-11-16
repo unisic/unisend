@@ -122,6 +122,59 @@ fn bodies(msgs: &[Msg]) -> Vec<String> {
     msgs.iter().filter(|m| m.kind == Kind::Message).map(|m| m.body.clone()).collect()
 }
 
+/// An encrypted chat's unread count is the SDK's, worked out after the sync loop has seen the
+/// message: the notification waits for it instead of taking the chat as read on another device.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn an_encrypted_chat_notifies_while_the_window_is_away() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-test-{tag}"));
+    let (mut alice, mut alice_rx) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut alice_rx, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+
+    let room = alice.client().unwrap().create_dm(bob.user_id().unwrap()).await.unwrap();
+    let room_id = room.room_id().to_owned();
+    assert!(room.latest_encryption_state().await.unwrap().is_encrypted());
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    bob.join_room_by_id(&room_id).await.unwrap();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    // Alice has read Bob's first message, so the SDK's count is the one used for the chat.
+    let first = bob.get_room(&room_id).unwrap().send(RoomMessageEventContent::text_plain("hi")).await.unwrap();
+    room.send_single_receipt(create_receipt::v3::ReceiptType::Read, ReceiptThread::Unthreaded, first.response.event_id).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while room.read_receipts().latest_active.is_none() {
+        assert!(tokio::time::Instant::now() < deadline, "Alice's receipt never reached her SDK");
+        while alice_rx.rx.try_recv().is_ok() {}
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    /// Puts the window back in front for the other tests, also when this one fails.
+    struct Away;
+    impl Drop for Away {
+        fn drop(&mut self) {
+            crate::FOREGROUND.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let _away = Away;
+    crate::FOREGROUND.store(false, std::sync::atomic::Ordering::Relaxed);
+    bob.get_room(&room_id).unwrap().send(RoomMessageEventContent::text_plain("are you there?")).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !crate::SHOWN.lock().unwrap().iter().any(|chat| chat == room_id.as_str()) {
+        assert!(tokio::time::Instant::now() < deadline, "no notification for the encrypted chat");
+        // The backend waits on a full channel: what it says is read and dropped.
+        while alice_rx.rx.try_recv().is_ok() {}
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a local homeserver with JWT login, see module docs"]
 async fn login_sync_decrypt_send_recover() {
