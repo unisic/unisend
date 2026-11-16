@@ -6,3 +6,4 @@ android/app/src/main/jniLibs/
 android/local.properties
 dist/
 __pycache__/
+.DS_Store

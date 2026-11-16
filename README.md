@@ -101,7 +101,8 @@ not generate link previews.
 ## Status
 
 - Android (the main target) and the Linux desktop are where it is built and tested.
-- Windows passes a compile check only, and macOS has not been built yet; neither has been run.
+- macOS is in progress: it builds from source as a universal app for macOS 11 and later and runs,
+  but has no released package yet. Windows passes a compile check only and has never been run.
 - Creating a new account is not supported: sign in to an existing one.
 - Some things bridges cannot carry at all, such as calls and view-once media: see
   [docs/parity-apps.md](docs/parity-apps.md).
@@ -121,7 +122,7 @@ fontconfig, freetype and wayland. Then:
 
 This puts the binary in `~/.local/bin` and the launcher and icons in `~/.local/share`; run both
 again to update. On Fedora without `libxkbcommon-x11-devel`, see the linker note in
-[docs/development.md](docs/development.md).
+[docs/platforms/linux.md](docs/platforms/linux.md).
 
 ### Android
 
@@ -134,8 +135,10 @@ Needs the Android SDK and NDK, `cargo-ndk` and the `aarch64-linux-android` Rust 
 
 ## Documentation
 
+- [docs/platforms/](docs/platforms/): building for Android, Linux, macOS and Windows, each one's
+  status and where its code lives
 - [docs/development.md](docs/development.md): tests, environment variables, KLIPY and update
-  builds, other platforms
+  builds
 - [docs/parity.md](docs/parity.md): feature status against Beeper, and how chat state is stored
 - [docs/parity-apps.md](docs/parity-apps.md): features compared with Signal, WhatsApp, Instagram and
   Messenger, and what bridges make impossible
