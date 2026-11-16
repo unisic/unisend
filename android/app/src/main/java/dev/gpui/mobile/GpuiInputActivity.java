@@ -178,6 +178,15 @@ public class GpuiInputActivity extends NativeActivity {
         });
     }
 
+    /** Called by src/ime.rs when a press left the focused field focused: the keyboard comes back if the user hid it. */
+    public void gpuiTapField() {
+        runOnUiThread(() -> {
+            if (input == null || !input.shown || !input.isFocused()) return;
+            // The IME keeps its connection while hidden, so no restart: a keyboard still up ignores this.
+            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(input, 0);
+        });
+    }
+
     public void gpuiResetComposition(long session) {
         runOnUiThread(() -> {
             if (input == null) return;

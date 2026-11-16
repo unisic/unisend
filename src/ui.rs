@@ -4038,12 +4038,25 @@ fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
 /// Raises the on-screen keyboard while an input has focus. Android shows none by itself for a
 /// GPUI input, so every input needs this.
 fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperApp>) {
-    match event {
-        // Focus listeners fire in field creation order, so moving to an earlier field emits its Focus
-        // before the old field's Blur: the show waits for that hide.
-        InputEvent::Focus => cx.defer(move |_| crate::show_keyboard(kind)),
-        InputEvent::Blur => crate::hide_keyboard(),
+    thread_local! {
+        /// The keyboard this turn's Focus and Blur events ask for (`Some(None)`: hidden), applied once after them.
+        static WANTED: Cell<Option<Option<Keyboard>>> = const { Cell::new(None) };
+    }
+    let want = match event {
+        InputEvent::Focus => Some(kind),
+        InputEvent::Blur => None,
         _ => return,
+    };
+    // Moving between fields emits a Blur and a Focus in one turn, in field creation order: whichever
+    // comes first, the Focus wins, so the keyboard stays up and only restarts its input.
+    let queued = WANTED.get();
+    WANTED.set(Some(want.or(queued.flatten())));
+    if queued.is_none() {
+        cx.defer(|_| match WANTED.take() {
+            Some(Some(kind)) => crate::show_keyboard(kind),
+            Some(None) => crate::hide_keyboard(),
+            None => {}
+        });
     }
     // shortcut: timed redraws, because gpui-mobile changes the insets when the keyboard has moved
     // without asking for a frame, and the layout then keeps the keyboard's gap until the next
@@ -4110,7 +4123,8 @@ impl BeeperApp {
                 el
             })
             .bg(p.ground)
-            .text_color(p.text);
+            .text_color(p.text)
+            .child(crate::ime::taps());
         match self.screen {
             Screen::Starting => root
                 .items_center()
