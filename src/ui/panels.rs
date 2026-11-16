@@ -12,7 +12,7 @@ use super::rowswipe::SwipeAction;
 use crate::{ChatColour, ThemeChoice};
 
 /// A settings row, and the widest a settings page grows.
-const ROW_H: f32 = 52.;
+pub(super) const ROW_H: f32 = 52.;
 const PANEL_W: f32 = 560.;
 use crate::bridges::{self, Step, StepKind};
 
@@ -51,6 +51,7 @@ pub(super) enum Page {
     Lock,
     LockAfter,
     NotifyShows,
+    Folders,
 }
 
 impl Page {
@@ -72,6 +73,7 @@ impl Page {
             Self::Lock => t!("App lock"),
             Self::LockAfter => t!("Auto-lock"),
             Self::NotifyShows => t!("Show|notification"),
+            Self::Folders => t!("Chat folders"),
         }
     }
 
@@ -602,6 +604,7 @@ impl BeeperApp {
             Page::Profile => self.render_profile(cx),
             Page::Updates => self.render_updates(cx).map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
             Page::Emoji => self.render_emoji(cx),
+            Page::Folders => self.render_folders(cx),
             Page::NotifyShows => pick("notify-shows", crate::NotifyShows::ALL, s.notify_shows, crate::NotifyShows::label, |s, shows| {
                 s.notify_shows = shows;
                 shows.apply();
@@ -736,7 +739,14 @@ impl BeeperApp {
                     .child(row(t!("Status of received messages"), t!("What their sender sees: sent, delivered or read."), cx))
                     .child(div().pb(px(8.)).child(incoming)),
             )
-            .child(section(t!("Chat list"), cx).child(card(cx).child(choice(Page::SwipeLeft, left, cx)).child(choice(Page::SwipeRight, right, cx))))
+            .child(
+                section(t!("Chat list"), cx).child(
+                    card(cx)
+                        .child(link(Page::Folders.id(), Page::Folders.title(), self.folders_summary().into(), None, Some(IconName::ChevronRight), cx).on_click(cx.listener(|this, _, _, cx| this.open_folders_page(cx))))
+                        .child(choice(Page::SwipeLeft, left, cx))
+                        .child(choice(Page::SwipeRight, right, cx)),
+                ),
+            )
             .when(!gpui_kit::is_mobile(), |el| {
                 let keys = link("keyboard-shortcuts", t!("Keyboard shortcuts"), "".into(), None, Some(IconName::ChevronRight), cx).on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx)));
                 el.child(card(cx).child(keys))

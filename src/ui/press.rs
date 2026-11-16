@@ -113,32 +113,53 @@ pub(super) fn long_press(on: impl Fn(&LongPressEvent, &mut Window, &mut App) + '
     .inset_0()
 }
 
-const ITEMS: usize = 8;
-
-/// Bounds of a segmented control's items, measured by last frame's paint.
+/// Bounds of a segmented control and of each of its items, measured by last frame's paint.
 #[derive(Clone)]
-pub(super) struct Segments(Rc<RefCell<[Option<Bounds<Pixels>>; ITEMS + 1]>>);
+pub(super) struct Segments(Rc<RefCell<Cells>>);
+
+#[derive(Default)]
+struct Cells {
+    items: Vec<Option<Bounds<Pixels>>>,
+    root: Option<Bounds<Pixels>>,
+}
 
 impl Segments {
     pub(super) fn new(id: &'static str, window: &mut Window, cx: &mut App) -> Self {
         window.use_keyed_state(id, cx, |_, _| Segments(Rc::default())).read(cx).clone()
     }
 
-    /// Measures item `ix` (or, as `ITEMS`, the container); goes inside the item as a child.
+    /// Measures item `ix`; goes inside the item as a child.
     pub(super) fn probe(&self, ix: usize) -> impl IntoElement + use<> {
         let cells = self.0.clone();
-        canvas(move |bounds, _, _| cells.borrow_mut()[ix.min(ITEMS)] = Some(bounds), |_, _, _, _| {}).absolute().inset_0()
+        canvas(
+            move |bounds, _, _| {
+                let items = &mut cells.borrow_mut().items;
+                if items.len() <= ix {
+                    items.resize(ix + 1, None);
+                }
+                items[ix] = Some(bounds);
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0()
     }
 
     pub(super) fn container(&self) -> impl IntoElement + use<> {
-        self.probe(ITEMS)
+        let cells = self.0.clone();
+        canvas(move |bounds, _, _| cells.borrow_mut().root = Some(bounds), |_, _, _, _| {}).absolute().inset_0()
+    }
+
+    /// Where item `ix` was last painted.
+    pub(super) fn item(&self, ix: usize) -> Option<Bounds<Pixels>> {
+        self.0.borrow().items.get(ix).copied().flatten()
     }
 
     /// The pill behind item `selected`, sliding from the old item; None until the items are measured
     /// (the caller paints the selected item itself for that one frame).
     pub(super) fn pill(&self, id: &'static str, selected: usize, tint: Hsla, window: &mut Window, cx: &mut App) -> Option<Div> {
         let cells = self.0.borrow();
-        let (Some(to), Some(root)) = (cells[selected.min(ITEMS)], cells[ITEMS]) else {
+        let (Some(to), Some(root)) = (cells.items.get(selected).copied().flatten(), cells.root) else {
             window.request_animation_frame();
             return None;
         };
