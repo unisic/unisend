@@ -320,6 +320,17 @@ async fn provision(api: &Api, bridge: &str, login: &str, method: Method, segment
     api.send(method, url.into(), body, timeout).await
 }
 
+/// Tells the chat's bridge that the user opened view-once media, so that it is used up on the
+/// network (bridgev2 `POST /v3/view_limited_media/{event}`, body `com.beeper.view_limited`).
+pub(super) async fn report_once(api: &Api, room: &Room, event: &str) -> Result<()> {
+    let protocol = super::protocol_id(room).await.context("the chat is not bridged")?;
+    let networks = api.networks().await?;
+    let network = networks.iter().find(|n| n.bridge == protocol).or_else(|| networks.iter().find(|n| n.bridge.starts_with(&protocol))).context("no bridge for the chat")?;
+    let login = network.logins.iter().find(|l| l.state == "CONNECTED").or(network.logins.first()).context("no login on the bridge")?;
+    let body = json!({ "com.beeper.view_limited": { "type": "count", "count": 1 } });
+    provision(api, &network.bridge, &login.id, Method::POST, &["view_limited_media", event], Some(body), CALL_TIMEOUT).await.map(drop)
+}
+
 fn caps(v: &Value) -> Caps {
     let flag = |path: &str| v.pointer(path).and_then(Value::as_bool).unwrap_or(false);
     let size = |g: &Value, path: &str| g.pointer(path).and_then(Value::as_u64).unwrap_or(0) as usize;

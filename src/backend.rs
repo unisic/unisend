@@ -123,6 +123,8 @@ pub enum Cmd {
     Thumbs(Vec<(String, Media)>),
     /// The image at viewing size.
     View(String, Media),
+    /// The user opened view-once media (the event of the open chat): the bridge is told.
+    ViewedOnce(OwnedRoomId, String),
     /// Download to the media cache so the system can open it.
     Fetch(String, Media),
     Attach { room: OwnedRoomId, path: PathBuf, reply_to: Option<String> },
@@ -593,6 +595,9 @@ pub struct Media {
     thumb: Option<MediaSource>,
     /// A video the sender's network plays as a GIF: on repeat, without sound.
     pub looped: bool,
+    /// Media the sender's network lets the user open once (`com.beeper.view_limited`): shown as a
+    /// placeholder, never cached, saved or forwarded.
+    pub once: bool,
     /// A voice message's loudness as `voice::BARS` heights, 0 to 255; empty when it has none.
     pub waveform: Vec<u8>,
 }
@@ -1370,13 +1375,25 @@ impl State {
                     });
                 }
             }
+            Cmd::ViewedOnce(room_id, event) => {
+                // Only Beeper's bridges take the report; elsewhere there is nobody to tell.
+                if let Ok(api) = self.api() {
+                    let room = self.room(&room_id)?;
+                    tokio::spawn(async move {
+                        if let Err(e) = rooms::report_once(&api, &room, &event).await {
+                            log::debug!("view-once report: {e:#}");
+                        }
+                    });
+                }
+            }
             Cmd::View(id, media) => {
                 let client = self.client()?.clone();
                 let ev = self.ev.clone();
                 tokio::spawn(async move {
                     let bytes = async {
                         let request = MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File };
-                        let bytes = client.media().get_media_content(&request, true).await?;
+                        // View-once media stays out of the on-disk media cache.
+                        let bytes = client.media().get_media_content(&request, !media.once).await?;
                         tokio::task::spawn_blocking(move || shrink(&bytes, VIEW_PX)).await?
                     };
                     let _ = match bytes.await {
@@ -2826,6 +2843,7 @@ fn sticker(content: &StickerEventContent) -> Media {
         source: content.source.clone().into(),
         thumb: info.thumbnail_source.clone(),
         looped: false,
+        once: false,
         waveform: Vec::new(),
     }
 }
@@ -2881,6 +2899,7 @@ fn link_preview(content: &serde_json::Value) -> Option<Link> {
             source,
             thumb: None,
             looped: false,
+            once: false,
             waveform: Vec::new(),
         });
         Some(Link { url, title, description, site, image })
@@ -3037,6 +3056,16 @@ pub(crate) async fn request(room: &Room) -> bool {
     })
 }
 
+/// The bridge's protocol id for the chat (`signal`, `whatsapp`), from `m.bridge`.
+async fn protocol_id(room: &Room) -> Option<String> {
+    let events = room.get_state_events(StateEventType::from("m.bridge")).await.ok()?;
+    events.iter().find_map(|e| {
+        let RawAnySyncOrStrippedState::Sync(raw) = e else { return None };
+        let content: serde_json::Value = raw.get_field("content").ok()??;
+        content.pointer("/protocol/id")?.as_str().map(str::to_owned)
+    })
+}
+
 /// The bridge's name for the network, and the name of the chat's parent (a Discord server, a
 /// Slack workspace, a Telegram forum, a WhatsApp community) when `m.bridge` has one.
 async fn bridge_names(room: &Room) -> (Option<String>, Option<String>) {
@@ -3150,6 +3179,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
                 looped: false,
+                once: false,
                 waveform: Vec::new(),
             }
         }
@@ -3165,6 +3195,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
                 looped: false,
+                once: false,
                 waveform: Vec::new(),
             }
         }
@@ -3181,6 +3212,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 source: c.source.clone(),
                 thumb: None,
                 looped: false,
+                once: false,
                 waveform: c.audio.as_ref().map(|a| voice::bars(a.waveform.iter().map(|v| v.get().into()))).unwrap_or_default(),
             }
         }
@@ -3196,6 +3228,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
                 source: c.source.clone(),
                 thumb: info.and_then(|i| i.thumbnail_source.clone()),
                 looped: false,
+                once: false,
                 waveform: Vec::new(),
             }
         }

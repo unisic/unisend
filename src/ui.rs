@@ -371,6 +371,9 @@ pub struct BeeperApp {
     disappear: disappear::Disappear,
     /// What the open chat's network takes, once read.
     features: Option<(OwnedRoomId, Option<crate::backend::Features>)>,
+    /// View-once media the user opened this session, so it is not offered again while the bridge
+    /// takes it away; at most `MAX_OPENED_ONCE`.
+    opened_once: Vec<String>,
     /// The app PIN's keypad, on the lock screen and in the settings.
     pad: pinpad::Pad,
 }
@@ -616,6 +619,7 @@ impl BeeperApp {
             people: Default::default(),
             disappear: disappear::Disappear::default(),
             features: None,
+            opened_once: Vec::new(),
             pad: Default::default(),
         }
     }
@@ -1099,7 +1103,7 @@ impl BeeperApp {
     /// the command channel to user actions.
     fn want_thumb(&mut self, ix: usize) {
         let m = &self.msgs[ix];
-        let pictured = m.media.as_ref().filter(|media| matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
+        let pictured = m.media.as_ref().filter(|media| !media.once && matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
         let linked = m.link.as_ref().and_then(|link| link.image.as_ref());
         let quoted = m.reply.as_ref().and_then(|q| q.media.as_ref()).filter(|media| matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
         let wanted: Vec<(String, Media)> = pictured
@@ -1131,6 +1135,52 @@ impl BeeperApp {
 
     /// A tap on an attachment: pictures open full-screen, videos on Android in the app's player,
     /// everything else in the system's app.
+    /// A tap on view-once media: a picture opens once and the bridge is told; nothing else opens.
+    fn open_once(&mut self, id: String, media: Media, cx: &mut Context<Self>) {
+        let Some(room) = self.open.clone() else { return };
+        if media.kind != MediaKind::Image || self.opened_once.contains(&id) {
+            return;
+        }
+        if self.send(Cmd::View(id.clone(), media), cx) {
+            self.viewer = Some((id.clone(), None));
+            self.open_zoom(cx);
+            if self.opened_once.len() >= MAX_OPENED_ONCE {
+                self.opened_once.remove(0);
+            }
+            self.opened_once.push(id.clone());
+            let _ = self.cmd.try_send(Cmd::ViewedOnce(room, id));
+            cx.notify();
+        }
+    }
+
+    /// What stands in a bubble for view-once media.
+    fn render_once(&self, m: &Msg, media: &Media, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let opened = self.opened_once.contains(&m.id);
+        let (id, owned) = (m.id.clone(), media.clone());
+        let label = match (opened, media.kind) {
+            (true, _) => t!("Opened"),
+            (false, MediaKind::Image) => t!("View-once photo"),
+            (false, _) => t!("View-once video"),
+        };
+        h_flex()
+            .id(SharedString::from(format!("{}-once", m.id)))
+            .gap(px(8.))
+            .py(px(6.))
+            .items_center()
+            .text_size(fs(15.))
+            .text_color(p.muted)
+            .child(Icon::new(IconName::EyeOff).size_4().text_color(p.faint))
+            .child(label)
+            .when(!opened && media.kind == MediaKind::Image, |el| {
+                el.cursor_pointer().on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.open_once(id.clone(), owned.clone(), cx);
+                }))
+            })
+            .into_any_element()
+    }
+
     fn open_media(&mut self, id: String, media: Media, cx: &mut Context<Self>) {
         if matches!(media.kind, MediaKind::Image | MediaKind::Sticker) {
             if self.send(Cmd::View(id.clone(), media), cx) {
@@ -1198,6 +1248,9 @@ impl BeeperApp {
     /// `room` is the width a bubble has for its content.
     /// `radius` is a picture's corner, concentric with the bubble around it.
     fn render_media(&self, m: &Msg, media: &Media, room: f32, radius: f32, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if media.once {
+            return self.render_once(m, media, cx);
+        }
         if let Some(card) = self.contact_card(m, media, room, cx) {
             return card;
         }
@@ -3781,6 +3834,9 @@ fn sheet_row_idle(id: &'static str, icon: IconName, label: impl Into<SharedStrin
         .child(Icon::new(icon).size_5())
         .child(label.into())
 }
+
+/// How many view-once messages the app remembers opening.
+const MAX_OPENED_ONCE: usize = 64;
 
 /// The parent's name in a chat row, shortened to what a phone's row can spare.
 const PARENT_CHARS: usize = 14;

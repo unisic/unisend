@@ -471,7 +471,7 @@ impl BeeperApp {
     /// The pictures before and after the one on screen, among those of the open chat.
     fn neighbours(&self) -> (Option<String>, Option<String>) {
         let Some((id, _)) = &self.viewer else { return (None, None) };
-        let set = pictures(self.msgs.iter().filter(|m| !self.is_hidden(&m.id)).map(|m| (m.id.as_str(), m.media.as_ref().map(|media| media.kind), m.deleted)));
+        let set = pictures(self.msgs.iter().filter(|m| !self.is_hidden(&m.id)).map(|m| (m.id.as_str(), m.media.as_ref().map(|media| media.kind), m.deleted || m.media.as_ref().is_some_and(|media| media.once))));
         let (older, newer) = beside(&set, id);
         (older.map(str::to_owned), newer.map(str::to_owned))
     }
@@ -699,7 +699,7 @@ impl BeeperApp {
 
     /// Downloads the original of a message's attachment, then saves or shares it.
     pub(super) fn export_message(&mut self, id: &str, what: Export, cx: &mut Context<Self>) {
-        let Some(media) = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.clone()) else { return };
+        let Some(media) = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.clone()).filter(|media| !media.once) else { return };
         if self.zoom.working.is_some() {
             return;
         }
@@ -1107,7 +1107,8 @@ impl BeeperApp {
         let when = m.map(|m| format!("{}, {}", day_label(m.ts), clock(m.ts)));
         let caption = m.map(|m| m.body.trim()).filter(|body| !body.is_empty()).map(str::to_owned);
         let replies = m.is_some_and(|m| m.id.starts_with('$') && !m.deleted);
-        let forwards = m.is_some_and(forward::forwardable);
+        let once = m.and_then(|m| m.media.as_ref()).is_some_and(|media| media.once);
+        let forwards = !once && m.is_some_and(forward::forwardable);
 
         let shade = gpui_kit::white().opacity(0.12);
         let scrim = gpui_kit::black().opacity(0.55);
@@ -1185,7 +1186,7 @@ impl BeeperApp {
                     }))
                 }))
             })
-            .when(crate::can_save(), |el| {
+            .when(crate::can_save() && !once, |el| {
                 el.child(action("viewer-save", IconName::Download, t!("Save"), working).when(interactive, |el| {
                     el.on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
@@ -1193,7 +1194,7 @@ impl BeeperApp {
                     }))
                 }))
             })
-            .when(crate::can_share(), |el| {
+            .when(crate::can_share() && !once, |el| {
                 el.child(action("viewer-share", IconName::Share2, t!("Share"), working).when(interactive, |el| {
                     el.on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();

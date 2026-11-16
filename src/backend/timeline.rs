@@ -455,6 +455,7 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
     }
     if let (Some(media), Some(json)) = (&mut m.media, &json) {
         media.looped = super::video::looped(json);
+        media.once = !m.own && json.get("com.beeper.view_limited").is_some_and(|v| v.is_object());
     }
     m.delivery = match event.send_state() {
         Some(EventSendState::NotSentYet { .. }) => Delivery::Sending,

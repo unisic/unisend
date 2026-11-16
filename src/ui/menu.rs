@@ -151,7 +151,7 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
     let link = m.link.as_ref().map(|link| link.url.clone()).or_else(|| urls(&m.body).into_iter().next().map(|r| m.body[r].to_owned()));
     let ends = m.own && sent && !m.deleted && m.poll.as_ref().is_some_and(|p| p.ended.is_none());
     let mut out = Vec::new();
-    let saveable = crate::can_save() && sent && m.media.as_ref().is_some_and(|media| matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
+    let saveable = crate::can_save() && sent && m.media.as_ref().is_some_and(|media| !media.once && matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
     // Reply and React head the list only where no buttons beside the message offer them; the touch
     // overlay has its own reactions. Past them, every menu lists the same acts in the same order.
     if sent && (kind == MenuKind::Touch || extra) {
