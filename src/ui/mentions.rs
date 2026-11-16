@@ -143,6 +143,18 @@ impl BeeperApp {
         }
     }
 
+    /// Asks once for the open chat's members when a reader there wrote nothing in view to be named
+    /// by: bridges' readers are otherwise their IDs (`facebookgo_1000…`).
+    pub(super) fn name_readers(&mut self) {
+        if self.mention.room.is_some() && self.mention.room == self.open {
+            return;
+        }
+        let named = |user: &OwnedUserId| self.msgs.iter().any(|m| m.from == *user && !m.sender.is_empty());
+        if self.msgs.iter().flat_map(|m| &m.seen).any(|(user, _)| !named(user)) {
+            self.want_members();
+        }
+    }
+
     /// The open chat's members other than the user, (user, name) by name; empty until they arrive.
     pub(super) fn members(&self) -> &[(OwnedUserId, String)] {
         if self.mention.room.is_some() && self.mention.room == self.open { &self.mention.members } else { &[] }

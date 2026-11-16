@@ -87,7 +87,7 @@ impl BeeperApp {
 
     /// Someone's name in the open chat: as a member, as the sender of a loaded message, or the
     /// local part of their address.
-    fn person_name(&self, user: &OwnedUserId) -> String {
+    pub(super) fn person_name(&self, user: &OwnedUserId) -> String {
         let members = self.members();
         let member = members.iter().find(|(id, _)| id == user).map(|(_, name)| name.as_str());
         let sender = || self.msgs.iter().rev().find(|m| m.from == *user && !m.sender.is_empty()).map(|m| m.sender.as_str());

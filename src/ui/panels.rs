@@ -175,7 +175,6 @@ impl BeeperApp {
             (&self.cookie_paste, t!("Paste cookies or a cURL command")),
             (&self.email, t!("you@example.com")),
             (&self.recovery, t!("Recovery code")),
-            (&self.composer, t!("Message")),
             (&self.search, t!("Search chats")),
             (&self.find.input, t!("Search this chat")),
             (&self.emoji_pick.search, t!("Search emoji")),
@@ -183,6 +182,7 @@ impl BeeperApp {
         for (input, text) in fields {
             input.update(cx, |input, cx| input.set_placeholder(text, window, cx));
         }
+        self.composer.update(cx, |input, cx| input.set_placeholder(t!("Message"), window, cx));
         self.accounts.tell_all(|| Cmd::Relabel);
         cx.refresh_windows();
     }

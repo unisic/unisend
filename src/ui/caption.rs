@@ -45,13 +45,13 @@ pub(super) struct Preview {
     pan: Option<Pan>,
     /// Where the stage is, sideways, once no finger holds it: it glides home from a let-go pan.
     slide: motion::Glide,
-    field: Entity<InputState>,
+    field: Entity<TextareaState>,
     _subs: Vec<Subscription>,
 }
 
 impl Preview {
     pub fn new(window: &mut Window, cx: &mut Context<BeeperApp>) -> Self {
-        let field = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Add a caption")));
+        let field = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 4).submit_on_enter(true).placeholder(t!("Add a caption")));
         crate::ime::follow(&field, window, cx);
         let subs = vec![cx.subscribe_in(&field, window, |this, _, ev: &InputEvent, window, cx| match ev {
             InputEvent::PressEnter { shift: false, .. } => this.send_preview(window, cx),
@@ -458,7 +458,7 @@ impl BeeperApp {
             .gap(px(6.))
             .px(px(GUTTER))
             .py(px(8.))
-            .child(div().flex_1().min_w_0().min_h(px(TAP)).px(px(6.)).flex().items_center().rounded(px(TAP / 2.)).bg(p.surface).child(Input::new(&pv.field).appearance(false).large()).child(crate::ime::marks(&pv.field)))
+            .child(div().flex_1().min_w_0().min_h(px(TAP)).px(px(6.)).flex().items_center().rounded(px(TAP / 2.)).overflow_hidden().bg(p.surface).child(Textarea::new(&pv.field).appearance(false).text_size(fs(16.))).child(crate::ime::marks(&pv.field)))
             .child(
                 div()
                     .id("preview-send")

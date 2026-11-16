@@ -15,10 +15,39 @@ use std::cell::RefCell;
 use std::ops::Range;
 
 use gpui_kit::component::RopeExt as _;
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::{App, ContentMask, Entity, Focusable as _, Hsla, IntoElement, MouseDownEvent, Pixels, Styled as _, Window, canvas, fill, point, px, size};
 
 use crate::Palette;
+
+/// A field the keyboard follows: a one-line one, or the composer, which grows with its text.
+#[derive(Clone)]
+pub(crate) enum Field {
+    Line(Entity<InputState>),
+    Area(Entity<TextareaState>),
+}
+
+impl From<&Entity<InputState>> for Field {
+    fn from(e: &Entity<InputState>) -> Self {
+        Self::Line(e.clone())
+    }
+}
+
+impl From<&Entity<TextareaState>> for Field {
+    fn from(e: &Entity<TextareaState>) -> Self {
+        Self::Area(e.clone())
+    }
+}
+
+/// `$body` once per kind of field, with `$e` its entity: the two states share no nameable type.
+macro_rules! each {
+    ($field:expr, $e:ident => $body:expr) => {
+        match $field {
+            Field::Line($e) => $body,
+            Field::Area($e) => $body,
+        }
+    };
+}
 
 /// UTF-16 units of context the keyboard gets before and after the selection.
 /// `GpuiInputActivity` trims and refills its copy relative to `BEFORE`.
@@ -119,8 +148,8 @@ fn shift(spell: &mut Vec<(Range<usize>, String)>, old: &Range<usize>, new_len: u
 
 /// Draws the composing underline and the misspelled-word dots over `input` while it has focus.
 /// Place it next to the field's `Input`; it takes no space.
-pub(crate) fn marks(input: &Entity<InputState>) -> impl IntoElement + use<> {
-    let input = input.clone();
+pub(crate) fn marks<F: Into<Field>>(input: F) -> impl IntoElement + use<F> {
+    let input = input.into();
     canvas(|_, _, _| (), move |_, _, window, cx| paint_marks(&input, window, cx)).absolute().inset_0()
 }
 
@@ -148,55 +177,57 @@ pub(crate) fn taps() -> impl IntoElement {
     .absolute()
 }
 
-fn paint_marks(input: &Entity<InputState>, window: &mut Window, cx: &mut App) {
-    let field = input.entity_id().as_u64();
-    let (comp, spell) = MARKS.with_borrow(|m| if m.field == field { (m.comp.clone(), m.spell.clone()) } else { (None, Vec::new()) });
-    if comp.is_none() && spell.is_empty() {
-        return;
-    }
-    let state = input.read(cx);
-    if !state.focus_handle(cx).is_focused(window) {
-        return;
-    }
-    let Some(text_bounds) = state.text_bounds() else {
-        return;
-    };
-    let rope = state.text();
-    let bytes = |r: &Range<usize>| rope.offset_utf16_to_offset(r.start)..rope.offset_utf16_to_offset(r.end);
-    // One stretch per line the range covers (a word wrapped at the edge has two): left x, right x, underline y.
-    let lines = |r: &Range<usize>| -> Vec<(Pixels, Pixels, Pixels)> {
-        let (Some(a), Some(b)) = (state.range_to_bounds(&(r.start..r.start)), state.range_to_bounds(&(r.end..r.end))) else {
-            return Vec::new();
+fn paint_marks(input: &Field, window: &mut Window, cx: &mut App) {
+    each!(input, input => {
+        let field = input.entity_id().as_u64();
+        let (comp, spell) = MARKS.with_borrow(|m| if m.field == field { (m.comp.clone(), m.spell.clone()) } else { (None, Vec::new()) });
+        if comp.is_none() && spell.is_empty() {
+            return;
+        }
+        let state = input.read(cx);
+        if !state.focus_handle(cx).is_focused(window) {
+            return;
+        }
+        let Some(text_bounds) = state.text_bounds() else {
+            return;
         };
-        let lift = a.size.height * LIFT;
-        let stretches = if a.top() == b.top() {
-            vec![(a.left(), b.left(), a.bottom() - lift)]
-        } else {
-            vec![(a.left(), text_bounds.right(), a.bottom() - lift), (text_bounds.left(), b.left(), b.bottom() - lift)]
+        let rope = state.text();
+        let bytes = |r: &Range<usize>| rope.offset_utf16_to_offset(r.start)..rope.offset_utf16_to_offset(r.end);
+        // One stretch per line the range covers (a word wrapped at the edge has two): left x, right x, underline y.
+        let lines = |r: &Range<usize>| -> Vec<(Pixels, Pixels, Pixels)> {
+            let (Some(a), Some(b)) = (state.range_to_bounds(&(r.start..r.start)), state.range_to_bounds(&(r.end..r.end))) else {
+                return Vec::new();
+            };
+            let lift = a.size.height * LIFT;
+            let stretches = if a.top() == b.top() {
+                vec![(a.left(), b.left(), a.bottom() - lift)]
+            } else {
+                vec![(a.left(), text_bounds.right(), a.bottom() - lift), (text_bounds.left(), b.left(), b.bottom() - lift)]
+            };
+            stretches.into_iter().filter(|(x0, x1, _)| x1 > x0).collect()
         };
-        stretches.into_iter().filter(|(x0, x1, _)| x1 > x0).collect()
-    };
-    let p = Palette::of(cx);
-    let mut quads = Vec::new();
-    if let Some(comp) = comp.as_ref().map(bytes).filter(|r| !r.is_empty()) {
-        for (x0, x1, y) in lines(&comp) {
-            quads.push(fill(gpui_kit::Bounds::new(point(x0, y), size(x1 - x0, px(1.))), p.text));
+        let p = Palette::of(cx);
+        let mut quads = Vec::new();
+        if let Some(comp) = comp.as_ref().map(bytes).filter(|r| !r.is_empty()) {
+            for (x0, x1, y) in lines(&comp) {
+                quads.push(fill(gpui_kit::Bounds::new(point(x0, y), size(x1 - x0, px(1.))), p.text));
+            }
         }
-    }
-    for (range, word) in &spell {
-        let range = bytes(range);
-        if range.is_empty() || rope.slice(range.clone()) != word.as_str() {
-            continue;
+        for (range, word) in &spell {
+            let range = bytes(range);
+            if range.is_empty() || rope.slice(range.clone()) != word.as_str() {
+                continue;
+            }
+            for (x0, x1, y) in lines(&range) {
+                quads.extend(dots(x0, x1, y, p.negative));
+            }
         }
-        for (x0, x1, y) in lines(&range) {
-            quads.extend(dots(x0, x1, y, p.negative));
-        }
-    }
-    window.with_content_mask(Some(ContentMask { bounds: state.input_bounds() }), |window| {
-        for quad in quads {
-            window.paint_quad(quad);
-        }
-    });
+        window.with_content_mask(Some(ContentMask { bounds: state.input_bounds() }), |window| {
+            for quad in quads {
+                window.paint_quad(quad);
+            }
+        });
+    })
 }
 
 /// A dotted line from `x0` to `x1`: round 2 px dots, 2 px apart, as a spell checker marks a word.
@@ -210,7 +241,7 @@ fn dots(x0: Pixels, x1: Pixels, y: Pixels, colour: Hsla) -> impl Iterator<Item =
 pub(crate) use android::{follow, on_picture, set_incognito, tapped};
 
 #[cfg(not(target_os = "android"))]
-pub(crate) fn follow<T: 'static>(_: &gpui_kit::Entity<gpui_kit::component::input::InputState>, _: &mut gpui_kit::Window, _: &mut gpui_kit::Context<T>) {}
+pub(crate) fn follow<T: 'static>(_: impl Into<Field>, _: &mut gpui_kit::Window, _: &mut gpui_kit::Context<T>) {}
 
 /// Settings > Privacy > Incognito keyboard; only the Android keyboard has the flag.
 #[cfg(not(target_os = "android"))]
@@ -232,13 +263,26 @@ mod android {
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
-    use gpui_kit::component::input::{InputEvent, InputState};
-    use gpui_kit::{App, Context, Entity, EntityInputHandler as _, Focusable as _, WeakEntity, Window};
+    use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+    use gpui_kit::{AnyEntity, AnyWeakEntity, App, Context, EntityInputHandler, Focusable as _, Window};
     use gpui_mobile::android::jni::{activity, get_string, with_env};
     use jni::objects::{JIntArray, JObject, JValue};
     use tokio::sync::mpsc;
 
-    use super::{Edit, MARKS, MAX_SPELL, Op, around, plan, shift};
+    use super::{Edit, Field, MARKS, MAX_SPELL, Op, around, plan, shift};
+
+    impl Field {
+        fn id(&self) -> u64 {
+            each!(self, e => e.entity_id().as_u64())
+        }
+
+        fn of(any: AnyEntity) -> Option<Self> {
+            match any.downcast::<InputState>() {
+                Ok(e) => Some(Self::Line(e)),
+                Err(any) => any.downcast::<TextareaState>().ok().map(Self::Area),
+            }
+        }
+    }
 
     enum Msg {
         Edit(Edit),
@@ -275,7 +319,7 @@ mod android {
 
     thread_local! {
         /// Followed fields still alive, pruned on every `follow`.
-        static FIELDS: RefCell<Vec<WeakEntity<InputState>>> = const { RefCell::new(Vec::new()) };
+        static FIELDS: RefCell<Vec<AnyWeakEntity>> = const { RefCell::new(Vec::new()) };
         static APPLIED: Cell<i64> = const { Cell::new(0) };
         /// What Java was last told: `None` before the first push, `Some(None)` for no field.
         static PUSHED: RefCell<Option<Option<State>>> = const { RefCell::new(None) };
@@ -287,10 +331,11 @@ mod android {
     }
 
     /// Mirror this field to the keyboard while it is focused. The subscriptions end with the field.
-    pub(crate) fn follow<T: 'static>(input: &Entity<InputState>, window: &mut Window, cx: &mut Context<T>) {
+    pub(crate) fn follow<T: 'static>(input: impl Into<Field>, window: &mut Window, cx: &mut Context<T>) {
+        let input = input.into();
         FIELDS.with_borrow_mut(|fields| {
             fields.retain(|f| f.upgrade().is_some());
-            fields.push(input.downgrade());
+            fields.push(each!(&input, e => e.downgrade().into()));
         });
         sender();
         if let Some(mut rx) = RX.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -304,23 +349,25 @@ mod android {
                 })
                 .detach();
         }
-        cx.observe_in(input, window, |_, input, window, cx| publish(&input, false, window, cx)).detach();
-        cx.subscribe_in(input, window, |_, input, ev: &InputEvent, window, cx| {
-            if matches!(ev, InputEvent::Focus | InputEvent::Blur) {
-                publish(input, false, window, cx);
-            }
-        })
-        .detach();
+        each!(&input, input => {
+            cx.observe_in(input, window, |_, input, window, cx| publish(&Field::from(&input), false, window, cx)).detach();
+            cx.subscribe_in(input, window, |_, input, ev: &InputEvent, window, cx| {
+                if matches!(ev, InputEvent::Focus | InputEvent::Blur) {
+                    publish(&Field::from(input), false, window, cx);
+                }
+            })
+            .detach();
+        });
     }
 
-    fn focused(window: &Window, cx: &App) -> Option<Entity<InputState>> {
+    fn focused(window: &Window, cx: &App) -> Option<Field> {
         FIELDS.with_borrow(|fields| {
-            fields.iter().filter_map(WeakEntity::upgrade).find(|f| f.read(cx).focus_handle(cx).is_focused(window))
+            fields.iter().filter_map(|f| Field::of(f.upgrade()?)).find(|f| each!(f, e => e.read(cx).focus_handle(cx).is_focused(window)))
         })
     }
 
-    fn find(field: u64) -> Option<Entity<InputState>> {
-        FIELDS.with_borrow(|fields| fields.iter().filter_map(WeakEntity::upgrade).find(|f| f.entity_id().as_u64() == field))
+    fn find(field: u64) -> Option<Field> {
+        FIELDS.with_borrow(|fields| fields.iter().filter_map(|f| Field::of(f.upgrade()?)).find(|f| f.id() == field))
     }
 
     fn handle(msg: Msg, window: &mut Window, cx: &mut App) {
@@ -346,21 +393,21 @@ mod android {
                 m.comp = edit.comp.clone();
             });
             if let Some(target) = find(edit.field) {
-                target.update(cx, |state, cx| {
-                    // The keyboard's Enter arrives as a typed newline, which a one-line field drops.
-                    let enter = state.is_single_line() && edit.replace.as_ref().is_some_and(|(_, text)| text == "\n");
+                // The keyboard's Enter arrives as a typed newline, which a one-line field drops.
+                let enter = matches!(target, Field::Line(_)) && edit.replace.as_ref().is_some_and(|(_, text)| text == "\n");
+                each!(target, e => e.update(cx, |state, cx| {
                     apply(state, edit, window, cx);
                     if enter {
                         cx.emit(InputEvent::PressEnter { secondary: false, shift: false });
                     }
                     // A composition that only ended changes no text, yet its underline must go.
                     cx.notify();
-                });
+                }));
             }
         }
         if let Msg::Spell(field, ranges) = &msg {
             if let Some(target) = find(*field) {
-                target.update(cx, |state, cx| {
+                each!(target, e => e.update(cx, |state, cx| {
                     let spell = ranges
                         .iter()
                         .filter_map(|r| {
@@ -376,7 +423,7 @@ mod android {
                         m.spell = spell;
                     });
                     cx.notify();
-                });
+                }));
             }
             return;
         }
@@ -386,7 +433,7 @@ mod android {
         }
     }
 
-    fn apply(s: &mut InputState, edit: &Edit, window: &mut Window, cx: &mut Context<InputState>) {
+    fn apply<T: EntityInputHandler>(s: &mut T, edit: &Edit, window: &mut Window, cx: &mut Context<T>) {
         for op in plan(edit) {
             match op {
                 Op::Replace(range, text) => s.replace_text_in_range(Some(range), &text, window, cx),
@@ -424,16 +471,16 @@ mod android {
         }
     }
 
-    fn publish(input: &Entity<InputState>, force: bool, window: &mut Window, cx: &mut App) {
-        let field = input.entity_id().as_u64();
-        if !input.read(cx).focus_handle(cx).is_focused(window) {
+    fn publish(input: &Field, force: bool, window: &mut Window, cx: &mut App) {
+        let field = input.id();
+        if !each!(input, e => e.read(cx).focus_handle(cx).is_focused(window)) {
             let ours = PUSHED.with_borrow(|p| matches!(p, Some(Some(s)) if s.field == field));
             if ours {
                 push(None, force);
             }
             return;
         }
-        let state = input.update(cx, |s, cx| {
+        let state = each!(input, e => e.update(cx, |s, cx| {
             let sel = s.selected_text_range(false, window, cx)?.range;
             let want = around(&sel);
             let mut adjusted = None;
@@ -443,7 +490,7 @@ mod android {
             s.text_for_range(usize::MAX..usize::MAX, &mut end, window, cx);
             let len = end.map_or(0, |r| r.end);
             Some(State { field, applied: APPLIED.get(), start, text, sel, len })
-        });
+        }));
         push(state, force);
     }
 

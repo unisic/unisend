@@ -11,7 +11,7 @@ use gpui_kit::component::{
     scroll::ScrollableElement as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     spinner::Spinner,
     tooltip::Tooltip,
     v_flex,
@@ -233,7 +233,7 @@ pub struct BeeperApp {
     code: Entity<InputState>,
     matrix: signin::Form,
     recovery: Entity<InputState>,
-    composer: Entity<InputState>,
+    composer: Entity<TextareaState>,
     need_recovery: bool,
     /// The chat list's unlock row shows its field; `recovery_later` puts the row away until the next start.
     recovery_open: bool,
@@ -470,14 +470,16 @@ impl BeeperApp {
         let email = cx.new(|cx| InputState::new(window, cx).placeholder(t!("you@example.com")));
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("123456"));
         let recovery = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Recovery code")));
-        let composer = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Message")));
+        // Enter sends and Shift+Enter breaks the line; the Android keyboard's Enter types a newline, as in Signal.
+        let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).submit_on_enter(true).placeholder(t!("Message")));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search chats")));
         let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search emoji")));
         let emoji_pick = emojipick::Picker::new(emoji_search.clone(), &dir);
         #[cfg(target_os = "linux")]
         Self::voice_setup(cx);
 
-        for input in [&composer, &search, &emoji_search] {
+        crate::ime::follow(&composer, window, cx);
+        for input in [&search, &emoji_search] {
             crate::ime::follow(input, window, cx);
         }
         crate::ime::set_incognito(settings.incognito_keyboard);
@@ -496,15 +498,18 @@ impl BeeperApp {
             (&email, Self::send_code as fn(&mut Self, &mut Window, &mut Context<Self>), Keyboard::Email),
             (&code, Self::submit_code, Keyboard::Key),
             (&recovery, Self::recover, Keyboard::Key),
-            (&composer, Self::send_message, Keyboard::Text),
         ] {
             subs.push(cx.subscribe_in(input, window, move |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { shift: false, .. } => on_enter(this, window, cx),
-                // The emoji icon focuses the composer for its caret; the panel, not the keyboard, takes the keyboard's place.
-                InputEvent::Focus if matches!(keyboard, Keyboard::Text) && this.emoji_open == Some(emojipick::Target::Composer) => {}
                 other => keyboard_follows(other, keyboard, cx),
             }));
         }
+        subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::PressEnter { shift: false, .. } => this.send_message(window, cx),
+            // The emoji icon focuses the composer for its caret; the panel, not the keyboard, takes the keyboard's place.
+            InputEvent::Focus if this.emoji_open == Some(emojipick::Target::Composer) => {}
+            other => keyboard_follows(other, Keyboard::Text, cx),
+        }));
 
         let matrix = signin::Form::new(window, cx, &mut subs);
         let share = sharein::ShareIn::new(window, cx, &mut subs);
@@ -955,6 +960,7 @@ impl BeeperApp {
                     self.count_missed(len_before, new);
                 }
                 self.seek_unread();
+                self.name_readers();
                 if let Some((id, _)) = self.seek.as_ref().filter(|(id, _)| self.msgs.iter().any(|m| &m.id == id)) {
                     let id = id.clone();
                     self.reveal(&id, cx);
@@ -2934,6 +2940,8 @@ impl BeeperApp {
                                     .flex()
                                     .items_center()
                                     .rounded(px(TAP / 2.))
+                                    // A scrolled field's top line is cut at the pill, not drawn over the chat.
+                                    .overflow_hidden()
                                     .bg(p.surface)
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
                                         // The field is already focused, so only a press tells that the keyboard is wanted back.
@@ -2944,7 +2952,7 @@ impl BeeperApp {
                                     }))
                                     .text_size(fs(16.))
                                     .map(|el| self.mention_keys(el, cx))
-                                    .child(Input::new(&self.composer).appearance(false).large().token(|t, _, cx| mentions::token(t, cx)))
+                                    .child(Textarea::new(&self.composer).appearance(false).text_size(fs(16.)).token(|t, _, cx| mentions::token(t, cx)))
                                     .child(crate::ime::marks(&self.composer)),
                             )
                             .child(
@@ -3175,8 +3183,7 @@ impl BeeperApp {
                 readers.push(user);
             }
         }
-        let name = |user: &OwnedUserId| self.msgs.iter().rev().find(|m| m.from == *user && !m.sender.is_empty()).map(|m| m.sender.as_str());
-        readers.iter().map(|user| ((*user).clone(), name(user).map_or_else(|| user.localpart().to_owned(), str::to_owned))).collect()
+        readers.iter().map(|user| ((*user).clone(), self.person_name(user))).collect()
     }
 
     /// Someone else's message `ix` as its sender's app shows it, where the network says.

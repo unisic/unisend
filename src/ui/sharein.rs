@@ -36,13 +36,13 @@ pub(super) struct ShareIn {
     /// Chats last offered in other apps' share sheets.
     published: Vec<OwnedRoomId>,
     query: Entity<InputState>,
-    message: Entity<InputState>,
+    message: Entity<TextareaState>,
 }
 
 impl ShareIn {
     pub(super) fn new(window: &mut Window, cx: &mut Context<BeeperApp>, subs: &mut Vec<Subscription>) -> Self {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search chats")));
-        let message = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Add a message")));
+        let message = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 4).submit_on_enter(true).placeholder(t!("Add a message")));
         crate::ime::follow(&query, window, cx);
         crate::ime::follow(&message, window, cx);
         subs.push(cx.subscribe_in(&query, window, |_, _, ev: &InputEvent, _, cx| match ev {
@@ -407,8 +407,9 @@ impl BeeperApp {
                         .flex()
                         .items_center()
                         .rounded(px(TAP / 2.))
+                        .overflow_hidden()
                         .bg(p.surface)
-                        .child(Input::new(&s.message).appearance(false).large())
+                        .child(Textarea::new(&s.message).appearance(false).text_size(fs(16.)))
                         .child(crate::ime::marks(&s.message)),
                 )
                 .child(
