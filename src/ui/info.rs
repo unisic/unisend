@@ -458,13 +458,19 @@ impl BeeperApp {
                 let [(_, read_icon, read), pin, mute, archive, _] = chat_actions(&room);
                 // The sheet's "Mark as unread" does not fit a quarter of a phone.
                 let unread = (if room.is_unread() { t!("Mark read") } else { t!("Mark unread") }, read_icon, read);
+                // A muted chat's tile says how: "Muted until 14:30"; a tap unmutes it.
+                let mute_state = self.mute_state(&room);
                 let id = room.id.clone();
                 edge()
                     .pb(px(GAP))
-                    .child(h_flex().items_stretch().gap(px(8.)).children([mute, pin, archive, unread].into_iter().map(|(label, icon, action)| {
+                    .child(h_flex().items_stretch().gap(px(8.)).children([mute, pin, archive, unread].into_iter().enumerate().map(|(ix, (label, icon, action))| {
                         let id = id.clone();
+                        let (label, icon): (SharedString, _) = match (ix, &mute_state) {
+                            (0, Some(state)) => (state.clone().into(), IconName::BellOff),
+                            _ => (label.into(), icon),
+                        };
                         v_flex()
-                            .id(label)
+                            .id(("chat-action", ix))
                             .flex_1()
                             .min_w_0()
                             .min_h(px(64.))
@@ -479,7 +485,7 @@ impl BeeperApp {
                             .child(Icon::new(icon).size_5())
                             .child(div().max_w_full().px(px(4.)).text_size(fs(12.)).line_height(fs(15.)).text_center().text_color(p.muted).line_clamp(2).text_ellipsis().child(label))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.send(Cmd::Chat(id.clone(), action), cx);
+                                this.chat_action(id.clone(), action, true, cx);
                             }))
                     })))
                     .into_any_element()

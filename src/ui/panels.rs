@@ -49,6 +49,7 @@ pub(super) enum Page {
     SwipeRight,
     Lock,
     LockAfter,
+    NotifyShows,
 }
 
 impl Page {
@@ -68,6 +69,7 @@ impl Page {
             Self::SwipeRight => t!("Swipe right"),
             Self::Lock => t!("App lock"),
             Self::LockAfter => t!("Auto-lock"),
+            Self::NotifyShows => t!("Show|notification"),
         }
     }
 
@@ -566,6 +568,12 @@ impl BeeperApp {
             Page::Profile => self.render_profile(cx),
             Page::Updates => self.render_updates(cx).map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
             Page::Emoji => self.render_emoji(cx),
+            Page::NotifyShows => pick("notify-shows", crate::NotifyShows::ALL, s.notify_shows, crate::NotifyShows::label, |s, shows| {
+                s.notify_shows = shows;
+                shows.apply();
+                // Those already up keep the text they were posted with.
+                crate::clear_notifications();
+            }, cx),
             Page::Receipts => pick("receipts", ReceiptStyle::ALL, s.receipts, ReceiptStyle::label, |s, style| s.receipts = style, cx),
             Page::SwipeLeft => pick("swipe-left", SwipeAction::ALL, s.swipe_left, SwipeAction::label, |s, a| s.swipe_left = a, cx),
             Page::SwipeRight => pick("swipe-right", SwipeAction::ALL, s.swipe_right, SwipeAction::label, |s, a| s.swipe_right = a, cx),
@@ -710,7 +718,10 @@ impl BeeperApp {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.send(Cmd::TestNotice, cx);
             }));
-        let page = v_flex().gap(px(GAP * 2.)).child(card(cx).child(test));
+        let shows = Page::NotifyShows;
+        let shows = link(shows.id(), shows.title(), self.settings.notify_shows.label().into(), None, Some(IconName::ChevronRight), cx)
+            .on_click(cx.listener(move |this, _, _, cx| this.open_page(shows, cx)));
+        let page = v_flex().gap(px(GAP * 2.)).child(card(cx).child(shows)).child(card(cx).child(test));
         // Sounds and the connection are Android's; desktop has the system's own settings.
         if !cfg!(target_os = "android") {
             return page.into_any_element();

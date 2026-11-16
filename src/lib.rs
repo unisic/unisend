@@ -114,6 +114,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::init(cx);
     ui::motion::follow_system(cx);
     let mut settings = Settings::load(&dir);
+    settings.notify_shows.apply();
     apply_language(&mut settings, &dir);
     let own = emoji::apply(&mut settings, &dir, cx);
     if !own {
@@ -345,6 +346,12 @@ pub(crate) struct Settings {
     /// Whether others' messages show the user's reading always or after a tap.
     #[serde(default)]
     pub incoming: ui::receipt::IncomingStatus,
+    /// When each chat muted for a time is unmuted, in ms since the epoch; Matrix keeps no end.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub mute_until: std::collections::BTreeMap<matrix_sdk::ruma::OwnedRoomId, u64>,
+    /// What a message's notification shows.
+    #[serde(default)]
+    pub notify_shows: NotifyShows,
 }
 
 impl Settings {
@@ -358,7 +365,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, receipts: Default::default(), incoming: Default::default() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, receipts: Default::default(), incoming: Default::default(), mute_until: Default::default(), notify_shows: Default::default() })
     }
 
     fn parse(raw: &[u8]) -> Option<Self> {
@@ -852,8 +859,62 @@ pub(crate) fn initials(name: &str) -> String {
     name.split_whitespace().filter_map(|w| w.chars().find(|c| c.is_alphanumeric())).take(2).flat_map(char::to_uppercase).collect()
 }
 
+/// What a message's notification shows, as Signal offers it; the lock screen never shows more
+/// than that there is a new message.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum NotifyShows {
+    #[default]
+    NameAndText,
+    NameOnly,
+    Nothing,
+}
+
+static NOTIFY_SHOWS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+impl NotifyShows {
+    pub(crate) const ALL: [Self; 3] = [Self::NameAndText, Self::NameOnly, Self::Nothing];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::NameAndText => t!("Name and message"),
+            Self::NameOnly => t!("Name only"),
+            Self::Nothing => t!("No name or message"),
+        }
+    }
+
+    /// Makes the choice the one notifications follow; the backend posts them from its own thread.
+    pub(crate) fn apply(self) {
+        NOTIFY_SHOWS.store(self as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn current() -> Self {
+        Self::ALL.get(usize::from(NOTIFY_SHOWS.load(std::sync::atomic::Ordering::Relaxed))).copied().unwrap_or_default()
+    }
+
+    /// The notice as this choice lets it show: the text gives way to "New message", and with
+    /// nothing shown, the chat's name and picture to the app's.
+    fn redact(self, notice: &Notice, f: impl FnOnce(&Notice)) {
+        let text = t!("New message").to_owned();
+        match self {
+            Self::NameAndText => f(notice),
+            Self::NameOnly => {
+                let note = backend::Note { sender: notice.note.sender.clone(), text, ts: notice.note.ts, mention: notice.note.mention };
+                f(&Notice { note: &note, ..*notice });
+            }
+            Self::Nothing => {
+                let note = backend::Note { sender: "Unisend".into(), text, ts: notice.note.ts, mention: notice.note.mention };
+                f(&Notice { name: "Unisend", group: false, icon: "", note: &note, ..*notice });
+            }
+        }
+    }
+}
+
 /// Adds a message to the chat's notification, which shows the last few messages of the chat.
 pub(crate) fn notify(notice: &Notice) {
+    NotifyShows::current().redact(notice, notify_as_shown);
+}
+
+fn notify_as_shown(notice: &Notice) {
     #[cfg(target_os = "android")]
     if let Err(e) = android_files::message(notice) {
         log::warn!("notification: {e}");
@@ -887,6 +948,16 @@ pub(crate) fn connection_notice_settings() {
     if let Err(e) = android_files::notify("connectionSettings", &[]) {
         log::warn!("connection notice settings: {e}");
     }
+}
+
+/// Takes away every chat's notification, as what they show was chosen anew.
+pub(crate) fn clear_notifications() {
+    #[cfg(target_os = "android")]
+    if let Err(e) = android_files::notify("forget", &[]) {
+        log::warn!("notifications: {e}");
+    }
+    #[cfg(not(target_os = "android"))]
+    notify::close_all();
 }
 
 pub(crate) fn clear_notification(chat: &str) {
@@ -1121,7 +1192,7 @@ mod android_files {
                 &class,
                 jni::jni_str!("message"),
                 jni::jni_sig!(
-                    "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;Ljava/lang/String;JZLjava/lang/String;Ljava/lang/String;Z)V"
+                    "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;Ljava/lang/String;JZLjava/lang/String;Ljava/lang/String;ZI)V"
                 ),
                 &[
                     JValue::Object(&activity),
@@ -1135,6 +1206,7 @@ mod android_files {
                     JValue::Object(&icon),
                     JValue::Object(&initials),
                     JValue::Bool(notice.alert),
+                    JValue::Int(crate::NotifyShows::current() as i32),
                 ],
             )
             .map(|_| ())
@@ -1343,6 +1415,22 @@ mod tests {
         assert_eq!(super::free_name(&dir, "a.jpg"), dir.join("a (3).jpg"));
         assert_eq!(super::free_name(&dir, "b"), dir.join("b (2)"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_notification_shows_only_what_the_setting_lets_it() {
+        use super::{Notice, NotifyShows, backend::Note};
+        let note = Note { sender: "Ann".into(), text: "secret".into(), ts: 1, mention: true };
+        let notice = Notice { chat: "!a:x", name: "Book club", group: true, icon: "/pic.png", note: &note, alert: true };
+        let seen = |shows: NotifyShows| {
+            let mut out = None;
+            shows.redact(&notice, |n| out = Some((n.chat.to_owned(), n.name.to_owned(), n.icon.to_owned(), n.note.sender.clone(), n.note.text.clone(), n.note.mention)));
+            out.unwrap()
+        };
+        let full = |name: &str, icon: &str, sender: &str, text: &str| ("!a:x".to_owned(), name.to_owned(), icon.to_owned(), sender.to_owned(), text.to_owned(), true);
+        assert_eq!(seen(NotifyShows::NameAndText), full("Book club", "/pic.png", "Ann", "secret"));
+        assert_eq!(seen(NotifyShows::NameOnly), full("Book club", "/pic.png", "Ann", "New message"));
+        assert_eq!(seen(NotifyShows::Nothing), full("Unisend", "", "Unisend", "New message"));
     }
 
     #[test]

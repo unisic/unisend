@@ -308,7 +308,8 @@ pub(crate) async fn serve(dir: PathBuf) {
                     }
                     // Earlier messages of one sync only add their lines: the last one posts them all.
                     if alert && let Some(entry) = shown.get(&chat) {
-                        let locked = locked();
+                        // Showing nothing reads as the lock does: "New message" under the app's name, no buttons.
+                        let locked = locked() || crate::NotifyShows::current() == crate::NotifyShows::Nothing;
                         let text = entry.text(sink.markup(), locked);
                         sink.post(entry, &text, alert, !locked).await;
                     }

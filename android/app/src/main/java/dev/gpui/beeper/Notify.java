@@ -73,6 +73,12 @@ public final class Notify {
         }
     };
 
+    /** What a notification shows, as Settings chose: {@code NotifyShows} in the native library. */
+    private static final int SHOW_ALL = 0;
+    private static final int SHOW_NOTHING = 2;
+    /** The choice the last message came with, for lines added after a reply. */
+    private static volatile int shows = SHOW_ALL;
+
     private Notify() {}
 
     /** Set by the native library when it is loaded; these run in the app's process. */
@@ -118,8 +124,9 @@ public final class Notify {
         Notification n = shown.getNotification();
         NotificationCompat.MessagingStyle style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n);
         if (style != null) {
-            post(context, manager, shown.getTag(), text(n, Notification.EXTRA_TITLE), n.getChannelId(), cached(shown.getTag()), style,
-                    text(n, Notification.EXTRA_TEXT), n.when, false);
+            boolean bare = n.getShortcutId() == null;
+            post(context, manager, shown.getTag(), text(n, Notification.EXTRA_TITLE), n.getChannelId(), bare ? null : cached(shown.getTag()), style,
+                    text(n, Notification.EXTRA_TEXT), n.when, false, bare);
         }
     }
 
@@ -174,6 +181,17 @@ public final class Notify {
         activity.stopService(new Intent(activity, SyncService.class));
     }
 
+    /** Settings changed what notifications show: the chats' ones, which may show more, go. */
+    public static void forget(Activity activity) {
+        NotificationManager manager = activity.getSystemService(NotificationManager.class);
+        for (StatusBarNotification shown : manager.getActiveNotifications()) {
+            // The connection's notice has no tag; the chats and their summary have one.
+            if (shown.getTag() != null) {
+                manager.cancel(shown.getTag(), shown.getId());
+            }
+        }
+    }
+
     /** Signed out: no background connection, no notifications, and no chats left in share sheets or the launcher. */
     public static void stop(Activity activity) {
         disconnect(activity);
@@ -222,14 +240,17 @@ public final class Notify {
     /**
      * Adds a message to the chat's conversation notification. {@code alert} is false for all but
      * the last of messages that arrive together, so they make one sound. {@code icon} is the path
-     * of the chat's picture, or empty; without one the chat's {@code initials} stand in.
+     * of the chat's picture, or empty; without one the chat's {@code initials} stand in. {@code show}
+     * is what Settings let it show; the native side has already put "New message" for the text.
      */
     public static void message(Context any, String chat, String name, boolean group, String sender,
-            String text, long time, boolean mention, String icon, String initials, boolean alert) {
+            String text, long time, boolean mention, String icon, String initials, boolean alert, int show) {
         Context context = any.getApplicationContext();
         channels(context);
-        Bitmap picture = icon.isEmpty() ? cached(chat) : load(chat, icon);
-        if (picture == null) {
+        shows = show;
+        boolean bare = show == SHOW_NOTHING;
+        Bitmap picture = bare ? null : icon.isEmpty() ? cached(chat) : load(chat, icon);
+        if (picture == null && !bare) {
             picture = initials(context, initials);
             synchronized (icons) {
                 icons.put(chat, picture);
@@ -238,10 +259,13 @@ public final class Notify {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         // A conversation notification needs its chat's shortcut at every post, and Share.publish may
         // have replaced it since the last one; Android's guidance is a push per message anyway.
-        try {
-            ShortcutManagerCompat.pushDynamicShortcut(context, Share.shortcut(context, chat, name, picture, 0));
-        } catch (IllegalStateException | IllegalArgumentException e) {
-            Log.w("Notify", "conversation shortcut", e);
+        // Showing nothing has no conversation: its shortcut would name the chat.
+        if (!bare) {
+            try {
+                ShortcutManagerCompat.pushDynamicShortcut(context, Share.shortcut(context, chat, name, picture, 0));
+            } catch (IllegalStateException | IllegalArgumentException e) {
+                Log.w("Notify", "conversation shortcut", e);
+            }
         }
         // In a one-to-one chat the picture is the sender's; in a group it is the chat's.
         Person person = new Person.Builder().setName(sender).setKey(sender).build();
@@ -256,7 +280,7 @@ public final class Notify {
         boolean mentioned = mention || (active(manager, chat) != null
                 && MENTIONS.equals(active(manager, chat).getNotification().getChannelId()));
         String channel = mentioned ? MENTIONS : group ? GROUPS : MESSAGES;
-        post(context, manager, chat, name, channel, picture, style, text, time, alert);
+        post(context, manager, chat, name, channel, picture, style, text, time, alert, bare);
         summarize(context, manager, chat, true);
     }
 
@@ -289,6 +313,10 @@ public final class Notify {
             return;
         }
         long now = System.currentTimeMillis();
+        if (shows != SHOW_ALL) {
+            text = context.getString(R.string.new_message);
+        }
+        boolean bare = shown.getNotification().getShortcutId() == null;
         NotificationCompat.MessagingStyle.Message line = new NotificationCompat.MessagingStyle.Message(text, now,
                 mine ? old.getUser() : new Person.Builder().setName("Unisend").setKey("beeper").build());
         NotificationCompat.MessagingStyle style = extend(context, old, old.getConversationTitle() == null ? null
@@ -296,7 +324,7 @@ public final class Notify {
         Bundle extras = shown.getNotification().extras;
         CharSequence title = extras.getCharSequence(Notification.EXTRA_TITLE);
         post(context, manager, chat, title == null ? "" : title.toString(), shown.getNotification().getChannelId(),
-                cached(chat), style, line.getText().toString(), now, false);
+                bare ? null : cached(chat), style, line.getText().toString(), now, false, bare);
     }
 
     /** Marks the chat read from its notification. */
@@ -343,7 +371,7 @@ public final class Notify {
     }
 
     private static void post(Context context, NotificationManager manager, String chat, String title, String channel,
-            Bitmap picture, NotificationCompat.MessagingStyle style, String last, long time, boolean alert) {
+            Bitmap picture, NotificationCompat.MessagingStyle style, String last, long time, boolean alert, boolean bare) {
         int code = chat.hashCode();
         Intent open = new Intent(context, activityClass(context))
                 .putExtra(EXTRA_CHAT, chat)
@@ -371,9 +399,14 @@ public final class Notify {
                 .setAutoCancel(true)
                 .setSilent(!alert)
                 .setContentIntent(tap)
-                .setShortcutId(chat)
                 .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-                .setPublicVersion(locked(context, channel))
+                .setPublicVersion(locked(context, channel));
+        // Showing nothing: no conversation and no buttons, as each would tell the chat or invite an answer blind.
+        if (bare) {
+            manager.notify(chat, 0, builder.build());
+            return;
+        }
+        builder.setShortcutId(chat)
                 .addAction(new NotificationCompat.Action.Builder(android.R.drawable.ic_menu_send, context.getString(R.string.reply), reply)
                         .addRemoteInput(input)
                         .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
