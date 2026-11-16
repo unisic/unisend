@@ -2352,6 +2352,8 @@ pub(crate) struct Note {
 const MAX_NOTES: usize = 6;
 /// How long to wait for a chat's picture before notifying without it.
 const ICON_WAIT: Duration = Duration::from_secs(3);
+/// How long a notification waits for the SDK to count an encrypted chat's new message as unread.
+const COUNT_WAIT: Duration = Duration::from_secs(3);
 
 /// The messages these new items call for a notification of, oldest first: those from someone else
 /// that the account's push rules ask to be notified of (they cover mutes and mentions-only chats).
@@ -2380,33 +2382,52 @@ fn announce(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, p
     if summary.unread == 0 && prev.is_some_and(|p| p.unread > 0) {
         crate::clear_notification(&crate::accounts::key(crate::accounts::slot_of(dir), summary.id.as_str()));
     }
+    let theirs = msgs.iter().filter(|m| !m.own).count();
     if on_screen(dir) {
+        if theirs > 0 {
+            log::debug!(target: "notify", "{theirs} new: the window shows the account");
+        }
         return;
     }
     let notes = notes(msgs, now_ms());
+    if notes.is_empty() {
+        if theirs > 0 {
+            let flagged = msgs.iter().filter(|m| !m.own && m.notify).count();
+            let locked = msgs.iter().filter(|m| !m.own && m.undecryptable).count();
+            log::debug!(target: "notify", "{theirs} new, {flagged} notify by push rules, {locked} undecryptable, none recent");
+        }
+        return;
+    }
     // Read on another device already. The server cannot count a mention in an encrypted chat that
     // notifies of mentions only, so a mention is not judged by the count.
     let mention = notes.iter().any(|n| n.mention);
     let waiting = move |r: &RoomSummary| r.is_unread() || mention;
-    if notes.is_empty() || !waiting(summary) {
-        return;
-    }
     show_notes(client, dir, rooms, summary, notes, waiting);
 }
 
 /// Shows the notes as the chat's notification while `waiting` still holds for it.
-fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, notes: Vec<Note>, waiting: impl Fn(&RoomSummary) -> bool + Send + 'static) {
+fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, notes: Vec<Note>, waiting: impl Fn(&RoomSummary) -> bool + Send + Sync + 'static) {
     let (client, dir, rooms, summary) = (client.clone(), dir.to_owned(), rooms.clone(), summary.clone());
     let generation = media_generation();
     // Off the sync loop: the picture may have to be fetched.
     tokio::spawn(async move {
         let file = tokio::time::timeout(ICON_WAIT, notification_icon(&client, &dir, &summary.id, generation)).await.ok().flatten();
         let icon = file.as_deref().and_then(Path::to_str).unwrap_or_default();
+        // An encrypted chat's count is the SDK's, worked out after the sync loop has summed the chat
+        // up: a new message there counts as unread only once the SDK has caught up.
+        let unread = || rooms.lock().unwrap().get(&summary.id).is_some_and(&waiting) || counted(&client, &summary.id);
+        let deadline = tokio::time::Instant::now() + COUNT_WAIT;
+        while !unread() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         {
             // Under the lock a sign-out moves the generation on with: nothing is shown after it.
             let current = MEDIA.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             // The chat may have been read while the picture was on its way.
-            let still = rooms.lock().unwrap().get(&summary.id).is_some_and(waiting);
+            let still = unread();
+            if !still {
+                log::debug!(target: "notify", "not shown: read already");
+            }
             if *current == generation && still {
                 let chat = crate::accounts::key(crate::accounts::slot_of(&dir), summary.id.as_str());
                 for (n, note) in notes.iter().enumerate() {
@@ -2423,6 +2444,14 @@ fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary,
             let _ = std::fs::remove_file(file);
         }
     });
+}
+
+/// Whether the SDK counts unread messages that notify in this chat, where its count is the one used.
+fn counted(client: &Client, id: &RoomId) -> bool {
+    client.get_room(id).is_some_and(|room| {
+        let receipts = room.read_receipts();
+        room.encryption_state().is_encrypted() && receipts.latest_active.is_some() && receipts.num_notifications > 0
+    })
 }
 
 /// Notifies of a new invitation once, unless the account's push rules turned invitations off.
