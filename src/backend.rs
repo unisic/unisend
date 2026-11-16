@@ -2269,7 +2269,6 @@ fn video_thumbnail(path: &Path) -> Option<caption::Prepared> {
 }
 
 /// One message to put in a chat's notification.
-#[cfg_attr(not(target_os = "android"), expect(dead_code, reason = "only Android shows notifications"))]
 pub(crate) struct Note {
     pub sender: String,
     pub text: String,
