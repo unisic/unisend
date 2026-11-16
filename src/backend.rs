@@ -2523,7 +2523,7 @@ struct Done {
 
 /// Clears the unread state. A private receipt does that without telling the other side, or the
 /// bridged network, that the message was read. The read marker moves with it, so the chat opens
-/// again without "New messages".
+/// again without the unread line.
 /// Nothing is sent before the user takes the chat: an invitation or a message request is not
 /// told it was seen.
 async fn mark_read(room: &Room, newest: Option<OwnedEventId>, private: bool) -> Result<()> {

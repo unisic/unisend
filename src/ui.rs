@@ -2508,7 +2508,7 @@ impl BeeperApp {
                             }),
                     )
                     .children(this.selection_mark(m, cx));
-                let row = if this.place.unread.as_ref() == Some(&m.id) { v_flex().w_full().child(Self::unread_line(cx)).child(row) } else { row };
+                let row = if this.place.unread.as_ref() == Some(&m.id) { v_flex().w_full().child(Self::unread_line(this.place.unread_count, cx)).child(row) } else { row };
                 // A list lays its items out across its full width, ignoring side padding, so each row keeps the column itself.
                 let row = div().w_full().px(px(column)).child(row);
                 match arriving {
@@ -2837,10 +2837,10 @@ impl BeeperApp {
             .child(list)
             .into_any_element()
     }
-    fn unread_line(cx: &App) -> Div {
+    fn unread_line(n: usize, cx: &App) -> Div {
         let p = Palette::of(cx);
         let rule = || div().h(px(1.)).flex_1().bg(p.rule);
-        h_flex().w_full().px(px(GUTTER)).pt(px(GAP)).gap(px(8.)).items_center().text_size(fs(12.)).text_color(p.accent_ink).child(rule()).child(t!("New messages")).child(rule())
+        h_flex().w_full().px(px(GUTTER)).pt(px(GAP)).gap(px(8.)).items_center().text_size(fs(12.)).text_color(p.accent_ink).child(rule()).child(tn!(n, "{n} unread message", "{n} unread messages")).child(rule())
     }
 
     /// A row that is not a message: a day, a line about the chat. The SDK's read marker draws
