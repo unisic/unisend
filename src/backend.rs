@@ -253,6 +253,9 @@ pub enum Ev {
     Paged { room: OwnedRoomId, more: bool },
     /// Who is writing in the open conversation right now.
     Typing { room: OwnedRoomId, names: Vec<String> },
+    /// Who is writing in any chat, for its row in the list: from the typing notices every sync
+    /// already carries. Empty once they stop.
+    ListTyping { room: OwnedRoomId, names: Vec<String> },
     /// How far the user has read the open conversation, and how far others can see that.
     OwnRead { room: OwnedRoomId, read: OwnRead },
     /// Thumbnail bytes as served (PNG, JPEG, ...).
@@ -384,6 +387,12 @@ pub struct RoomSummary {
     /// The room was upgraded: the room that replaces it.
     #[serde(default)]
     pub moved_to: Option<OwnedRoomId>,
+    /// The preview is the user's own message.
+    #[serde(default)]
+    pub own_last: bool,
+    /// Who has read that message, as their public receipts on it say; a few, named.
+    #[serde(default)]
+    pub read_by: Vec<(OwnedUserId, String)>,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -1115,6 +1124,7 @@ impl State {
         self.tasks = vec![tokio::spawn(watch_recovery(client.clone(), self.ev.clone())), self.sync_task(&client, &notif)];
         self.notif = Some(notif);
         self.verify.listen(&client, &self.ev);
+        list_typing(&client, &self.ev);
         search::start(&self.dir, &client, &self.seal);
         let user = client.user_id().map(ToOwned::to_owned);
         self.client = Some(client);
@@ -2401,6 +2411,8 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>) -> RoomSummary {
         dated: true,
         pending: Some(Pending::Invite { by, name: inviter }),
         moved_to: None,
+        own_last: false,
+        read_by: Vec::new(),
     }
 }
 
@@ -2737,7 +2749,49 @@ async fn summarize(
     s.archived = is_done(&done, &s, now_ms());
     s.pending = request(room).await.then_some(Pending::Request);
     s.moved_to = room.successor_room().map(|next| next.room_id);
+    if s.own_last && let Some(id) = s.preview_id.as_deref().and_then(|id| EventId::parse(id).ok()) {
+        s.read_by = readers(room, &id).await;
+    }
     s
+}
+
+/// Readers named in a chat row's status, at most.
+const ROW_READERS: usize = 3;
+
+/// Who has read an event, by the public receipts the store holds on it. No network.
+// shortcut: a receipt already moved past the event (onto a reaction or a state event) is not seen
+// here, so such a chat shows Sent; walk the newer events if that shows up in practice.
+async fn readers(room: &Room, event: &EventId) -> Vec<(OwnedUserId, String)> {
+    use matrix_sdk::ruma::events::receipt::{ReceiptThread, ReceiptType};
+    let own = room.own_user_id();
+    let service = room.service_members().unwrap_or_default();
+    let mut out = Vec::new();
+    let receipts = room.load_event_receipts(ReceiptType::Read, &ReceiptThread::Unthreaded, event).await.unwrap_or_default();
+    for (user, _) in receipts.into_iter().filter(|(u, _)| u != own && !service.contains(u)).take(ROW_READERS) {
+        let name = display_name(room, &user).await;
+        out.push((user, name));
+    }
+    out
+}
+
+/// Names shown typing in a chat row, at most.
+const ROW_TYPING: usize = 3;
+
+/// Tells the list who is writing in every chat, from the typing notices syncs bring anyway.
+fn list_typing(client: &Client, ev: &mpsc::Sender<Ev>) {
+    let ev = ev.clone();
+    client.add_event_handler(move |e: matrix_sdk::ruma::events::typing::SyncTypingEvent, room: Room| {
+        let ev = ev.clone();
+        async move {
+            let own = room.own_user_id().to_owned();
+            let service = room.service_members().unwrap_or_default();
+            let mut names = Vec::new();
+            for user in e.content.user_ids.iter().filter(|u| **u != own && !service.contains(*u)).take(ROW_TYPING) {
+                names.push(display_name(&room, user).await);
+            }
+            let _ = ev.send(Ev::ListTyping { room: room.room_id().to_owned(), names }).await;
+        }
+    });
 }
 
 /// A chat's unread messages that notify, and its mentions among them. In an encrypted chat the
@@ -2927,6 +2981,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 dated,
                 pending: None,
                 moved_to: None,
+                own_last: amended.or(msgs.last()).map(|m| m.own).or_else(|| prev.as_ref().map(|p| p.own_last)).unwrap_or(false),
+                read_by: Vec::new(),
             };
             let mut summary = summarize(&room, &notif, peer, seen).await;
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);

@@ -257,6 +257,8 @@ pub struct BeeperApp {
     msgs: Vec<Msg>,
     /// Who is writing in the open conversation.
     typing: Vec<String>,
+    /// Who is writing in each chat, for the list; one entry per chat someone writes in, gone when they stop.
+    list_typing: HashMap<OwnedRoomId, Vec<String>>,
     /// How far the user has read the open chat, publicly and at all.
     own_read: OwnRead,
     /// Someone else's message whose status line a tap showed.
@@ -578,6 +580,7 @@ impl BeeperApp {
             open: None,
             msgs: Vec::new(),
             typing: Vec::new(),
+            list_typing: HashMap::new(),
             own_read: OwnRead::default(),
             tapped: None,
             typing_last: SharedString::default(),
@@ -806,6 +809,7 @@ impl BeeperApp {
                 self.publish_share_targets();
             }
             Ev::RoomGone(id) => {
+                self.list_typing.remove(&id);
                 self.rooms.retain(|r| r.id != id);
                 self.refilter(cx);
                 if self.open.as_ref() == Some(&id) {
@@ -881,6 +885,13 @@ impl BeeperApp {
                         // The last page's rows can arrive after this; they are looked through then.
                         self.seek = Some((id, 0));
                     }
+                }
+            }
+            Ev::ListTyping { room, names } => {
+                if names.is_empty() {
+                    self.list_typing.remove(&room);
+                } else {
+                    self.list_typing.insert(room, names);
                 }
             }
             Ev::Typing { room, names } => {
@@ -1923,7 +1934,7 @@ impl BeeperApp {
                                                             .child(div().flex_none().text_color(p.faint).child(t!("Draft:")))
                                                             .child(div().flex_1().min_w_0().truncate().child(crate::emoji::styled(draft.replace('\n', " "), Vec::new())))
                                                             .into_any_element(),
-                                                        (None, None) => crate::emoji::styled(preview.unwrap_or(t!("Message")).to_owned(), Vec::new()).into_any_element(),
+                                                        (None, None) => this.row_preview(room, preview, cx),
                                                     }),
                                             )
                                             .when(room.pinned, |el| el.child(mark(IconName::Pin)))
@@ -4468,6 +4479,8 @@ mod tests {
             dated: true,
             pending,
             moved_to: moved_to.map(|m| m.try_into().unwrap()),
+            own_last: false,
+            read_by: Vec::new(),
         };
         let old = room("!old:x", Some("!new:x"), None);
         assert!(!replaced(std::slice::from_ref(&old), &old));

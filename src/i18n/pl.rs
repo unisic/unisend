@@ -640,6 +640,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("the login is already complete", "logowanie jest już zakończone"),
     ("the network", "sieci"),
     ("this app does not know the login step {step}", "ta aplikacja nie zna kroku logowania {step}"),
+    ("typing…", "pisze…"),
     ("you@example.com", "ty@example.com"),
     ("{actor} changed the description", "{actor} zmienił(a) opis"),
     ("{actor} changed the name to “{name}”", "{actor} zmienił(a) nazwę na „{name}”"),

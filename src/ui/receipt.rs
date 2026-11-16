@@ -249,6 +249,40 @@ impl BeeperApp {
     }
 }
 
+impl BeeperApp {
+    /// The state of the user's own last message, before its preview in the chat list. A row says
+    /// only what the sync holds: sent, or read by whom; a bridge's delivery shows inside the chat.
+    pub(super) fn row_mark(&self, room: &RoomSummary, cx: &App) -> Option<AnyElement> {
+        if !room.own_last {
+            return None;
+        }
+        let receipt = if !room.read_by.is_empty() {
+            Receipt::Seen { group: !room.dm, readers: room.read_by.clone() }
+        } else if room.network.is_none() {
+            Receipt::Sent
+        } else {
+            // On another network it is sent once the bridge says so, which the list does not hear.
+            return None;
+        };
+        // Words do not fit before a one-line preview: the Text style shows ticks here.
+        let style = match self.settings.receipts {
+            ReceiptStyle::Text => ReceiptStyle::Ticks,
+            style => style,
+        };
+        let p = Palette::of(cx);
+        let el = match mark(&receipt, style)? {
+            Mark::Glyph { glyph, read } => glyph_el(glyph, if read { p.text } else { p.faint }, p.ground),
+            Mark::Faces(readers, more) => h_flex()
+                .gap(px(2.))
+                .children(readers.iter().map(|(user, name)| avatar(name, self.faces.get(user), fs(14.) / px(1.), cx)))
+                .when(more > 0, |el| el.child(div().text_color(p.faint).child(format!("+{more}"))))
+                .into_any_element(),
+            Mark::Words(_) | Mark::Failed { .. } => return None,
+        };
+        Some(div().id("row-receipt").flex_none().role(Role::Image).aria_label(receipt.words()).child(el).into_any_element())
+    }
+}
+
 /// Lucide's stroke at the size of 12 px text; the filled ones are its circle, filled, with the
 /// ticks in the ground's colour.
 fn glyph_el(glyph: Glyph, ink: Hsla, ground: Hsla) -> AnyElement {
