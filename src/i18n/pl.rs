@@ -286,8 +286,6 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Low priority", "Niski priorytet"),
     ("Mark as read", "Oznacz jako przeczytane"),
     ("Mark as unread", "Oznacz jako nieprzeczytane"),
-    ("Mark read", "Przeczytane"),
-    ("Mark unread", "Do przeczytania"),
     ("Media", "Multimedia"),
     ("Media that can be viewed once cannot be forwarded", "Multimediów do jednorazowego wyświetlenia nie można przekazać"),
     ("Mentions only", "Tylko wzmianki"),
