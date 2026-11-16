@@ -95,7 +95,6 @@ pub(super) struct MessageMenu {
 /// A mouse button held on a message, which becomes a long press unless it moves or lets go.
 pub(super) struct Press {
     id: String,
-    bubble: Bounds<Pixels>,
     at: Point<Pixels>,
     since: Instant,
 }
@@ -393,21 +392,21 @@ impl BeeperApp {
     }
 
     /// A mouse button went down on a message: a long press unless it moves or lets go first.
-    fn press_start(&mut self, id: String, bubble: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
+    fn press_start(&mut self, id: String, at: Point<Pixels>, cx: &mut Context<Self>) {
         // One still fading out must not swallow the next press.
         if self.menu_open() {
             return;
         }
         let since = Instant::now();
-        self.press = Some(Press { id, bubble, at, since });
+        self.press = Some(Press { id, at, since });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(LONG_PRESS).await;
             let _ = this.update(cx, |this, cx| {
                 // Still the same press: one let go and pressed again has its own timer.
                 if let Some(press) = this.press.take_if(|p| p.since == since) {
-                    // The lift takes over from the press's tint.
                     this.bubble_press = None;
-                    this.open_menu(press.id, MenuKind::Touch, press.at, Some(press.bubble), true, cx);
+                    // A held mouse button: the list opens where it is, as for the right button.
+                    this.open_menu(press.id, MenuKind::List, press.at, None, false, cx);
                 }
             });
         })
@@ -527,7 +526,7 @@ impl BeeperApp {
                     let (weak, id, hitbox) = (weak.clone(), id.clone(), hitbox.clone());
                     move |e: &MouseDownEvent, phase, window, cx| {
                         if phase.bubble() && e.button == MouseButton::Left && hitbox.is_hovered(window) {
-                            let _ = weak.update(cx, |this, cx| this.press_start(id.clone(), rest, e.position, cx));
+                            let _ = weak.update(cx, |this, cx| this.press_start(id.clone(), e.position, cx));
                         }
                     }
                 });
