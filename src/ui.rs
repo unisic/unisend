@@ -3521,7 +3521,7 @@ fn chat_actions(room: &RoomSummary) -> [(&'static str, IconName, ChatAction); 5]
         if room.muted {
             (t!("Unmute"), IconName::Bell, ChatAction::Mute(RoomNotificationMode::AllMessages))
         } else {
-            (t!("Mute"), IconName::BellOff, ChatAction::Mute(RoomNotificationMode::Mute))
+            (t!("Mute"), IconName::BellOff, ChatAction::Mute(mute::MUTE))
         },
         if room.archived {
             (t!("Unarchive"), IconName::ArchiveRestore, ChatAction::Archive(false))
@@ -4332,7 +4332,6 @@ mod tests {
             pinned: false,
             low_priority: false,
             muted: false,
-            mentions_only: false,
             marked_unread: false,
             archived: false,
             order: 0,

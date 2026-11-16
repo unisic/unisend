@@ -1,6 +1,6 @@
-//! Muting a chat as Signal offers it: for an hour, eight hours, a day, a week or for good, and in a
-//! group, mentions only. The mode is the room's push rules, so other Matrix clients agree; Matrix
-//! has no end time, so the end of a timed mute is kept in `settings.json` and one timer lifts it.
+//! Muting a chat as Signal offers it: for an hour, eight hours, a day, a week or for good. The mode
+//! is the room's push rules, so other Matrix clients agree; Matrix has no end time, so the end of a
+//! timed mute is kept in `settings.json` and one timer lifts it.
 
 use super::*;
 use super::disappear::timer_row;
@@ -11,6 +11,10 @@ use std::collections::BTreeMap;
 const MAX_TIMED: usize = 256;
 
 const HOUR_MS: u64 = 3_600_000;
+
+/// A mute as Beeper's apps write and read it: a room rule without a notify action. Mentions still
+/// notify through the server's override rules, as in Signal's muted groups by default.
+pub(super) const MUTE: RoomNotificationMode = RoomNotificationMode::MentionsAndKeywordsOnly;
 
 fn now_ms() -> u64 {
     Local::now().timestamp_millis().max(0) as u64
@@ -67,13 +71,10 @@ impl BeeperApp {
         });
     }
 
-    /// The chat's mute in words: "Muted until 14:30", "Mentions only", "Muted"; `None` when it notifies.
+    /// The chat's mute in words: "Muted until 14:30" or "Muted"; `None` when it notifies.
     pub(super) fn mute_state(&self, room: &RoomSummary) -> Option<String> {
         if !room.muted {
             return None;
-        }
-        if room.mentions_only {
-            return Some(t!("Mentions only").to_owned());
         }
         Some(match self.settings.mute_until.get(&room.id).and_then(|&at| local(at)) {
             Some(t) if t.date_naive() == Local::now().date_naive() => t!("Muted until {time}", time = t.format("%H:%M")),
@@ -82,37 +83,44 @@ impl BeeperApp {
         })
     }
 
-    /// The sheet's choices for muting the chat: how long, and in a group, mentions only.
+    /// The sheet's choices for muting the chat: how long; a group's says that mentions still notify.
     pub(super) fn mute_sheet(&self, room: &RoomSummary, live: bool, cx: &mut Context<Self>) -> (String, Vec<Stateful<Div>>) {
-        let mut choices = vec![
+        let choices = [
             (t!("1 hour|mute"), Some(HOUR_MS)),
             (t!("8 hours|mute"), Some(8 * HOUR_MS)),
             (t!("1 day|mute"), Some(24 * HOUR_MS)),
             (t!("7 days|mute"), Some(7 * 24 * HOUR_MS)),
             (t!("Always"), None),
-        ]
-        .into_iter()
-        .map(|(label, ms)| (label, RoomNotificationMode::Mute, ms))
-        .collect::<Vec<_>>();
-        if !room.dm {
-            choices.push((t!("Mentions only"), RoomNotificationMode::MentionsAndKeywordsOnly, None));
-        }
-        let rows = choices
+        ];
+        let mut rows: Vec<_> = choices
             .into_iter()
             .enumerate()
-            .map(|(ix, (label, mode, ms))| {
+            .map(|(ix, (label, ms))| {
                 let row = timer_row(("mute-choice", ix), None, label, cx);
                 if !live {
                     return row;
                 }
                 let room = room.id.clone();
                 row.on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_mute(room.clone(), mode, ms, cx);
+                    this.set_mute(room.clone(), MUTE, ms, cx);
                     (this.chat_sheet, this.mute_picking) = (None, false);
                     cx.notify();
                 }))
             })
             .collect();
+        if !room.dm {
+            let p = Palette::of(cx);
+            rows.push(
+                h_flex()
+                    .id("mute-note")
+                    .h(px(SHEET_ROW_H))
+                    .px(px(GUTTER + 4.))
+                    .text_size(fs(13.))
+                    .line_height(fs(18.))
+                    .text_color(p.faint)
+                    .child(div().flex_1().min_w_0().child(t!("Mentions still notify."))),
+            );
+        }
         (t!("Mute for…").to_owned(), rows)
     }
 
@@ -120,7 +128,7 @@ impl BeeperApp {
     /// a sheet can, and unmuting forgets the mute's end.
     pub(super) fn chat_action(&mut self, room: OwnedRoomId, action: ChatAction, ask: bool, cx: &mut Context<Self>) -> bool {
         match action {
-            ChatAction::Mute(RoomNotificationMode::Mute) if ask => {
+            ChatAction::Mute(MUTE) if ask => {
                 self.chat_sheet = Some(room);
                 (self.mute_picking, self.disappear.picking) = (true, false);
                 self.info.member = None;

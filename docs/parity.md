@@ -29,7 +29,7 @@ is not started.
 | Inbox, Archive, Low Priority | done | `com.beeper.inbox.done` `{updated_ts, at_order}`, `m.lowpriority` tag |
 | Archive / unarchive, new message unarchives | done | same; rule mirrors Desktop's `isRoomDone` |
 | Pin / unpin, pins on top | part | `m.favourite` tag; manual order (`com.beeper.favourites_order`) todo |
-| Mute / unmute | done | for 1 hour, 8 hours, 1 day, 7 days or always (override push rule without notify, Element's mute); groups also "Mentions only" (room rule without notify, what Beeper's mute writes, shown as such). Matrix keeps no end: a timed mute's end is kept in `settings.json` (at most 256) and one timer lifts it, rechecked once synced and when the window returns. Chat info says "Muted until 14:30" |
+| Mute / unmute | done | for 1 hour, 8 hours, 1 day, 7 days or always, written as Beeper's apps write a mute: a room push rule without notify, so mentions still notify (the sheet says so in groups). An override rule without notify (Element's mute) also reads as muted; unmute removes both. Matrix keeps no end: a timed mute's end is kept in `settings.json` (at most 256) and one timer lifts it, rechecked once synced and when the window returns. Chat info says "Muted until 14:30" |
 | Mark read / unread | done | `m.marked_unread`, `m.read.private` receipt |
 | Unread counts | done | server notification counts |
 | Search chats by name | part | names, and a Messages section with hits from every chat (local index, below). Beeper also searches contacts and networks |
@@ -162,5 +162,5 @@ them was taken from its desktop bundle, and the state events were checked agains
   `com.beeper.mark_read_when_archive` is `{enabled: false}` (Desktop also
   gates that setting on a feature flag, which this client does not read).
 - Pin: tag `m.favourite` (order 1). Low priority: tag `m.lowpriority` (order 0).
-- Mute: a push rule of kind `override` (conditions: the room id) whose actions do not notify; mentions only: a rule of kind `room` without notify. Both as matrix-sdk's `RoomNotificationMode` writes them.
+- Mute: a push rule of kind `room` (id: the room id) whose actions do not notify (`[]` or `["dont_notify"]`), matrix-sdk's `MentionsAndKeywordsOnly`. Checked read-only on a live Beeper account: every mute there was such a rule, none an override rule.
 - Marked unread: `m.marked_unread` `{unread}`.
