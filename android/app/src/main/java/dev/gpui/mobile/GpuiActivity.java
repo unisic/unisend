@@ -7,9 +7,11 @@ import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.media.AudioManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.KeyEvent;
+import android.view.WindowInsets;
 
 import androidx.core.splashscreen.SplashScreen;
 
@@ -74,6 +76,30 @@ public class GpuiActivity extends GpuiInputActivity {
         super.onCreate(savedInstanceState);
         dev.gpui.beeper.AppLock.onCreate(this);
         dev.gpui.beeper.Lang.configured(this, getResources().getConfiguration());
+        // Runs after every layout pass, which a change of insets brings; NativeActivity's own
+        // listener reports only a content rect, and gpui-mobile does not repaint for it.
+        getWindow().getDecorView().getViewTreeObserver().addOnGlobalLayoutListener(this::publishInsets);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) publishInsets();
+    }
+
+    private int publishedBottom = -1;
+
+    /** Tells src/lib.rs the bottom inset, the keyboard or the navigation bar, whichever is taller. */
+    private void publishInsets() {
+        WindowInsets insets = getWindow().getDecorView().getRootWindowInsets();
+        if (insets == null) return;
+        int bottom = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                ? insets.getInsets(WindowInsets.Type.navigationBars() | WindowInsets.Type.ime()).bottom
+                // Before Android 11, with adjustResize, the keyboard is part of the system window insets.
+                : insets.getSystemWindowInsetBottom();
+        if (bottom == publishedBottom) return;
+        publishedBottom = bottom;
+        nativeInsets(bottom);
     }
 
     /** The manifest keeps the activity through a change of language, so the app redraws in place. */
@@ -193,4 +219,6 @@ public class GpuiActivity extends GpuiInputActivity {
      * JNI bridge to notify Rust of an incoming deeplink URL.
      */
     private static native void nativeOnDeepLink(String url);
+
+    private static native void nativeInsets(int bottom);
 }
