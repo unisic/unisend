@@ -3029,6 +3029,10 @@ async fn display_name(room: &Room, user: &UserId) -> String {
 
 /// The other person in a one-to-one chat. Bridged DMs also hold a bridge bot, listed as a service member.
 async fn other_person(room: &Room) -> Option<OwnedUserId> {
+    let marked = room.is_direct().await.unwrap_or(false);
+    if !marked && !one_to_one(bridge_kind(room).await, room.name().is_some()) {
+        return None;
+    }
     let own = room.own_user_id();
     let service = room.service_members().unwrap_or_default();
     // Lazy loading leaves most members unloaded, so the size comes from the room summary.
@@ -3054,6 +3058,34 @@ pub(crate) async fn request(room: &Room) -> bool {
         let content: Option<serde_json::Value> = raw.get_field("content").ok().flatten();
         content.and_then(|c| c.get("channel")?.get("com.beeper.message_request")?.as_bool()).unwrap_or(false)
     })
+}
+
+/// Whether a chat not marked one-to-one in `m.direct` may still be one, before its members are
+/// counted. `bridge` is its bridge's word on the kind of chat (`Some(None)`: bridged, kind not
+/// told); a chat no bridge made is a group once it has a name, even with two people in it.
+fn one_to_one(bridge: Option<Option<String>>, named: bool) -> bool {
+    match bridge {
+        Some(Some(kind)) => kind == "dm",
+        // Older bridges name a one-to-one chat after the person and do not say what it is.
+        Some(None) => true,
+        None => !named,
+    }
+}
+
+/// The kind of chat as its bridge tells it (`com.beeper.room_type.v2`, else the older
+/// `com.beeper.room_type`, which says "dm" for groups of people too); `None` when no bridge made it.
+async fn bridge_kind(room: &Room) -> Option<Option<String>> {
+    let events = room.get_state_events(StateEventType::from("m.bridge")).await.ok()?;
+    let contents: Vec<serde_json::Value> = events
+        .iter()
+        .filter_map(|e| match e {
+            RawAnySyncOrStrippedState::Sync(raw) => raw.get_field("content").ok().flatten(),
+            // An invitation holds the state stripped.
+            RawAnySyncOrStrippedState::Stripped(raw) => raw.get_field("content").ok().flatten(),
+        })
+        .collect();
+    let kind = |key: &str| contents.iter().find_map(|c| c.get(key)?.as_str().map(ToOwned::to_owned));
+    (!contents.is_empty()).then(|| kind("com.beeper.room_type.v2").or_else(|| kind("com.beeper.room_type")))
 }
 
 /// The bridge's protocol id for the chat (`signal`, `whatsapp`), from `m.bridge`.

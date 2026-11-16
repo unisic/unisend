@@ -810,6 +810,16 @@ async fn errors_on_start_delete_nothing() {
 }
 
 #[test]
+fn named_groups_of_two_are_not_one_to_one() {
+    let kind = |k: &str| Some(Some(k.to_owned()));
+    assert!(!one_to_one(None, true), "a named chat of two people no bridge made");
+    assert!(one_to_one(None, false), "an unnamed chat of two");
+    assert!(one_to_one(kind("dm"), true), "a bridged one-to-one chat named after the person");
+    assert!(!one_to_one(kind("group_dm"), true) && !one_to_one(kind(""), false));
+    assert!(one_to_one(Some(None), true), "an older bridge that does not tell the kind");
+}
+
+#[test]
 fn old_downloads_are_swept() {
     let dir = std::env::temp_dir().join(format!("beeper-gpui-media-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
