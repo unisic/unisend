@@ -4,6 +4,7 @@
 // The matrix-sdk futures nested in the command handler exceed the default layout query depth.
 #![recursion_limit = "256"]
 
+mod accounts;
 mod applock;
 mod backend;
 mod beeper;
@@ -126,10 +127,20 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     cx.set_global(settings.theme);
     cx.set_global(settings.chat_colour);
     sync_theme(None, cx);
-    let (cmd, events) = backend::start(dir.clone());
+    let mut backends = vec![(0, backend::start(dir.clone()))];
+    for slot in accounts::added(&dir) {
+        let at = accounts::dir(&dir, slot);
+        if vault::signed_in(&at) {
+            backends.push((slot, backend::start(at)));
+        } else if let Err(e) = std::fs::remove_dir_all(&at) {
+            // Left by a sign-in given up or a sign-out cut short.
+            log::warn!("unused account folder: {e}");
+        }
+    }
+    let accounts = ui::accounts::Accounts::new(backends, settings.account, &dir);
     #[cfg(not(target_os = "android"))]
     desktop::keep_running(settings.stay_connected);
-    let (window, app) = gpui_kit::open_window(window_options(window_bounds), cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, dir, settings, window, cx)))
+    let (window, app) = gpui_kit::open_window(window_options(window_bounds), cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(accounts, dir, settings, window, cx)))
         .expect("open main window");
     #[cfg(not(target_os = "android"))]
     {
@@ -359,6 +370,12 @@ pub(crate) struct Settings {
     /// When each chat muted for a time is unmuted, in ms since the epoch; Matrix keeps no end.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub mute_until: std::collections::BTreeMap<matrix_sdk::ruma::OwnedRoomId, u64>,
+    /// The same for the accounts added after the first, by their slot.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub mute_until_added: std::collections::BTreeMap<usize, std::collections::BTreeMap<matrix_sdk::ruma::OwnedRoomId, u64>>,
+    /// The account the window showed last, by slot.
+    #[serde(default)]
+    pub account: usize,
     /// What a message's notification shows.
     #[serde(default)]
     pub notify_shows: NotifyShows,
@@ -375,7 +392,16 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, receipts: Default::default(), incoming: Default::default(), mute_until: Default::default(), notify_shows: Default::default() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, receipts: Default::default(), incoming: Default::default(), mute_until: Default::default(), mute_until_added: Default::default(), account: 0, notify_shows: Default::default() })
+    }
+
+    /// The ends of the timed mutes of the account in `slot`.
+    pub(crate) fn mute_ends(&mut self, slot: usize) -> &mut std::collections::BTreeMap<matrix_sdk::ruma::OwnedRoomId, u64> {
+        if slot == 0 { &mut self.mute_until } else { self.mute_until_added.entry(slot).or_default() }
+    }
+
+    pub(crate) fn mute_ends_of(&self, slot: usize) -> Option<&std::collections::BTreeMap<matrix_sdk::ruma::OwnedRoomId, u64>> {
+        if slot == 0 { Some(&self.mute_until) } else { self.mute_until_added.get(&slot) }
     }
 
     fn parse(raw: &[u8]) -> Option<Self> {
@@ -965,6 +991,16 @@ pub(crate) fn clear_notifications() {
     }
     #[cfg(not(target_os = "android"))]
     notify::close_all();
+}
+
+/// Takes away the notifications of the account in `slot`, as it signed out.
+pub(crate) fn clear_account_notifications(slot: usize) {
+    #[cfg(target_os = "android")]
+    if let Err(e) = android_files::notify("forgetAccount", &[&slot.to_string()]) {
+        log::warn!("notifications: {e}");
+    }
+    #[cfg(not(target_os = "android"))]
+    notify::close_account(slot);
 }
 
 pub(crate) fn clear_notification(chat: &str) {

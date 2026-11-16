@@ -26,7 +26,7 @@ impl BeeperApp {
         if !self.send(Cmd::Chat(room.clone(), ChatAction::Mute(mode)), cx) {
             return false;
         }
-        let ends = &mut self.settings.mute_until;
+        let ends = self.settings.mute_ends(self.accounts.active());
         match for_ms {
             Some(ms) => remember(ends, room, now_ms() + ms),
             None if ends.remove(&room).is_none() => return true,
@@ -43,7 +43,7 @@ impl BeeperApp {
     pub(super) fn unmute_due(&mut self, send: bool, cx: &mut Context<Self>) {
         let now = now_ms();
         let rooms = &self.rooms;
-        let (lift, forget, next) = due(&self.settings.mute_until, now, |id| match rooms.iter().find(|r| &r.id == id) {
+        let (lift, forget, next) = due(self.settings.mute_ends_of(self.accounts.active()).unwrap_or(&BTreeMap::new()), now, |id| match rooms.iter().find(|r| &r.id == id) {
             Some(r) => Some(r.muted),
             // Before the list is read nothing is known; after, a chat missing from it is gone.
             None if rooms.is_empty() => Some(true),
@@ -59,7 +59,7 @@ impl BeeperApp {
         }
         if !forget.is_empty() {
             for room in &forget {
-                self.settings.mute_until.remove(room);
+                self.settings.mute_ends(self.accounts.active()).remove(room);
             }
             self.settings.save(&self.dir);
         }
@@ -76,7 +76,7 @@ impl BeeperApp {
         if !room.muted {
             return None;
         }
-        Some(match self.settings.mute_until.get(&room.id).and_then(|&at| local(at)) {
+        Some(match self.settings.mute_ends_of(self.accounts.active()).and_then(|ends| ends.get(&room.id)).and_then(|&at| local(at)) {
             Some(t) if t.date_naive() == Local::now().date_naive() => t!("Muted until {time}", time = t.format("%H:%M")),
             Some(t) => t!("Muted until {time}", time = format!("{}, {}", crate::i18n::date_short(&t), t.format("%H:%M"))),
             None => t!("Muted").to_owned(),

@@ -25,6 +25,7 @@ use crate::i18n::{n_, t, tn, tr};
 use tokio::sync::mpsc;
 
 pub(crate) mod appearance;
+pub(crate) mod accounts;
 mod camera;
 mod caption;
 pub(crate) use caption::video_frame;
@@ -424,7 +425,7 @@ pub struct BeeperApp {
     profile: profile::Ui,
     info: info::Info,
     _subs: Vec<Subscription>,
-    _events: Task<()>,
+    accounts: accounts::Accounts,
     /// Leaving chats and starting new ones.
     people: rooms::People,
     disappear: disappear::Disappear,
@@ -438,9 +439,8 @@ pub struct BeeperApp {
 }
 
 impl BeeperApp {
-    pub fn new(
-        cmd: mpsc::Sender<Cmd>,
-        mut events: mpsc::Receiver<Ev>,
+    pub(crate) fn new(
+        mut accounts: accounts::Accounts,
         dir: PathBuf,
         settings: crate::Settings,
         window: &mut Window,
@@ -571,17 +571,12 @@ impl BeeperApp {
             });
         });
 
-        let events = cx.spawn(async move |this, cx| {
-            while let Some(ev) = events.recv().await {
-                if this.update(cx, |this, cx| this.on_event(ev, cx)).is_err() {
-                    break;
-                }
-            }
-        });
+        accounts.listen(cx);
+        let cmd = accounts.cmd();
         let fwd = forward::Forward::new(window, cx);
 
         // Plain until the backend says otherwise: a sealed install has no plain drafts to find.
-        let drafts = navigate::Drafts::load(&dir, crate::vault::Seal::Plain);
+        let drafts = navigate::Drafts::load(&crate::accounts::dir(&dir, accounts.active()), crate::vault::Seal::Plain);
         Self {
             cmd,
             screen: Screen::Starting,
@@ -713,7 +708,7 @@ impl BeeperApp {
             profile,
             info: info::Info::default(),
             _subs: subs,
-            _events: events,
+            accounts,
             people: Default::default(),
             disappear: disappear::Disappear::default(),
             features: None,
@@ -736,14 +731,18 @@ impl BeeperApp {
             Ev::NeedLogin => {
                 // Signed out, here or by the server: the session is gone, and the app lock with it.
                 // A server sign-out skips the settings button, so the connection, notices and share targets end here too.
-                crate::background(false);
-                if !crate::vault::signed_in(&self.dir) {
-                    if self.settings.lock.mode != crate::applock::LockMode::Off {
+                // Another account signed in keeps them; an account being added is not signed in yet.
+                let alone = !self.accounts.others_signed_in();
+                if alone {
+                    crate::background(false);
+                }
+                if !crate::vault::signed_in(&self.account_dir()) {
+                    if alone && self.settings.lock.mode != crate::applock::LockMode::Off {
                         crate::applock::pin::clear(&self.dir);
                         self.set_lock(Some(crate::applock::LockMode::Off), None, None, cx);
                     }
                     // The backend removed the file; what is in memory must not write it back.
-                    self.drafts = navigate::Drafts::load(&self.dir, crate::vault::Seal::Plain);
+                    self.drafts = navigate::Drafts::load(&self.account_dir(), crate::vault::Seal::Plain);
                     self.unencrypted = false;
                 }
                 (self.panel, self.networks, self.user) = (None, None, None);
@@ -765,9 +764,9 @@ impl BeeperApp {
             Ev::Ready { user, beeper, seal } => {
                 self.beeper = beeper;
                 self.sync_stopped = false;
-                self.unencrypted = cfg!(target_os = "android") && crate::vault::layout(&self.dir) == crate::vault::Layout::Legacy;
+                self.unencrypted = cfg!(target_os = "android") && crate::vault::layout(&self.account_dir()) == crate::vault::Layout::Legacy;
                 if seal.sealed() {
-                    self.drafts = navigate::Drafts::load(&self.dir, seal);
+                    self.drafts = navigate::Drafts::load(&self.account_dir(), seal);
                 }
                 crate::background(true);
                 crate::stay_connected(self.settings.stay_connected);
@@ -872,7 +871,7 @@ impl BeeperApp {
                     self.fly.start(change, ROOM_ROW_H);
                 }
                 self.publish_share_targets();
-                if !self.settings.mute_until.is_empty() {
+                if self.settings.mute_ends_of(self.accounts.active()).is_some_and(|ends| !ends.is_empty()) {
                     self.unmute_due(false, cx);
                 }
             }
@@ -1243,6 +1242,7 @@ impl BeeperApp {
                 self.close_room(cx);
                 cx.notify();
             }
+        } else if self.screen == Screen::Email && self.leave_sign_in(window, cx) {
         } else {
             return false;
         }
@@ -1409,7 +1409,7 @@ impl BeeperApp {
         if paths.is_empty() && images.is_empty() {
             return false;
         }
-        let dir = self.dir.join(crate::backend::PASTED);
+        let dir = self.account_dir().join(crate::backend::PASTED);
         cx.spawn(async move |this, cx| {
             let saved = cx.background_spawn(async move { save_pasted(&dir, images) }).await;
             let _ = this.update(cx, |this, cx| this.attach_paths(paths.into_iter().chain(saved).collect(), cx));
@@ -1633,18 +1633,14 @@ impl BeeperApp {
 
     /// Opens the chat a tapped notification was for.
     pub(crate) fn open_from_notification(&mut self, cx: &mut Context<Self>) {
-        if self.screen != Screen::Main {
+        // Kept for later while the one account is not ready; another account's chat switches to it.
+        if self.screen != Screen::Main && !self.accounts.others_signed_in() {
             return;
         }
         let Some(chat) = crate::pending_chat() else { return };
-        match OwnedRoomId::try_from(chat) {
-            Ok(id) => {
-                self.panel = None;
-                self.chat_sheet = None;
-                self.slide.jump = true;
-                self.open_room(id, cx);
-                cx.notify();
-            }
+        let (slot, room) = crate::accounts::split(&chat);
+        match OwnedRoomId::try_from(room) {
+            Ok(id) => self.open_account_chat(slot, id, cx),
             Err(e) => log::warn!("notification chat: {e}"),
         }
     }
@@ -1763,6 +1759,7 @@ impl BeeperApp {
                             }),
                         ))
                     })
+                    .children(self.back_to_accounts(cx))
                     .children(self.error.clone().map(|e| div().text_size(fs(14.)).text_color(p.negative).child(e))),
             )
     }
@@ -4464,6 +4461,7 @@ impl Released {
 
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.switch_pending(window, cx);
         self.released.free(window, cx);
         let locked = self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked();
         // The chat left open behind the lock is read once the lock is passed, as an opening is.

@@ -18,6 +18,7 @@
 //! opens the file in one buffer and hands SQLite one copy, also 2x. One thread, idle while nothing
 //! arrives; a write is one transaction per batch, a query one FTS lookup ordered by time.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -29,7 +30,7 @@ use matrix_sdk::ruma::events::room::message::{MessageType, Relation};
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent};
 use matrix_sdk::ruma::room_version_rules::RedactionRules;
 use matrix_sdk::ruma::serde::Raw;
-use matrix_sdk::ruma::{OwnedRoomId, RoomId};
+use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId};
 use matrix_sdk::Client;
 use rusqlite::{Connection, MAIN_DB, OptionalExtension as _, params};
 use tokio::sync::{mpsc, oneshot};
@@ -102,20 +103,32 @@ struct Found {
     snippet: String,
 }
 
-static INDEX: Mutex<Option<mpsc::Sender<Op>>> = Mutex::new(None);
-/// Moved on by `wipe`, under this lock, so a sealed index is never written back for an account that
-/// signed out meanwhile.
-static GENERATION: Mutex<u64> = Mutex::new(0);
-
-fn sender() -> Option<mpsc::Sender<Op>> {
-    INDEX.lock().unwrap().clone()
+/// One account's index, found by the user it belongs to.
+struct Index {
+    dir: PathBuf,
+    user: OwnedUserId,
+    tx: mpsc::Sender<Op>,
 }
 
-async fn write(changes: Vec<Change>) {
+/// One per signed-in account, `accounts::MAX` at most.
+static INDEX: Mutex<Vec<Index>> = Mutex::new(Vec::new());
+/// Moved on for an account's directory by `wipe`, under this lock, so a sealed index is never
+/// written back for an account that signed out meanwhile. One entry per directory ever indexed.
+static GENERATION: Mutex<BTreeMap<PathBuf, u64>> = Mutex::new(BTreeMap::new());
+
+fn generation(all: &BTreeMap<PathBuf, u64>, dir: &Path) -> u64 {
+    all.get(dir).copied().unwrap_or_default()
+}
+
+fn sender(user: &UserId) -> Option<mpsc::Sender<Op>> {
+    INDEX.lock().unwrap().iter().find(|i| i.user == user).map(|i| i.tx.clone())
+}
+
+async fn write(user: &UserId, changes: Vec<Change>) {
     if changes.is_empty() {
         return;
     }
-    if let Some(tx) = sender() {
+    if let Some(tx) = sender(user) {
         let _ = tx.send(Op::Write(changes)).await;
     }
 }
@@ -125,13 +138,15 @@ async fn write(changes: Vec<Change>) {
 pub(super) fn start(dir: &Path, client: &Client, seal: &Seal) {
     let (tx, rx) = mpsc::channel(QUEUE);
     let sealed = matches!(seal, Seal::Sealed(_));
+    let Some(user) = client.user_id().map(ToOwned::to_owned) else { return };
     let (dir, seal) = (dir.to_owned(), seal.clone());
-    let generation = *GENERATION.lock().unwrap();
+    let generation = generation(&GENERATION.lock().unwrap(), &dir);
+    let index_dir = dir.clone();
     let run = move || {
         // Held while opening, so a sign-out cannot delete the files under it, nor a plain index be
         // made again for an account that has just signed out.
         let current = GENERATION.lock().unwrap();
-        if *current != generation {
+        if self::generation(&current, &dir) != generation {
             return;
         }
         let opened = match &seal {
@@ -163,26 +178,30 @@ pub(super) fn start(dir: &Path, client: &Client, seal: &Seal) {
             }
         });
     }
-    *INDEX.lock().unwrap() = Some(tx);
+    {
+        let mut all = INDEX.lock().unwrap();
+        all.retain(|i| i.dir != index_dir);
+        all.push(Index { dir: index_dir, user, tx });
+    }
     client.add_event_handler(|event: Raw<AnySyncTimelineEvent>, room: Room| async move {
         let rules = room.clone_info().room_version_rules_or_default().redaction;
-        write(change(&event, room.room_id(), &rules).into_iter().collect()).await;
+        write(room.own_user_id(), change(&event, room.room_id(), &rules).into_iter().collect()).await;
     });
 }
 
 /// Writes a sealed index back if it changed. Never waits: a full queue leaves it to the timer.
 pub(crate) fn save() {
-    if let Some(tx) = sender() {
-        let _ = tx.try_send(Op::Save);
+    for index in INDEX.lock().unwrap().iter() {
+        let _ = index.tx.try_send(Op::Save);
     }
 }
 
 /// Closes the index and deletes it: signed out, or a store left by another account.
 pub(super) fn wipe(dir: &Path) {
     // Dropping the sender ends the thread once its queue is empty; the files can go before it closes.
-    INDEX.lock().unwrap().take();
+    INDEX.lock().unwrap().retain(|i| i.dir != dir);
     let mut generation = GENERATION.lock().unwrap();
-    *generation += 1;
+    *generation.entry(dir.to_owned()).or_default() += 1;
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let _ = std::fs::remove_file(PathBuf::from(format!("{}{suffix}", dir.join(FILE).display())));
     }
@@ -192,11 +211,11 @@ pub(super) fn wipe(dir: &Path) {
 /// Indexes a page of events read from the server.
 pub(super) async fn page(room: &Room, events: &[TimelineEvent]) {
     let rules = room.clone_info().room_version_rules_or_default().redaction;
-    write(events.iter().filter_map(|e| change(e.raw(), room.room_id(), &rules)).collect()).await;
+    write(room.own_user_id(), events.iter().filter_map(|e| change(e.raw(), room.room_id(), &rules)).collect()).await;
 }
 
 /// Indexes the open conversation's rows as they change.
-pub(super) async fn rows(room: &RoomId, diffs: &[Diff]) {
+pub(super) async fn rows(user: &UserId, room: &RoomId, diffs: &[Diff]) {
     let mut changes = Vec::new();
     for diff in diffs {
         use matrix_sdk_ui::eyeball_im::VectorDiff::*;
@@ -206,7 +225,7 @@ pub(super) async fn rows(room: &RoomId, diffs: &[Diff]) {
             _ => {}
         }
     }
-    write(changes).await;
+    write(user, changes).await;
 }
 
 fn row(room: &RoomId, m: &Msg) -> Option<Change> {
@@ -283,7 +302,7 @@ fn text(body: &str, file: Option<&str>) -> String {
 
 /// Messages matching `query`, newest first, in `room` or in every room. Empty for short queries.
 pub(super) async fn search(client: &Client, room: Option<&RoomId>, query: &str) -> Vec<Hit> {
-    let Some(tx) = sender() else { return Vec::new() };
+    let Some(tx) = client.user_id().and_then(sender) else { return Vec::new() };
     let Some(query) = fts_query(query) else { return Vec::new() };
     let (reply, found) = oneshot::channel();
     if tx.send(Op::Query { room: room.map(ToString::to_string), query, reply }).await.is_err() {
@@ -386,7 +405,7 @@ impl Saver {
             return;
         }
         let generation = GENERATION.lock().unwrap();
-        if *generation != self.generation {
+        if self::generation(&generation, &self.dir) != self.generation {
             return;
         }
         let saved = conn.serialize(MAIN_DB).map_err(std::io::Error::other).and_then(|data| self.seal.write(&self.dir, FILE, &data));
@@ -631,7 +650,7 @@ mod tests {
         let conn = open_sealed(&dir, &seal).unwrap();
         let mut n = 0;
         apply(&conn, &[add("$1", "!r", 1, "the secret meeting place")], &mut n).unwrap();
-        let mut saver = Saver { dir: dir.clone(), seal: seal.clone(), generation: *GENERATION.lock().unwrap(), dirty: true };
+        let mut saver = Saver { dir: dir.clone(), seal: seal.clone(), generation: generation(&GENERATION.lock().unwrap(), &dir), dirty: true };
         saver.save(&conn);
         assert!(!saver.dirty);
         assert!(!dir.join(FILE).exists(), "nothing plain on disk");

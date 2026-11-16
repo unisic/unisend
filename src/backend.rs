@@ -171,6 +171,8 @@ pub enum Cmd {
     Retry { room: OwnedRoomId, target: String },
     /// Starts the sync again after `Ev::SyncStopped`.
     Resync,
+    /// Sends the whole chat list again: the window turned to this account.
+    Replay,
     /// Sends the user's position as an `m.location` message.
     SendLocation { room: OwnedRoomId, lat: f64, lon: f64, accuracy: Option<f64>, reply_to: Option<String> },
     /// Starts a poll; `answers` are checked again before they go out.
@@ -730,18 +732,28 @@ pub fn apply(rows: &mut Vec<Msg>, diff: Diff) -> Option<(std::ops::Range<usize>,
     })
 }
 
-/// The command channel, for what happens outside the UI: a reply typed into a notification.
+/// Each account's command channel, by slot, for what happens outside the UI: a reply typed into a
+/// notification.
 #[cfg(target_os = "android")]
-static COMMANDS: std::sync::OnceLock<mpsc::Sender<Cmd>> = std::sync::OnceLock::new();
+type Commands = mpsc::Sender<Cmd>;
 /// Weak: desktop notifications must not keep the backend running once the UI is gone.
 #[cfg(not(target_os = "android"))]
-static COMMANDS: std::sync::OnceLock<mpsc::WeakSender<Cmd>> = std::sync::OnceLock::new();
+type Commands = mpsc::WeakSender<Cmd>;
+static COMMANDS: std::sync::Mutex<[Option<Commands>; crate::accounts::MAX]> = std::sync::Mutex::new([const { None }; crate::accounts::MAX]);
 
-fn commands() -> Option<mpsc::Sender<Cmd>> {
+fn commands(slot: usize) -> Option<mpsc::Sender<Cmd>> {
+    let all = COMMANDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     #[cfg(target_os = "android")]
-    return COMMANDS.get().cloned();
+    return all.get(slot)?.clone();
     #[cfg(not(target_os = "android"))]
-    COMMANDS.get()?.upgrade()
+    all.get(slot)?.as_ref()?.upgrade()
+}
+
+/// Lets go of the account's channel, so the backend ends once the UI drops its sender too.
+pub(crate) fn forget(slot: usize) {
+    if let Some(tx) = COMMANDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(slot) {
+        *tx = None;
+    }
 }
 
 /// The chat of the test notification: no room, so its buttons send nothing.
@@ -759,7 +771,8 @@ async fn test_notice(client: Client, dir: PathBuf) {
     let file = tokio::time::timeout(ICON_WAIT, face).await.ok().flatten();
     let icon = file.as_deref().and_then(Path::to_str).unwrap_or_default();
     let note = Note { sender: "Unisend".into(), text: t!("Test notification. Reply, mark as read or mute to try the buttons: nothing is sent.").into(), ts: now_ms().max(0) as u64, mention: false };
-    crate::notify(&crate::Notice { chat: TEST_CHAT, name: "Unisend", group: false, icon, note: &note, alert: true });
+    let chat = crate::accounts::key(crate::accounts::slot_of(&dir), TEST_CHAT);
+    crate::notify(&crate::Notice { chat: &chat, name: "Unisend", group: false, icon, note: &note, alert: true });
     // Android has decoded the picture by now; desktop removes it with the notification.
     if cfg!(target_os = "android")
         && let Some(file) = file
@@ -768,21 +781,23 @@ async fn test_notice(client: Client, dir: PathBuf) {
     }
 }
 
-/// Sends a message from a notification's reply box. False when the app is not signed in.
+/// Sends a message from a notification's reply box, through the account `chat`'s key names.
+/// False when that account is not signed in.
 pub(crate) fn reply(chat: &str, body: &str) -> bool {
     log::debug!("notification: reply");
+    let (slot, chat) = crate::accounts::split(chat);
     if chat == TEST_CHAT {
         log::info!("test notification: reply");
         return !body.trim().is_empty();
     }
     let (body, Ok(room)) = (body.trim(), OwnedRoomId::try_from(chat)) else { return false };
-    !body.is_empty() && commands().is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None, mentions: Vec::new() }).is_ok())
+    !body.is_empty() && commands(slot).is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None, mentions: Vec::new() }).is_ok())
 }
 
-/// Android's answer when it did not install an update.
+/// Android's answer when it did not install an update: shown by the account on screen.
 #[cfg(target_os = "android")]
 pub(crate) fn update_failed(why: String) {
-    if COMMANDS.get().is_none_or(|tx| tx.try_send(Cmd::UpdateFailed(why)).is_err()) {
+    if commands(crate::accounts::active()).is_none_or(|tx| tx.try_send(Cmd::UpdateFailed(why)).is_err()) {
         log::warn!("update failure not shown");
     }
 }
@@ -790,10 +805,11 @@ pub(crate) fn update_failed(why: String) {
 /// Marks a chat read from its notification.
 pub(crate) fn read_from_notification(chat: &str) {
     log::debug!("notification: mark read");
+    let (slot, chat) = crate::accounts::split(chat);
     if chat == TEST_CHAT {
         log::info!("test notification: mark read");
     }
-    if let (Some(tx), Ok(room)) = (commands(), OwnedRoomId::try_from(chat)) {
+    if let (Some(tx), Ok(room)) = (commands(slot), OwnedRoomId::try_from(chat)) {
         let _ = tx.try_send(Cmd::Chat(room, ChatAction::Unread(false)));
     }
 }
@@ -801,27 +817,39 @@ pub(crate) fn read_from_notification(chat: &str) {
 /// Mutes a chat from its notification. False when the app is not signed in.
 pub(crate) fn mute_from_notification(chat: &str) -> bool {
     log::debug!("notification: mute");
+    let (slot, chat) = crate::accounts::split(chat);
     if chat == TEST_CHAT {
         log::info!("test notification: mute");
         return true;
     }
     let Ok(room) = OwnedRoomId::try_from(chat) else { return false };
-    commands().is_some_and(|tx| tx.try_send(Cmd::Chat(room, ChatAction::Mute(RoomNotificationMode::MentionsAndKeywordsOnly))).is_ok())
+    commands(slot).is_some_and(|tx| tx.try_send(Cmd::Chat(room, ChatAction::Mute(RoomNotificationMode::MentionsAndKeywordsOnly))).is_ok())
 }
 
 /// Stack of the backend's threads. Opening a chat polls deep matrix-sdk futures whose debug-build
 /// frames outgrow the default 2 MiB; only the pages actually touched cost memory.
 const BACKEND_STACK: usize = 8 << 20;
 
-pub fn start(dir: PathBuf) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Ev>) {
+/// A running backend: its channels, and its thread, which ends once `cmd` and every clone of it
+/// are dropped (see `forget`) and its tasks have stopped.
+pub struct Backend {
+    pub cmd: mpsc::Sender<Cmd>,
+    pub events: mpsc::Receiver<Ev>,
+    pub thread: std::thread::JoinHandle<()>,
+}
+
+/// Starts the backend of the account whose data is in `dir`.
+pub fn start(dir: PathBuf) -> Backend {
     let (cmd_tx, cmd_rx) = mpsc::channel(CHANNEL_CAP);
+    let slot = crate::accounts::slot_of(&dir);
     #[cfg(target_os = "android")]
-    let _ = COMMANDS.set(cmd_tx.clone());
+    let registered = cmd_tx.clone();
     #[cfg(not(target_os = "android"))]
-    let _ = COMMANDS.set(cmd_tx.downgrade());
+    let registered = cmd_tx.downgrade();
+    COMMANDS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[slot] = Some(registered);
     let (ev_tx, ev_rx) = mpsc::channel(CHANNEL_CAP);
-    std::thread::Builder::new()
-        .name("matrix".into())
+    let thread = std::thread::Builder::new()
+        .name(format!("matrix-{slot}"))
         .stack_size(BACKEND_STACK)
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
@@ -830,11 +858,12 @@ pub fn start(dir: PathBuf) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Ev>) {
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            // Returns once the UI drops its sender; dropping `rt` then cancels sync.
+            // Returns once the UI drops its sender; dropping `rt` then cancels sync and waits for
+            // the worker threads.
             rt.block_on(run(dir, cmd_rx, ev_tx));
         })
         .expect("spawn matrix thread");
-    (cmd_tx, ev_rx)
+    Backend { cmd: cmd_tx, events: ev_rx, thread }
 }
 
 fn http_client() -> Result<reqwest::Client> {
@@ -908,8 +937,12 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), previews: Arc::new(tokio::sync::Semaphore::new(PROBES)), notif: None,
         incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, browser: None, replaceable: false, update: None };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
+    // One service shows every account's notifications; the first account's backend, which runs
+    // as long as the app, keeps it.
     #[cfg(not(target_os = "android"))]
-    tokio::spawn(crate::notify::serve(st.dir.clone()));
+    if crate::accounts::slot_of(&st.dir) == 0 {
+        tokio::spawn(crate::notify::serve(st.dir.clone()));
+    }
     let restored = if st.unlock().await { st.restore_retrying().await } else { false };
     if !restored {
         st.emit(Ev::NeedLogin).await;
@@ -1345,7 +1378,7 @@ impl State {
             Cmd::Open(room_id) => {
                 // The old conversation stops being followed before the new one starts.
                 self.open = None;
-                crate::clear_notification(room_id.as_str());
+                crate::clear_notification(&crate::accounts::key(crate::accounts::slot_of(&self.dir), room_id.as_str()));
                 let room = self.room(&room_id)?;
                 // An invitation has no history to read until it is taken.
                 if room.state() == RoomState::Invited {
@@ -1570,6 +1603,12 @@ impl State {
                     panel(&ev, done.await.map(Ev::Networks)).await;
                 });
             }
+            Cmd::Replay => {
+                let list: Vec<RoomSummary> = self.rooms.lock().unwrap().values().cloned().collect();
+                if !list.is_empty() {
+                    self.emit(Ev::Rooms(list)).await;
+                }
+            }
             Cmd::Resync => {
                 if let (Some(client), Some(notif)) = (&self.client, &self.notif)
                     && self.tasks.last().is_some_and(tokio::task::JoinHandle::is_finished)
@@ -1610,9 +1649,8 @@ impl State {
                 (self.open, self.info) = (None, None);
                 self.rooms.lock().unwrap().clear();
                 wipe_account(&self.dir);
-                // One posted between the window's sign-out and the wipe.
-                #[cfg(not(target_os = "android"))]
-                crate::notify::close_all();
+                // One posted between the window's sign-out and the wipe; other accounts keep theirs.
+                crate::clear_account_notifications(crate::accounts::slot_of(&self.dir));
                 (self.homeserver, self.beeper, self.seal) = (beeper_homeserver(), true, Seal::Plain);
                 self.emit(Ev::NeedLogin).await;
             }
@@ -2331,14 +2369,18 @@ fn notes(msgs: &[Msg], now_ms: i64) -> Vec<Note> {
     found
 }
 
-/// Notifies while the window is not in front; clears the chat's notification once it has been
-/// read somewhere.
+/// Whether the window shows this account's chats now, so it needs no notification of them.
+fn on_screen(dir: &Path) -> bool {
+    crate::FOREGROUND.load(std::sync::atomic::Ordering::Relaxed) && crate::accounts::slot_of(dir) == crate::accounts::active()
+}
+
+/// Notifies while the window does not show the account; clears the chat's notification once it
+/// has been read somewhere.
 fn announce(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, prev: Option<&RoomSummary>, msgs: &[Msg]) {
-    let chat = summary.id.as_str();
     if summary.unread == 0 && prev.is_some_and(|p| p.unread > 0) {
-        crate::clear_notification(chat);
+        crate::clear_notification(&crate::accounts::key(crate::accounts::slot_of(dir), summary.id.as_str()));
     }
-    if crate::FOREGROUND.load(std::sync::atomic::Ordering::Relaxed) {
+    if on_screen(dir) {
         return;
     }
     let notes = notes(msgs, now_ms());
@@ -2366,9 +2408,10 @@ fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary,
             // The chat may have been read while the picture was on its way.
             let still = rooms.lock().unwrap().get(&summary.id).is_some_and(waiting);
             if *current == generation && still {
+                let chat = crate::accounts::key(crate::accounts::slot_of(&dir), summary.id.as_str());
                 for (n, note) in notes.iter().enumerate() {
                     let alert = n + 1 == notes.len();
-                    crate::notify(&crate::Notice { chat: summary.id.as_str(), name: &summary.name, group: !summary.dm, icon, note, alert });
+                    crate::notify(&crate::Notice { chat: &chat, name: &summary.name, group: !summary.dm, icon, note, alert });
                 }
             }
         }
@@ -2385,7 +2428,7 @@ fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary,
 /// Notifies of a new invitation once, unless the account's push rules turned invitations off.
 fn announce_invite(client: &Client, dir: &Path, rooms: &Rooms, notif: &NotificationSettings, summary: &RoomSummary) {
     let Some(Pending::Invite { name, .. }) = &summary.pending else { return };
-    if crate::FOREGROUND.load(std::sync::atomic::Ordering::Relaxed) {
+    if on_screen(dir) {
         return;
     }
     let text = if summary.dm { t!("Wants to chat with you") } else { t!("Invited you to the group") };
