@@ -3300,9 +3300,9 @@ impl BeeperApp {
             let found = self.msgs.iter().find(|m| &m.id == id);
             let quote = found.map_or_else(|| Quote::unknown(id.clone(), QuoteState::Missing), Msg::quote);
             let (icon, title) = match (&self.compose, found) {
-                (Compose::Edit(_), _) => (Some(IconName::Pencil), t!("Editing").into()),
-                (_, Some(m)) if m.own => (None, t!("Replying to yourself").into()),
-                (_, Some(m)) => (None, t!("Replying to {who}", who = m.sender).into()),
+                (Compose::Edit(_), _) => (Some(IconName::Pencil), t!("Editing message").into()),
+                (_, Some(m)) if m.own => (None, t!("You").into()),
+                (_, Some(m)) => (None, m.sender.clone().into()),
                 _ => (None, t!("Replying").into()),
             };
             (icon, title, quote)
@@ -3659,7 +3659,7 @@ fn inside_of(m: &Msg, p: Palette) -> Palette {
 }
 
 /// A quoted message: who wrote it and what it says, behind a bar that tells it from a link's card.
-/// `heading` takes the place of the sender (the compose strip's "Replying to"), with one line of
+/// `heading` takes the place of the sender (the compose strip's title), with one line of
 /// text under it. `inside` is the palette of what it sits in.
 /// `thumb` is the quoted picture with how far it has faded in.
 fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, inside: Palette, thumb: Option<(Arc<Image>, f32)>) -> Stateful<Div> {
