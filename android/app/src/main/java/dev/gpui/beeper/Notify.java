@@ -9,6 +9,7 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.BitmapShader;
@@ -16,6 +17,7 @@ import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Shader;
+import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -220,13 +222,19 @@ public final class Notify {
     /**
      * Adds a message to the chat's conversation notification. {@code alert} is false for all but
      * the last of messages that arrive together, so they make one sound. {@code icon} is the path
-     * of the chat's picture, or empty.
+     * of the chat's picture, or empty; without one the chat's {@code initials} stand in.
      */
     public static void message(Context any, String chat, String name, boolean group, String sender,
-            String text, long time, boolean mention, String icon, boolean alert) {
+            String text, long time, boolean mention, String icon, String initials, boolean alert) {
         Context context = any.getApplicationContext();
         channels(context);
         Bitmap picture = icon.isEmpty() ? cached(chat) : load(chat, icon);
+        if (picture == null) {
+            picture = initials(context, initials);
+            synchronized (icons) {
+                icons.put(chat, picture);
+            }
+        }
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         // A conversation notification needs its chat's shortcut at every post, and Share.publish may
         // have replaced it since the last one; Android's guidance is a push per message anyway.
@@ -489,6 +497,29 @@ public final class Notify {
         synchronized (icons) {
             return icons.get(chat);
         }
+    }
+
+    /**
+     * {@code letters} on an {@link #AVATAR} px disc, as the app's lists draw a chat without a
+     * picture (`avatar` in src/ui.rs): `Palette`'s raised fill and muted ink (src/lib.rs), dark or
+     * light as the system's shade is. Kept with the chat like a picture, so a disc drawn before the
+     * system switched between light and dark stays until the chat's notification is gone.
+     */
+    static Bitmap initials(Context context, String letters) {
+        boolean night = (context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
+        Bitmap disc = Bitmap.createBitmap(AVATAR, AVATAR, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(disc);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setColor(night ? 0xff2a2a2a : 0xffe2e2e2);
+        canvas.drawCircle(AVATAR / 2f, AVATAR / 2f, AVATAR / 2f, paint);
+        paint.setColor(night ? 0xffb4b4b4 : 0xff4f4f4f);
+        paint.setTextSize(AVATAR * 0.36f);
+        paint.setTextAlign(Paint.Align.CENTER);
+        paint.setTypeface(Build.VERSION.SDK_INT >= 28 ? Typeface.create(Typeface.DEFAULT, 600, false) : Typeface.DEFAULT_BOLD);
+        Paint.FontMetrics metrics = paint.getFontMetrics();
+        canvas.drawText(letters, AVATAR / 2f, AVATAR / 2f - (metrics.ascent + metrics.descent) / 2f, paint);
+        return disc;
     }
 
     /**

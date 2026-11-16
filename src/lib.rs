@@ -841,6 +841,12 @@ pub(crate) struct Notice<'a> {
     pub alert: bool,
 }
 
+/// What stands for a chat or a person without a picture: the first letter or digit of each of the
+/// first two words, as the app's lists and Android's notifications draw it.
+pub(crate) fn initials(name: &str) -> String {
+    name.split_whitespace().filter_map(|w| w.chars().find(|c| c.is_alphanumeric())).take(2).flat_map(char::to_uppercase).collect()
+}
+
 /// Adds a message to the chat's notification, which shows the last few messages of the chat.
 pub(crate) fn notify(notice: &Notice) {
     #[cfg(target_os = "android")]
@@ -1087,13 +1093,13 @@ mod android_files {
             let activity = helpers::activity(env)?;
             let class = helpers::find_app_class(env, "dev.gpui.beeper.Notify")?;
             let mut text = |s: &str| env.new_string(s).map_err(|e| e.to_string());
-            let (chat, name, sender, body, icon) =
-                (text(notice.chat)?, text(notice.name)?, text(&notice.note.sender)?, text(&notice.note.text)?, text(notice.icon)?);
+            let (chat, name, sender, body, icon, initials) =
+                (text(notice.chat)?, text(notice.name)?, text(&notice.note.sender)?, text(&notice.note.text)?, text(notice.icon)?, text(&crate::initials(notice.name))?);
             env.call_static_method(
                 &class,
                 jni::jni_str!("message"),
                 jni::jni_sig!(
-                    "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;Ljava/lang/String;JZLjava/lang/String;Z)V"
+                    "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;Ljava/lang/String;JZLjava/lang/String;Ljava/lang/String;Z)V"
                 ),
                 &[
                     JValue::Object(&activity),
@@ -1105,6 +1111,7 @@ mod android_files {
                     JValue::Long(i64::try_from(notice.note.ts).unwrap_or(i64::MAX)),
                     JValue::Bool(notice.note.mention),
                     JValue::Object(&icon),
+                    JValue::Object(&initials),
                     JValue::Bool(notice.alert),
                 ],
             )

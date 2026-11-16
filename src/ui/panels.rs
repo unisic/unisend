@@ -643,7 +643,7 @@ impl BeeperApp {
         let android = |id: &'static str, label: &'static str, detail: &'static str, open: fn(), cx: &mut Context<Self>| {
             link(id, label, detail.into(), None, Some(IconName::ExternalLink), cx).on_click(move |_, _, _| open())
         };
-        let test = link("test-notice", t!("Send a test notification"), t!("As a message brings one, with your picture. Its buttons send nothing.").into(), None, Some(IconName::Bell), cx)
+        let test = link("test-notice", t!("Send a test notification"), t!("As a message brings one. Its buttons send nothing.").into(), None, Some(IconName::Bell), cx)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.send(Cmd::TestNotice, cx);
             }));
@@ -1012,6 +1012,8 @@ pub(super) fn footnote(text: &str, cx: &App) -> Div {
 /// A row that leads somewhere, as a whole: its name, the value set now under it, and where it goes.
 pub(super) fn link(id: impl Into<ElementId>, label: &'static str, value: SharedString, icon: Option<IconName>, trail: Option<IconName>, cx: &App) -> Stateful<Div> {
     let p = Palette::of(cx);
+    // A page's summary keeps to two lines; what an action does is read whole.
+    let page = trail == Some(IconName::ChevronRight);
     h_flex()
         .id(id)
         .min_h(px(ROW_H))
@@ -1033,7 +1035,7 @@ pub(super) fn link(id: impl Into<ElementId>, label: &'static str, value: SharedS
                 .flex_1()
                 .min_w_0()
                 .child(div().text_size(fs(16.)).line_height(fs(22.)).child(label))
-                .when(!value.is_empty(), |el| el.child(div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.muted).line_clamp(2).child(value))),
+                .when(!value.is_empty(), |el| el.child(div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.muted).when(page, |el| el.line_clamp(2)).child(value))),
         )
         .children(trail.map(|icon| Icon::new(icon).size_4().flex_none().text_color(p.faint)))
 }

@@ -609,7 +609,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("App lock off", "Blokada aplikacji wyłączona"),
     ("Auto-lock", "Autoblokada"),
     ("Arrive while Unisend is closed", "Docierają, gdy Unisend jest zamknięty"),
-    ("As a message brings one, with your picture. Its buttons send nothing.", "Takie jak przy wiadomości, z Twoim zdjęciem. Jego przyciski niczego nie wysyłają."),
+    ("As a message brings one. Its buttons send nothing.", "Takie jak przy wiadomości. Jego przyciski niczego nie wysyłają."),
     ("Checked once a day", "Sprawdzane raz dziennie"),
     ("Checked when you ask", "Sprawdzane na żądanie"),
     ("Dark theme", "Ciemny motyw"),

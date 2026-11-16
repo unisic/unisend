@@ -3273,8 +3273,7 @@ fn avatar(name: &str, image: Option<&Option<Arc<Image>>>, size: f32, cx: &App) -
     match image.cloned().flatten() {
         Some(image) => disc.child(img(image).size_full().rounded_full().object_fit(ObjectFit::Cover)),
         None => {
-            let initials: String =
-                name.split_whitespace().filter_map(|w| w.chars().find(|c| c.is_alphanumeric())).take(2).flat_map(char::to_uppercase).collect();
+            let initials = crate::initials(name);
             disc.flex()
                 .items_center()
                 .justify_center()
