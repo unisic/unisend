@@ -1217,11 +1217,69 @@ pub(crate) fn insets() -> (f32, f32) {
             .and_then(|p| p.primary_window())
             .map(|w| w.safe_area_insets_logical());
         let (top, bottom) = safe.map_or((0., 0.), |s| (s.top, s.bottom));
-        let keyboard = gpui_mobile::keyboard_height();
-        return (top, if keyboard > 0. { keyboard } else { bottom });
+        return (top, live_insets::bottom().unwrap_or(bottom));
     }
     #[allow(unreachable_code)]
     (0., 0.)
+}
+
+/// Repaints the window when the keyboard or the navigation bar changes the bottom inset.
+pub(crate) fn watch_insets(window: &mut Window, cx: &mut App) {
+    #[cfg(target_os = "android")]
+    live_insets::watch(window, cx);
+    #[cfg(not(target_os = "android"))]
+    let _ = (window, cx);
+}
+
+/// The bottom inset as GpuiActivity reads it from the window's insets. gpui-mobile takes it from
+/// NativeActivity's content rect without asking for a frame, so a keyboard that went away while
+/// nothing was drawing (Unisend brought to the front over another app's keyboard) left its space
+/// empty until something else repainted.
+#[cfg(target_os = "android")]
+mod live_insets {
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+    use gpui_kit::{App, Window};
+    use tokio::sync::Notify;
+
+    /// Physical px; negative until Java has reported.
+    static BOTTOM: AtomicI32 = AtomicI32::new(-1);
+    /// Holds at most one pending wakeup however often Java reports.
+    static MOVED: Notify = Notify::const_new();
+    static WATCHING: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn bottom() -> Option<f32> {
+        let px = BOTTOM.load(Ordering::Relaxed);
+        let scale = gpui_mobile::android::jni::platform()?.primary_window()?.scale_factor();
+        (px >= 0 && scale > 0.).then(|| px as f32 / scale)
+    }
+
+    pub(super) fn watch(window: &mut Window, cx: &mut App) {
+        if WATCHING.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        window
+            .spawn(cx, async move |cx| {
+                loop {
+                    MOVED.notified().await;
+                    if cx.update(|window, _| window.refresh()).is_err() {
+                        break;
+                    }
+                }
+                WATCHING.store(false, Ordering::Relaxed);
+            })
+            .detach();
+    }
+
+    /// # Safety
+    /// Called by the JVM on the UI thread.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiActivity_nativeInsets(_env: *mut c_void, _class: *mut c_void, bottom: i32) {
+        if BOTTOM.swap(bottom, Ordering::Relaxed) != bottom {
+            MOVED.notify_one();
+        }
+    }
 }
 
 /// Entry points the Java side of notifications calls: the reply box and the mark-as-read and mute buttons.

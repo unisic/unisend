@@ -416,6 +416,7 @@ impl BeeperApp {
             crate::ime::follow(input, window, cx);
         }
         crate::ime::set_incognito(settings.incognito_keyboard);
+        crate::watch_insets(window, cx);
         let ui = cx.weak_entity();
         crate::ime::on_picture(move |path, cx| {
             let taken = ui.update(cx, |this, cx| this.open.is_some().then(|| this.attach_paths(vec![path.clone()], cx))).ok().flatten();
