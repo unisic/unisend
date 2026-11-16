@@ -32,6 +32,8 @@ pub(super) enum Confirming {
     /// A chat the user asked to leave; drawn once the backend says whether its bridge can delete it.
     /// `block`: block the person behind an invitation or a message request, then leave.
     Leave { room: OwnedRoomId, dm: bool, delete: Option<bool>, block: bool },
+    /// Blocking a person: the Matrix ignore list, not their chat network.
+    Person { user: OwnedUserId },
     /// Signing an account out of a network; `name` is the account's.
     SignOut { bridge: String, login: String },
     /// Turning a Discord server off; `name` is the server's.
@@ -125,6 +127,13 @@ fn wording(c: &Confirm) -> (String, String, &'static str) {
     let network = c.network.as_deref().unwrap_or(t!("the network"));
     let (delete, dm, block) = match &c.what {
         Confirming::Leave { delete, dm, block, .. } => (*delete, *dm, *block),
+        Confirming::Person { .. } => {
+            let body = match &c.network {
+                Some(network) => t!("You stop getting messages from {name} in Unisend. They are not blocked on {network}: they can still write to you there. They are not told.", name = c.name, network = network),
+                None => t!("{name} can no longer send you messages or invitations. They are not told.", name = c.name),
+            };
+            return (t!("Block {name}?", name = c.name), body, t!("Block"));
+        }
         Confirming::StopGuild { .. } => {
             return (
                 t!("Turn off {name}?", name = c.name),
@@ -275,6 +284,12 @@ impl BeeperApp {
         cx.notify();
     }
 
+    /// Asks before a person is put on the ignore list.
+    pub(super) fn ask_block_person(&mut self, user: OwnedUserId, name: String, network: Option<String>, cx: &mut Context<Self>) {
+        self.people.confirm = Some(Confirm { name, network, what: Confirming::Person { user } });
+        cx.notify();
+    }
+
     /// Turns an invitation down at once: nothing is lost that cannot come back with a new one.
     pub(super) fn decline(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
         let Some(r) = self.rooms.iter().find(|r| r.id == room) else { return };
@@ -312,6 +327,10 @@ impl BeeperApp {
         let Some(c) = self.people.confirm.take() else { return };
         let (room, delete, block) = match c.what {
             Confirming::Leave { room, delete, block, .. } => (room, delete == Some(true), block),
+            Confirming::Person { user } => {
+                self.send(Cmd::SetBlocked(user, true), cx);
+                return;
+            }
             Confirming::StopGuild { bridge, login, guild } => {
                 self.set_guild(bridge, login, guild, false, cx);
                 return;

@@ -40,6 +40,7 @@ pub(super) enum Page {
     Chats,
     Notifications,
     Privacy,
+    Blocked,
     Devices,
     Account,
     Updates,
@@ -60,6 +61,7 @@ impl Page {
             Self::Chats => t!("Chats"),
             Self::Notifications => t!("Notifications"),
             Self::Privacy => t!("Privacy and security"),
+            Self::Blocked => t!("Blocked people"),
             Self::Devices => t!("Devices"),
             Self::Account => t!("Account"),
             Self::Updates => t!("Updates"),
@@ -594,6 +596,7 @@ impl BeeperApp {
             Page::Chats => self.render_chats(window, cx),
             Page::Notifications => self.render_notifications(cx),
             Page::Privacy => self.render_privacy(cx),
+            Page::Blocked => self.render_blocked_list(cx),
             Page::Devices => self.render_devices(cx).into_any_element(),
             Page::Account => self.render_account(cx),
             Page::Profile => self.render_profile(cx),
@@ -803,6 +806,7 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let android = cfg!(target_os = "android");
         let lock = self.settings.lock.clone();
+        let blocked: SharedString = if self.blocked_count() == 0 { SharedString::default() } else { self.blocked_count().to_string().into() };
         let weak = cx.entity().downgrade();
         let incognito = Switch::new("incognito").checked(self.settings.incognito).on_click(move |on, _, cx| {
             let _ = weak.update(cx, |this, cx| this.set_incognito(*on, cx));
@@ -826,6 +830,9 @@ impl BeeperApp {
                     .child(row(t!("Hide reading and typing"), t!("Others will not see that you have read their messages or that you are typing."), cx).child(incognito))
                     .when(android, |el| el.child(row(t!("Incognito keyboard"), t!("The keyboard learns nothing from what you type. Off: better suggestions and voice typing."), cx).child(keyboard))),
             )
+            .child(card(cx).child(
+                link(Page::Blocked.id(), Page::Blocked.title(), blocked, None, Some(IconName::ChevronRight), cx).on_click(cx.listener(|this, _, _, cx| this.open_page(Page::Blocked, cx))),
+            ))
             .child(
                 section(t!("Security"), cx).child(
                     card(cx)

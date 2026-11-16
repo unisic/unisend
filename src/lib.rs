@@ -37,6 +37,7 @@ gpui_kit::assets::icon_assets!(
         ArchiveRestore,
         ArrowUp,
         AtSign,
+        Ban,
         BellOff,
         Camera,
         ChartBar,
@@ -89,6 +90,7 @@ gpui_kit::assets::icon_assets!(
         Users,
         UserPlus,
         UserMinus,
+        UserCheck,
         CheckCheck,
         Circle,
         CircleCheck,
@@ -1528,6 +1530,7 @@ mod tests {
         for source in [
             include_str!("ui.rs"),
             include_str!("ui/appearance.rs"),
+            include_str!("ui/block.rs"),
             include_str!("ui/camera.rs"),
             include_str!("ui/caption.rs"),
             include_str!("ui/cards.rs"),

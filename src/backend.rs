@@ -218,6 +218,8 @@ pub enum Cmd {
     InfoClose,
     /// How the other person in a one-to-one chat is known on its network; answered with `PeerIds`.
     PeerIds(OwnedRoomId),
+    /// Blocks (true) or unblocks the person; the new list comes as `Ev::Blocked`, a failure as `Ev::Error`.
+    SetBlocked(OwnedUserId, bool),
     /// Changes a group; answered with `Ev::Group` once the server took it, else `Ev::Error`.
     Group { room: OwnedRoomId, change: group::Change },
     /// People who could be added to a group; answered with `Candidates`.
@@ -327,6 +329,10 @@ pub enum Ev {
     Profile(group::Profile),
     /// What checking for or installing an update did.
     Update(update::Step),
+    /// The people this account ignores: when signed in, and whenever the list changes anywhere.
+    Blocked(Vec<block::Blocked>),
+    /// The other person of an opened one-to-one chat.
+    Peer(OwnedRoomId, OwnedUserId),
     /// The answer to `Cmd::PeerIds`; never sent for a group.
     PeerIds(OwnedRoomId, Vec<String>),
     /// Messages with media, files or links, newest first; `scanned` counts the events read so far.
@@ -893,6 +899,8 @@ struct State {
     /// The conversation on screen.
     open: Option<timeline::Open>,
     rooms: Rooms,
+    /// The blocked people last told to the UI, told again when the window turns to this account.
+    blocked: Arc<Mutex<Vec<block::Blocked>>>,
     fetches: Arc<tokio::sync::Semaphore>,
     previews: Arc<tokio::sync::Semaphore>,
     /// Push rules, kept current by the SDK. One instance: each registers an event handler.
@@ -934,7 +942,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     // Older builds kept KLIPY's customer ID on disk; it now lives only in memory.
     let _ = std::fs::remove_file(dir.join("klipy-id"));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
-        rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), previews: Arc::new(tokio::sync::Semaphore::new(PROBES)), notif: None,
+        rooms: Rooms::default(), blocked: Arc::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), previews: Arc::new(tokio::sync::Semaphore::new(PROBES)), notif: None,
         incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, browser: None, replaceable: false, update: None };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
     // One service shows every account's notifications; the first account's backend, which runs
@@ -1185,7 +1193,7 @@ impl State {
         }
         // Sends left in the queue by the last run go out now, not once their chat is opened.
         client.send_queue().respawn_tasks_for_rooms_with_unsent_requests().await;
-        self.tasks = vec![tokio::spawn(watch_recovery(client.clone(), self.ev.clone())), self.sync_task(&client, &notif)];
+        self.tasks = vec![tokio::spawn(watch_recovery(client.clone(), self.ev.clone())), tokio::spawn(block::watch(client.clone(), self.ev.clone(), self.blocked.clone())), self.sync_task(&client, &notif)];
         self.notif = Some(notif);
         self.verify.listen(&client, &self.ev);
         list_typing(&client, &self.ev);
@@ -1380,6 +1388,13 @@ impl State {
                 self.open = None;
                 crate::clear_notification(&crate::accounts::key(crate::accounts::slot_of(&self.dir), room_id.as_str()));
                 let room = self.room(&room_id)?;
+                let ev = self.ev.clone();
+                let asked = room.clone();
+                tokio::spawn(async move {
+                    if let Some(peer) = other_person(&asked).await {
+                        let _ = ev.send(Ev::Peer(asked.room_id().to_owned(), peer)).await;
+                    }
+                });
                 // An invitation has no history to read until it is taken.
                 if room.state() == RoomState::Invited {
                     let _ = self.ev.send(Ev::Paged { room: room_id, more: false }).await;
@@ -1607,6 +1622,10 @@ impl State {
                 let list: Vec<RoomSummary> = self.rooms.lock().unwrap().values().cloned().collect();
                 if !list.is_empty() {
                     self.emit(Ev::Rooms(list)).await;
+                }
+                let blocked = self.blocked.lock().unwrap().clone();
+                if !blocked.is_empty() {
+                    self.emit(Ev::Blocked(blocked)).await;
                 }
             }
             Cmd::Resync => {
@@ -1883,6 +1902,15 @@ impl State {
                 tokio::spawn(async move {
                     let ids = info::identifiers_of(&room, &user).await;
                     let _ = ev.send(Ev::MemberIds(user, ids)).await;
+                });
+            }
+            Cmd::SetBlocked(user, on) => {
+                let (client, ev) = (self.client()?.clone(), self.ev.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = block::set(&client, &user, on).await {
+                        log::warn!("block: {e:#}");
+                        let _ = ev.send(Ev::Error(t!("Could not change who you have blocked: {error}", error = plain(&format!("{e:#}"))))).await;
+                    }
                 });
             }
             Cmd::Profile => {
@@ -3824,6 +3852,7 @@ pub(crate) mod caption;
 mod strip;
 pub(crate) mod forward;
 mod info;
+pub(crate) mod block;
 pub(crate) mod group;
 mod polls;
 mod rich;
