@@ -9,6 +9,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use anyhow::{Context as _, Result};
@@ -60,6 +61,10 @@ const MAX_SESSIONS_FETCHED: usize = 256;
 /// Batches of lookups waiting for the ones before them, and quoted messages fetched at once.
 const LOOKUP_QUEUE: usize = 16;
 const QUOTES_AT_ONCE: usize = 4;
+/// A key the backup did not have may reach it later, from another of the user's devices: the
+/// rows still locked are asked for again after this, then after twice as long, up to the most.
+pub(super) const KEY_RETRY_FIRST: Duration = Duration::from_secs(10);
+const KEY_RETRY_MOST: Duration = Duration::from_secs(300);
 /// Longest chat name or failure reason put on a row.
 const LINE_MAX: usize = 120;
 
@@ -117,7 +122,26 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
     let lookup = tokio::spawn({
         let timeline = timeline.clone();
         async move {
-            while let Some((sessions, quotes)) = wanted.recv().await {
+            let mut wait = KEY_RETRY_FIRST;
+            let mut again = tokio::time::Instant::now() + wait;
+            loop {
+                let (sessions, quotes) = tokio::select! {
+                    got = wanted.recv() => match got {
+                        Some(got) => got,
+                        None => break,
+                    },
+                    () = tokio::time::sleep_until(again) => {
+                        let items = timeline.items().await;
+                        // Newest first: the end of the conversation is what is on screen.
+                        let sessions: Vec<String> = items.iter().rev().filter_map(|item| locked(item)).collect();
+                        wait = (wait * 2).min(KEY_RETRY_MOST);
+                        again = tokio::time::Instant::now() + wait;
+                        if sessions.is_empty() || !timeline.room().client().encryption().backups().are_enabled().await {
+                            continue;
+                        }
+                        (sessions, Vec::new())
+                    }
+                };
                 fetch_keys(timeline.room(), sessions).await;
                 // The answers come back as changes to those rows.
                 futures_util::stream::iter(quotes)
@@ -315,12 +339,13 @@ fn locked(item: &TimelineItem) -> Option<String> {
 /// Gets the keys of these sessions from the server-side backup; the timeline then reads the
 /// messages by itself. Does nothing until recovery has unlocked the backup.
 async fn fetch_keys(room: &Room, sessions: impl IntoIterator<Item = String>) {
-    let backups = room.client().encryption().backups();
-    let sessions: BTreeSet<String> = sessions.into_iter().collect();
-    for session in sessions.iter().take(MAX_KEY_FETCHES) {
-        if let Err(e) = backups.download_room_key(room.room_id(), session).await {
-            log::warn!("backup key: {e}");
-            break;
+    let backups = &room.client().encryption().backups();
+    let mut seen = HashSet::new();
+    let sessions: Vec<String> = sessions.into_iter().filter(|s| seen.insert(s.clone())).take(MAX_KEY_FETCHES).collect();
+    // At once, and one the backup does not hold yet says nothing about the others.
+    for asked in futures_util::future::join_all(sessions.iter().map(|session| backups.download_room_key(room.room_id(), session))).await {
+        if let Err(e) = asked {
+            log::debug!("backup key: {e}");
         }
     }
 }
@@ -328,7 +353,7 @@ async fn fetch_keys(room: &Room, sessions: impl IntoIterator<Item = String>) {
 /// After recovery: the messages of the open conversation that were locked can now be read.
 pub(super) async fn unlock(timeline: &Timeline) {
     let items = timeline.items().await;
-    fetch_keys(timeline.room(), items.iter().filter_map(|item| locked(item))).await;
+    fetch_keys(timeline.room(), items.iter().rev().filter_map(|item| locked(item))).await;
 }
 
 /// Which message a command means: an event, or one that has not left yet.

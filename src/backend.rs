@@ -76,7 +76,8 @@ const PAGE: u16 = 40;
 const MIN_ITEMS: usize = 15;
 const MAX_PAGES_PER_REQUEST: usize = 5;
 const SYNC_TIMELINE_LIMIT: u32 = 10;
-/// Avatar and preview fetches in flight at once.
+/// Pictures (avatars, thumbnails) fetched at once. Previews have their own permits: a list that
+/// asked for many must not hold back the pictures of the chat opened after it.
 const ROW_FETCHES: usize = 4;
 /// Longest side of an inline thumbnail and of the full-screen view, in pixels. Everything shown is
 /// re-encoded to at most this, so a decoded image costs at most 2.6 MB and 16 MB.
@@ -864,6 +865,7 @@ struct State {
     open: Option<timeline::Open>,
     rooms: Rooms,
     fetches: Arc<tokio::sync::Semaphore>,
+    previews: Arc<tokio::sync::Semaphore>,
     /// Push rules, kept current by the SDK. One instance: each registers an event handler.
     notif: Option<NotificationSettings>,
     /// Read by the tasks that follow an open conversation.
@@ -903,7 +905,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     // Older builds kept KLIPY's customer ID on disk; it now lives only in memory.
     let _ = std::fs::remove_file(dir.join("klipy-id"));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
-        rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
+        rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), previews: Arc::new(tokio::sync::Semaphore::new(PROBES)), notif: None,
         incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, browser: None, replaceable: false, update: None };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
     #[cfg(not(target_os = "android"))]
@@ -1615,7 +1617,7 @@ impl State {
             Cmd::Previews(ids) => {
                 for room_id in ids {
                     let room = self.room(&room_id)?;
-                    let (ev, permits, rooms) = (self.ev.clone(), self.fetches.clone(), self.rooms.clone());
+                    let (ev, permits, rooms) = (self.ev.clone(), self.previews.clone(), self.rooms.clone());
                     tokio::spawn(async move {
                         let Ok(_permit) = permits.acquire().await else { return };
                         if let Some(summary) = probe(&room, &rooms).await {
@@ -1947,17 +1949,10 @@ async fn messages(room: &Room, from: Option<&str>, limit: u16) -> Result<Message
             _ => None,
         })
         .collect();
-    let backups = room.client().encryption().backups();
-    let mut found = false;
-    for session in sessions.iter().take(MAX_KEY_FETCHES) {
-        match backups.download_room_key(room.room_id(), session).await {
-            Ok(f) => found |= f,
-            Err(e) => {
-                log::warn!("backup key: {e}");
-                break;
-            }
-        }
-    }
+    let backups = &room.client().encryption().backups();
+    // A key the backup does not hold yet says nothing about the others: none stops the rest.
+    let asked = futures_util::future::join_all(sessions.iter().take(MAX_KEY_FETCHES).map(|session| backups.download_room_key(room.room_id(), session))).await;
+    let found = asked.into_iter().fold(false, |found, got| found | got.inspect_err(|e| log::debug!("backup key: {e}")).unwrap_or(false));
     let resp = if found { room.messages(opts()).await? } else { resp };
     search::page(room, &resp.chunk).await;
     Ok(resp)

@@ -74,6 +74,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         open: None,
         rooms: Rooms::default(),
         fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)),
+        previews: Arc::new(tokio::sync::Semaphore::new(PROBES)),
         notif: None,
         incognito: Arc::new(AtomicBool::new(true)),
         tasks: Vec::new(),
@@ -1245,6 +1246,248 @@ async fn a_chat_opens_at_once_after_the_store_lost_its_events() {
     eprintln!("messages on screen after {took:?}");
     // The SDK waits up to 3 s for a sync to tell it where the chat's history starts.
     assert!(took < Duration::from_secs(2), "the messages took {took:?}");
+}
+
+/// Not a check: times a long encrypted group read on a new device whose keys are only in the
+/// backup. SLOW_N messages (with replies and pictures) from two people, read through a hop of
+/// SLOW_RTT_MS; SLOW_PREVIEWS chat-list previews asked for just before the thumbnails. The seed
+/// is kept in the temporary directory for the next run.
+/// Run: SLOW_N=2000 ... cargo test --lib long_history_timings -- --include-ignored --nocapture
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement, needs a local homeserver with JWT login"]
+async fn long_history_timings() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let n: usize = std::env::var("SLOW_N").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+    let rtt = Duration::from_millis(std::env::var("SLOW_RTT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(150));
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-slowload-{tag}"));
+    // The seed takes minutes: kept for the next run, with the account and its recovery key.
+    let saved = std::env::temp_dir().join(format!("slowload-seed-{n}.json"));
+    let (alice_name, room_id, key): (String, OwnedRoomId, String) = match std::fs::read(&saved) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap(),
+        Err(_) => {
+            let seeded = slowload_seed(&hs, &secret, n, &root, &tag).await;
+            std::fs::write(&saved, serde_json::to_vec(&seeded).unwrap()).unwrap();
+            seeded
+        }
+    };
+    measure_slowload(&hs, &secret, rtt, &root, &alice_name, &room_id, key).await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+async fn slowload_seed(hs: &str, secret: &str, n: usize, root: &Path, tag: &str) -> (String, OwnedRoomId, String) {
+    let alice_name = format!("alice{tag}");
+    let seeding = std::time::Instant::now();
+    let login = |name: String| async move {
+        let c = Client::builder().homeserver_url(hs).sqlite_store(root.join(&name), None).build().await.unwrap();
+        let mut data = JsonObject::new();
+        data.insert("token".into(), jwt(secret, &name).into());
+        c.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+        c.sync_once(SyncSettings::default()).await.unwrap();
+        c
+    };
+    // Alice's first device stays in sync, so that every room key reaches it and its backup.
+    let alice_client = login(alice_name.clone()).await;
+    let syncing = tokio::spawn({
+        let c = alice_client.clone();
+        async move { c.sync(SyncSettings::default()).await }
+    });
+    alice_client.encryption().bootstrap_cross_signing_if_needed(None).await.unwrap();
+    let key = alice_client.encryption().recovery().enable().await.unwrap();
+    let mut people = Vec::new();
+    for name in ["bob", "carol"] {
+        people.push(login(format!("{name}{tag}")).await);
+    }
+    let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+    req.name = Some("Long history".into());
+    req.invite = people.iter().map(|c| c.user_id().unwrap().to_owned()).collect();
+    let group = alice_client.create_room(req).await.unwrap();
+    group.enable_encryption().await.unwrap();
+    let room_id = group.room_id().to_owned();
+    let photo = root_photo(root);
+    let senders = people.iter().enumerate().map(|(who, c)| {
+        let (c, room_id, photo) = (c.clone(), room_id.clone(), photo.clone());
+        async move {
+            c.sync_once(SyncSettings::default()).await.unwrap();
+            c.join_room_by_id(&room_id).await.unwrap();
+            c.sync_once(SyncSettings::default()).await.unwrap();
+            let room = c.get_room(&room_id).unwrap();
+            let mut sent: Vec<OwnedEventId> = Vec::new();
+            for i in 0..n / 2 {
+                if i % 50 == 25 {
+                    attach(&room, &photo, None, "", false).await.unwrap();
+                    continue;
+                }
+                let mut msg = RoomMessageEventContent::text_plain(format!("m{who}-{i}"));
+                if i % 10 == 5 && sent.len() > 30 {
+                    let quoted = sent[sent.len() - 30].clone();
+                    msg.relates_to = Some(matrix_sdk::ruma::events::room::message::Relation::Reply(matrix_sdk::ruma::events::relation::Reply::new(
+                        matrix_sdk::ruma::events::relation::InReplyTo::new(quoted),
+                    )));
+                }
+                sent.push(room.send(msg).await.unwrap().response.event_id);
+            }
+            sent.pop().unwrap()
+        }
+    });
+    let lasts = futures_util::future::join_all(senders).await;
+    // Alice's first device reads the last message: by then every room key has reached it.
+    let alice_room = alice_client.get_room(&room_id).unwrap();
+    for last in lasts {
+        let mut tries = 0;
+        while alice_room.event(&last, None).await.unwrap().kind.is_utd() {
+            tries += 1;
+            assert!(tries < 300, "device 1 never read {last}");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+    eprintln!("timing: device 1 read the last messages after {:?}", seeding.elapsed());
+    tokio::time::timeout(Duration::from_secs(300), alice_client.encryption().backups().wait_for_steady_state()).await.unwrap().unwrap();
+    syncing.abort();
+    eprintln!("timing: seeded {n} messages in {:?}", seeding.elapsed());
+    (alice_name, room_id, key)
+}
+
+async fn measure_slowload(hs: &str, secret: &str, rtt: Duration, root: &Path, alice_name: &str, room_id: &OwnedRoomId, key: String) {
+    let room_id = room_id.clone();
+    // A new device, as after a reinstall, through a phone-like connection.
+    let start = std::time::Instant::now();
+    let at = |what: &str| eprintln!("timing: {:>8.2}s {what}", start.elapsed().as_secs_f64());
+    let (mut alice2, mut seat) = state(root.join("alice2"), &slow_hop(hs, rtt));
+    alice2.login_jwt(jwt(secret, alice_name)).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    at("ready");
+    wait_for(&mut seat, "room in list", |e| match e {
+        Ev::Rooms(r) => r.iter().any(|s| s.id == room_id).then_some(()),
+        _ => None,
+    })
+    .await;
+    at("room in list");
+    alice2.handle(Cmd::Recover(key)).await.unwrap();
+    wait_for(&mut seat, "NeedRecovery(false)", |e| matches!(e, Ev::NeedRecovery(false)).then_some(())).await;
+    at("recovered");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+    let opened = std::time::Instant::now();
+    let since = |t: std::time::Instant| format!("{:.2}s", t.elapsed().as_secs_f64());
+    alice2.handle(Cmd::Open(room_id.clone())).await.unwrap();
+    let (mut first, mut readable, mut most_locked) = (None, None, 0);
+    let messages = |rows: &[Msg]| rows.iter().filter(|m| m.kind == Kind::Message).count();
+    let locked = |rows: &[Msg]| bodies(rows).iter().filter(|b| undecrypted(b)).count();
+    while readable.is_none() {
+        let ev = seat.next("the first page readable", deadline).await;
+        let (m, l) = (messages(&seat.rows), locked(&seat.rows));
+        most_locked = most_locked.max(l);
+        if first.is_none() && m > 0 {
+            first = Some(since(opened));
+            eprintln!("timing: open: first rows after {} ({m} messages, {l} locked)", first.as_ref().unwrap());
+        }
+        if m >= MIN_ITEMS && l == 0 && matches!(ev, None | Some(Ev::Paged { .. })) {
+            readable = Some(since(opened));
+        }
+    }
+    eprintln!("timing: open: {} messages readable after {} (at most {most_locked} locked)", messages(&seat.rows), readable.unwrap());
+
+    let scrolled = std::time::Instant::now();
+    let target = messages(&seat.rows) + 200;
+    let (mut loaded, mut most_locked) = (None, 0);
+    alice2.handle(Cmd::LoadOlder).await.unwrap();
+    loop {
+        let ev = seat.next("200 older messages readable", deadline).await;
+        let (m, l) = (messages(&seat.rows), locked(&seat.rows));
+        most_locked = most_locked.max(l);
+        if let Some(Ev::Paged { more, .. }) = ev {
+            if m < target && more {
+                alice2.handle(Cmd::LoadOlder).await.unwrap();
+            } else if loaded.is_none() {
+                loaded = Some(since(scrolled));
+            }
+        }
+        if loaded.is_some() && l == 0 {
+            break;
+        }
+    }
+    eprintln!("timing: scroll: {} messages loaded after {}, readable after {} (at most {most_locked} locked)", messages(&seat.rows), loaded.unwrap(), since(scrolled));
+
+    let pictures: Vec<_> = seat.rows.iter().filter_map(|m| m.media.clone().map(|media| (m.id.clone(), media))).collect();
+    let thumbs = std::time::Instant::now();
+    let mut left: std::collections::HashSet<String> = pictures.iter().map(|(id, _)| id.clone()).collect();
+    let count = left.len();
+    // The chat list asked for previews just before, as it does for every row it shows locked.
+    let previews: usize = std::env::var("SLOW_PREVIEWS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    alice2.handle(Cmd::Previews(vec![room_id.clone(); previews])).await.unwrap();
+    alice2.handle(Cmd::Thumbs(pictures)).await.unwrap();
+    while !left.is_empty() {
+        if let Some(Ev::Thumb(id, _)) = seat.next("thumbnails", deadline).await {
+            left.remove(&id);
+        }
+    }
+    eprintln!("timing: thumbs: {count} after {}", since(thumbs));
+    at("done");
+}
+
+/// Keys that reach the backup only after the chat was opened: the sender did not know the new
+/// device yet, and the user's other device backs the keys up a while later. The open chat reads
+/// them without being opened again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn keys_backed_up_late_unlock_the_open_chat() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-latekey-{tag}"));
+    let login = |name: String| {
+        let (hs, secret, root) = (hs.clone(), secret.clone(), root.clone());
+        async move {
+            let c = Client::builder().homeserver_url(&hs).sqlite_store(root.join(&name), None).build().await.unwrap();
+            let mut data = JsonObject::new();
+            data.insert("token".into(), jwt(&secret, &name).into());
+            c.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+            c.sync_once(SyncSettings::default()).await.unwrap();
+            c
+        }
+    };
+    let alice_name = format!("alice{tag}");
+    let alice1 = login(alice_name.clone()).await;
+    alice1.encryption().bootstrap_cross_signing_if_needed(None).await.unwrap();
+    let key = alice1.encryption().recovery().enable().await.unwrap();
+    let bob = login(format!("bob{tag}")).await;
+    let room = alice1.create_dm(bob.user_id().unwrap()).await.unwrap();
+    let room_id = room.room_id().to_owned();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    bob.join_room_by_id(&room_id).await.unwrap();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    let bob_room = bob.get_room(&room_id).unwrap();
+    bob_room.send(RoomMessageEventContent::text_plain("before")).await.unwrap();
+
+    // The new device signs in and unlocks the backup; Bob has not synced since, so he does not know it.
+    let (mut alice2, mut seat) = state(root.join("alice2"), &hs);
+    alice2.login_jwt(jwt(&secret, &alice_name)).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    alice2.handle(Cmd::Recover(key)).await.unwrap();
+    wait_for(&mut seat, "NeedRecovery(false)", |e| matches!(e, Ev::NeedRecovery(false)).then_some(())).await;
+    bob_room.discard_room_key().await.unwrap();
+    for i in 0..5 {
+        bob_room.send(RoomMessageEventContent::text_plain(format!("late {i}"))).await.unwrap();
+    }
+    alice2.handle(Cmd::Open(room_id.clone())).await.unwrap();
+    let late = |rows: &[Msg]| bodies(rows).iter().filter(|b| b.starts_with("late")).count();
+    until(&mut seat, "the locked messages", |rows| bodies(rows).iter().filter(|b| undecrypted(b)).count() >= 5).await;
+    // The first backup lookups find nothing.
+    let settle = tokio::time::Instant::now() + Duration::from_secs(3);
+    while tokio::time::timeout_at(settle, seat.next("settle", settle + Duration::from_secs(1))).await.is_ok() {}
+    assert_eq!(late(&seat.rows), 0, "{:?}", bodies(&seat.rows));
+
+    // The other device syncs, gets the keys and backs them up.
+    alice1.sync_once(SyncSettings::default()).await.unwrap();
+    alice1.encryption().backups().wait_for_steady_state().await.unwrap();
+    let uploaded = std::time::Instant::now();
+    let deadline = tokio::time::Instant::now() + timeline::KEY_RETRY_FIRST * 2;
+    while late(&seat.rows) < 5 && tokio::time::timeout_at(deadline, seat.next("late keys", deadline + Duration::from_secs(1))).await.is_ok() {}
+    eprintln!("late keys read {:?} after the upload", uploaded.elapsed());
+    assert_eq!(late(&seat.rows), 5, "{:?}", bodies(&seat.rows));
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Answers of the New chat screen and of leaving, as the UI sees them.
