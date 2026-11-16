@@ -129,6 +129,54 @@ pub struct Field {
     pub pattern: String,
 }
 
+/// The Meta bridge's step asking for the PIN of the encrypted chat history.
+pub const HISTORY_PIN_STEP: &str = "fi.mau.meta.history_pin";
+/// The bridges that ask for it: Messenger only (Instagram has no encrypted chats).
+pub const HISTORY_BRIDGE: &str = "facebookgo";
+const HISTORY_PIN_EXHAUSTED: &str = "FI.MAU.META_HISTORY_PIN_EXHAUSTED";
+
+/// Why a call failed, from the body of its answer. Both APIs put a readable reason in `error` or
+/// `message`; the exhausted PIN gets words that say what to do.
+fn failure(json: &Value) -> String {
+    if json.get("errcode").and_then(Value::as_str) == Some(HISTORY_PIN_EXHAUSTED) {
+        return t!("The PIN was wrong too many times. Open Messenger on a device where your chats are available, reset the PIN there, then try again.").to_owned();
+    }
+    ["error", "message"].iter().find_map(|k| json.get(k)?.as_str()).unwrap_or("request failed").to_owned()
+}
+
+/// What the bridge says of a wrong history PIN: "Messenger reports N attempts remaining."
+pub fn pin_attempts_left(instructions: &str) -> Option<u32> {
+    let before = instructions.split(" attempts remaining").next().filter(|b| b.len() < instructions.len())?;
+    before.rsplit(' ').next()?.parse().ok()
+}
+
+/// Whether `value` fits a pattern that only digits match (`^[0-9]{6}$`, `^\d{4,8}$`, `^\d+$`);
+/// any other pattern is left to the bridge.
+pub fn fits_digits(pattern: &str, value: &str) -> bool {
+    if !digits_only(pattern) {
+        return true;
+    }
+    let (min, max) = digit_range(pattern);
+    value.chars().all(|c| c.is_ascii_digit()) && (min..=max).contains(&value.len())
+}
+
+/// The shortest and longest run of digits a digits-only pattern allows.
+fn digit_range(pattern: &str) -> (usize, usize) {
+    let body = pattern.trim_start_matches('^').trim_end_matches('$');
+    if let Some((_, q)) = body.rsplit_once('{') {
+        let q = q.trim_end_matches('}');
+        let (lo, hi) = q.split_once(',').unwrap_or((q, q));
+        let lo = lo.trim().parse().unwrap_or(0);
+        return (lo, if q.contains(',') { hi.trim().parse().unwrap_or(usize::MAX) } else { lo });
+    }
+    match body.chars().last() {
+        Some('+') => (1, usize::MAX),
+        Some('*') => (0, usize::MAX),
+        Some('?') => (0, 1),
+        _ => (1, 1),
+    }
+}
+
 /// A pattern that only digits match, such as `^[0-9]{6}$` or `^\d+$`: a number pad fits it.
 pub fn digits_only(pattern: &str) -> bool {
     let body = pattern.trim_start_matches('^').trim_end_matches('$');
@@ -200,9 +248,7 @@ impl Api {
         if status.is_success() {
             return Ok(json);
         }
-        // Both APIs put a readable reason in one of these.
-        let reason = ["error", "message"].iter().find_map(|k| json.get(k)?.as_str());
-        bail!("{} (HTTP {})", reason.unwrap_or("request failed"), status.as_u16())
+        bail!("{} (HTTP {})", failure(&json), status.as_u16())
     }
 
     async fn bridge(&self, bridge: &str, method: Method, path: &str, body: Option<Value>, timeout: Duration) -> Result<Value> {
@@ -527,6 +573,28 @@ mod tests {
         let want = [("facebookgo", "Dean"), ("facebookgo", "300")].map(|(b, n)| (b.to_owned(), n.to_owned()));
         assert_eq!(attention(&whoami), want);
         assert!(attention(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn history_pin_is_checked_against_the_steps_pattern() {
+        assert!(fits_digits("^[0-9]{6}$", "123456"));
+        for bad in ["12345", "1234567", "12345a", "", " 12345"] {
+            assert!(!fits_digits("^[0-9]{6}$", bad), "{bad}");
+        }
+        assert!(fits_digits("^\\d{4,8}$", "1234") && !fits_digits("^\\d{4,8}$", "123"));
+        assert!(fits_digits("^\\d+$", "7") && !fits_digits("^\\d+$", ""));
+        assert!(fits_digits("^[a-z]+$", "anything"), "other patterns are the bridge's to check");
+    }
+
+    #[test]
+    fn wrong_pin_attempts_and_exhaustion() {
+        let wrong = "Couldn't verify your PIN. Messenger reports 2 attempts remaining.\n\nEnter your Messenger secure storage PIN";
+        assert_eq!(pin_attempts_left(wrong), Some(2));
+        assert_eq!(pin_attempts_left("Enter your Messenger secure storage PIN to restore."), None);
+        let exhausted = json!({ "errcode": "FI.MAU.META_HISTORY_PIN_EXHAUSTED", "error": "PIN entered incorrectly too many times." });
+        assert!(failure(&exhausted).contains("reset the PIN"));
+        assert_eq!(failure(&json!({ "error": "boom" })), "boom");
+        assert_eq!(failure(&Value::Null), "request failed");
     }
 
     #[test]

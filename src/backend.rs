@@ -452,6 +452,8 @@ pub struct Msg {
     /// The message disappears after this many ms (`com.beeper.disappearing_timer`); 0 when it
     /// stays. On a bridge's status row: the timer the bridge gave the user's message.
     pub disappear: u64,
+    /// The Meta bridge's placeholder for a message it could not decrypt (`fi.mau.meta.undecryptable`).
+    pub undecryptable: bool,
 }
 
 /// What a row of a conversation is.
@@ -557,6 +559,7 @@ impl Msg {
             delivery: Delivery::Sent,
             seen: Vec::new(),
             disappear: 0,
+            undecryptable: false,
         }
     }
 }

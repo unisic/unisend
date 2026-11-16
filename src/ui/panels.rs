@@ -225,8 +225,24 @@ impl BeeperApp {
         self.cancel_login(cx);
         self.end_login(cx);
         self.relogin = relogin;
+        (self.unlock, self.pin_asked) = (false, false);
         self.panel = Some(Panel::Login);
         self.working = self.send(Cmd::Flows(bridge.to_owned()), cx);
+    }
+
+    /// Signs the Messenger login in again for the bridge to ask for the history PIN.
+    fn unlock_history(&mut self, login: String, cx: &mut Context<Self>) {
+        self.choose_network(bridges::HISTORY_BRIDGE, Some(login), cx);
+        self.unlock = true;
+    }
+
+    /// From a chat with undecryptable Messenger messages: the one Messenger account's page, or the list.
+    pub(super) fn open_unlock(&mut self, cx: &mut Context<Self>) {
+        let logins = self.networks.iter().flatten().filter(|n| n.bridge == bridges::HISTORY_BRIDGE).flat_map(|n| &n.logins).collect::<Vec<_>>();
+        match logins[..] {
+            [only] => self.open_account(bridges::HISTORY_BRIDGE.to_owned(), only.id.clone(), cx),
+            _ => self.open_panel(Panel::Networks, cx),
+        }
     }
 
     fn start_flow(&mut self, bridge: String, flow: String, cx: &mut Context<Self>) {
@@ -260,7 +276,15 @@ impl BeeperApp {
     }
 
     fn submit_fields(&mut self, cx: &mut Context<Self>) {
-        let values = self.fields.iter().map(|(id, input)| (id.clone(), input.read(cx).value().trim().to_string())).collect();
+        let values: HashMap<String, String> = self.fields.iter().map(|(id, input)| (id.clone(), input.read(cx).value().trim().to_string())).collect();
+        // A digits-only field (the history PIN) is checked here; an empty one is the bridge's to accept or not.
+        if let Some(Step { kind: StepKind::Input(wanted), .. }) = &self.step
+            && wanted.iter().any(|f| !values[&f.id].is_empty() && !bridges::fits_digits(&f.pattern, &values[&f.id]))
+        {
+            self.error = Some(t!("Enter the digits only, in the length asked for.").into());
+            cx.notify();
+            return;
+        }
         self.submit(values, cx);
     }
 
@@ -321,6 +345,7 @@ impl BeeperApp {
                     }
                     _ => {}
                 }
+                self.pin_asked |= step.step_id == bridges::HISTORY_PIN_STEP;
                 self.step = Some(step);
             }
             Ev::PanelFailed => {
@@ -948,6 +973,16 @@ impl BeeperApp {
                     .child(footnote(t!("Signing in again keeps this account's chats. On Messenger it is also when the bridge asks for the PIN of your encrypted chat history."), cx)),
             )
             .children(servers)
+            .children((network.bridge == bridges::HISTORY_BRIDGE && !broken).then(|| {
+                let unlock = {
+                    let id = login.id.clone();
+                    cx.listener(move |this, _, _, cx| this.unlock_history(id.clone(), cx))
+                };
+                v_flex()
+                    .gap(px(8.))
+                    .child(card(cx).child(account_row("account-unlock-history", t!("Unlock encrypted history"), "", p.muted, cx).on_click(unlock)))
+                    .child(footnote(t!("Enter the 6-digit PIN from Messenger. It goes to the bridge, which decrypts the history."), cx))
+            }))
             .child(
                 card(cx).child(
                     h_flex()
@@ -1029,6 +1064,27 @@ impl BeeperApp {
         )
     }
 
+    /// A quiet line under a chat that shows the Meta bridge's undecryptable notices; it opens the way to the history PIN.
+    pub(super) fn render_unlock_hint(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.beeper || !self.msgs.iter().any(|m| m.undecryptable) {
+            return None;
+        }
+        let p = Palette::of(cx);
+        Some(
+            h_flex()
+                .id("unlock-hint")
+                .px(px(GUTTER))
+                .py(px(8.))
+                .gap(px(8.))
+                .role(Role::Button)
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.open_unlock(cx)))
+                .child(div().flex_1().min_w_0().text_size(fs(13.)).line_height(fs(18.)).text_color(p.faint).child(t!("Some messages could not be decrypted. Unlock encrypted history")))
+                .child(Icon::new(IconName::ChevronRight).size_4().flex_none().text_color(p.faint))
+                .into_any_element(),
+        )
+    }
+
     fn render_add(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         v_flex()
@@ -1074,6 +1130,18 @@ impl BeeperApp {
             };
         };
         let name = bridges::display_name(&step.bridge).to_owned();
+        let instructions = if step.step_id == bridges::HISTORY_PIN_STEP {
+            match bridges::pin_attempts_left(&step.instructions) {
+                Some(n) => tn!(n, "Wrong PIN. {n} attempt left. Try again, or leave it empty to skip.", "Wrong PIN. {n} attempts left. Try again, or leave it empty to skip."),
+                None if step.instructions.contains("\n\n") => step.instructions.clone(),
+                None => t!("Enter the 6-digit PIN of your Messenger encrypted chats. It goes to the bridge, which decrypts the history. Leave it empty to skip.").to_owned(),
+            }
+        } else if self.unlock && matches!(step.kind, StepKind::Cookies(_)) {
+            t!("Sign in to Messenger once more. The bridge asks for the PIN after that.").to_owned()
+        } else {
+            step.instructions.clone()
+        };
+        let no_pin = self.unlock && !self.pin_asked && step.kind == StepKind::Done;
         let body = match &step.kind {
             StepKind::Input(wanted) => {
                 if self.fields.is_empty() {
@@ -1185,6 +1253,12 @@ impl BeeperApp {
                     ))
                     .into_any_element()
             }
+            StepKind::Done if no_pin => v_flex()
+                .gap_3()
+                .child(div().text_size(fs(16.)).child(t!("The bridge did not ask for a PIN.")))
+                .child(note(t!("It does not restore encrypted history, or this account has none saved, so the history cannot be unlocked here.")))
+                .child(h_flex().child(Button::new("login-done").primary().label(t!("Done")).on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
+                .into_any_element(),
             StepKind::Done => v_flex()
                 .gap_3()
                 .child(div().text_size(fs(16.)).child(t!("{name} is connected.", name = name)))
@@ -1195,7 +1269,7 @@ impl BeeperApp {
         v_flex()
             .gap_4()
             .child(div().text_size(fs(20.)).font_weight(FontWeight::SEMIBOLD).child(name))
-            .when(!step.instructions.is_empty(), |el| el.child(div().text_size(fs(15.)).child(step.instructions.clone())))
+            .when(!instructions.is_empty() && !no_pin, |el| el.child(div().text_size(fs(15.)).child(instructions)))
             .child(body)
             .into_any_element()
     }

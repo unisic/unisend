@@ -447,7 +447,10 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
             m.disappear = timer.map_or(0, |(ms, _)| ms);
             match &like.kind {
                 MsgLikeKind::Message(_) if json.as_ref().is_some_and(disappear::repeats_state) => m.kind = Kind::Hidden,
-                MsgLikeKind::Message(_) => m.link = json.as_ref().and_then(link_preview),
+                MsgLikeKind::Message(_) => {
+                    m.link = json.as_ref().and_then(link_preview);
+                    m.undecryptable = json.as_ref().is_some_and(|c| c.get("fi.mau.meta.undecryptable").and_then(serde_json::Value::as_bool) == Some(true));
+                }
                 MsgLikeKind::Other(other) if other.event_type().to_string() == CALL_HANGUP => {
                     match call_line(CALL_HANGUP, json.as_ref(), None, &m.sender, m.own) {
                         Some(line) => (m.kind, m.body) = (Kind::Notice, line),

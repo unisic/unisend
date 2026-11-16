@@ -252,6 +252,9 @@ pub struct BeeperApp {
     guilds: Option<(String, Vec<Guild>)>,
     /// The login being signed in again, in place of adding one.
     relogin: Option<String>,
+    /// The sign-in is to unlock Messenger's encrypted history, and whether the bridge asked for the PIN.
+    unlock: bool,
+    pin_asked: bool,
     /// Ways to sign in to the chosen bridge, when it offers more than one.
     flows: Option<(String, Vec<Flow>)>,
     step: Option<Step>,
@@ -607,6 +610,8 @@ impl BeeperApp {
             attention: Vec::new(),
             guilds: None,
             relogin: None,
+            unlock: false,
+            pin_asked: false,
             flows: None,
             step: None,
             fields: Vec::new(),
@@ -2808,6 +2813,7 @@ impl BeeperApp {
             .when(composing, |el| el.child(
                 v_flex()
                     .px(px(column))
+                    .children(self.render_unlock_hint(cx))
                     .children(self.render_typing(window, cx))
                     .children(self.render_compose_strip(window, cx))
                     .children(self.render_mentions(cx))
