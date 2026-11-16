@@ -107,6 +107,8 @@ pub enum Cmd {
     RecoveryCode,
     /// Replaces the account's recovery code with a new one and keeps it here.
     NewRecoveryCode,
+    /// A notification as a message brings one, with the user's picture, to try its look and buttons.
+    TestNotice,
     Open(OwnedRoomId),
     /// The conversation left the screen.
     Close,
@@ -658,9 +660,37 @@ fn commands() -> Option<mpsc::Sender<Cmd>> {
     COMMANDS.get()?.upgrade()
 }
 
+/// The chat of the test notification: no room, so its buttons send nothing.
+pub(crate) const TEST_CHAT: &str = "test";
+
+/// Shows the test notification through the same path a message takes, the user's picture as its face.
+async fn test_notice(client: Client, dir: PathBuf) {
+    let face = async {
+        let bytes = picture(&client, client.account().get_avatar_url().await.ok()??).await.ok()?;
+        let path = dir.join("notify").join(TEST_CHAT);
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        write_private(&path, &bytes).ok()?;
+        Some(path)
+    };
+    let file = tokio::time::timeout(ICON_WAIT, face).await.ok().flatten();
+    let icon = file.as_deref().and_then(Path::to_str).unwrap_or_default();
+    let note = Note { sender: "Unisend".into(), text: t!("Test notification. Reply, mark as read or mute to try the buttons: nothing is sent.").into(), ts: now_ms().max(0) as u64, mention: false };
+    crate::notify(&crate::Notice { chat: TEST_CHAT, name: "Unisend", group: false, icon, note: &note, alert: true });
+    // Android has decoded the picture by now; desktop removes it with the notification.
+    if cfg!(target_os = "android")
+        && let Some(file) = file
+    {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
 /// Sends a message from a notification's reply box. False when the app is not signed in.
 pub(crate) fn reply(chat: &str, body: &str) -> bool {
     log::debug!("notification: reply");
+    if chat == TEST_CHAT {
+        log::info!("test notification: reply");
+        return !body.trim().is_empty();
+    }
     let (body, Ok(room)) = (body.trim(), OwnedRoomId::try_from(chat)) else { return false };
     !body.is_empty() && commands().is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None, mentions: Vec::new() }).is_ok())
 }
@@ -676,6 +706,9 @@ pub(crate) fn update_failed(why: String) {
 /// Marks a chat read from its notification.
 pub(crate) fn read_from_notification(chat: &str) {
     log::debug!("notification: mark read");
+    if chat == TEST_CHAT {
+        log::info!("test notification: mark read");
+    }
     if let (Some(tx), Ok(room)) = (commands(), OwnedRoomId::try_from(chat)) {
         let _ = tx.try_send(Cmd::Chat(room, ChatAction::Unread(false)));
     }
@@ -684,6 +717,10 @@ pub(crate) fn read_from_notification(chat: &str) {
 /// Mutes a chat from its notification. False when the app is not signed in.
 pub(crate) fn mute_from_notification(chat: &str) -> bool {
     log::debug!("notification: mute");
+    if chat == TEST_CHAT {
+        log::info!("test notification: mute");
+        return true;
+    }
     let Ok(room) = OwnedRoomId::try_from(chat) else { return false };
     commands().is_some_and(|tx| tx.try_send(Cmd::Chat(room, ChatAction::Mute(true))).is_ok())
 }
@@ -1176,6 +1213,8 @@ impl State {
                 };
                 self.emit(Ev::RecoveryCode(kept)).await;
             }
+            // Off the command loop: the picture may have to be fetched.
+            Cmd::TestNotice => drop(tokio::spawn(test_notice(self.client()?.clone(), self.dir.clone()))),
             Cmd::NewRecoveryCode => {
                 let enc = self.client()?.encryption();
                 let recovery = enc.recovery();

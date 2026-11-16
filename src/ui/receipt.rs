@@ -35,7 +35,7 @@ impl ReceiptStyle {
 /// When someone else's message shows what its sender sees of it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum IncomingStatus {
-    /// Beside the time under each run of their messages.
+    /// Under the newest message when it is theirs; under the others once tapped.
     Always,
     /// Under a message once it is tapped.
     #[default]
@@ -47,7 +47,7 @@ impl IncomingStatus {
 
     pub(super) fn label(self) -> &'static str {
         match self {
-            Self::Always => t!("Always"),
+            Self::Always => t!("Under the newest"),
             Self::OnTap => t!("On tap"),
         }
     }

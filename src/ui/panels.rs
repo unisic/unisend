@@ -422,7 +422,13 @@ impl BeeperApp {
         };
         let look = t!("{theme}, text {size}%", theme = theme, size = s.text_size.percent());
         let chats = t!("Message status: {style}", style = s.receipts.label());
-        let notices = if s.stay_connected { t!("Arrive while Unisend is closed") } else { t!("Only while Unisend is open") };
+        let notices = if !cfg!(target_os = "android") {
+            t!("Send a test notification")
+        } else if s.stay_connected {
+            t!("Arrive while Unisend is closed")
+        } else {
+            t!("Only while Unisend is open")
+        };
         let privacy = match s.lock.mode {
             _ if self.unencrypted => t!("Data on this device is not encrypted"),
             LockMode::Off => t!("App lock off"),
@@ -449,7 +455,7 @@ impl BeeperApp {
                 card(cx)
                     .child(category(Page::Appearance, IconName::Palette, look.into(), cx))
                     .child(category(Page::Chats, IconName::MessageCircle, chats.into(), cx))
-                    .when(cfg!(target_os = "android"), |el| el.child(category(Page::Notifications, IconName::Bell, notices.into(), cx))),
+                    .child(category(Page::Notifications, IconName::Bell, notices.into(), cx)),
             )
             .child(
                 card(cx)
@@ -637,9 +643,16 @@ impl BeeperApp {
         let android = |id: &'static str, label: &'static str, detail: &'static str, open: fn(), cx: &mut Context<Self>| {
             link(id, label, detail.into(), None, Some(IconName::ExternalLink), cx).on_click(move |_, _, _| open())
         };
-        v_flex()
-            .gap(px(GAP * 2.))
-            .child(card(cx).child(android(
+        let test = link("test-notice", t!("Send a test notification"), t!("As a message brings one, with your picture. Its buttons send nothing.").into(), None, Some(IconName::Bell), cx)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.send(Cmd::TestNotice, cx);
+            }));
+        let page = v_flex().gap(px(GAP * 2.)).child(card(cx).child(test));
+        // Sounds and the connection are Android's; desktop has the system's own settings.
+        if !cfg!(target_os = "android") {
+            return page.into_any_element();
+        }
+        page.child(card(cx).child(android(
                 "notification-settings",
                 t!("Sounds and importance"),
                 t!("Direct messages, group chats and mentions each have their own."),

@@ -248,7 +248,7 @@ pub struct BeeperApp {
     typing_last: SharedString,
     /// When the others were last told that the user is writing.
     typing_sent: Option<std::time::Instant>,
-    /// Row of the newest message, when it is the user's own.
+    /// Row of the newest message.
     tail: Option<usize>,
     /// Inline thumbnails by event ID, oldest first in `thumb_order`.
     thumbs: HashMap<String, Arc<Image>>,
@@ -1984,8 +1984,8 @@ impl BeeperApp {
         let network = room.and_then(|r| r.network.clone());
         let header_avatar = room.map(|r| avatar(&r.name, self.avatars.get(&r.id), 36., cx));
         let dm = room.is_some_and(|r| r.dm);
-        // The newest message, when it is the user's: the one whose way to the others is told.
-        self.tail = self.msgs.iter().rposition(|m| m.kind == Kind::Message && !self.is_hidden(&m.id)).filter(|&ix| self.msgs[ix].own);
+        // The newest message: the user's tells its way to the others, someone else's what its sender sees.
+        self.tail = self.msgs.iter().rposition(|m| m.kind == Kind::Message && !self.is_hidden(&m.id));
         // A wide pane keeps the conversation to a column a glance can cross, as desktop chat apps do.
         let column = if narrow { 0. } else { ((f32::from(frame::viewport(window).width) - Self::nav_w(window) - LIST_W - self.info_aside(window) - THREAD_W) / 2.).max(0.) };
         let timeline = list(
@@ -2064,7 +2064,7 @@ impl BeeperApp {
                 });
                 let style = this.settings.receipts;
                 let asked = match this.settings.incoming {
-                    receipt::IncomingStatus::Always => last,
+                    receipt::IncomingStatus::Always => this.tail == Some(ix) || this.tapped.as_ref() == Some(&m.id),
                     receipt::IncomingStatus::OnTap => this.tapped.as_ref() == Some(&m.id),
                 };
                 let said = if m.own { this.delivery_line(ix, dm) } else if asked && !m.deleted { this.heard(ix) } else { None };
@@ -2659,7 +2659,7 @@ impl BeeperApp {
     }
 
     /// What became of the user's message at `ix`. Said of the newest message of the chat when it
-    /// is the user's, and of any that failed.
+    /// is the user's, of a tapped one, and of any that failed.
     fn delivery_line(&self, ix: usize, dm: bool) -> Option<Receipt> {
         let m = &self.msgs[ix];
         // The bridge's word on it follows it; the latest counts, except as a step back from delivered.
@@ -2675,7 +2675,7 @@ impl BeeperApp {
         if let Delivery::Failed(why) = state {
             return Some(Receipt::Failed(why));
         }
-        if self.tail != Some(ix) {
+        if self.tail != Some(ix) && self.tapped.as_deref() != Some(m.id.as_str()) {
             return None;
         }
         let (readers, who) = self.readers(ix);
