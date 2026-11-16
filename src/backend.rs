@@ -177,6 +177,8 @@ pub enum Cmd {
     SendLocation { room: OwnedRoomId, lat: f64, lon: f64, accuracy: Option<f64>, reply_to: Option<String> },
     /// Starts a poll; `answers` are checked again before they go out.
     SendPoll { room: OwnedRoomId, question: String, answers: Vec<String>, multiple: bool },
+    /// Pins or unpins a message that reached the server.
+    Pin { room: OwnedRoomId, target: String, pin: bool },
     /// Ends the user's own poll.
     EndPoll { room: OwnedRoomId, target: String },
     /// Reads the contact card in a `.vcf` attachment.
@@ -319,6 +321,9 @@ pub enum Ev {
     /// `None`: no bridge says, so the chat is plain Matrix and takes everything.
     /// `moderate`: the user's power level lets them delete other people's messages.
     Features { room: OwnedRoomId, features: Option<Features>, moderate: bool },
+    /// The open chat's pinned messages and whether the user may change them, when it opens and
+    /// whenever its pins or power levels change.
+    Pins { room: OwnedRoomId, pins: Pins },
     /// A chat's details for its info screen; sent again as more is known.
     Info(OwnedRoomId, Box<info::Details>),
     Group { room: OwnedRoomId, change: group::Change },
@@ -1759,6 +1764,7 @@ impl State {
                 let (kind, content) = pollnew::NewPoll::check(&question, &answers, multiple).map_err(anyhow::Error::msg)?.event();
                 self.room(&room)?.send_raw(kind, content).await?;
             }
+            Cmd::Pin { room, target, pin } => pins::set(&self.room(&room)?, &target, pin).await?,
             Cmd::EndPoll { room, target } => {
                 let (kind, content) = pollnew::end(&target);
                 self.room(&room)?.send_raw(kind, content).await?;
@@ -3837,6 +3843,8 @@ pub use info::Member;
 
 mod timeline;
 mod video;
+mod pins;
+pub use pins::Pins;
 mod disappear;
 pub use disappear::{Disappearing, label as disappear_label};
 mod features;

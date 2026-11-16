@@ -6,7 +6,7 @@ use crate::backend::{Hit, MAX_HITS, MIN_QUERY};
 use crate::i18n::t;
 
 /// Older pages a jump to a found message may load before it gives up; 40 events each.
-const JUMP_PAGES: u8 = 50;
+pub(super) const JUMP_PAGES: u8 = 50;
 
 pub(super) struct Find {
     pub(super) input: Entity<InputState>,

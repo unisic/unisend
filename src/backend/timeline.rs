@@ -76,6 +76,7 @@ pub(super) struct Open {
     pub relabel: Arc<tokio::sync::Notify>,
     _tasks: [AbortOnDrop; 4],
     _features: EventHandlerDropGuard,
+    _pins: EventHandlerDropGuard,
 }
 
 /// Who is looking at the conversation: what a row needs to know besides its own item.
@@ -259,7 +260,8 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
         }
     });
     let _features = follow_features(room, ev).await;
-    Ok(Open { room: id, timeline, relabel, _tasks: [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing), AbortOnDrop(reads)], _features })
+    let _pins = super::pins::follow(room, ev).await;
+    Ok(Open { room: id, timeline, relabel, _tasks: [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing), AbortOnDrop(reads)], _features, _pins })
 }
 
 /// Reads only what the SDK keeps; never sends a receipt.

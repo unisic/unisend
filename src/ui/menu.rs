@@ -113,6 +113,8 @@ pub(super) enum Act {
     Save,
     Forward,
     Select,
+    Pin,
+    Unpin,
     Reactions,
     Info,
 }
@@ -131,6 +133,8 @@ impl Act {
             Act::Save => ("act-save", IconName::Download, t!("Save to gallery")),
             Act::Forward => ("act-forward", IconName::Forward, t!("Forward")),
             Act::Select => ("act-select", IconName::ListChecks, t!("Select multiple")),
+            Act::Pin => ("act-pin", IconName::Pin, t!("Pin")),
+            Act::Unpin => ("act-unpin", IconName::PinOff, t!("Unpin")),
             Act::Reactions => ("act-reactions", IconName::FaceSlightlySmiling, t!("Reactions")),
             Act::Info => ("act-info", IconName::Info, t!("Info")),
         }
@@ -344,6 +348,16 @@ impl MessageMenu {
 }
 
 impl BeeperApp {
+    /// Pin or Unpin before Select, for a message that reached the server where the user's power
+    /// level allows `m.room.pinned_events`.
+    fn with_pin(&self, mut acts: Vec<Act>, m: &Msg) -> Vec<Act> {
+        if let Some(pinned) = self.pin_offer(&m.id).filter(|_| m.id.starts_with('$') && !m.deleted) {
+            let at = acts.iter().position(|a| *a == Act::Select).unwrap_or(acts.len());
+            acts.insert(at, if pinned { Act::Unpin } else { Act::Pin });
+        }
+        acts
+    }
+
     /// The user's last message, when the chat's network still takes an edit to it: what Up in an
     /// empty composer edits.
     pub(super) fn last_editable(&self) -> Option<String> {
@@ -665,6 +679,11 @@ impl BeeperApp {
             Act::Save => self.export_message(id, crate::backend::Export::Save, cx),
             Act::Forward => self.forward_start(vec![id.to_owned()], window, cx),
             Act::Select => self.select_start(id, cx),
+            Act::Pin | Act::Unpin => {
+                if let Some(room) = self.open.clone() {
+                    self.send(Cmd::Pin { room, target: id.to_owned(), pin: act == Act::Pin }, cx);
+                }
+            }
             Act::Info => {
                 let at = self.menu.as_ref().filter(|m| m.kind != MenuKind::Touch).map(|m| m.at);
                 self.open_people(super::people::Shown::Details(id.to_owned()), at, cx);
@@ -729,7 +748,7 @@ impl BeeperApp {
         let keys = bar_keys(m, caps);
         let more = more_offered(&keys, caps);
         let reacts = id.starts_with('$') && caps.reaction >= 1;
-        let acts = taken(acts(m, MenuKind::Touch, false), m, caps);
+        let acts = self.with_pin(taken(acts(m, MenuKind::Touch, false), m, caps), m);
         let mine: Vec<bool> = keys.iter().map(|k| m.reactions.iter().any(|r| r.own && same_emoji(&r.key, k))).collect();
         let b = Bounds { origin: frame::local(window, menu.bubble.origin), size: menu.bubble.size };
         let bubble = Bounds { origin: point(f32::from(b.origin.x), f32::from(b.origin.y)), size: size(f32::from(b.size.width), f32::from(b.size.height)) };
@@ -899,7 +918,7 @@ impl BeeperApp {
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
         let id = m.id.clone();
-        let acts = taken(acts(m, MenuKind::List, narrow), m, self.caps());
+        let acts = self.with_pin(taken(acts(m, MenuKind::List, narrow), m, self.caps()), m);
         let h = POINTER_ROW_H * acts.len() as f32 + 12.;
         let (top, bottom) = crate::insets();
         let at = frame::local(window, menu.at);
