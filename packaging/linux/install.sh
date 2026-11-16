@@ -20,4 +20,6 @@ sed "s|^Exec=.*|Exec=$dest|" "$here/dev.gpui.beeper.desktop" > "$data/applicatio
 done
 if command -v update-desktop-database >/dev/null; then update-desktop-database -q "$data/applications" || true; fi
 if command -v gtk-update-icon-cache >/dev/null; then gtk-update-icon-cache -qtf "$data/icons/hicolor" || true; fi
+# A running Plasma keeps the icon it loaded first: this is the reload a new icon theme sends.
+if command -v dbus-send >/dev/null; then dbus-send --session --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:0 || true; fi
 echo "installed $dest and the launcher in $data/applications"
