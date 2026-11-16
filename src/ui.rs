@@ -141,8 +141,12 @@ const TYPING_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
 /// How long a message sent through a bridge may go without the bridge's word before it is taken
 /// as sent: some bridges never give one.
 const BRIDGE_WAIT_MS: u64 = 2 * 60 * 1000;
-/// Inline thumbnails kept decoded; each is at most 2.6 MB of pixels.
-const MAX_THUMBS: usize = 60;
+/// Inline thumbnails kept decoded; each is at most 2.6 MB of pixels, so about 50 MB of heap and as
+/// much GPU memory at most. A screen shows about 6; scrolling back reads the others from disk.
+const MAX_THUMBS: usize = 20;
+/// Room avatars kept, the least recently shown going first: 96 px, about 36 KB decoded each plus
+/// its atlas tile, so about 7 MB of heap and as much GPU memory.
+const MAX_AVATARS: usize = 200;
 /// Images let go of while no frame is drawn (the app in the background) waiting for the next one.
 const MAX_RELEASED: usize = 16;
 /// Sender pictures kept for the open chat; people past that many keep their initials.
@@ -369,8 +373,11 @@ pub struct BeeperApp {
     /// The pages open under the settings list, deepest last: a category, then a choice in it.
     settings_pages: Vec<panels::Page>,
     page_scroll: ScrollHandle,
-    /// Room avatars; `None` while loading or when the room has none. One entry per room at most.
+    /// Room avatars; `None` while loading or when the room has none. At most `MAX_AVATARS`.
     avatars: HashMap<OwnedRoomId, Option<Arc<Image>>>,
+    /// When each of `avatars` was last on screen, in `avatar_tick`s: list frames.
+    avatar_seen: HashMap<OwnedRoomId, u64>,
+    avatar_tick: u64,
     /// Images let go of; their GPU atlas tiles are freed with the next frame.
     released: Released,
     /// Pictures of the people writing in the open chat; `None` while loading or when they have
@@ -646,6 +653,8 @@ impl BeeperApp {
             drafts,
             place: navigate::Place::default(),
             avatars: HashMap::new(),
+            avatar_seen: HashMap::new(),
+            avatar_tick: 0,
             released: Released::default(),
             peeked: HashSet::new(),
             share,
@@ -740,8 +749,9 @@ impl BeeperApp {
                 self.busy = false;
             }
             Ev::Avatar(id, bytes) => {
-                if let Some(format) = image_format(&bytes) {
-                    self.avatars.insert(id, Some(Arc::new(Image::from_bytes(format, bytes))));
+                // One evicted while it loaded is asked for again when it is shown.
+                if let (Some(slot), Some(format)) = (self.avatars.get_mut(&id), image_format(&bytes)) {
+                    *slot = Some(Arc::new(Image::from_bytes(format, bytes)));
                 }
             }
             Ev::Face(user, bytes) => {
@@ -996,9 +1006,30 @@ impl BeeperApp {
     }
 
     /// Menu of what can be done to a chat; shared by the row's context menu and the chat header.
+    /// Room pictures just asked for; past `MAX_AVATARS` the least recently shown are let go.
+    fn asked_avatars(&mut self, ids: Vec<OwnedRoomId>, cx: &mut App) {
+        for id in ids {
+            self.avatar_seen.insert(id.clone(), self.avatar_tick);
+            self.avatars.insert(id, None);
+        }
+        while self.avatars.len() > MAX_AVATARS {
+            let Some(old) = self.avatars.keys().min_by_key(|id| self.avatar_seen.get(*id).copied().unwrap_or(0)).cloned() else { break };
+            self.avatar_seen.remove(&old);
+            if let Some(Some(image)) = self.avatars.remove(&old) {
+                self.released.push(image, cx);
+            }
+        }
+    }
+
     /// Asks the backend for avatars and previews of rows that just became visible.
     /// Uses at most half the command channel so user actions always fit.
-    fn fetch_rows(&mut self, range: std::ops::Range<usize>) {
+    fn fetch_rows(&mut self, range: std::ops::Range<usize>, cx: &mut App) {
+        self.avatar_tick += 1;
+        for &ix in &self.shown[range.clone()] {
+            if let Some(seen) = self.avatar_seen.get_mut(&self.rooms[ix].id) {
+                *seen = self.avatar_tick;
+            }
+        }
         if self.cmd.capacity() < self.cmd.max_capacity() / 2 {
             return;
         }
@@ -1011,7 +1042,7 @@ impl BeeperApp {
             .map(|r| r.id.clone())
             .collect();
         if !avatars.is_empty() && self.cmd.try_send(Cmd::Avatars(avatars.clone())).is_ok() {
-            self.avatars.extend(avatars.into_iter().map(|id| (id, None)));
+            self.asked_avatars(avatars, cx);
         }
         if !previews.is_empty() && self.cmd.try_send(Cmd::Previews(previews.clone())).is_ok() {
             self.peeked.extend(previews);
@@ -1826,7 +1857,7 @@ impl BeeperApp {
             self.shown.len() + self.message_rows(),
             cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 let chats = this.shown.len();
-                this.fetch_rows(range.start.min(chats)..range.end.min(chats));
+                this.fetch_rows(range.start.min(chats)..range.end.min(chats), cx);
                 range
                     .map(|ix| {
                         if ix >= chats {
