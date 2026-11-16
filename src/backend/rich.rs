@@ -81,7 +81,15 @@ pub fn parse(html: &str) -> Option<(String, Rich)> {
 }
 
 fn flush(blocks: &mut Vec<Block>, cur: &mut Vec<Run>, b: &mut Builder) {
-    // A paragraph does not end in spaces or line breaks.
+    trim_end(cur, b);
+    if !cur.is_empty() {
+        blocks.push(Block::Para(std::mem::take(cur)));
+    }
+    b.apart = true;
+}
+
+/// A paragraph does not end in spaces or line breaks.
+fn trim_end(cur: &mut Vec<Run>, b: &mut Builder) {
     while let Some(last) = cur.last_mut() {
         let kept = last.text.trim_end().len();
         b.plain.truncate(b.plain.len() - (last.text.len() - kept));
@@ -91,10 +99,6 @@ fn flush(blocks: &mut Vec<Block>, cur: &mut Vec<Run>, b: &mut Builder) {
         }
         cur.pop();
     }
-    if !cur.is_empty() {
-        blocks.push(Block::Para(std::mem::take(cur)));
-    }
-    b.apart = true;
 }
 
 fn text(s: &str, st: &Style, cur: &mut Vec<Run>, b: &mut Builder) {
@@ -274,6 +278,14 @@ fn walk(node: &NodeRef, st: &Style, depth: usize, blocks: &mut Vec<Block>, cur: 
             kids(&inner, blocks, cur, b);
             flush(blocks, cur, b);
         }
+        // A table reads as one line per row, its cells apart.
+        "td" | "th" => {
+            if !cur.is_empty() {
+                trim_end(cur, b);
+                push(" | ".into(), st, cur, b);
+            }
+            kids(&inner, blocks, cur, b)
+        }
         // Unknown tags and spans (spoilers, colours, mention pills) keep their text.
         _ => kids(&inner, blocks, cur, b),
     }
@@ -363,6 +375,12 @@ mod tests {
         assert!(parse(&"a".repeat(MAX_HTML + 1)).is_none());
         let deep = "<div>".repeat(500) + "x";
         assert_eq!(parse(&deep).unwrap().0, "x");
+    }
+
+    #[test]
+    fn table_cells_and_rows_stay_apart() {
+        let html = "<table><thead><tr><th>h1</th><th>h2</th></tr></thead>\n<tbody><tr>\n<td>c1</td>\n<td><b>c2</b></td>\n</tr><tr><td></td><td>d2</td></tr></tbody></table>";
+        assert_eq!(parse(html).unwrap().0, "h1 | h2\nc1 | c2\nd2");
     }
 
     #[test]
