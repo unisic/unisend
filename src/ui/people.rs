@@ -12,6 +12,9 @@ const HEAD_H: f32 = 36.;
 const FACT_H: f32 = 44.;
 const TABS_H: f32 = 48.;
 const FACE: f32 = 36.;
+/// The message at the top of its details: at most this many lines, of about this many characters.
+const PREVIEW_LINES: usize = 3;
+const PREVIEW_CHARS: usize = 30;
 /// A list a mouse opened stands at the pointer, at most this tall.
 const POPOVER_MAX_H: f32 = 440.;
 
@@ -37,6 +40,8 @@ pub(super) struct People {
 type Listing = (&'static str, Vec<(Option<String>, String)>, Vec<Line>);
 
 enum Line {
+    /// The message itself, as a bubble of `rows` lines.
+    Preview { text: String, own: bool, rows: usize },
     Head(&'static str),
     Fact(&'static str, String),
     /// Someone (`None` for the user), with a time or an emoji beside the name. `remove` is the
@@ -50,6 +55,7 @@ impl Line {
         match self {
             Line::Head(_) | Line::More(_) => HEAD_H,
             Line::Fact(..) => FACT_H,
+            Line::Preview { rows, .. } => 2. * 9. + 22. * *rows as f32 + 16.,
             Line::Person { .. } => PERSON_H,
         }
     }
@@ -95,7 +101,16 @@ impl BeeperApp {
             Shown::Details(id) => {
                 let ix = self.msgs.iter().position(|m| m.id == *id && !m.deleted)?;
                 let m = &self.msgs[ix];
-                let mut lines = vec![Line::Fact(t!("Sent"), format!("{}, {}", day_label(m.ts), clock(m.ts)))];
+                let mut text = m.summary();
+                // Cut by characters, not by the layout's clamp, which leaves the bubble as narrow as its ellipsis.
+                if let Some((cut, _)) = text.char_indices().nth(PREVIEW_LINES * PREVIEW_CHARS) {
+                    text.truncate(cut);
+                    text.push('\u{2026}');
+                }
+                let rows = text.lines().map(|l| l.chars().count().div_ceil(PREVIEW_CHARS).max(1)).sum::<usize>().clamp(1, PREVIEW_LINES);
+                // Matrix keeps only the time the server took it, which is when it was received too.
+                let when = format!("{}, {}", day_label(m.ts), clock(m.ts));
+                let mut lines = vec![Line::Preview { text, own: m.own, rows }, Line::Fact(if m.own { t!("Sent") } else { t!("Received") }, when)];
                 if !m.own {
                     lines.push(Line::Head(t!("Sender")));
                     lines.extend(listed(std::iter::once((m.from.clone(), short_time(m.ts)))));
@@ -127,7 +142,7 @@ impl BeeperApp {
                 let m = self.msgs.iter().find(|m| m.id == *id && !m.reactions.is_empty())?;
                 let total: usize = m.reactions.iter().map(|r| r.count).sum();
                 let mut tabs = vec![(None, t!("All · {n}", n = total))];
-                tabs.extend(m.reactions.iter().map(|r| (Some(r.key.clone()), format!("{} \u{b7} {}", r.key, r.count))));
+                tabs.extend(m.reactions.iter().map(|r| (Some(r.key.clone()), format!("{} \u{b7} {}", menu::clip_key(&r.key), r.count))));
                 // A tab whose emoji everyone took back shows them all.
                 let key = key.as_ref().filter(|k| m.reactions.iter().any(|r| &r.key == *k));
                 let mut lines = Vec::new();
@@ -135,9 +150,9 @@ impl BeeperApp {
                 for r in m.reactions.iter().filter(|r| key.is_none_or(|k| *k == r.key)) {
                     let mut rows: Vec<Line> = Vec::new();
                     if r.own {
-                        rows.push(Line::Person { user: None, aside: r.key.clone(), emoji: true, remove: Some(r.key.clone()) });
+                        rows.push(Line::Person { user: None, aside: menu::clip_key(&r.key), emoji: true, remove: Some(r.key.clone()) });
                     }
-                    rows.extend(r.by.iter().map(|user| Line::Person { user: Some(user.clone()), aside: r.key.clone(), emoji: true, remove: None }));
+                    rows.extend(r.by.iter().map(|user| Line::Person { user: Some(user.clone()), aside: menu::clip_key(&r.key), emoji: true, remove: None }));
                     hidden += r.count.saturating_sub(rows.len());
                     lines.extend(rows);
                 }
@@ -303,6 +318,28 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let edge = || h_flex().w_full().flex_none().px(px(GUTTER + 4.));
         match line {
+            Line::Preview { text, own, rows } => {
+                let inside = if own { p.in_own_bubble() } else { p };
+                edge()
+                    .h(px(Line::Preview { text: String::new(), own, rows }.h()))
+                    .py(px(8.))
+                    .map(|el| if own { el.justify_end() } else { el.justify_start() })
+                    .child(
+                        div()
+                            .max_w(relative(BUBBLE_SHARE))
+                            .px(px(GAP))
+                            .py(px(9.))
+                            .rounded(px(RADIUS))
+                            .bg(if own { p.own } else { p.surface })
+                            .text_color(inside.text)
+                            .text_size(fs(16.))
+                            .line_height(fs(22.))
+                            .max_h(fs(22.) * rows as f32 + px(2. * 9.))
+                            .overflow_hidden()
+                            .child(text),
+                    )
+                    .into_any_element()
+            }
             Line::Head(text) => edge().h(px(HEAD_H)).pt(px(8.)).text_size(fs(13.)).font_weight(FontWeight::SEMIBOLD).text_color(p.faint).child(text).into_any_element(),
             Line::More(n) => edge().h(px(HEAD_H)).text_size(fs(13.)).font_features(tabular()).text_color(p.faint).child(format!("+{n}")).into_any_element(),
             Line::Fact(label, value) => edge()

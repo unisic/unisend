@@ -51,7 +51,7 @@ pub(super) struct Voice {
     asking: bool,
     /// A tap on the microphone shows how to use it, until then.
     hint: Option<Instant>,
-    composer_empty: bool,
+    composer_empty: (bool, bool),
     /// Tells a stale answer from the recorder or player from the current one.
     epoch: u64,
     /// What the held recorder drew last, drawn again while it leaves; not its levels.
@@ -122,10 +122,11 @@ impl BeeperApp {
         INLINE && self.open.is_some() && self.caps().voice && !matches!(self.compose, Compose::Edit(_)) && self.composer.read(cx).value().is_empty()
     }
 
-    /// The composer turned empty or stopped being empty: the send button changes.
+    /// The composer turned empty or stopped being empty, or blank: the send button changes.
     pub(super) fn voice_typed(&mut self, cx: &mut Context<Self>) {
-        let empty = self.composer.read(cx).value().is_empty();
-        if INLINE && empty != std::mem::replace(&mut self.voice.composer_empty, empty) {
+        let text = self.composer.read(cx).value();
+        let empty = (text.is_empty(), text.trim().is_empty());
+        if empty != std::mem::replace(&mut self.voice.composer_empty, empty) {
             cx.notify();
         }
     }

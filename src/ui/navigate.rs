@@ -110,9 +110,11 @@ pub(super) struct Place {
     pub missed: usize,
     /// The chat was just opened: scroll to its first unread message once it is in the list.
     pub seek_unread: bool,
-    /// The first message the user had not seen when the chat opened: "New messages" stays above
+    /// The first message the user had not seen when the chat opened: the unread line stays above
     /// it while the chat is open, though reading moves the SDK's marker to the end.
     pub unread: Option<String>,
+    /// How many messages from others were unread then: the line counts them as Signal does.
+    pub unread_count: usize,
     /// Text the composer is to be given by the next frame: a chat's draft, or nothing.
     pub restore: Option<String>,
     /// The text last given to the composer, so its change is not taken for the user typing.
@@ -211,6 +213,7 @@ impl BeeperApp {
         if let Some(ix) = first_unseen(&self.msgs) {
             self.place.seek_unread = false;
             self.place.unread = Some(self.msgs[ix].id.clone());
+            self.place.unread_count = self.msgs[ix..].iter().filter(|m| m.kind == Kind::Message && !m.own && !self.is_hidden(&m.id)).count().max(1);
             self.timeline.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
         }
     }

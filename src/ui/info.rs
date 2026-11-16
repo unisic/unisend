@@ -701,7 +701,7 @@ impl BeeperApp {
                 let second = if self.fetching.contains(&file.id) {
                     t!("Downloading").to_owned()
                 } else {
-                    [file.media.size.map(file_size), Some(day_label(file.ts))].into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
+                    [file.media.size.filter(|&s| s > 0).or_else(|| self.sizes.get(&file.id).copied()).map(file_size), Some(day_label(file.ts))].into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
                 };
                 let icon = if file.media.kind == MediaKind::Audio { IconName::Music } else { IconName::File };
                 let name = if file.media.name.is_empty() { t!("File").to_owned() } else { file.media.name.clone() };

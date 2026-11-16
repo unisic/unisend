@@ -155,6 +155,19 @@ const MAX_FACES: usize = 64;
 const MAX_ARRIVALS: usize = 3;
 /// Link and quote pictures fading in at once, at most.
 const MAX_THUMB_FADES: usize = 60;
+/// A message estimated past this many lines shows its first `SHORT_LINES` and Show more; the
+/// estimate takes a line of a paragraph as `LINE_CHARS` characters. Collapsed, a plain body is laid
+/// out only up to `SHORT_CHARS`.
+const LONG_LINES: usize = 30;
+const SHORT_LINES: usize = 20;
+const LINE_CHARS: usize = 40;
+const SHORT_CHARS: usize = 2000;
+/// Long messages opened in full at once in a chat; past that the oldest choice is forgotten.
+const MAX_EXPANDED: usize = 64;
+/// Reaction badges under a message; the rest are behind "+k".
+const MAX_CHIPS: usize = 7;
+/// File sizes learnt by downloading, for the open chat.
+const MAX_SIZES: usize = 256;
 /// Pages of older messages loaded to find a quoted one before giving up.
 const SEEK_PAGES: u8 = 5;
 
@@ -264,6 +277,8 @@ pub struct BeeperApp {
     own_read: OwnRead,
     /// Someone else's message whose status line a tap showed.
     tapped: Option<String>,
+    /// Long messages of the open chat the user opened in full with Show more.
+    expanded: HashSet<String>,
     /// What the typing line said last, drawn while it leaves.
     typing_last: SharedString,
     /// When the others were last told that the user is writing.
@@ -281,6 +296,8 @@ pub struct BeeperApp {
     viewer: Option<(String, Option<Arc<Image>>)>,
     /// Attachments being downloaded to open.
     fetching: HashSet<String>,
+    /// Sizes of the open chat's files whose sender gave none, read once they were downloaded.
+    sizes: HashMap<String, u64>,
     uploads: usize,
     preview: caption::Preview,
     /// The message whose reactions and actions are showing.
@@ -402,7 +419,7 @@ pub struct BeeperApp {
     people: rooms::People,
     disappear: disappear::Disappear,
     /// What the open chat's network takes, once read.
-    features: Option<(OwnedRoomId, Option<crate::backend::Features>)>,
+    features: Option<(OwnedRoomId, Option<crate::backend::Features>, bool)>,
     /// View-once media the user opened this session, so it is not offered again while the bridge
     /// takes it away; at most `MAX_OPENED_ONCE`.
     opened_once: Vec<String>,
@@ -589,6 +606,7 @@ impl BeeperApp {
             typing: Vec::new(),
             own_read: OwnRead::default(),
             tapped: None,
+            expanded: HashSet::new(),
             typing_last: SharedString::default(),
             typing_sent: None,
             tail: None,
@@ -598,6 +616,7 @@ impl BeeperApp {
             asked: HashSet::new(),
             viewer: None,
             fetching: HashSet::new(),
+            sizes: HashMap::new(),
             uploads: 0,
             preview: caption::Preview::new(window, cx),
             menu: None,
@@ -787,6 +806,14 @@ impl BeeperApp {
             Ev::Viewed(id, bytes) => self.viewed(id, bytes),
             Ev::Fetched(id, path) => {
                 self.fetching.remove(&id);
+                let media = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()).or_else(|| self.info_media(&id));
+                let sizeless = media.is_some_and(|media| media.size.is_none_or(|s| s == 0));
+                if sizeless && let Some(len) = path.as_ref().and_then(|path| std::fs::metadata(path).ok()).map(|meta| meta.len()).filter(|&len| len > 0) {
+                    if self.sizes.len() >= MAX_SIZES {
+                        self.sizes.clear();
+                    }
+                    self.sizes.insert(id.clone(), len);
+                }
                 if let Some(path) = path.filter(|path| !self.voice_fetched(&id, path, cx)) {
                     let media = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()).or_else(|| self.info_media(&id));
                     if !media.is_some_and(|media| video::play(&path, media)) {
@@ -928,9 +955,9 @@ impl BeeperApp {
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
             ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_) | Ev::RecoveryCode(_)) => self.on_verify_event(ev, cx),
             Ev::Disappear { room, setting } => self.on_disappear(room, setting),
-            Ev::Features { room, features } => {
+            Ev::Features { room, features, moderate } => {
                 if self.open.as_ref() == Some(&room) {
-                    self.features = Some((room, features));
+                    self.features = Some((room, features, moderate));
                 }
             }
             Ev::Info(room, details) => self.info_details(room, *details, cx),
@@ -1119,7 +1146,7 @@ impl BeeperApp {
         } else if self.viewer.is_some() {
             // Android's back is a gesture and animates; a desktop's Escape is a key and does not.
             self.dismiss_viewer(gpui_kit::is_mobile(), cx);
-        } else if self.close_confirm(cx) {
+        } else if self.close_confirm(cx) || self.close_delete(cx) {
         } else if self.preview.open() {
             self.close_preview(true, window, cx);
         } else if self.menu_open() {
@@ -1208,6 +1235,18 @@ impl BeeperApp {
     }
 
     /// Asks once for the picture of whoever wrote this message.
+    /// Show more: the message opens in full where it is.
+    fn expand(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.expanded.len() >= MAX_EXPANDED {
+            self.expanded.clear();
+        }
+        self.expanded.insert(id.to_owned());
+        if let Some(ix) = self.msgs.iter().position(|m| m.id == id) {
+            self.timeline.remeasure_items(ix..ix + 1);
+        }
+        cx.notify();
+    }
+
     fn want_face(&mut self, from: OwnedUserId) {
         if self.faces.contains_key(&from) || self.faces.len() >= MAX_FACES || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
             return;
@@ -1447,7 +1486,8 @@ impl BeeperApp {
         let detail = if self.fetching.contains(&m.id) {
             t!("Downloading…").to_owned()
         } else {
-            match (media.duration, media.size) {
+            // A sender may give no size, or 0: then it shows once the file was downloaded, or not at all.
+            match (media.duration, media.size.filter(|&s| s > 0).or_else(|| self.sizes.get(&m.id).copied())) {
                 (Some(d), _) => length(d),
                 (None, Some(size)) => file_size(size),
                 (None, None) => String::new(),
@@ -1490,7 +1530,13 @@ impl BeeperApp {
 
     /// The open chat's features as its bridge publishes them; `None` without a bridge or until read.
     fn published(&self) -> Option<&crate::backend::Features> {
-        self.features.as_ref().filter(|(room, _)| self.open.as_ref() == Some(room)).and_then(|(_, f)| f.as_ref())
+        self.features.as_ref().filter(|(room, ..)| self.open.as_ref() == Some(room)).and_then(|(_, f, _)| f.as_ref())
+    }
+
+    /// The user may delete other people's messages in the open chat: a moderator of a plain Matrix
+    /// chat. A bridge would only hide them on Matrix, so a bridged chat never offers it.
+    fn moderates(&self) -> bool {
+        self.features.as_ref().is_some_and(|(room, _, moderate)| self.open.as_ref() == Some(room) && *moderate) && self.open_network().is_none()
     }
 
     /// The composer's characters and the network's limit, when the chat has one.
@@ -1578,8 +1624,10 @@ impl BeeperApp {
         }
         self.close_viewer(cx);
         self.fetching.clear();
+        self.sizes.clear();
         (self.swipe, self.swipe_back, self.flash, self.seek, self.fresh_reaction, self.strip_last) = (None, None, None, None, None, None);
         (self.bubble_press, self.status_last, self.tapped) = (None, None, None);
+        self.expanded.clear();
         self.own_read = OwnRead::default();
         self.arrivals.clear();
         for image in self.faces.drain().filter_map(|(_, image)| image) {
@@ -2208,10 +2256,10 @@ impl BeeperApp {
                 // A picture sits in its bubble with a thin margin, concentric with it; alone, it is the bubble.
                 let pictured = !m.deleted && m.media.as_ref().is_some_and(drawn_as_picture);
                 // A few emoji on their own are drawn large and free, as the phones do.
-                let jumbo = m.media.is_none() && m.reply.is_none() && m.link.is_none() && m.poll.is_none() && m.place.is_none() && !m.edited && emoji_only(&m.body);
-                let bare = jumbo || (pictured && m.body.is_empty() && m.reply.is_none() && !m.edited && m.link.is_none());
+                let jumbo = m.media.is_none() && m.reply.is_none() && m.link.is_none() && m.poll.is_none() && m.place.is_none() && emoji_only(&m.body);
+                let bare = jumbo || (pictured && m.body.is_empty() && m.reply.is_none() && m.link.is_none());
                 // A place alone fills its bubble, its card concentric with it.
-                let place_only = !m.deleted && m.place.is_some() && m.body.is_empty() && m.reply.is_none() && !m.edited;
+                let place_only = !m.deleted && m.place.is_some() && m.body.is_empty() && m.reply.is_none();
                 let (pad_x, pad_y) = if bare {
                     (0., 0.)
                 } else if pictured {
@@ -2236,6 +2284,10 @@ impl BeeperApp {
                 let first = prev.is_none_or(|p| !joined(p, m));
                 let last = next.is_none_or(|n| !joined(m, n));
                 let faded = m.deleted || crate::backend::undecrypted(&m.body);
+                // Copy and Forward still take the whole body.
+                let collapsed = !faded && !this.expanded.contains(&m.id) && long(&m.body);
+                // As in Signal, an edit is told in the line under the bubble, before the time.
+                let edited = m.edited && !m.deleted;
                 // Where a run's bubbles meet, their corners on the sender's side are tighter; a picture
                 // keeps its round corners.
                 let joins = !pictured;
@@ -2343,7 +2395,7 @@ impl BeeperApp {
                     .min_w_0()
                     .px(px(pad_x))
                     .pt(px(pad_y))
-                    .pb(px(if pictured && !(m.body.is_empty() && !m.edited) { 9. } else { pad_y }))
+                    .pb(px(if pictured && !m.body.is_empty() { 9. } else { pad_y }))
                     .gap(px(4.))
                     .when_some(framed_w, |el, w| el.w(px(w)))
                     .map(|el| corners(el, m.own, top_r, bottom_r))
@@ -2373,21 +2425,46 @@ impl BeeperApp {
                                 .px(px(text_x))
                                 .map(|el| if jumbo { el.text_size(fs(40.)).line_height(fs(48.)) } else { el.text_size(fs(16.)).line_height(fs(22.)) })
                                 .when(faded, |el| el.italic().text_color(inside.faint))
+                                .when(collapsed, |el| el.max_h(fs(22.) * SHORT_LINES as f32).overflow_hidden())
                                 .child(match m.rich.as_ref().filter(|_| !faded) {
                                     Some(rich) => rich::body(m, rich, inside, ink),
+                                    None if collapsed => {
+                                        let cut = m.body.char_indices().nth(SHORT_CHARS).map_or(m.body.len(), |(at, _)| at);
+                                        crate::emoji::styled(m.body[..cut].to_owned(), marks.into_iter().filter(|(r, _)| r.end <= cut).collect()).into_any_element()
+                                    }
                                     None => crate::emoji::styled(m.body.clone(), marks).into_any_element(),
                                 }),
                         )
                     })
+                    .when(collapsed, |el| {
+                        let id = m.id.clone();
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("{}-more", m.id)))
+                                .px(px(text_x))
+                                .text_size(fs(14.))
+                                .line_height(fs(20.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.expand(&id, cx);
+                                }))
+                                .child(t!("Show more")),
+                        )
+                    })
                     .children(link_card)
                     .children(poll_card)
-                    .children(place_card)
-                    .when(m.edited && !m.deleted, |el| el.child(div().px(px(text_x)).text_size(fs(12.)).text_color(inside.faint).child(t!("Edited"))));
+                    .children(place_card);
                 // Badges pinned over the bubble's lower edge, ringed in the ground's colour: standing
                 // free under it they read as small messages of their own.
                 let reactions = (!m.reactions.is_empty()).then(|| {
+                    // A wall of badges is cut to a row or two; "+k" lists them all, as a tap on one does.
+                    let shown = if m.reactions.len() > MAX_CHIPS + 1 { MAX_CHIPS } else { m.reactions.len() };
+                    let rest = m.reactions.len() - shown;
+                    let all = m.id.clone();
                     // Before the next message of the run, the badges keep a little room under them.
-                    h_flex().flex_wrap().gap(px(2.)).mt(px(-REACTION_LAP)).px(px(8.)).when(!last, |el| el.pb(px(4.))).children(m.reactions.iter().enumerate().map(|(n, reaction)| {
+                    h_flex().flex_wrap().gap(px(2.)).mt(px(-REACTION_LAP)).px(px(8.)).when(!last, |el| el.pb(px(4.))).children(m.reactions.iter().take(shown).enumerate().map(|(n, reaction)| {
                         let (key, count, mine) = (reaction.key.as_str(), reaction.count, reaction.own);
                         let (id, key_owned) = (m.id.clone(), key.to_owned());
                         // The one the user just gave rises into place; others appear as they are.
@@ -2411,9 +2488,29 @@ impl BeeperApp {
                             .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
                                 this.open_people(people::Shown::Reactions(id.clone(), Some(key_owned.clone())), Some(e.position()), cx)
                             }))
-                            .child(crate::emoji::styled(key.to_owned(), Vec::new()))
+                            .child(crate::emoji::styled(menu::clip_key(key), Vec::new()))
                             .when(count > 1, |el| el.child(div().font_features(tabular()).child(count.to_string())))
                     }))
+                    .when(rest > 0, |el| {
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("{}-reaction-more", m.id)))
+                                .h(px(32.))
+                                .px(px(9.))
+                                .flex()
+                                .items_center()
+                                .rounded_full()
+                                .border_2()
+                                .border_color(p.ground)
+                                .bg(p.lifted)
+                                .text_size(fs(13.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .font_features(tabular())
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| this.open_people(people::Shown::Reactions(all.clone(), None), Some(e.position()), cx)))
+                                .child(format!("+{rest}")),
+                        )
+                    })
                 });
                 // In a group, the sender's picture stands beside the last message of the run.
                 let faces = !dm && !m.own;
@@ -2498,16 +2595,12 @@ impl BeeperApp {
                             .pl(side)
                             .map(|el| if m.own { el.items_end() } else { el.items_start() })
                             .children(reactions)
-                            .when(last || state.is_some() || shrink.is_some(), |el| {
+                            .when(last || state.is_some() || shrink.is_some() || edited, |el| {
                                 let failed = state.as_ref().is_some_and(|(_, r)| matches!(r, Receipt::Failed(_)));
                                 // Words follow the time after a dot, icons after a space.
                                 let worded = state.as_ref().is_some_and(|(mark, _)| matches!(mark, Mark::Words(_) | Mark::Failed { .. }));
                                 // A new state fades in where the old one was; the time stays.
-                                let time = match &state {
-                                    Some(_) if m.own && !last => None,
-                                    Some(_) if worded => Some(format!("{} \u{b7} ", clock(m.ts))),
-                                    _ => Some(clock(m.ts)),
-                                };
+                                let time = if worded { format!("{} \u{b7} ", clock(m.ts)) } else { clock(m.ts) };
                                 let said = state.as_ref().map(|(mark, r)| this.receipt_mark(r, mark, state_level.as_ref().map(|(v, before)| (before.as_ref(), *v)), cx));
                                 let ink = if failed { p.negative } else { this.on_wallpaper(p.faint, cx) };
                                 let read = state.as_ref().is_some_and(|(_, r)| matches!(r, Receipt::Seen { .. }));
@@ -2533,12 +2626,18 @@ impl BeeperApp {
                                         .text_color(ink)
                                         .when(this.disappears(ix), |el| el.child(Icon::new(IconName::Timer).size_3().text_color(ink)))
                                         // One line however many read it: the time stays whole, the words end in an ellipsis.
-                                        .child(h_flex().min_w_0().children(time.map(|time| div().flex_none().child(time))).children(said)),
+                                        .child(
+                                            h_flex()
+                                                .min_w_0()
+                                                .when(edited, |el| el.child(div().flex_none().child(format!("{} \u{b7} ", t!("Edited")))))
+                                                .child(div().flex_none().child(time))
+                                                .children(said),
+                                        ),
                                 )
                             }),
                     )
                     .children(this.selection_mark(m, cx));
-                let row = if this.place.unread.as_ref() == Some(&m.id) { v_flex().w_full().child(Self::unread_line(cx)).child(row) } else { row };
+                let row = if this.place.unread.as_ref() == Some(&m.id) { v_flex().w_full().child(Self::unread_line(this.place.unread_count, cx)).child(row) } else { row };
                 // A list lays its items out across its full width, ignoring side padding, so each row keeps the column itself.
                 let row = div().w_full().px(px(column)).child(row);
                 match arriving {
@@ -2558,6 +2657,7 @@ impl BeeperApp {
         let read_only = self.published().is_some_and(|f| !f.post);
         let limit = self.text_limit(cx);
         let over = limit.is_some_and(|(len, max)| len > max);
+        let idle = !mic && self.composer.read(cx).value().trim().is_empty();
         let send_mode = transition(("send", "mode"), if mic { 0. } else { 1. }, motion::exit(), window, cx);
         let own_frame = frame::reserve(window) > 0.;
         let end = self.chat_end(window);
@@ -2730,12 +2830,14 @@ impl BeeperApp {
                                     .items_center()
                                     .justify_center()
                                     .rounded_full()
-                                    .bg(p.text)
-                                    .text_color(p.ground)
-                                    .when(over, |el| el.opacity(0.4))
-                                    .cursor_pointer()
-                                    .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
-                                    .active(|el| el.bg(p.muted))
+                                    // Lit only when there is something to send.
+                                    .map(|el| {
+                                        if idle {
+                                            el.bg(p.raised).text_color(p.faint)
+                                        } else {
+                                            el.bg(p.text).text_color(p.ground).when(over, |el| el.opacity(0.4)).cursor_pointer().when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted))).active(|el| el.bg(p.muted))
+                                        }
+                                    })
                                     .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
                                     .relative()
                                     .children([(IconName::ArrowUp, send_mode), (IconName::Mic, 1. - send_mode)].into_iter().filter(|(_, v)| *v > 0.).map(|(icon, v)| {
@@ -2864,10 +2966,10 @@ impl BeeperApp {
             .child(list)
             .into_any_element()
     }
-    fn unread_line(cx: &App) -> Div {
+    fn unread_line(n: usize, cx: &App) -> Div {
         let p = Palette::of(cx);
         let rule = || div().h(px(1.)).flex_1().bg(p.rule);
-        h_flex().w_full().px(px(GUTTER)).pt(px(GAP)).gap(px(8.)).items_center().text_size(fs(12.)).text_color(p.accent_ink).child(rule()).child(t!("New messages")).child(rule())
+        h_flex().w_full().px(px(GUTTER)).pt(px(GAP)).gap(px(8.)).items_center().text_size(fs(12.)).text_color(p.accent_ink).child(rule()).child(tn!(n, "{n} unread message", "{n} unread messages")).child(rule())
     }
 
     /// A row that is not a message: a day, a line about the chat. The SDK's read marker draws
@@ -2883,7 +2985,16 @@ impl BeeperApp {
                 let mut names: Vec<&str> =
                     self.msgs[..=ix].iter().rev().take(MAX_JOINED).take_while(|m| m.kind == Kind::Joined).map(|m| m.sender.as_str()).collect();
                 names.reverse();
-                (tn!(names.len(), "{who} joined", "{who} joined", who = people(&names).0), self.on_wallpaper(p.faint, cx))
+                (joined_line(&names), self.on_wallpaper(p.faint, cx))
+            }
+            // So are invitations one person sends one after another.
+            Kind::Invited { by } if self.msgs.get(ix + 1).is_none_or(|next| next.kind != m.kind || next.from != m.from) => {
+                let mut names: Vec<&str> =
+                    self.msgs[..=ix].iter().rev().take(MAX_JOINED).take_while(|row| row.kind == m.kind && row.from == m.from).map(|row| row.sender.as_str()).collect();
+                names.reverse();
+                let who = people(&names).0;
+                let text = if m.own { t!("You invited {object}", object = who) } else { t!("{actor} invited {object}", actor = by, object = who) };
+                (text, self.on_wallpaper(p.faint, cx))
             }
             _ => return div().into_any_element(),
         };
@@ -3325,9 +3436,9 @@ impl BeeperApp {
             let found = self.msgs.iter().find(|m| &m.id == id);
             let quote = found.map_or_else(|| Quote::unknown(id.clone(), QuoteState::Missing), Msg::quote);
             let (icon, title) = match (&self.compose, found) {
-                (Compose::Edit(_), _) => (Some(IconName::Pencil), t!("Editing").into()),
-                (_, Some(m)) if m.own => (None, t!("Replying to yourself").into()),
-                (_, Some(m)) => (None, t!("Replying to {who}", who = m.sender).into()),
+                (Compose::Edit(_), _) => (Some(IconName::Pencil), t!("Editing message").into()),
+                (_, Some(m)) if m.own => (None, t!("You").into()),
+                (_, Some(m)) => (None, m.sender.clone().into()),
                 _ => (None, t!("Replying").into()),
             };
             (icon, title, quote)
@@ -3568,6 +3679,16 @@ fn chat_actions(room: &RoomSummary) -> [(&'static str, IconName, ChatAction); 5]
     ]
 }
 
+/// Who joined, one after another, as one line: "You and Ann joined" takes the plural of "you".
+fn joined_line(names: &[&str]) -> String {
+    let who = people(names).0;
+    match names {
+        [one] if *one == t!("You") => t!("You joined").to_owned(),
+        _ if names.contains(&t!("You")) => t!("{who} joined|with you", who = who),
+        _ => tn!(names.len(), "{who} joined", "{who} joined", who = who),
+    }
+}
+
 /// Names as a phrase, and whether it stands for more than one person: "Ann", "Ann and Bob",
 /// "Ann, Bob and 3 others".
 fn people(names: &[&str]) -> (String, bool) {
@@ -3627,6 +3748,12 @@ fn corners<E: Styled>(el: E, own: bool, top: f32, bottom: f32) -> E {
     }
 }
 
+/// A body too long to show whole at first: past `LONG_LINES` lines, a long paragraph counting
+/// as several.
+fn long(body: &str) -> bool {
+    body.lines().map(|line| line.chars().count().div_ceil(LINE_CHARS).max(1)).sum::<usize>() > LONG_LINES
+}
+
 /// Whether a message is one to three emoji and nothing else. Flags (two regional indicators),
 /// skin tones and sequences joined by U+200D count as one.
 fn emoji_only(text: &str) -> bool {
@@ -3674,7 +3801,7 @@ fn inside_of(m: &Msg, p: Palette) -> Palette {
 }
 
 /// A quoted message: who wrote it and what it says, behind a bar that tells it from a link's card.
-/// `heading` takes the place of the sender (the compose strip's "Replying to"), with one line of
+/// `heading` takes the place of the sender (the compose strip's title), with one line of
 /// text under it. `inside` is the palette of what it sits in.
 /// `thumb` is the quoted picture with how far it has faded in.
 fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, inside: Palette, thumb: Option<(Arc<Image>, f32)>) -> Stateful<Div> {
@@ -4370,13 +4497,29 @@ impl BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced, clip_chars};
+    use super::{long, Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced, clip_chars, joined_line};
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
 
     #[test]
     fn parent_names_clip_to_what_the_row_spares() {
         assert_eq!(clip_chars("Rust PL", 14), "Rust PL");
         assert_eq!(clip_chars("Serwer Rust Polska", 14), "Serwer Rust P…");
+    }
+
+    #[test]
+    fn only_long_messages_are_collapsed() {
+        assert!(!long("short"));
+        assert!(!long(&"line\n".repeat(30)));
+        assert!(long(&"line\n".repeat(31)));
+        assert!(!long(&"a".repeat(1200)), "one paragraph of 30 lines");
+        assert!(long(&"a".repeat(1201)));
+    }
+
+    #[test]
+    fn joins_with_the_user_read_as_one_sentence() {
+        assert_eq!(joined_line(&["You"]), "You joined");
+        assert_eq!(joined_line(&["You", "Ann"]), "You and Ann joined");
+        assert_eq!(joined_line(&["Ann", "Bob", "Cy", "Di"]), "Ann, Bob and 2 others joined");
     }
 
     #[test]

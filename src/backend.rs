@@ -301,7 +301,8 @@ pub enum Ev {
     Disappear { room: OwnedRoomId, setting: Disappearing },
     /// What the open chat's network takes, when it opens and whenever its bridge says anew.
     /// `None`: no bridge says, so the chat is plain Matrix and takes everything.
-    Features { room: OwnedRoomId, features: Option<Features> },
+    /// `moderate`: the user's power level lets them delete other people's messages.
+    Features { room: OwnedRoomId, features: Option<Features>, moderate: bool },
     /// A chat's details for its info screen; sent again as more is known.
     Info(OwnedRoomId, Box<info::Details>),
     Group { room: OwnedRoomId, change: group::Change },
@@ -455,6 +456,9 @@ pub enum Kind {
     Notice,
     /// `sender` joined. Joins that follow one another are told on one line.
     Joined,
+    /// `by` (the user's "You" when `own`) invited `sender`, also told in `body`. Invitations one
+    /// person sends one after another are told on one line.
+    Invited { by: String },
     /// The day the rows under it belong to.
     Day,
     /// The rows under it are new since the user last read the chat.
@@ -2519,7 +2523,7 @@ struct Done {
 
 /// Clears the unread state. A private receipt does that without telling the other side, or the
 /// bridged network, that the message was read. The read marker moves with it, so the chat opens
-/// again without "New messages".
+/// again without the unread line.
 /// Nothing is sent before the user takes the chat: an invitation or a message request is not
 /// told it was seen.
 async fn mark_read(room: &Room, newest: Option<OwnedEventId>, private: bool) -> Result<()> {

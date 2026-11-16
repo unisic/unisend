@@ -114,8 +114,6 @@ pub(super) enum Act {
     Forward,
     Select,
     Info,
-    DeleteForMe,
-    DeleteForEveryone,
 }
 
 impl Act {
@@ -131,10 +129,8 @@ impl Act {
             Act::EndPoll => ("act-end-poll", IconName::Check, t!("End poll")),
             Act::Save => ("act-save", IconName::Download, t!("Save to gallery")),
             Act::Forward => ("act-forward", IconName::Forward, t!("Forward")),
-            Act::Select => ("act-select", IconName::ListChecks, t!("Select")),
+            Act::Select => ("act-select", IconName::ListChecks, t!("Select multiple")),
             Act::Info => ("act-info", IconName::Info, t!("Info")),
-            Act::DeleteForMe => ("act-delete-me", IconName::EyeOff, t!("Delete for me")),
-            Act::DeleteForEveryone => ("act-delete-all", IconName::Trash, t!("Delete for everyone")),
         }
     }
 }
@@ -167,34 +163,32 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
     out.extend(ends.then_some(Act::EndPoll));
     out.extend(saveable.then_some(Act::Save));
     out.extend(more_acts(m));
-    // One that never left is only dropped; one that did is deleted for everyone or hidden here.
-    out.extend((m.own && !sent).then_some(Act::Delete));
+    // One that never left is only dropped; one that did asks whether for everyone or only here.
+    out.extend((sent || m.own).then_some(Act::Delete));
     out
 }
 
-/// What the chat's network takes of `acts`: Reply, React, an edit and a deletion for everyone,
-/// the last two only within their time on the network.
+/// What the chat's network takes of `acts`: Reply, React, and an edit only within its time on the
+/// network.
 fn taken(mut acts: Vec<Act>, m: &Msg, caps: &Features) -> Vec<Act> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
     acts.retain(|act| match act {
         Act::Reply => caps.reply >= 1,
         Act::React => caps.reaction >= 1,
         Act::Edit => caps.editable(m.ts, now),
-        Act::DeleteForEveryone => caps.deletable(m.ts, now),
         _ => true,
     });
     acts
 }
 
-/// Forward, Select, Info and the two deletions, for a message that reached the server.
+/// Forward, Select and Info, for a message that reached the server.
 fn more_acts(m: &Msg) -> Vec<Act> {
     if !m.id.starts_with('$') {
         return Vec::new();
     }
     let mut out = Vec::new();
     out.extend(super::forward::forwardable(m).then_some(Act::Forward));
-    out.extend([Act::Select, Act::Info, Act::DeleteForMe]);
-    out.extend(m.own.then_some(Act::DeleteForEveryone));
+    out.extend([Act::Select, Act::Info]);
     out
 }
 
@@ -213,6 +207,11 @@ fn bar_keys(m: &Msg, caps: &Features) -> Vec<String> {
 /// The bar ends with a + for every other emoji, unless the chat takes only what the bar shows.
 fn more_offered(keys: &[String], caps: &Features) -> bool {
     caps.allowed_reactions.as_ref().is_none_or(|list| list.iter().any(|a| !keys.iter().any(|k| same_emoji(k, a))))
+}
+
+/// A reaction key as shown: any emoji whole, someone's long text cut short.
+pub(super) fn clip_key(key: &str) -> String {
+    clip_chars(key, 16)
 }
 
 /// One emoji with or without the emoji presentation selector: clients send "\u{2764}" and
@@ -574,7 +573,7 @@ impl BeeperApp {
         }
     }
 
-    /// A tap on a message does nothing of its own, as in Signal: a double tap likes it.
+    /// A tap on a message shows or hides its time and status line; a double tap likes it.
     pub(super) fn bubble_click(&mut self, id: &str, event: &ClickEvent, cx: &mut Context<Self>) {
         if event.click_count() == 2 && id.starts_with('$') {
             self.double_tap(id, cx);
@@ -645,6 +644,7 @@ impl BeeperApp {
                     self.send(Cmd::Retry { room, target: id.to_owned() }, cx);
                 }
             }
+            Act::Delete if id.starts_with('$') => self.ask_delete(vec![id.to_owned()], cx),
             Act::Delete => {
                 if let Some(room) = self.open.clone() {
                     self.send(Cmd::Delete { room, target: id.to_owned() }, cx);
@@ -664,12 +664,6 @@ impl BeeperApp {
                 let at = self.menu.as_ref().filter(|m| m.kind != MenuKind::Touch).map(|m| m.at);
                 self.open_people(super::people::Shown::Details(id.to_owned()), at, cx);
             }
-            Act::DeleteForMe => self.hide_for_me(vec![id.to_owned()], cx),
-            Act::DeleteForEveryone => {
-                if let Some(room) = self.open.clone() {
-                    self.send(Cmd::Delete { room, target: id.to_owned() }, cx);
-                }
-            }
         }
         self.close_menu(cx);
     }
@@ -683,7 +677,7 @@ impl BeeperApp {
             .map(|act| {
                 let (name, icon, label) = act.look();
                 let label = if read_by && act == Act::Info { t!("Read by|menu") } else { label };
-                let ink = if matches!(act, Act::Delete | Act::DeleteForEveryone) { p.negative } else { p.text };
+                let ink = if act == Act::Delete { p.negative } else { p.text };
                 let id = id.to_owned();
                 h_flex()
                     .id(name)
@@ -962,7 +956,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, BAR_H, Delivery, Features, Kind, MenuKind, Msg, OVERLAY_GAP, Placement, TAP, acts, bar_keys, ease_out_expo, more_offered, place, same_emoji, slot_at, taken};
+    use super::{Act, BAR_H, Delivery, Features, Kind, MenuKind, Msg, OVERLAY_GAP, Placement, TAP, acts, bar_keys, clip_key, ease_out_expo, more_offered, place, same_emoji, slot_at, taken};
     use gpui_kit::{Bounds, point, size};
 
     #[test]
@@ -973,7 +967,10 @@ mod tests {
         assert_eq!(touch[..2], [Act::Reply, Act::Edit]);
         assert_eq!(acts(&m, MenuKind::List, false), touch[1..]);
         assert_eq!(acts(&m, MenuKind::List, true)[..3], [Act::Reply, Act::React, Act::Edit]);
-        assert_eq!(touch.last(), Some(&Act::DeleteForEveryone));
+        assert_eq!(touch[touch.len() - 3..], [Act::Select, Act::Info, Act::Delete]);
+        let mut theirs = m.clone();
+        theirs.own = false;
+        assert_eq!(acts(&theirs, MenuKind::Touch, false).last(), Some(&Act::Delete), "anyone's can be hidden here");
 
         let mut failed = Msg::bare("~1".to_owned(), Kind::Message, "@me:x".try_into().unwrap());
         (failed.own, failed.body, failed.delivery) = (true, "hi".to_owned(), Delivery::Failed(String::new()));
@@ -991,8 +988,8 @@ mod tests {
         // An old message on WhatsApp: no edit past 15 minutes, no deletion past two days.
         let wa = Features { edit_max_age: Some(900), delete_max_age: Some(172_800), ..Features::ALL };
         let left = taken(all.clone(), &m, &wa);
-        assert!(left.contains(&Act::Reply) && left.contains(&Act::React) && left.contains(&Act::DeleteForMe));
-        assert!(!left.contains(&Act::Edit) && !left.contains(&Act::DeleteForEveryone));
+        assert!(left.contains(&Act::Reply) && left.contains(&Act::React) && left.contains(&Act::Delete));
+        assert!(!left.contains(&Act::Edit));
         let none = Features { reply: 0, reaction: -2, ..Features::ALL };
         let left = taken(all, &m, &none);
         assert!(!left.contains(&Act::Reply) && !left.contains(&Act::React) && left.contains(&Act::Edit));
@@ -1009,6 +1006,15 @@ mod tests {
         let fire = Features { allowed_reactions: Some(vec!["\u{1F525}".to_owned()]), ..Features::ALL };
         assert_eq!(bar_keys(&m, &fire), ["\u{1F525}"]);
         assert!(!more_offered(&bar_keys(&m, &fire), &fire));
+    }
+
+    #[test]
+    fn long_reaction_keys_are_cut_and_emoji_kept_whole() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        assert_eq!(clip_key(family), family);
+        let long = "a".repeat(200);
+        assert_eq!(clip_key(&long).chars().count(), 16);
+        assert!(clip_key(&long).ends_with('\u{2026}'));
     }
 
     #[test]

@@ -88,8 +88,10 @@ struct Toast {
 pub(super) struct Forward {
     /// Selection mode in a chat, with the messages chosen in the order they were tapped.
     selected: Option<(OwnedRoomId, Vec<String>)>,
-    /// Delete for everyone was tapped once; a second tap deletes.
-    armed: bool,
+    /// The messages the delete dialog asks about.
+    deleting: Option<Vec<String>>,
+    /// What the dialog showed last, so it fades out as it was: how many, and for everyone too.
+    deleting_last: Option<(usize, bool)>,
     /// The forward sheet: the chat the messages are in and the messages, oldest first.
     picking: Option<(OwnedRoomId, Vec<String>)>,
     picker_last: Option<(OwnedRoomId, Vec<String>)>,
@@ -113,7 +115,8 @@ impl Forward {
         });
         Self {
             selected: None,
-            armed: false,
+            deleting: None,
+            deleting_last: None,
             picking: None,
             picker_last: None,
             sheet: SheetMotion::default(),
@@ -139,6 +142,12 @@ pub(super) fn forwardable(m: &Msg) -> bool {
 
 fn selectable(m: &Msg) -> bool {
     m.kind == Kind::Message && m.id.starts_with('$')
+}
+
+/// Every one of `picked` can be deleted for everyone: on the server, not deleted yet, the user's
+/// own or the user moderates the chat, and young enough for its network.
+fn everyone_may(picked: &[&Msg], moderate: bool, caps: &crate::backend::Features, now: u64) -> bool {
+    !picked.is_empty() && picked.iter().all(|m| m.id.starts_with('$') && !m.deleted && (m.own || moderate) && caps.deletable(m.ts, now))
 }
 
 /// What Copy puts on the clipboard for several messages: each on its own line, with its sender
@@ -183,7 +192,6 @@ impl BeeperApp {
     pub(super) fn select_start(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(room) = self.open.clone() else { return };
         self.fwd.selected = Some((room, vec![id.to_owned()]));
-        self.fwd.armed = false;
         cx.notify();
     }
 
@@ -194,7 +202,6 @@ impl BeeperApp {
         } else if ids.len() < MAX_MESSAGES {
             ids.push(id.to_owned());
         }
-        self.fwd.armed = false;
         cx.notify();
     }
 
@@ -207,9 +214,9 @@ impl BeeperApp {
         open
     }
 
-    /// Escape and Android's back in selection mode: Delete for everyone's second step first.
+    /// Escape and Android's back in selection mode.
     pub(super) fn selection_back(&mut self, cx: &mut Context<Self>) -> bool {
-        if !std::mem::take(&mut self.fwd.armed) && self.fwd.selected.take().is_none() {
+        if self.fwd.selected.take().is_none() {
             return false;
         }
         cx.notify();
@@ -218,10 +225,7 @@ impl BeeperApp {
 
     /// Closes the forward sheet, or else leaves selection mode.
     pub(super) fn forward_back(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.fwd.picking.take().is_some() {
-        } else if self.fwd.selected.take().is_some() {
-            self.fwd.armed = false;
-        } else {
+        if self.fwd.picking.take().is_none() && self.fwd.selected.take().is_none() {
             return false;
         }
         cx.notify();
@@ -300,13 +304,11 @@ impl BeeperApp {
         let ids: Vec<String> = picked.iter().map(|m| m.id.clone()).collect();
         let text = transcript(&picked);
         let can_forward = !picked.is_empty() && picked.iter().all(|m| forwardable(m));
-        let for_everyone = !picked.is_empty() && picked.iter().all(|m| m.own && !m.deleted);
         let count = match picked.len() {
             0 => t!("Select messages").to_owned(),
             n => t!("{n} selected", n = n),
         };
-        let armed = self.fwd.armed && for_everyone;
-        let (forward_ids, hide_ids) = (ids.clone(), ids.clone());
+        let forward_ids = ids.clone();
         let bar = h_flex()
             .id("select-bar")
             .absolute()
@@ -325,7 +327,7 @@ impl BeeperApp {
                 this.forward_back(cx);
             })))
             .child(div().flex_1().min_w_0().pl(px(8.)).truncate().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).font_features(tabular()).child(count))
-            .when(!picked.is_empty() && !armed, |el| {
+            .when(!picked.is_empty(), |el| {
                 el.child(round_button("select-copy", IconName::Copy, cx).on_click(cx.listener(move |this, _, _, cx| {
                     crate::copy(cx, text.clone());
                     this.forward_back(cx);
@@ -335,37 +337,39 @@ impl BeeperApp {
                         this.forward_start(forward_ids.clone(), window, cx)
                     })))
                 })
-                .child(round_button("select-hide", IconName::EyeOff, cx).on_click(cx.listener(move |this, _, _, cx| {
-                    this.hide_for_me(hide_ids.clone(), cx);
-                    this.forward_back(cx);
+                .child(round_button("select-delete", IconName::Trash, cx).text_color(p.negative).on_click(cx.listener(move |this, _, _, cx| {
+                    this.ask_delete(ids.clone(), cx);
                 })))
-            })
-            .when(for_everyone && !armed, |el| {
-                el.child(round_button("select-delete", IconName::Trash, cx).text_color(p.negative).on_click(cx.listener(|this, _, _, cx| {
-                    this.fwd.armed = true;
-                    cx.notify();
-                })))
-            })
-            .when(armed, |el| {
-                // Irreversible for everyone in the chat, so it takes a second, explicit tap.
-                el.child(
-                    div()
-                        .id("select-delete-confirm")
-                        .h(px(TAP))
-                        .px(px(GUTTER))
-                        .flex()
-                        .items_center()
-                        .rounded_full()
-                        .bg(p.raised)
-                        .text_color(p.negative)
-                        .text_size(fs(14.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .cursor_pointer()
-                        .child(t!("Delete for everyone"))
-                        .on_click(cx.listener(move |this, _, _, cx| this.delete_for_everyone(ids.clone(), cx))),
-                )
             });
         Some(bar.into_any_element())
+    }
+
+    /// Opens the dialog that asks how to delete these messages of the open chat.
+    pub(super) fn ask_delete(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        if !ids.is_empty() {
+            self.fwd.deleting = Some(ids);
+            cx.notify();
+        }
+    }
+
+    /// Escape and Android's back close the delete dialog first.
+    pub(super) fn close_delete(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.fwd.deleting.take().is_some();
+        if open {
+            cx.notify();
+        }
+        open
+    }
+
+    /// The dialog's choice: hide here, or delete for everyone; either way selection mode ends.
+    fn delete_chosen(&mut self, everyone: bool, cx: &mut Context<Self>) {
+        let Some(ids) = self.fwd.deleting.take() else { return };
+        if everyone {
+            self.delete_for_everyone(ids, cx);
+        } else {
+            self.hide_for_me(ids, cx);
+            self.forward_back(cx);
+        }
     }
 
     fn delete_for_everyone(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
@@ -421,8 +425,83 @@ impl BeeperApp {
     pub(super) fn render_forward_layers(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out = Vec::new();
         out.extend(self.render_picker_sheet(window, cx));
+        out.extend(self.render_delete_dialog(window, cx));
         out.extend(self.render_toast(window, cx));
         out
+    }
+
+    /// Signal's delete dialog: hide here, delete for everyone where the chat allows it, or cancel.
+    fn render_delete_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(ids) = &self.fwd.deleting {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            let picked: Vec<&Msg> = self.msgs.iter().filter(|m| ids.contains(&m.id)).collect();
+            self.fwd.deleting_last = Some((ids.len(), everyone_may(&picked, self.moderates(), self.caps(), now)));
+        }
+        let live = self.fwd.deleting.is_some();
+        let shown = Presence::new("delete-dialog", live).transition(if live { motion::enter() } else { motion::exit() }).sample(window, cx);
+        if !shown.should_render() {
+            self.fwd.deleting_last = None;
+            return None;
+        }
+        let (n, everyone) = self.fwd.deleting_last?;
+        let v = shown.progress;
+        let p = Palette::of(cx);
+        let width = super::rooms::DIALOG_W.min(f32::from(frame::viewport(window).width) - 2. * GUTTER);
+        let button = |id: &'static str, label: &'static str, bg: Hsla, ink: Hsla| {
+            div()
+                .id(id)
+                .h(px(TAP))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(bg)
+                .text_color(ink)
+                .text_size(fs(16.))
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .active(|el| el.opacity(0.8))
+                .child(label)
+        };
+        let dialog = v_flex()
+            .id("delete-dialog")
+            .w(px(width))
+            .p(px(20.))
+            .gap(px(8.))
+            .rounded(px(RADIUS))
+            .bg(p.raised)
+            .occlude()
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(div().pb(px(GAP - 8.)).text_size(fs(18.)).font_weight(FontWeight::SEMIBOLD).child(tn!(n, "Delete message?", "Delete {n} messages?")))
+            .child(button("delete-me", t!("Delete for me"), p.lifted, p.negative).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.delete_chosen(false, cx)))))
+            .when(everyone, |el| {
+                el.child(button("delete-everyone", t!("Delete for everyone"), p.negative, gpui_kit::white()).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.delete_chosen(true, cx)))))
+            })
+            .child(button("delete-cancel", t!("Cancel"), p.raised, p.text).when(live, |el| {
+                el.on_click(cx.listener(|this, _, _, cx| {
+                    this.close_delete(cx);
+                }))
+            }))
+            .opacity(v)
+            .top(px(8. * (1. - v)));
+        Some(
+            div()
+                .id("delete-scrim")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui_kit::black().opacity(0.6 * v))
+                .occlude()
+                .when(live, |el| {
+                    el.on_click(cx.listener(|this, _, _, cx| {
+                        this.close_delete(cx);
+                    }))
+                })
+                .child(dialog)
+                .into_any_element(),
+        )
     }
 
     fn render_picker_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -780,6 +859,27 @@ mod tests {
         a.remove(&["$2".to_owned()]);
         assert!(!a.contains("$2"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_allowed_messages_are_deleted_for_everyone() {
+        use crate::backend::{Features, Kind, Msg};
+        let msg = |id: &str, own: bool, ts: u64| {
+            let mut m = Msg::bare(id.to_owned(), Kind::Message, "@me:x".try_into().unwrap());
+            (m.own, m.ts) = (own, ts);
+            m
+        };
+        let (mine, theirs, unsent) = (msg("$1", true, 1_000), msg("$2", false, 1_000), msg("~3", true, 1_000));
+        let all = Features::ALL;
+        assert!(super::everyone_may(&[&mine], false, &all, 2_000));
+        assert!(!super::everyone_may(&[&mine, &theirs], false, &all, 2_000), "another's needs a moderator");
+        assert!(super::everyone_may(&[&mine, &theirs], true, &all, 2_000));
+        assert!(!super::everyone_may(&[&unsent], true, &all, 2_000));
+        assert!(!super::everyone_may(&[], true, &all, 2_000));
+        let wa = Features { delete_max_age: Some(60), ..Features::ALL };
+        assert!(!super::everyone_may(&[&mine], false, &wa, 1_000 + 61_000), "too old for the network");
+        let none = Features { delete: 0, ..Features::ALL };
+        assert!(!super::everyone_may(&[&mine], false, &none, 2_000));
     }
 
     #[test]
