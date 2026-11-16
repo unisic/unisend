@@ -19,9 +19,12 @@ use matrix_sdk::{
     ruma::{
         EventId, OwnedEventId, OwnedRoomId, OwnedTransactionId, OwnedUserId, UserId,
         events::{
-            AnySyncStateEvent, AnySyncTimelineEvent, StateEventContentChange, SyncStateEvent,
+            AnySyncMessageLikeEvent, AnySyncStateEvent, AnySyncTimelineEvent, StateEventContentChange, SyncMessageLikeEvent, SyncStateEvent,
             receipt::{ReceiptThread, ReceiptType},
-            room::{member::MembershipChange as Change, message::MessageType},
+            room::{
+                member::MembershipChange as Change,
+                message::{MessageType, Relation},
+            },
         },
         room_version_rules::RoomVersionRules,
         serde::Raw,
@@ -348,7 +351,12 @@ fn shown(event: &AnySyncTimelineEvent, rules: &RoomVersionRules, dm: bool, big: 
     let service = &viewer.service;
     match event {
         AnySyncTimelineEvent::MessageLike(message) if message.event_type().to_string() == SEND_STATUS => true,
-        AnySyncTimelineEvent::MessageLike(_) => default_event_filter(event, rules),
+        AnySyncTimelineEvent::MessageLike(_) if default_event_filter(event, rules) => true,
+        // A message type the SDK does not know is read by its body, as the chat list reads it.
+        AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Original(e))) => {
+            !matches!(e.content.relates_to, Some(Relation::Replacement(_))) && !e.content.body().trim().is_empty()
+        }
+        AnySyncTimelineEvent::MessageLike(_) => false,
         // Told in a one-to-one chat too: whether what is written there stays is the chat's business.
         AnySyncTimelineEvent::State(state) if state.event_type().to_string() == disappear::TIMER => true,
         AnySyncTimelineEvent::State(_) if dm => false,
@@ -620,6 +628,24 @@ mod tests {
 
     use super::*;
 
+    /// Whether a message-like event of `kind` with `content` gets a row in a group chat.
+    fn shows(kind: &str, content: serde_json::Value) -> bool {
+        let event = json!({ "type": kind, "event_id": "$e", "sender": "@b:x", "origin_server_ts": 1, "content": content });
+        let event: AnySyncTimelineEvent = serde_json::from_value(event).unwrap();
+        let viewer = Viewer { own: "@a:x".try_into().unwrap(), service: BTreeSet::new(), bridged: false };
+        shown(&event, &RoomVersionRules::V11, false, false, &viewer)
+    }
+
+    #[test]
+    fn unknown_message_types_show_their_body() {
+        assert!(shows("m.room.message", json!({ "msgtype": "com.example.custom", "body": "fallback" })));
+        assert!(!shows("m.room.message", json!({ "msgtype": "com.example.custom", "body": " " })));
+        let edit = json!({ "msgtype": "com.example.custom", "body": "* x", "m.new_content": { "msgtype": "com.example.custom", "body": "x" },
+            "m.relates_to": { "rel_type": "m.replace", "event_id": "$o" } });
+        assert!(!shows("m.room.message", edit));
+        assert!(shows("m.room.message", json!({ "msgtype": "m.text", "body": "hi" })));
+        assert!(!shows("m.reaction", json!({ "m.relates_to": { "rel_type": "m.annotation", "event_id": "$o", "key": "x" } })));
+    }
     #[test]
     fn a_bridge_status_names_its_message_and_what_became_of_it() {
         let status = |extra: serde_json::Value| {
