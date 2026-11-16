@@ -87,7 +87,8 @@ struct Viewer {
 /// Starts following a room: sends the rows it has now, then every change to them, and who is
 /// typing. While the window is in front, a message that arrives is marked read.
 pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<AtomicBool>) -> Result<Open> {
-    let dm = other_person(room).await.is_some();
+    // A note to self reads like a direct chat: no "You created the group" line on top.
+    let dm = other_person(room).await.is_some() || super::is_note(room).await;
     // Past this many people, who comes and goes is noise: Beeper draws the same line.
     let big = room.joined_members_count() >= 100;
     let viewer = Arc::new(Viewer {
