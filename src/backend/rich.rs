@@ -239,14 +239,14 @@ fn walk(node: &NodeRef, st: &Style, depth: usize, blocks: &mut Vec<Block>, cur: 
         "ul" | "ol" => {
             flush(blocks, cur, b);
             let ordered = name == "ol";
-            let start = ordered.then(|| attr(node, "start").and_then(|s| s.parse().ok()).unwrap_or(1));
+            let start = ordered.then(|| attr(node, "start").and_then(|s| s.parse::<u64>().ok()).unwrap_or(1));
             let mut items = Vec::new();
             for (n, li) in node.children().filter(|c| c.as_element().is_some()).enumerate() {
                 let mut inside = Vec::new();
                 b.start();
                 let before = b.plain.len();
                 match start {
-                    Some(first) => b.plain.push_str(&format!("{}. ", first + n as u64)),
+                    Some(first) => b.plain.push_str(&format!("{}. ", first.saturating_add(n as u64))),
                     None => b.plain.push_str("\u{2022} "),
                 }
                 // The marker is drawn by the list; the item's text follows it on the same line.
@@ -363,5 +363,13 @@ mod tests {
         assert!(parse(&"a".repeat(MAX_HTML + 1)).is_none());
         let deep = "<div>".repeat(500) + "x";
         assert_eq!(parse(&deep).unwrap().0, "x");
+    }
+
+    #[test]
+    fn list_start_from_a_sender_does_not_overflow() {
+        let (plain, rich) = parse("<ol start=\"18446744073709551615\"><li>a</li><li>b</li></ol>").unwrap();
+        assert_eq!(plain, "18446744073709551615. a\n18446744073709551615. b");
+        assert!(matches!(rich.blocks[0], Block::List { start: Some(u64::MAX), .. }));
+        assert_eq!(parse("<ol start=\"-3\"><li>a</li></ol>").unwrap().0, "1. a");
     }
 }

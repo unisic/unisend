@@ -59,7 +59,7 @@ fn one(m: &Msg, block: &Block, look: Look, n: &mut usize) -> AnyElement {
             .gap(px(2.))
             .children(items.iter().enumerate().map(|(i, item)| {
                 let mark = match start {
-                    Some(first) => format!("{}.", first + i as u64),
+                    Some(first) => format!("{}.", first.saturating_add(i as u64)),
                     None => "\u{2022}".to_owned(),
                 };
                 h_flex()
