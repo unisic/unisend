@@ -28,6 +28,9 @@ Fedora without `libxkbcommon-x11-devel`: the linker needs the unversioned
     ln -sf /usr/lib64/libxkbcommon-x11.so.0 target/linkshim/libxkbcommon-x11.so
     RUSTFLAGS="-L $PWD/target/linkshim" cargo run --release
 
+To install for your user (binary in `~/.local/bin`, launcher and icons in `~/.local/share`; run
+again to update): `cargo build --release && packaging/linux/install.sh`.
+
 Windows and macOS: `.github/workflows/build.yml` builds both on GitHub's runners (also Linux and
 the Android APK); it has never run, because the repository has never been pushed. A Windows
 build cannot be made on Linux: GPUI compiles its shaders with `fxc.exe`, on a Windows host only.

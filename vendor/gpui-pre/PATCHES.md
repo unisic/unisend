@@ -21,6 +21,14 @@ touch screen never becomes a `PinchEvent` (only trackpads send one). Changes, ma
 - `src/window.rs`: a `pinch_tracker` field, and every raw touch is fed to it before the gesture
   recognizer; a resulting pinch is dispatched like a trackpad pinch
 
+Views that outlive their window: a window's focus, activation and appearance listeners live in
+the window, so a view shown again in a new window (the desktop app running on with its window
+closed) lost them: text fields got no caret and the view no activation. Changes, marked
+`murmur patch`: `Window::hand_listeners_on` (src/window.rs) tells the focused element it lost
+focus, then moves the three listener sets to `App::kept_window_listeners` (src/app.rs);
+`Window::new` takes them when set. Listeners of views that went with the old window drop out on
+their next call, as upstream's do.
+
 Re-apply on upgrade: copy the new crate into this directory, repeat the above
 (`grep -rn "murmur patch" vendor/gpui-pre`), bump the `gpui-pre =` pin consumers, or drop the
 vendor dir and the `[patch.crates-io]` entry once upstream cuts on grapheme boundaries.

@@ -8,6 +8,8 @@ mod applock;
 mod backend;
 mod beeper;
 mod bridges;
+#[cfg(not(target_os = "android"))]
+mod desktop;
 mod emoji;
 mod i18n;
 mod ime;
@@ -125,7 +127,22 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     cx.set_global(settings.chat_colour);
     sync_theme(None, cx);
     let (cmd, events) = backend::start(dir.clone());
-    let options = WindowOptions {
+    #[cfg(not(target_os = "android"))]
+    desktop::keep_running(settings.stay_connected);
+    let (window, app) = gpui_kit::open_window(window_options(window_bounds), cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, dir, settings, window, cx)))
+        .expect("open main window");
+    #[cfg(not(target_os = "android"))]
+    {
+        notify::attach(window, app.downgrade(), cx);
+        desktop::keep(window, app, cx);
+    }
+    #[cfg(target_os = "android")]
+    let _ = (window, app);
+    cx.activate(true);
+}
+
+fn window_options(window_bounds: Option<WindowBounds>) -> WindowOptions {
+    WindowOptions {
         window_bounds,
         titlebar: Some(TitlebarOptions { title: Some("Unisend".into()), ..Default::default() }),
         // Wayland app id; matches packaging/linux/dev.gpui.beeper.desktop so the shell finds the icon.
@@ -134,14 +151,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
         #[cfg(target_os = "linux")]
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
-    };
-    let (window, app) = gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(cmd, events, dir, settings, window, cx)))
-        .expect("open main window");
-    #[cfg(not(target_os = "android"))]
-    notify::attach(window, app.downgrade(), cx);
-    #[cfg(target_os = "android")]
-    let _ = (window, app);
-    cx.activate(true);
+    }
 }
 
 /// Takes the language Android 13 and later keep for the app (Settings, Apps, Unisend, Language)
@@ -588,16 +598,13 @@ pub fn run_desktop() {
         .expect("no data directory");
     private_dir(&dir).expect("create data directory");
     let Some(claim) = instance::claim(&dir) else { return };
-    gpui_kit::application().with_assets(Assets).run(move |cx| {
+    let app = gpui_kit::application().with_assets(Assets);
+    // macOS: a click on the Dock icon while the window is closed.
+    app.on_reopen(desktop::show);
+    app.run(move |cx| {
         let bounds = WindowBounds::Windowed(Bounds::centered(None, size(px(1000.), px(700.)), cx));
         open(cx, dir, Some(bounds));
         instance::serve(claim, cx);
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
     });
 }
 
@@ -837,7 +844,7 @@ pub(crate) fn stay_connected(on: bool) {
         log::warn!("background connection: {e}");
     }
     #[cfg(not(target_os = "android"))]
-    let _ = on;
+    desktop::keep_running(on);
 }
 
 /// A message for a chat's notification.

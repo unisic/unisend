@@ -831,6 +831,8 @@ pub struct App {
     pending_updates: usize,
     quit_mode: QuitMode,
     quitting: bool,
+    /// murmur patch: listeners a closed window handed to the next one (`Window::hand_listeners_on`).
+    pub(crate) kept_window_listeners: Option<crate::window::KeptWindowListeners>,
 
     // We need to ensure the leak detector drops last, after all tasks, callbacks and things have been dropped.
     // Otherwise it may report false positives.
@@ -925,6 +927,7 @@ impl App {
                 inspector_element_registry: InspectorElementRegistry::default(),
                 quit_mode: QuitMode::default(),
                 quitting: false,
+                kept_window_listeners: None,
                 cursor_hide_mode: CursorHideMode::default(),
                 reduce_motion: false,
                 synced_animation_epoch,

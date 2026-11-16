@@ -157,6 +157,9 @@ fn control(kind: Control, cx: &App) -> impl IntoElement {
             match kind {
                 Control::Minimise => window.minimize_window(),
                 Control::Maximise | Control::Restore => window.zoom_window(),
+                #[cfg(not(target_os = "android"))]
+                Control::Close => crate::desktop::close(window, cx),
+                #[cfg(target_os = "android")]
                 Control::Close => window.remove_window(),
             }
         })

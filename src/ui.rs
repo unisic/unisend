@@ -1611,6 +1611,15 @@ impl BeeperApp {
         self.send(Cmd::React { room, target: target.to_owned(), key }, cx);
     }
 
+    /// Desktop: the window closed while the app runs on. A closing window is not always told it
+    /// went to the background first.
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn hidden(&mut self) {
+        crate::FOREGROUND.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.drafts.save();
+        crate::backend::save_search();
+    }
+
     /// Opens the chat a tapped notification was for.
     pub(crate) fn open_from_notification(&mut self, cx: &mut Context<Self>) {
         if self.screen != Screen::Main {

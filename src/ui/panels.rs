@@ -752,6 +752,17 @@ impl BeeperApp {
             .on_click(cx.listener(move |this, _, _, cx| this.open_page(shows, cx)));
         let page = v_flex().gap(px(GAP * 2.)).child(card(cx).child(shows)).child(card(cx).child(test));
         // Sounds and the connection are Android's; desktop has the system's own settings.
+        #[cfg(not(target_os = "android"))]
+        if crate::desktop::CAN_KEEP_RUNNING {
+            return page
+                .child(
+                    v_flex()
+                        .gap(px(8.))
+                        .child(card(cx).child(row(t!("Keep running when the window is closed"), "", cx).child(stay)))
+                        .child(footnote(t!("On: messages and notifications keep arriving. Open Unisend again from the tray icon or by launching it. Off: closing the window quits."), cx)),
+                )
+                .into_any_element();
+        }
         if !cfg!(target_os = "android") {
             return page.into_any_element();
         }

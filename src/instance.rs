@@ -77,7 +77,7 @@ fn knock(dir: &Path) {
     let _ = dir;
 }
 
-/// Brings the window to front whenever a later launch knocks.
+/// Brings the window to front, or opens it again, whenever a later launch knocks.
 pub(crate) fn serve(claim: Claim, cx: &mut App) {
     // The lock goes with the process; the claim only keeps it open until then.
     std::mem::forget(claim.lock);
@@ -107,9 +107,7 @@ pub(crate) fn serve(claim: Claim, cx: &mut App) {
                     }
                     #[cfg(not(target_os = "linux"))]
                     let _ = token;
-                    if let Some(window) = cx.windows().into_iter().next() {
-                        let _ = window.update(cx, |_, window, _| window.activate_window());
-                    }
+                    crate::desktop::show(cx);
                 });
             }
         })

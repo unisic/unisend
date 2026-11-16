@@ -161,12 +161,11 @@ pub(crate) fn attach(window: AnyWindowHandle, app: WeakEntity<crate::ui::BeeperA
         while let Some(msg) = rx.recv().await {
             cx.update(|cx| match msg {
                 ToUi::Open => {
-                    let _ = window.update(cx, |_, window, cx| {
-                        #[cfg(target_os = "linux")]
-                        linux::hand_token();
-                        window.activate_window();
-                        let _ = app.update(cx, |app, cx| app.open_from_notification(cx));
-                    });
+                    #[cfg(target_os = "linux")]
+                    linux::hand_token();
+                    // Opens the window again when it was closed and the app ran on.
+                    crate::desktop::show(cx);
+                    let _ = app.update(cx, |app, cx| app.open_from_notification(cx));
                 }
                 #[cfg(target_os = "macos")]
                 ToUi::Show(notification) => cx.show_system_notification(notification),

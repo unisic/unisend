@@ -307,6 +307,14 @@ pub(crate) struct WindowFocusEvent {
     pub(crate) current_focus_path: SmallVec<[FocusId; 8]>,
 }
 
+/// murmur patch: the focus, activation and appearance listeners of a window that closed, for the
+/// next window to open. Views kept alive across a closed window keep them this way.
+pub(crate) struct KeptWindowListeners {
+    focus: SubscriberSet<(), AnyWindowFocusListener>,
+    activation: SubscriberSet<(), AnyObserver>,
+    appearance: SubscriberSet<(), AnyObserver>,
+}
+
 impl WindowFocusEvent {
     pub fn is_focus_in(&self, focus_id: FocusId) -> bool {
         !self.previous_focus_path.contains(&focus_id) && self.current_focus_path.contains(&focus_id)
@@ -2020,6 +2028,13 @@ impl Window {
 
         platform_window.map_window().unwrap();
 
+        // murmur patch: see `hand_listeners_on`.
+        let kept = cx.kept_window_listeners.take();
+        let (focus_listeners, activation_observers, appearance_observers) = match kept {
+            Some(k) => (k.focus, k.activation, k.appearance),
+            None => (SubscriberSet::new(), SubscriberSet::new(), SubscriberSet::new()),
+        };
+
         Ok(Window {
             handle,
             invalidator,
@@ -2052,7 +2067,7 @@ impl Window {
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
             dirty_views: FxHashSet::default(),
-            focus_listeners: SubscriberSet::new(),
+            focus_listeners,
             focus_lost_listeners: SubscriberSet::new(),
             focus_lost_path: SmallVec::new(),
             default_prevented: true,
@@ -2063,7 +2078,7 @@ impl Window {
             scale_factor,
             bounds_observers: SubscriberSet::new(),
             appearance,
-            appearance_observers: SubscriberSet::new(),
+            appearance_observers,
             button_layout_observers: SubscriberSet::new(),
             active,
             visibility,
@@ -2084,7 +2099,7 @@ impl Window {
             long_press_timer: None,
             long_press_capture: None,
             refreshing: false,
-            activation_observers: SubscriberSet::new(),
+            activation_observers,
             focus: None,
             focus_enabled: true,
             focus_generation: 0,
@@ -2282,6 +2297,23 @@ impl Window {
     /// Close this window.
     pub fn remove_window(&mut self) {
         self.removed = true;
+    }
+
+    /// murmur patch: hands this window's focus, activation and appearance listeners to the next
+    /// window opened, for views that outlive this window and are shown in the next one. Whatever
+    /// had focus is told it lost it first, so a text field stops its caret. Call it before the
+    /// window goes; the listeners of views that went with it drop out on their next call.
+    pub fn hand_listeners_on(&mut self, cx: &mut App) {
+        let previous_focus_path = self.rendered_frame.focus_path();
+        if !previous_focus_path.is_empty() {
+            let event = WindowFocusEvent { previous_focus_path, current_focus_path: SmallVec::new() };
+            self.focus_listeners.clone().retain(&(), |listener| listener(&event, self, cx));
+        }
+        cx.kept_window_listeners = Some(KeptWindowListeners {
+            focus: mem::replace(&mut self.focus_listeners, SubscriberSet::new()),
+            activation: mem::replace(&mut self.activation_observers, SubscriberSet::new()),
+            appearance: mem::replace(&mut self.appearance_observers, SubscriberSet::new()),
+        });
     }
 
     /// Obtain the currently focused [`FocusHandle`]. If no elements are focused, returns `None`.
