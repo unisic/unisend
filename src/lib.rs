@@ -1015,6 +1015,28 @@ pub(crate) fn web_login(cx: &mut gpui_kit::App, wanted: &bridges::Cookies) -> gp
     }
 }
 
+/// Shows a Matrix server's sign-in page. On Android it opens in the app's own browser, which hands
+/// back the address the page sent it to (it starts with `back`) or none when the user closed it.
+/// Elsewhere the system browser opens it and its answer reaches the backend's listener: there is
+/// nothing to wait for here.
+pub(crate) fn sign_in_page(cx: &mut gpui_kit::App, url: &str, back: &str) -> Option<gpui_kit::Task<Option<String>>> {
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = back;
+        open_link(cx, url);
+        None
+    }
+    #[cfg(target_os = "android")]
+    {
+        let (url, pattern) = (url.to_owned(), format!("^\\Q{back}\\E"));
+        // Blocks until the browser closes, so off the UI thread.
+        Some(cx.background_spawn(async move {
+            let found = android_files::web_login(&url, "", &pattern, "", "u:url", "", "").map_err(|e| log::warn!("sign-in page: {e}")).ok()??;
+            serde_json::from_str::<serde_json::Value>(&found).ok()?.get("url")?.as_str().map(str::to_owned)
+        }))
+    }
+}
+
 /// The text of a failed JNI call. A thrown Java exception is caught here, so it is no longer
 /// pending, and named with its message and where it was thrown; `e.to_string()` alone only says
 /// that one was thrown.

@@ -81,6 +81,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         info: None,
         peer: None,
         login: None,
+        browser: None,
         replaceable: false,
         update: None,
     };
@@ -1992,4 +1993,119 @@ fn an_unnamed_group_is_titled_by_its_people_not_its_bot() {
     assert_eq!(group_title(&n(&["Ann", "Bob"]), 2).as_deref(), Some("Ann, Bob"));
     assert_eq!(group_title(&n(&["Ann", "Bob", "Cy", "Di"]), 4).as_deref(), Some("Ann, Bob, Cy and 1 other"));
     assert_eq!(group_title(&n(&["Ann", "Bob"]), 9).as_deref(), Some("Ann, Bob and 7 others"));
+}
+
+/// What a browser does with a sign-in page that answers at once: follows it to the redirect,
+/// which is the app's loopback listener, and returns the address it was sent to.
+async fn browse(url: &str, back: &str) -> String {
+    let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let sent = http.get(url).send().await.unwrap();
+    assert_eq!(sent.status(), 302, "{url}");
+    let to = sent.headers()["location"].to_str().unwrap().to_owned();
+    assert!(to.starts_with(back), "{to}");
+    // The listener answers the browser; in tests nobody reads the command it would send.
+    let page = http.get(&to).send().await.unwrap();
+    assert_eq!(page.status(), 200);
+    to
+}
+
+fn saved(root: &Path) -> SavedSession {
+    serde_json::from_slice(&std::fs::read(root.join("session.json")).unwrap()).unwrap()
+}
+
+/// OAuth 2.0 sign-in through `tests/fake-browser-signin.py PORT oauth USER 5`, a fake
+/// authorization service in front of the local homeserver: registration, PKCE, the session kept
+/// and refreshed tokens written back, a restart, and signing out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs tests/fake-browser-signin.py in oauth mode, see the doc comment"]
+async fn oauth_browser_signin_refresh_restore() {
+    let hs = std::env::var("MATRIX_TEST_OAUTH_HS").expect("MATRIX_TEST_OAUTH_HS");
+    let root = std::env::temp_dir().join(format!("beeper-gpui-oauth-{}", tag()));
+    let (mut st, mut rx) = state(root.clone(), beeper::HOMESERVER_URL);
+    st.handle(Cmd::LoginMethods(hs.clone())).await.unwrap();
+    let methods = wait_for(&mut rx, "methods", |e| match e {
+        Ev::LoginMethods(m) => Some(m),
+        _ => None,
+    })
+    .await;
+    assert_eq!(methods, Methods { typed: hs.clone(), oauth: true, sso: None, password: false });
+    st.handle(Cmd::BrowserLogin { server: hs.clone(), way: Way::OAuth }).await.unwrap();
+    let (url, back) = wait_for(&mut rx, "sign-in page", |e| match e {
+        Ev::SignInPage { url, back } => Some((url, back)),
+        _ => None,
+    })
+    .await;
+    assert!(back.starts_with("http://127.0.0.1:") && url.contains("code_challenge_method=S256"), "{url}");
+    let to = browse(&url, &back).await;
+    // An answer for another sign-in is ignored.
+    st.handle(Cmd::BrowserDone { back: "http://127.0.0.1:1/".into(), url: Some(to.clone()) }).await.unwrap();
+    st.handle(Cmd::BrowserDone { back: back.clone(), url: Some(to) }).await.unwrap();
+    wait_for(&mut rx, "Ready", |e| matches!(e, Ev::Ready { beeper: false, .. }).then_some(())).await;
+    let first = saved(&root);
+    assert!(first.oauth.is_some() && first.session.tokens.refresh_token.is_some());
+
+    // The fake's access tokens last 5 s: the next request refreshes, and the file follows.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    st.client().unwrap().whoami().await.unwrap();
+    let second = saved(&root);
+    assert_ne!(second.session.tokens.access_token, first.session.tokens.access_token);
+    assert_ne!(second.session.tokens.refresh_token, first.session.tokens.refresh_token);
+
+    // A restart signs in with what the file holds, refreshing once more when it has to.
+    for task in st.tasks.drain(..) {
+        task.abort();
+    }
+    drop((st, rx));
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let (mut st, mut rx) = state(root.clone(), beeper::HOMESERVER_URL);
+    assert!(st.restore().await.unwrap());
+    wait_for(&mut rx, "Ready after restart", |e| matches!(e, Ev::Ready { beeper: false, .. }).then_some(())).await;
+    st.client().unwrap().whoami().await.unwrap();
+    assert_ne!(saved(&root).session.tokens.refresh_token, second.session.tokens.refresh_token);
+
+    st.handle(Cmd::SignOut).await.unwrap();
+    assert!(!root.join("session.json").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Single sign-on through `tests/fake-browser-signin.py PORT sso USER`: the identity provider
+/// listed, the login token from the redirect, and a session with no OAuth client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs tests/fake-browser-signin.py in sso mode, see the doc comment"]
+async fn sso_browser_signin() {
+    let hs = std::env::var("MATRIX_TEST_SSO_HS").expect("MATRIX_TEST_SSO_HS");
+    let root = std::env::temp_dir().join(format!("beeper-gpui-sso-{}", tag()));
+    let (mut st, mut rx) = state(root.clone(), beeper::HOMESERVER_URL);
+    st.handle(Cmd::LoginMethods(hs.clone())).await.unwrap();
+    let methods = wait_for(&mut rx, "methods", |e| match e {
+        Ev::LoginMethods(m) => Some(m),
+        _ => None,
+    })
+    .await;
+    assert_eq!(methods.sso, Some(vec![("fake".to_owned(), "Fake IdP".to_owned())]));
+    assert!(!methods.oauth && !methods.password);
+    // Closing the page lets the sign-in go; its late answer is ignored.
+    st.handle(Cmd::BrowserLogin { server: hs.clone(), way: Way::Sso(Some("fake".into())) }).await.unwrap();
+    let (_, gone) = wait_for(&mut rx, "sign-in page", |e| match e {
+        Ev::SignInPage { url, back } => Some((url, back)),
+        _ => None,
+    })
+    .await;
+    st.handle(Cmd::BrowserCancel).await.unwrap();
+    st.handle(Cmd::BrowserDone { back: gone.clone(), url: Some(format!("{gone}?loginToken=x")) }).await.unwrap();
+    assert!(st.client.is_none());
+
+    st.handle(Cmd::BrowserLogin { server: hs.clone(), way: Way::Sso(Some("fake".into())) }).await.unwrap();
+    let (url, back) = wait_for(&mut rx, "sign-in page", |e| match e {
+        Ev::SignInPage { url, back } => Some((url, back)),
+        _ => None,
+    })
+    .await;
+    assert!(url.contains("/login/sso/redirect/fake"), "{url}");
+    let to = browse(&url, &back).await;
+    st.handle(Cmd::BrowserDone { back, url: Some(to) }).await.unwrap();
+    wait_for(&mut rx, "Ready", |e| matches!(e, Ev::Ready { beeper: false, .. }).then_some(())).await;
+    assert!(saved(&root).oauth.is_none());
+    st.handle(Cmd::SignOut).await.unwrap();
+    let _ = std::fs::remove_dir_all(&root);
 }

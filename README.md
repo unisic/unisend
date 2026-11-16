@@ -4,8 +4,9 @@ Unisend is a Matrix chat client written in Rust, for Linux, Windows, macOS and A
 [GPUI](https://www.gpui.rs) through gpui-kit (gpui-mobile on Android); the protocol, end-to-end
 encryption and key backup come from matrix-sdk. The crate and binary are still named `beeper-gpui`.
 
-Accounts: any Matrix homeserver that offers password login (`m.login.password`). Single sign-on,
-OIDC and registration are not supported yet. Beeper accounts work as well, through Beeper's
+Accounts: any Matrix homeserver, signed in through its OAuth 2.0 service (MSC3861, as on
+matrix.org), single sign-on or a password, whichever it offers. Registration is not supported
+yet. Beeper accounts work as well, through Beeper's
 email-code sign-in (`api.beeper.com/user/login`, then Matrix JWT login on `matrix.beeper.com`);
 chats from other networks (WhatsApp, Signal, Messenger and the rest) arrive through Beeper's
 bridges, so the Networks page needs a Beeper account. Encrypted history is unlocked with the

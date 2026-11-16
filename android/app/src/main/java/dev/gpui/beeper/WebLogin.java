@@ -13,6 +13,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -142,6 +143,11 @@ public final class WebLogin extends Activity {
             public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
                 check(url);
             }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, android.webkit.WebResourceRequest request) {
+                return arrivedBack(request.getUrl().toString());
+            }
         });
         setContentView(web);
         web.loadUrl(startUrl);
@@ -212,10 +218,26 @@ public final class WebLogin extends Activity {
     }
 
     private void check(String url) {
+        if (arrivedBack(url)) {
+            return;
+        }
         boolean arrived = done == null || (url != null && done.matcher(url).find());
         if (arrived && required.length > 0 && hasRequired()) {
             finish();
         }
+    }
+
+    /**
+     * A Matrix server's sign-in asks for "u:url": the address the page sends the browser back to
+     * is then the answer itself, kept as "url" and never loaded.
+     */
+    private boolean arrivedBack(String url) {
+        if (url == null || done == null || !Arrays.asList(required).contains("u:url") || !done.matcher(url).find()) {
+            return false;
+        }
+        found.put("u:url", url);
+        finish();
+        return true;
     }
 
     /** Every required field has a value from one of its sources. */

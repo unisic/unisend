@@ -103,6 +103,13 @@ pub enum Cmd {
     SubmitCode(String),
     /// Sign in to any Matrix homeserver. `server` is a server name or URL, as typed.
     PasswordLogin { server: String, user: String, password: String },
+    /// What the server typed in the sign-in form offers to sign in with.
+    LoginMethods(String),
+    /// Sign in on the server's own page, in a browser.
+    BrowserLogin { server: String, way: Way },
+    /// The browser came back to `back` at `url`, or the page was closed (none).
+    BrowserDone { back: String, url: Option<String> },
+    BrowserCancel,
     Recover(String),
     /// The recovery code kept on this device, for the settings to show.
     RecoveryCode,
@@ -232,6 +239,9 @@ pub enum Cmd {
 pub enum Ev {
     NeedLogin,
     CodeSent,
+    LoginMethods(Methods),
+    /// The server's sign-in page to show; it sends the browser back to `back`.
+    SignInPage { url: String, back: String },
     /// Signed in as this user; `beeper` says the account is Beeper's, with its bridges and account API.
     /// `seal` keeps the UI's own files the way the store is kept.
     Ready { user: OwnedUserId, beeper: bool, seal: Seal },
@@ -867,6 +877,8 @@ struct State {
     peer: Option<AbortOnDrop>,
     /// The network login's request in flight; leaving the login cancels it.
     login: Option<AbortOnDrop>,
+    /// A sign-in waiting for the browser to come back.
+    browser: Option<signin::Pending>,
     /// The account on disk cannot be opened here (key gone, session unreadable), so a sign-in may
     /// replace it; otherwise a sign-in never deletes a session that may still open.
     replaceable: bool,
@@ -892,7 +904,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     let _ = std::fs::remove_file(dir.join("klipy-id"));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
-        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, replaceable: false, update: None };
+        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, browser: None, replaceable: false, update: None };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
     #[cfg(not(target_os = "android"))]
     tokio::spawn(crate::notify::serve(st.dir.clone()));
@@ -916,6 +928,9 @@ struct SavedSession {
     /// always are.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     homeserver: Option<String>,
+    /// The OAuth 2.0 client ID of a session signed in through the server's authorization service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    oauth: Option<String>,
 }
 
 fn beeper_homeserver() -> String {
@@ -996,7 +1011,11 @@ impl State {
             ..Default::default()
         };
         let store = matrix_sdk::SqliteStoreConfig::new(self.dir.join("store")).key(self.seal.key());
-        Client::builder().sqlite_store_with_config_and_cache_path(store, None::<PathBuf>).http_client(self.http.clone()).with_encryption_settings(e2ee)
+        Client::builder()
+            .sqlite_store_with_config_and_cache_path(store, None::<PathBuf>)
+            .http_client(self.http.clone())
+            .with_encryption_settings(e2ee)
+            .handle_refresh_tokens()
     }
 
     /// Reads the store key. A Keystore that fails for now is asked again, with nothing deleted; a
@@ -1095,7 +1114,7 @@ impl State {
             }
         };
         let beeper = saved.homeserver.is_none();
-        let homeserver = saved.homeserver.unwrap_or_else(|| self.homeserver.clone());
+        let homeserver = saved.homeserver.clone().unwrap_or_else(|| self.homeserver.clone());
         let client = match self.client_builder().homeserver_url(&homeserver).build().await {
             Ok(client) => client,
             Err(e) if key_rejected(&e) => {
@@ -1105,7 +1124,10 @@ impl State {
             }
             Err(e) => return Err(e.into()),
         };
-        client.matrix_auth().restore_session(saved.session, RoomLoadSettings::default()).await?;
+        if saved.session.tokens.refresh_token.is_some() {
+            signin::keep_tokens(&client, &self.dir, &self.seal, saved.homeserver.clone())?;
+        }
+        signin::restore(&client, saved).await?;
         (self.homeserver, self.beeper) = (homeserver, beeper);
         if let Some(rooms) = load_rooms(&self.dir, &self.seal) {
             let list = rooms.values().cloned().collect();
@@ -1186,7 +1208,7 @@ impl State {
             .initial_device_display_name("Unisend")
             .await?;
         let session = client.matrix_auth().session().ok_or_else(|| anyhow!(t!("Login returned no session")))?;
-        self.seal.write(&self.dir, vault::SESSION, &serde_json::to_vec(&SavedSession { session, homeserver: None })?)?;
+        self.seal.write(&self.dir, vault::SESSION, &serde_json::to_vec(&SavedSession { session, homeserver: None, oauth: None })?)?;
         self.go_live(client).await;
         Ok(())
     }
@@ -1198,22 +1220,10 @@ impl State {
         if user.is_empty() || password.is_empty() {
             return Err(anyhow!(t!("Enter your user name and password.")));
         }
+        self.browser = None;
         self.fresh_store()?;
-        let not_reached = || anyhow!(t!("Could not reach {server}. Check the address and your connection.", server = server));
-        // The SDK retries a silent host for minutes; someone waiting at the form should hear sooner.
-        let discovery = self.client_builder().server_name_or_homeserver_url(&server).build();
-        let client = tokio::time::timeout(Duration::from_secs(30), discovery).await.map_err(|_| not_reached())?.map_err(|e| {
-            log::warn!("homeserver discovery: {e}");
-            match unreachable(&e) {
-                true => not_reached(),
-                false => anyhow!(t!("No Matrix server found at {server}.", server = server)),
-            }
-        })?;
-        // A server's .well-known may point anywhere; the password only goes over https.
+        let client = self.find(self.client_builder(), &server).await?;
         let homeserver = client.homeserver();
-        if homeserver.scheme() != "https" && !homeserver.host_str().is_some_and(is_local) {
-            return Err(anyhow!(t!("{server} does not offer an encrypted (https) connection, so this app will not send it a password.", server = server)));
-        }
         let auth = client.matrix_auth();
         let types = auth.get_login_types().await.map_err(|e| match unreachable(&e) {
             true => anyhow!(t!("Could not reach {server}. Check your connection.", server = server)),
@@ -1238,7 +1248,7 @@ impl State {
         let session = auth.session().ok_or_else(|| anyhow!(t!("Login returned no session")))?;
         self.homeserver = homeserver.to_string();
         self.beeper = false;
-        let saved = SavedSession { session, homeserver: Some(self.homeserver.clone()) };
+        let saved = SavedSession { session, homeserver: Some(self.homeserver.clone()), oauth: None };
         self.seal.write(&self.dir, vault::SESSION, &serde_json::to_vec(&saved)?)?;
         self.go_live(client).await;
         Ok(())
@@ -1261,6 +1271,13 @@ impl State {
                 self.login_jwt(jwt).await?;
             }
             Cmd::PasswordLogin { server, user, password } => self.login_password(&server, &user, &password).await?,
+            Cmd::LoginMethods(server) => {
+                let methods = self.methods(server).await?;
+                self.emit(Ev::LoginMethods(methods)).await;
+            }
+            Cmd::BrowserLogin { server, way } => self.browser_login(&server, way).await?,
+            Cmd::BrowserDone { back, url } => self.browser_done(&back, url).await?,
+            Cmd::BrowserCancel => self.browser = None,
             Cmd::Recover(key) => {
                 let recovery = self.client()?.encryption().recovery();
                 if let Err(e) = recovery.recover(key.trim()).await {
@@ -1581,7 +1598,7 @@ impl State {
                 self.verify.stop();
                 if let Some(client) = self.client.take() {
                     // The device is gone locally either way; the server forgets it when it can.
-                    if let Err(e) = client.matrix_auth().logout().await {
+                    if let Err(e) = client.logout().await {
                         log::warn!("logout: {e}");
                     }
                 }
@@ -3751,6 +3768,8 @@ mod export;
 pub use export::Export;
 
 mod mentions;
+mod signin;
+pub use signin::{Methods, Way};
 pub(crate) mod voice;
 pub mod verify;
 

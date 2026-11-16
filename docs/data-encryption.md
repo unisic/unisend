@@ -52,8 +52,8 @@ counts and sizes, integer columns (timestamps, send queue priority and order, ch
 relation type of events (`rel_type`, such as `m.replace`), send queue transaction ids, and the
 names of the crypto store's key-value entries. Room, event and user ids are stored hashed;
 event contents, state, members, keys and media are encrypted. Values written with
-`set_custom_value` are stored plain; only sliding sync and OAuth use them, and this app uses
-neither.
+`set_custom_value` are stored plain; only sliding sync and OAuth's cross-process refresh lock use
+them, and this app uses neither.
 
 Plain on purpose, short-lived:
 

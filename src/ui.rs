@@ -754,6 +754,8 @@ impl BeeperApp {
                 self.screen = Screen::Email;
                 self.busy = false;
             }
+            Ev::LoginMethods(methods) => self.on_login_methods(methods),
+            Ev::SignInPage { url, back } => self.on_sign_in_page(url, back, cx),
             Ev::CodeSent => {
                 self.screen = Screen::Code;
                 self.busy = false;
@@ -779,6 +781,7 @@ impl BeeperApp {
                 self.screen = Screen::Main;
                 self.busy = false;
                 self.error = None;
+                self.matrix.waiting = None;
                 self.take_share(None, cx);
                 self.check_update_if_due(cx);
             }
@@ -987,6 +990,10 @@ impl BeeperApp {
                 self.error = Some(crate::backend::plain(&e).into());
                 self.busy = false;
                 self.loading = false;
+                // A browser sign-in that failed is over; the backend has let it go.
+                if self.screen == Screen::Matrix {
+                    self.matrix.waiting = None;
+                }
             }
             Ev::Contact(id, cards) => self.contacts.keep(id, cards),
             Ev::People(answer) => self.on_people(answer, cx),
