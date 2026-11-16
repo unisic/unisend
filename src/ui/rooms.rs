@@ -28,6 +28,8 @@ struct Confirm {
     network: Option<String>,
     dm: bool,
     delete: Option<bool>,
+    /// Block the person behind an invitation or a message request, then leave.
+    block: bool,
 }
 
 pub(super) struct NewChat {
@@ -108,6 +110,13 @@ fn looks_like_identifier(q: &str, target: &Target, caps: &Caps) -> bool {
 /// What the leave dialog says and its button, in whole sentences.
 fn wording(c: &Confirm) -> (String, String, &'static str) {
     let network = c.network.as_deref().unwrap_or(t!("the network"));
+    if c.block {
+        let body = match &c.network {
+            Some(network) => t!("{network} blocks them for you and the request is deleted. They are not told.", network = network),
+            None => t!("You won't see anything from them in Unisend again, and the invitation is declined. They are not told.").to_owned(),
+        };
+        return (t!("Block {name}?", name = c.name), body, t!("Block"));
+    }
     match (c.network.is_some(), c.delete == Some(true), c.dm) {
         (true, true, true) => (
             t!("Delete {name}?", name = c.name),
@@ -154,7 +163,7 @@ impl BeeperApp {
 
     pub(super) fn ask_leave(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
         let Some(r) = self.rooms.iter().find(|r| r.id == room) else { return };
-        let mut confirm = Confirm { room: room.clone(), name: r.name.clone(), network: r.network.clone(), dm: r.dm, delete: None };
+        let mut confirm = Confirm { room: room.clone(), name: r.name.clone(), network: r.network.clone(), dm: r.dm, delete: None, block: false };
         if confirm.network.is_none() {
             confirm.delete = Some(false);
         } else if !self.send(Cmd::People(Ask::LeaveOptions(room)), cx) {
@@ -162,6 +171,24 @@ impl BeeperApp {
         }
         self.people.confirm = Some(confirm);
         cx.notify();
+    }
+
+    /// Asks before blocking whoever is behind a pending chat; the chat is left with it.
+    pub(super) fn ask_block(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
+        let Some(r) = self.rooms.iter().find(|r| r.id == room) else { return };
+        let name = match &r.pending {
+            Some(Pending::Invite { name, .. }) if !name.is_empty() => name.clone(),
+            _ => r.name.clone(),
+        };
+        self.people.confirm = Some(Confirm { room, name, network: r.network.clone(), dm: r.dm, delete: Some(false), block: true });
+        cx.notify();
+    }
+
+    /// Turns an invitation down at once: nothing is lost that cannot come back with a new one.
+    pub(super) fn decline(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
+        let Some(r) = self.rooms.iter().find(|r| r.id == room) else { return };
+        self.people.confirm = Some(Confirm { room, name: r.name.clone(), network: None, dm: r.dm, delete: Some(false), block: false });
+        self.leave(cx);
     }
 
     /// The leave or delete dialog is asking about this chat, or waiting to.
@@ -181,7 +208,8 @@ impl BeeperApp {
     fn leave(&mut self, cx: &mut Context<Self>) {
         let Some(c) = self.people.confirm.take() else { return };
         let delete = c.delete == Some(true);
-        if !self.send(Cmd::People(Ask::Leave { room: c.room.clone(), delete }), cx) {
+        let ask = if c.block { Ask::Block(c.room.clone()) } else { Ask::Leave { room: c.room.clone(), delete } };
+        if !self.send(Cmd::People(ask), cx) {
             return;
         }
         // It leaves the list at once; the backend puts it back if leaving fails.
@@ -467,6 +495,17 @@ impl BeeperApp {
                 }
                 new.clear = true;
             }
+            Answer::Accepted(room) => {
+                let Some(r) = self.rooms.iter_mut().find(|r| r.id == room) else { return };
+                let invited = matches!(r.pending, Some(Pending::Invite { .. }));
+                r.pending = None;
+                self.refilter(cx);
+                // A joined room has history to show now.
+                if invited && self.open.as_ref() == Some(&room) {
+                    self.close_room(cx);
+                    self.open_room(room, cx);
+                }
+            }
             Answer::Ready(room) => {
                 self.people.new = None;
                 self.panel = None;
@@ -702,7 +741,7 @@ mod tests {
 
     #[test]
     fn the_dialog_promises_a_remote_delete_only_when_the_bridge_offers_one() {
-        let mut c = Confirm { room: "!a:b".try_into().unwrap(), name: "Ann".into(), network: Some("WhatsApp".into()), dm: true, delete: Some(true) };
+        let mut c = Confirm { room: "!a:b".try_into().unwrap(), name: "Ann".into(), network: Some("WhatsApp".into()), dm: true, delete: Some(true), block: false };
         assert_eq!(wording(&c).2, "Delete");
         assert!(wording(&c).1.contains("your WhatsApp account"));
         c.delete = Some(false);
@@ -711,5 +750,11 @@ mod tests {
         assert!(body.contains("cannot delete it"));
         c.network = None;
         assert!(!wording(&c).1.contains("WhatsApp"));
+        c.block = true;
+        let (title, body, act) = wording(&c);
+        assert_eq!((title.as_str(), act), ("Block Ann?", "Block"));
+        assert!(body.contains("invitation is declined"));
+        c.network = Some("Instagram".into());
+        assert!(wording(&c).1.starts_with("Instagram blocks them"));
     }
 }
