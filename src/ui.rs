@@ -102,6 +102,9 @@ const LIST_W: f32 = 384.;
 const RAIL_W: f32 = 60.;
 /// A tablet's navigation: icons over their labels, Android's navigation rail.
 const TABLET_RAIL_W: f32 = 80.;
+/// From this width a touch screen's navigation is the rail, also beside one pane (Material's
+/// medium width); a phone keeps the bar under the screen.
+const MEDIUM: f32 = 600.;
 /// Where the labelled navigation would leave the conversation under about 800 wide.
 const RAIL_BELOW: f32 = 1400.;
 /// Widest a message and a sheet grow on a wide window.
@@ -1727,12 +1730,8 @@ impl BeeperApp {
             (t!("Sign in to Beeper"), t!("We will email you a sign-in code."), &self.email, t!("Send code"))
         };
         let p = Palette::of(cx);
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .p(px(GUTTER + 8.))
-            .child(
+        sign_in_screen(
+            "login-screen",
                 v_flex()
                     .w_full()
                     .max_w(px(360.))
@@ -1887,6 +1886,12 @@ impl BeeperApp {
     /// A desktop window too narrow for the labelled navigation beside a usable conversation.
     fn rail(window: &Window) -> bool {
         !gpui_kit::is_mobile() && frame::viewport(window).width < px(RAIL_BELOW)
+    }
+
+    /// The rail beside the one pane of a tablet held upright; 0 on a phone and beside two panes.
+    fn upright_rail(window: &Window) -> f32 {
+        let w = frame::viewport(window).width;
+        if gpui_kit::is_mobile() && w >= px(MEDIUM) && w < px(NARROW) { TABLET_RAIL_W } else { 0. }
     }
 
     fn nav_w(window: &Window) -> f32 {
@@ -3804,6 +3809,12 @@ fn header() -> Div {
     h_flex().h(px(BAR_H)).flex_none().px(px(GUTTER - 10.)).gap(px(4.)).items_center()
 }
 
+/// A sign-in card in the middle of the screen, scrolled instead of cut when the keyboard leaves
+/// less room than it needs.
+fn sign_in_screen(id: &'static str, card: impl IntoElement) -> Stateful<Div> {
+    div().id(id).size_full().overflow_y_scroll().child(v_flex().w_full().min_h_full().items_center().justify_center().p(px(GUTTER + 8.)).child(card))
+}
+
 fn screen_title(title: &'static str) -> Div {
     div().text_size(fs(22.)).line_height(fs(28.)).font_weight(FontWeight::SEMIBOLD).child(title)
 }
@@ -4593,14 +4604,21 @@ impl BeeperApp {
                             panel_base = Some(self.render_panel(base, true, None, window, cx));
                         }
                         let screen = panel_base.unwrap_or_else(|| self.render_rooms(None, window, cx).into_any_element());
+                        let rail = Self::upright_rail(window) > 0.;
                         Some(
                             div().absolute().inset_0().child(
                                 v_flex()
                                     .size_full()
                                     .relative()
                                     .left(px(g.under_x))
-                                    .child(div().flex_1().min_h_0().child(screen))
-                                    .when(!self.searching && !crate::keyboard_up(), |el| el.child(self.render_nav(true, window, cx)))
+                                    .child(
+                                        h_flex()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .when(rail, |el| el.child(self.render_nav(false, window, cx)))
+                                            .child(div().flex_1().min_w_0().h_full().child(screen)),
+                                    )
+                                    .when(!rail && !self.searching && !crate::keyboard_up(), |el| el.child(self.render_nav(true, window, cx)))
                                     .when(over.is_some() && v > 0., |el| el.child(div().absolute().inset_0().occlude().bg(p.ground).opacity(g.veil))),
                             ),
                         )

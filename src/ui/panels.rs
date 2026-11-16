@@ -398,7 +398,7 @@ impl BeeperApp {
             .overflow_y_scroll()
             .when(settings, |el| el.track_scroll(&self.settings_scroll))
             .when(page, |el| el.track_scroll(&self.page_scroll))
-            .child(v_flex().w_full().max_w(px(PANEL_W)).px(px(edge)).pt(px(8.)).pb(px(GAP * 2.)).gap(px(GAP * 2.)).child(body));
+            .child(v_flex().w_full().when(!narrow, |el| el.max_w(px(PANEL_W))).px(px(edge)).pt(px(8.)).pb(px(GAP * 2.)).gap(px(GAP * 2.)).child(body));
         let handle = if settings { Some(&self.settings_scroll) } else if page { Some(&self.page_scroll) } else { None };
         let scrolled = match handle.filter(|_| !gpui_kit::is_mobile()) {
             Some(handle) => div().flex_1().min_h_0().relative().child(scrolled.size_full()).vertical_scrollbar(handle).into_any_element(),
@@ -416,7 +416,7 @@ impl BeeperApp {
             // A card standing above the cards keeps their spacing.
             .children(banners.map(|banners| {
                 let card = self.error.is_some();
-                div().w_full().max_w(px(PANEL_W)).px(px(edge - GUTTER)).when(card, |el| el.pb(px(GAP * 2. - 8.))).child(banners)
+                div().w_full().when(!narrow, |el| el.max_w(px(PANEL_W))).px(px(edge - GUTTER)).when(card, |el| el.pb(px(GAP * 2. - 8.))).child(banners)
             }))
             .child(scrolled)
             .into_any_element()

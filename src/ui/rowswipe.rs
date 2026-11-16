@@ -183,7 +183,7 @@ impl BeeperApp {
     /// The width a row moves within: the window on a phone, the list's column when wide.
     fn row_width(window: &Window) -> f32 {
         let w = f32::from(frame::viewport(window).width);
-        if w < NARROW { w } else { LIST_W }
+        if w < NARROW { w - Self::upright_rail(window) } else { LIST_W }
     }
 
     pub(super) fn row_pan(&mut self, id: &OwnedRoomId, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {

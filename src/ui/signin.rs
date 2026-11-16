@@ -189,12 +189,8 @@ impl BeeperApp {
         } else {
             ways = ways.child(tall(Button::new("matrix-next").primary()).label(t!("Continue")).on_click(cx.listener(|this, _, _, cx| this.ask_methods(cx))));
         }
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .p(px(GUTTER + 8.))
-            .child(
+        super::sign_in_screen(
+            "matrix-screen",
                 v_flex()
                     .w_full()
                     .max_w(px(360.))
