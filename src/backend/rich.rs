@@ -80,6 +80,38 @@ pub fn parse(html: &str) -> Option<(String, Rich)> {
     (!b.plain.is_empty()).then_some((b.plain, Rich { blocks }))
 }
 
+/// An emote ("/me waves") as the others read it: "* Ann waves", all in italic. `body` and `rich`
+/// gain the prefix; returns its length, by which the caller moves its own ranges into `body`.
+pub fn emote(actor: &str, body: &mut String, rich: &mut Option<Rich>) -> usize {
+    let prefix = format!("* {actor} ");
+    let n = prefix.len();
+    let mut blocks = match rich.take() {
+        Some(rich) => rich.blocks,
+        None => vec![Block::Para(vec![Run { text: body.clone(), ..Run::default() }])],
+    };
+    shift(&mut blocks, n);
+    let lead = Run { text: prefix.clone(), italic: true, ..Run::default() };
+    match blocks.first_mut() {
+        Some(Block::Para(runs)) => runs.insert(0, lead),
+        _ => blocks.insert(0, Block::Para(vec![lead])),
+    }
+    body.insert_str(0, &prefix);
+    *rich = Some(Rich { blocks });
+    n
+}
+
+/// Moves every offset `n` bytes on and sets the text in italic.
+fn shift(blocks: &mut [Block], n: usize) {
+    for block in blocks {
+        match block {
+            Block::Para(runs) => runs.iter_mut().for_each(|r| (r.at, r.italic) = (r.at + n, true)),
+            Block::Quote(inside) => shift(inside, n),
+            Block::Code(_, at) => *at += n,
+            Block::List { items, .. } => items.iter_mut().for_each(|item| shift(item, n)),
+        }
+    }
+}
+
 fn flush(blocks: &mut Vec<Block>, cur: &mut Vec<Run>, b: &mut Builder) {
     trim_end(cur, b);
     if !cur.is_empty() {
@@ -375,6 +407,22 @@ mod tests {
         assert!(parse(&"a".repeat(MAX_HTML + 1)).is_none());
         let deep = "<div>".repeat(500) + "x";
         assert_eq!(parse(&deep).unwrap().0, "x");
+    }
+
+    #[test]
+    fn emotes_lead_with_the_actor() {
+        let (mut body, mut rich) = ("waves".to_owned(), None);
+        assert_eq!(emote("Ann", &mut body, &mut rich), "* Ann ".len());
+        assert_eq!(body, "* Ann waves");
+        let runs = para(rich.as_ref().unwrap(), 0);
+        assert!(runs.iter().all(|r| r.italic) && runs.iter().all(|r| body[r.at..].starts_with(&r.text)));
+
+        let (mut body, rich) = parse("waves at <b>Bob</b>").unwrap();
+        let mut rich = Some(rich);
+        emote("Ann", &mut body, &mut rich);
+        let bob = para(rich.as_ref().unwrap(), 0).iter().find(|r| r.bold).unwrap();
+        assert_eq!((body.as_str(), &body[bob.at..bob.at + 3]), ("* Ann waves at Bob", "Bob"));
+        assert!(bob.italic);
     }
 
     #[test]

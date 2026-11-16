@@ -39,7 +39,7 @@ use matrix_sdk_ui::timeline::{
 use tokio::sync::{broadcast, mpsc};
 
 use super::{
-    AbortOnDrop, deleted, utd, Delivery, Ev, Kind, OwnRead, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
+    AbortOnDrop, act, deleted, utd, Delivery, Ev, Kind, OwnRead, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
     format, marks, bridge_names, other_person, plain, sticker, disappear, features,
 };
 use crate::i18n::t;
@@ -524,6 +524,9 @@ fn fill(m: &mut Msg, kind: &MsgLikeKind, own: &UserId) {
             m.body = if m.place.is_some() { String::new() } else { text };
             format(m, message.msgtype());
             (m.mentions, m.mentioned, m.to_me) = marks(&m.body, message.msgtype(), message.mentions(), own);
+            if matches!(message.msgtype(), MessageType::Emote(_)) {
+                act(m);
+            }
             m.mentioned &= !m.own;
             m.edited = message.is_edited();
         }

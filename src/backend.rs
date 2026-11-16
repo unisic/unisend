@@ -1791,9 +1791,19 @@ async fn messages(room: &Room, from: Option<&str>, limit: u16) -> Result<Message
     Ok(resp)
 }
 
+/// An emote: the sender's name ahead of the action, as other apps show it. Needs `sender` set.
+fn act(m: &mut Msg) {
+    let n = rich::emote(&m.sender, &mut m.body, &mut m.rich);
+    for r in m.mentions.iter_mut().chain(m.to_me.iter_mut()) {
+        *r = r.start + n..r.end + n;
+    }
+}
+
 /// List preview: the newest message on one line, prefixed with its sender outside one-to-one chats.
 fn preview(m: &Msg, dm: bool) -> String {
     let text = match m {
+        // An emote names its sender already.
+        m if m.media.is_none() && m.body.starts_with(&format!("* {} ", m.sender)) => m.summary(),
         m if m.own => format!("{}: {}", t!("You"), m.summary()),
         m if dm => m.summary(),
         m => format!("{}: {}", m.sender, m.summary()),
@@ -2808,6 +2818,7 @@ async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> (Vec<Msg>, Vec<Msg>) 
         let Some(sender) = event.sender() else { continue };
         let mut m = Msg::bare(id, Kind::Message, sender.clone());
         let mut amends_id = None;
+        let mut emote = false;
         // A deleted event in an encrypted room is an empty `m.room.encrypted`: nothing says whether
         // it was a message or a reaction, so it gets no placeholder.
         if event.kind.is_utd() {
@@ -2838,6 +2849,7 @@ async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> (Vec<Msg>, Vec<Msg>) 
                     m.body = if m.place.is_some() { String::new() } else { text };
                     format(&mut m, msgtype);
                     (m.mentions, m.mentioned, m.to_me) = marks(&m.body, msgtype, mentions, &own);
+                    emote = matches!(msgtype, MessageType::Emote(_));
                 }
                 Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomRedaction(r))) => {
                     let Some(target) = r.redacts(&rules.redaction) else { continue };
@@ -2864,6 +2876,9 @@ async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> (Vec<Msg>, Vec<Msg>) 
                 n
             }
         };
+        if emote {
+            act(&mut m);
+        }
         m.ts = event.timestamp().map_or(0, |t| u64::from(t.0));
         m.order = hs_order(event).unwrap_or(0);
         m.own = sender == own;

@@ -827,6 +827,15 @@ fn encrypted_chats_count_unread_on_the_device() {
 }
 
 #[test]
+fn emotes_name_their_sender_once_in_the_list() {
+    let mut m = Msg::bare("$e".into(), Kind::Message, "@ann:x".try_into().unwrap());
+    (m.sender, m.body) = ("Ann".into(), "waves at Bob".into());
+    m.mentions.push(9..12);
+    act(&mut m);
+    assert_eq!((preview(&m, false), &m.body[m.mentions[0].clone()]), ("* Ann waves at Bob".to_owned(), "Bob"));
+}
+
+#[test]
 fn old_downloads_are_swept() {
     let dir = std::env::temp_dir().join(format!("beeper-gpui-media-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
