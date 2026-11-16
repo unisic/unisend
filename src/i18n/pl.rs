@@ -430,6 +430,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Saving…", "Zapisywanie…"),
     ("Screen security", "Ochrona ekranu"),
     ("Search KLIPY", "Szukaj w KLIPY"),
+    ("Search", "Wyszukaj"),
     ("Search chats", "Szukaj czatów"),
     ("Search emoji", "Szukaj emoji"),
     ("Search this chat", "Szukaj w tym czacie"),

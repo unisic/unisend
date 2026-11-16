@@ -51,7 +51,7 @@ fn long_enough(query: &str) -> bool {
 }
 
 impl BeeperApp {
-    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         (self.find.open, self.find.results) = (true, true);
         self.find.input.update(cx, |input, cx| {
             input.set_value("", window, cx);

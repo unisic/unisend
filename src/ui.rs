@@ -314,6 +314,8 @@ pub struct BeeperApp {
     mute_picking: bool,
     /// Wakes when the soonest timed mute ends.
     mute_timer: Option<Task<()>>,
+    /// The sheet came from the open chat's header: what to do inside it, not the list's actions.
+    chat_sheet_inside: bool,
     /// Where a mouse opened the chat's or the attach sheet: on a desktop it opens there as a list.
     sheet_at: Option<Point<Pixels>>,
     /// The sheet's chat and its other person's page in their network's app, as `(app, link)`.
@@ -606,6 +608,7 @@ impl BeeperApp {
             chat_sheet: None,
             mute_picking: false,
             mute_timer: None,
+            chat_sheet_inside: false,
             sheet_at: None,
             peer_link: None,
             gallery: gallery::Gallery::default(),
@@ -1937,7 +1940,7 @@ impl BeeperApp {
                                     #[cfg(target_os = "android")]
                                     motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Heavy);
                                     // A held mouse button: the list opens where it is, as for the right button.
-                                    this.open_chat_sheet(id.clone(), Some(e.start_position), cx);
+                                    this.open_chat_sheet(id.clone(), Some(e.start_position), false, cx);
                                 }
                             })))
                             // The right button of a mouse.
@@ -1945,7 +1948,7 @@ impl BeeperApp {
                                 let id = room.id.clone();
                                 move |this, event: &ClickEvent, _, cx| {
                                     if event.is_secondary() {
-                                        this.open_chat_sheet(id.clone(), Some(event.position()), cx);
+                                        this.open_chat_sheet(id.clone(), Some(event.position()), false, cx);
                                     }
                                 }
                             }));
@@ -2572,7 +2575,7 @@ impl BeeperApp {
                     .when(room.is_some(), |el| {
                         el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
                             if let Some(id) = this.open.clone() {
-                                this.open_chat_sheet(id, Some(e.position()), cx);
+                                this.open_chat_sheet(id, Some(e.position()), true, cx);
                             }
                         })))
                     }),
@@ -3163,7 +3166,8 @@ impl BeeperApp {
         }
     }
 
-    fn open_chat_sheet(&mut self, id: OwnedRoomId, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+    fn open_chat_sheet(&mut self, id: OwnedRoomId, at: Option<Point<Pixels>>, inside: bool, cx: &mut Context<Self>) {
+        self.chat_sheet_inside = inside;
         let network = self.rooms.iter().find(|r| r.id == id).and_then(|r| r.network.as_deref());
         // One profile lookup at the homeserver, which already holds it, so the row shows only when it leads somewhere.
         if self.peer_link.as_ref().is_none_or(|(room, ..)| *room != id) && crate::backend::links_profiles(network) {
@@ -3205,6 +3209,10 @@ impl BeeperApp {
             let (title, rows) = self.mute_sheet(room, live, cx);
             return Some(self.sheet(&self.chat_motion, frame, 4, title, rows, |this| &mut this.chat_motion, window, cx));
         }
+        if self.chat_sheet_inside {
+            let [_, _, mute, archive, _] = chat_actions(room);
+            return Some(self.inside_sheet(id, title, [mute, archive], frame, window, cx));
+        }
         let mut rows: Vec<_> = chat_actions(room)
             .into_iter()
             .map(|(label, icon, action)| {
@@ -3237,6 +3245,57 @@ impl BeeperApp {
         rows.extend(self.disappear_entry(&id, live, cx));
         rows.push(self.leave_row(id, live, window, cx));
         Some(self.sheet(&self.chat_motion, frame, 0, title, rows, |this| &mut this.chat_motion, window, cx))
+    }
+
+    /// The open chat's own actions, as Signal has them inside a conversation; the rest stay on the list's sheet.
+    fn inside_sheet(
+        &mut self,
+        id: OwnedRoomId,
+        title: String,
+        acts: [(&'static str, IconName, ChatAction); 2],
+        frame: sheet::SheetFrame,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (p, live) = (Palette::of(cx), frame.live);
+        let close = |this: &mut Self, cx: &mut Context<Self>| {
+            this.chat_sheet = None;
+            cx.notify();
+        };
+        let mut rows = vec![
+            sheet_row("chat-info", IconName::Info, t!("Chat info"), p.text, window, cx).when(live, |row| {
+                row.on_click(cx.listener(move |this, _, _, cx| {
+                    close(this, cx);
+                    if !this.info_open() {
+                        this.toggle_info(cx);
+                    }
+                }))
+            }),
+            sheet_row("chat-find", IconName::Search, t!("Search"), p.text, window, cx).when(live, |row| {
+                row.on_click(cx.listener(move |this, _, window, cx| {
+                    close(this, cx);
+                    this.open_find(window, cx);
+                }))
+            }),
+        ];
+        for (label, icon, action) in acts {
+            let id = id.clone();
+            rows.push(sheet_row(label, icon, label, p.text, window, cx).when(live, |row| {
+                // Mute opens the same choice of how long as the list's sheet.
+                row.on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.chat_action(id.clone(), action, true, cx) || !this.mute_picking {
+                        close(this, cx);
+                    }
+                    cx.notify();
+                }))
+            }));
+        }
+        // Above Archive, as Signal orders them.
+        if let Some(row) = self.disappear_entry(&id, live, cx) {
+            rows.insert(3, row);
+        }
+        rows.push(self.leave_row(id, live, window, cx));
+        self.sheet(&self.chat_motion, frame, 0, title, rows, |this| &mut this.chat_motion, window, cx)
     }
 
     /// Who is writing, over the composer. It grows from nothing and shrinks back, so the messages
