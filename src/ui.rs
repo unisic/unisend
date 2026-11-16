@@ -19,6 +19,7 @@ use gpui_kit::component::{
 use gpui_kit::base::{Presence, PresencePhase, Transition, spring, transition};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use matrix_sdk::notification_settings::RoomNotificationMode;
 use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId};
 use crate::i18n::{n_, t, tn, tr};
 use tokio::sync::mpsc;
@@ -44,6 +45,7 @@ mod profile;
 mod menu;
 mod navigate;
 pub(crate) mod motion;
+mod mute;
 mod panels;
 mod pinpad;
 mod press;
@@ -305,6 +307,10 @@ pub struct BeeperApp {
     strip_sent: bool,
     /// The chat whose actions are showing.
     chat_sheet: Option<OwnedRoomId>,
+    /// The chat's sheet lists how long to mute instead of the chat's actions.
+    mute_picking: bool,
+    /// Wakes when the soonest timed mute ends.
+    mute_timer: Option<Task<()>>,
     /// Where a mouse opened the chat's or the attach sheet: on a desktop it opens there as a list.
     sheet_at: Option<Point<Pixels>>,
     /// The sheet's chat and its other person's page in their network's app, as `(app, link)`.
@@ -489,6 +495,9 @@ impl BeeperApp {
                 this.publish_share_targets();
                 this.update_returned(cx);
                 this.check_update_if_due(cx);
+                if this.synced {
+                    this.unmute_due(cx);
+                }
                 // Android 15 ends the service after 6 hours a day in the background; being in front resets that.
                 if this.user.is_some() && this.settings.stay_connected {
                     crate::stay_connected(true);
@@ -590,6 +599,8 @@ impl BeeperApp {
             status_last: None,
             strip_epoch: 0,
             chat_sheet: None,
+            mute_picking: false,
+            mute_timer: None,
             sheet_at: None,
             peer_link: None,
             gallery: gallery::Gallery::default(),
@@ -876,7 +887,10 @@ impl BeeperApp {
                 }
             }
             Ev::Online(online) => self.offline = !online,
-            Ev::Synced => self.synced = true,
+            Ev::Synced => {
+                self.synced = true;
+                self.unmute_due(cx);
+            }
             Ev::SyncStopped => self.sync_stopped = true,
             Ev::Exported(id, path, what) => self.exported(id, path, what, cx),
             Ev::Error(e) => {
@@ -3152,7 +3166,7 @@ impl BeeperApp {
         }
         self.chat_sheet = Some(id);
         self.sheet_at = at;
-        self.disappear.picking = false;
+        (self.disappear.picking, self.mute_picking) = (false, false);
         self.info.member = None;
         cx.notify();
     }
@@ -3181,6 +3195,10 @@ impl BeeperApp {
         {
             return Some(self.sheet(&self.chat_motion, frame, 1, title, rows, |this| &mut this.chat_motion, window, cx));
         }
+        if self.mute_picking {
+            let (title, rows) = self.mute_sheet(room, live, cx);
+            return Some(self.sheet(&self.chat_motion, frame, 4, title, rows, |this| &mut this.chat_motion, window, cx));
+        }
         let mut rows: Vec<_> = chat_actions(room)
             .into_iter()
             .map(|(label, icon, action)| {
@@ -3190,8 +3208,9 @@ impl BeeperApp {
                     return row;
                 }
                 row.on_click(cx.listener(move |this, _, _, cx| {
-                    this.send(Cmd::Chat(id.clone(), action), cx);
-                    this.chat_sheet = None;
+                    if !this.chat_action(id.clone(), action, true, cx) || !this.mute_picking {
+                        this.chat_sheet = None;
+                    }
                     cx.notify();
                 }))
             })
@@ -3491,7 +3510,11 @@ fn chat_actions(room: &RoomSummary) -> [(&'static str, IconName, ChatAction); 5]
             (t!("Mark as unread"), IconName::Mail, ChatAction::Unread(true))
         },
         if room.pinned { (t!("Unpin"), IconName::PinOff, ChatAction::Pin(false)) } else { (t!("Pin"), IconName::Pin, ChatAction::Pin(true)) },
-        if room.muted { (t!("Unmute"), IconName::Bell, ChatAction::Mute(false)) } else { (t!("Mute"), IconName::BellOff, ChatAction::Mute(true)) },
+        if room.muted {
+            (t!("Unmute"), IconName::Bell, ChatAction::Mute(RoomNotificationMode::AllMessages))
+        } else {
+            (t!("Mute"), IconName::BellOff, ChatAction::Mute(RoomNotificationMode::Mute))
+        },
         if room.archived {
             (t!("Unarchive"), IconName::ArchiveRestore, ChatAction::Archive(false))
         } else {
@@ -4301,6 +4324,7 @@ mod tests {
             pinned: false,
             low_priority: false,
             muted: false,
+            mentions_only: false,
             marked_unread: false,
             archived: false,
             order: 0,

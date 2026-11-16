@@ -345,6 +345,9 @@ pub(crate) struct Settings {
     /// Whether others' messages show the user's reading always or after a tap.
     #[serde(default)]
     pub incoming: ui::receipt::IncomingStatus,
+    /// When each chat muted for a time is unmuted, in ms since the epoch; Matrix keeps no end.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub mute_until: std::collections::BTreeMap<matrix_sdk::ruma::OwnedRoomId, u64>,
 }
 
 impl Settings {
@@ -358,7 +361,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, receipts: Default::default(), incoming: Default::default() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, receipts: Default::default(), incoming: Default::default(), mute_until: Default::default() })
     }
 
     fn parse(raw: &[u8]) -> Option<Self> {

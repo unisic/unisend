@@ -81,7 +81,7 @@ impl BeeperApp {
         Some(row.on_click(cx.listener(move |this, _, _, cx| {
             // From the info screen there is no sheet open yet to show the timers in.
             this.chat_sheet = Some(room.clone());
-            this.disappear.picking = true;
+            (this.disappear.picking, this.mute_picking) = (true, false);
             this.info.member = None;
             cx.notify();
         })))
@@ -141,7 +141,7 @@ impl BeeperApp {
 }
 
 /// A sheet row with a label made at run time; without an icon, its place stays empty so labels line up.
-fn timer_row(id: impl Into<ElementId>, icon: Option<IconName>, label: impl Into<SharedString>, cx: &App) -> Stateful<Div> {
+pub(super) fn timer_row(id: impl Into<ElementId>, icon: Option<IconName>, label: impl Into<SharedString>, cx: &App) -> Stateful<Div> {
     let p = Palette::of(cx);
     h_flex()
         .id(id)

@@ -327,8 +327,9 @@ pub enum ChatAction {
     Pin(bool),
     /// `m.lowpriority` tag.
     LowPriority(bool),
-    /// Room push rule without a notify action.
-    Mute(bool),
+    /// The room's push rules, as Element sets them: `Mute` an override rule without a notify
+    /// action, `MentionsAndKeywordsOnly` a room rule without one, `AllMessages` neither.
+    Mute(RoomNotificationMode),
     /// `m.marked_unread`; clearing it also sends a read receipt.
     Unread(bool),
 }
@@ -362,6 +363,9 @@ pub struct RoomSummary {
     pub low_priority: bool,
     #[serde(default)]
     pub muted: bool,
+    /// Muted but for mentions and keywords: a room rule without a notify action, Beeper's mute.
+    #[serde(default)]
+    pub mentions_only: bool,
     #[serde(default)]
     pub marked_unread: bool,
     #[serde(default)]
@@ -775,7 +779,7 @@ pub(crate) fn mute_from_notification(chat: &str) -> bool {
         return true;
     }
     let Ok(room) = OwnedRoomId::try_from(chat) else { return false };
-    commands().is_some_and(|tx| tx.try_send(Cmd::Chat(room, ChatAction::Mute(true))).is_ok())
+    commands().is_some_and(|tx| tx.try_send(Cmd::Chat(room, ChatAction::Mute(RoomNotificationMode::Mute))).is_ok())
 }
 
 /// Stack of the backend's threads. Opening a chat polls deep matrix-sdk futures whose debug-build
@@ -1341,12 +1345,12 @@ impl State {
                         let resp = room.messages(MessagesOptions::backward()).await?;
                         mark_read(&room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito.load(Ordering::Relaxed)).await?;
                     }
-                    ChatAction::Mute(on) => {
+                    ChatAction::Mute(mode) => {
                         let notif = self.notif.as_ref().context(t!("Not signed in"))?;
-                        if on {
-                            notif.set_room_notification_mode(&room_id, RoomNotificationMode::MentionsAndKeywordsOnly).await?;
-                        } else {
+                        if mode == RoomNotificationMode::AllMessages {
                             notif.delete_user_defined_room_rules(&room_id).await?;
+                        } else {
+                            notif.set_room_notification_mode(&room_id, mode).await?;
                         }
                     }
                     ChatAction::Archive(false) => {
@@ -2391,6 +2395,7 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>) -> RoomSummary {
         pinned: false,
         low_priority: false,
         muted: false,
+        mentions_only: false,
         marked_unread: false,
         archived: false,
         order: 0,
@@ -2726,6 +2731,7 @@ async fn summarize(
         pinned: room.is_favourite(),
         low_priority: room.is_low_priority(),
         muted: matches!(mode, Some(RoomNotificationMode::Mute | RoomNotificationMode::MentionsAndKeywordsOnly)),
+        mentions_only: mode == Some(RoomNotificationMode::MentionsAndKeywordsOnly),
         marked_unread: room.is_marked_unread(),
         ..seen
     };
@@ -2916,6 +2922,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 pinned: false,
                 low_priority: false,
                 muted: false,
+                mentions_only: false,
                 marked_unread: false,
                 archived: false,
                 dated,

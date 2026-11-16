@@ -234,7 +234,7 @@ impl BeeperApp {
                     }
                     in_view(self.view, room) && !in_view(self.view, &after)
                 };
-                if !self.send(Cmd::Chat(r.id.clone(), action), cx) || !leaves {
+                if !self.chat_action(r.id.clone(), action, false, cx) || !leaves {
                     self.row_back(r.id, r.dx, r.vel, cx);
                 } else {
                     self.row_away(r.id, Some(action), r.dx, away, r.vel, cx);
