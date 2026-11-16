@@ -20,10 +20,10 @@ public final class NotifyReceiver extends BroadcastReceiver {
 
     private static void test(Context context, String chat) {
         long now = System.currentTimeMillis();
-        Notify.message(context, chat, "Test group", true, "Ann", "First message of three", now - 2000, false, "", "TG", false);
-        Notify.message(context, chat, "Test group", true, "Bob", "@you second, mentions you", now - 1000, true, "", "TG", false);
-        Notify.message(context, chat, "Test group", true, "Ann", "Third, and the one that makes the sound", now, false, "", "TG", true);
-        Notify.message(context, chat + "2", "Test person", false, "Test person", "A direct message", now, false, "", "TP", true);
+        Notify.message(context, chat, "Test group", true, "Ann", "First message of three", now - 2000, false, "", "TG", false, Notify.SHOW_ALL);
+        Notify.message(context, chat, "Test group", true, "Bob", "@you second, mentions you", now - 1000, true, "", "TG", false, Notify.SHOW_ALL);
+        Notify.message(context, chat, "Test group", true, "Ann", "Third, and the one that makes the sound", now, false, "", "TG", true, Notify.SHOW_ALL);
+        Notify.message(context, chat + "2", "Test person", false, "Test person", "A direct message", now, false, "", "TP", true, Notify.SHOW_ALL);
     }
 
     @Override

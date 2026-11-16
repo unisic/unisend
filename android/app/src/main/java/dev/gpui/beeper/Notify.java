@@ -74,7 +74,7 @@ public final class Notify {
     };
 
     /** What a notification shows, as Settings chose: {@code NotifyShows} in the native library. */
-    private static final int SHOW_ALL = 0;
+    static final int SHOW_ALL = 0;
     private static final int SHOW_NOTHING = 2;
     /** The choice the last message came with, for lines added after a reply. */
     private static volatile int shows = SHOW_ALL;
