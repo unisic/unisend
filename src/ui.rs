@@ -2471,7 +2471,6 @@ impl BeeperApp {
                                 let worded = state.as_ref().is_some_and(|(mark, _)| matches!(mark, Mark::Words(_) | Mark::Failed { .. }));
                                 // A new state fades in where the old one was; the time stays.
                                 let time = match &state {
-                                    Some(_) if m.own && !last => None,
                                     Some(_) if worded => Some(format!("{} \u{b7} ", clock(m.ts))),
                                     _ => Some(clock(m.ts)),
                                 };
