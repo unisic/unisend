@@ -306,7 +306,8 @@ pub(crate) async fn serve(dir: PathBuf) {
                     if let Some(old) = shown.add(&chat, &name, &line, icon) {
                         drop_entry(&mut sink, old).await;
                     }
-                    if let Some(entry) = shown.get(&chat) {
+                    // Earlier messages of one sync only add their lines: the last one posts them all.
+                    if alert && let Some(entry) = shown.get(&chat) {
                         let locked = locked();
                         let text = entry.text(sink.markup(), locked);
                         sink.post(entry, &text, alert, !locked).await;

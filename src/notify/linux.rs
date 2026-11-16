@@ -72,6 +72,12 @@ impl Sink {
     }
 
     pub(super) async fn post(&mut self, entry: &mut Entry, body: &str, alert: bool, buttons: bool) {
+        // Plasma keeps a replaced notification's state: once its popup has timed out, a
+        // replacement updates only the history. A new message gets a new notification.
+        if alert && entry.id != 0 {
+            self.close(entry).await;
+            entry.id = 0;
+        }
         let all = ["default", t!("Open"), "inline-reply", t!("Reply"), "read", t!("Mark as read"), "mute", t!("Mute")];
         let actions = if buttons { &all[..] } else { &all[..2] };
         let mut hints: HashMap<&str, Value> = HashMap::new();

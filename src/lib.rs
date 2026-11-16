@@ -12,6 +12,8 @@ mod emoji;
 mod i18n;
 mod ime;
 #[cfg(not(target_os = "android"))]
+mod instance;
+#[cfg(not(target_os = "android"))]
 mod notify;
 mod share;
 mod ui;
@@ -576,9 +578,11 @@ pub fn run_desktop() {
         .or_else(|| dirs::data_local_dir().map(|d| d.join("beeper-gpui")))
         .expect("no data directory");
     private_dir(&dir).expect("create data directory");
+    let Some(claim) = instance::claim(&dir) else { return };
     gpui_kit::application().with_assets(Assets).run(move |cx| {
         let bounds = WindowBounds::Windowed(Bounds::centered(None, size(px(1000.), px(700.)), cx));
         open(cx, dir, Some(bounds));
+        instance::serve(claim, cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
