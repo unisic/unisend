@@ -192,13 +192,14 @@ async fn members(room: &Room, levels: Option<&RoomPowerLevels>) -> Vec<Member> {
             },
         })
         .collect();
-    sort_members(&mut out);
+    sort_members(&mut out, room.own_user_id());
     out.truncate(MAX_MEMBERS);
     out
 }
 
-fn sort_members(list: &mut [Member]) {
-    list.sort_by_cached_key(|m| (m.role, m.name.to_lowercase()));
+/// The user first, as Signal lists them, then by role and name.
+fn sort_members(list: &mut [Member], own: &UserId) {
+    list.sort_by_cached_key(|m| (m.id != own, m.role, m.name.to_lowercase()));
 }
 
 /// Reads the history backwards and passes on the messages that carry media, a file or a link.
@@ -292,11 +293,11 @@ mod tests {
     }
 
     #[test]
-    fn members_sort_by_role_then_name() {
+    fn members_sort_by_user_then_role_then_name() {
         let m = |name: &str, role| Member { id: format!("@{}:x", name.to_lowercase()).try_into().unwrap(), name: name.into(), role, removable: false };
         let mut list = vec![m("bob", Role::Member), m("Zed", Role::Admin), m("Ann", Role::Member), m("bot", Role::Service), m("Cy", Role::Creator)];
-        sort_members(&mut list);
+        sort_members(&mut list, matrix_sdk::ruma::user_id!("@bob:x"));
         let names: Vec<&str> = list.iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(names, ["Cy", "Zed", "bot", "Ann", "bob"]);
+        assert_eq!(names, ["bob", "Cy", "Zed", "bot", "Ann"]);
     }
 }
