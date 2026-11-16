@@ -4016,7 +4016,9 @@ fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
 /// GPUI input, so every input needs this.
 fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperApp>) {
     match event {
-        InputEvent::Focus => crate::show_keyboard(kind),
+        // Focus listeners fire in field creation order, so moving to an earlier field emits its Focus
+        // before the old field's Blur: the show waits for that hide.
+        InputEvent::Focus => cx.defer(move |_| crate::show_keyboard(kind)),
         InputEvent::Blur => crate::hide_keyboard(),
         _ => return,
     }

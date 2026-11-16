@@ -122,10 +122,12 @@ public class GpuiInputActivity extends NativeActivity {
             addContentView(input, new ViewGroup.LayoutParams(1, 1));
         }
         InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-        // Gaining focus starts the input by itself; only a view that already has focus needs a restart.
-        if (input.isFocused()) imm.restartInput(input);
-        else input.requestFocus();
-        if (!imm.isActive(input)) imm.restartInput(input);
+        // Gaining focus starts the input only when the IME serves another view. The proxy stays served
+        // after a hide's clearFocus (InputMethodManager keeps it on focus loss), so regaining
+        // focus would leave the IME on the old session's connection, which rejects every edit.
+        boolean served = imm.isActive(input);
+        if (!input.isFocused()) input.requestFocus();
+        if (served || !imm.isActive(input)) input.restart();
         imm.showSoftInput(input, InputMethodManager.SHOW_IMPLICIT);
     }
 
