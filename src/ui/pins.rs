@@ -72,7 +72,7 @@ impl BeeperApp {
                         .min_w_0()
                         .gap(px(6.))
                         .text_size(fs(14.))
-                        .child(div().flex_none().max_w(px(140.)).truncate().font_weight(FontWeight::MEDIUM).text_color(p.text).child(who))
+                        .child(div().flex_none().max_w(relative(0.4)).truncate().font_weight(FontWeight::MEDIUM).text_color(p.text).child(who))
                         .children(icon.map(|icon| Icon::new(icon).size_4().flex_none().text_color(p.muted)))
                         .child(div().flex_1().min_w_0().truncate().text_color(p.muted).child(crate::emoji::styled(label, Vec::new()))),
                 )
