@@ -329,6 +329,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Older history is not searched.", "Starsza historia nie jest przeszukiwana."),
     ("On: notifications arrive while Unisend is closed, under a quiet system notice. Off: no notice, messages arrive only while Unisend is open.", "Włączone: powiadomienia przychodzą też, gdy Unisend jest zamknięty, a system pokazuje cichy komunikat. Wyłączone: bez komunikatu, wiadomości przychodzą tylko, gdy Unisend jest otwarty."),
     ("One for all chats, with the dark theme.", "Jedna dla wszystkich czatów, w ciemnym motywie."),
+    ("Only admins can send messages", "Tylko administratorzy mogą wysyłać wiadomości"),
     ("Only the chat's admins can change this.", "Tylko administratorzy czatu mogą to zmienić."),
     ("Only the newest 200 are shown.", "Widać tylko 200 najnowszych."),
     ("Open Beeper, Element or Unisend where you are signed in and accept the request there.", "Otwórz Beepera, Elementa lub Unisend na zalogowanym urządzeniu i zaakceptuj prośbę."),

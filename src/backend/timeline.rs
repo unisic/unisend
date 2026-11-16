@@ -242,7 +242,7 @@ async fn own_read(timeline: &Timeline) -> OwnRead {
     OwnRead { read: newest.map(|id| (id.to_string(), row)), public }
 }
 
-/// Sends the room's features now and again whenever sync brings the event; the SDK has stored
+/// Sends the room's features now and again whenever sync brings the event or a change of power levels; the SDK has stored
 /// the state by the time it calls the handler.
 async fn follow_features(room: &Room, ev: &mpsc::Sender<Ev>) -> EventHandlerDropGuard {
     let _ = ev.send(Ev::Features { room: room.room_id().to_owned(), features: features::read(room).await }).await;
@@ -250,7 +250,7 @@ async fn follow_features(room: &Room, ev: &mpsc::Sender<Ev>) -> EventHandlerDrop
     let handle = room.client().add_room_event_handler(room.room_id(), move |raw: Raw<AnySyncStateEvent>, room: Room| {
         let ev = ev.clone();
         async move {
-            if raw.get_field::<String>("type").ok().flatten().as_deref() == Some(features::KIND) {
+            if matches!(raw.get_field::<String>("type").ok().flatten().as_deref(), Some(features::KIND | "m.room.power_levels")) {
                 let _ = ev.send(Ev::Features { room: room.room_id().to_owned(), features: features::read(&room).await }).await;
             }
         }

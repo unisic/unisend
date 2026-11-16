@@ -2371,6 +2371,7 @@ impl BeeperApp {
         .size_full();
         // The send button turns between a microphone (nothing typed) and an arrow; desktop has no microphone.
         let mic = self.mic_shown(cx);
+        let read_only = self.published().is_some_and(|f| !f.post);
         let send_mode = transition(("send", "mode"), if mic { 0. } else { 1. }, motion::exit(), window, cx);
         let own_frame = frame::reserve(window) > 0.;
         let end = self.chat_end(window);
@@ -2467,7 +2468,19 @@ impl BeeperApp {
                     .when(self.uploads > 0, |el| {
                         el.child(div().px(px(GUTTER)).pt(px(8.)).text_size(fs(12.)).text_color(p.faint).child(t!("Sending attachment…")))
                     })
-                    .child(
+                    .when(read_only, |el| {
+                        el.child(
+                            div()
+                                .w_full()
+                                .px(px(GUTTER))
+                                .py(px(18.))
+                                .text_center()
+                                .text_size(fs(14.))
+                                .text_color(p.faint)
+                                .child(t!("Only admins can send messages")),
+                        )
+                    })
+                    .when(!read_only, |el| el.child(
                         h_flex()
                             .items_end()
                             .gap(px(6.))
@@ -2537,7 +2550,7 @@ impl BeeperApp {
                             )
                             .relative()
                             .children(self.render_recorder(window, cx)),
-                    ),
+                    ))
             ))
             .children(self.render_emoji_panel(window, cx))
     }

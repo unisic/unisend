@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use matrix_sdk::Room;
+use matrix_sdk::{Room, ruma::events::MessageLikeEventType};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -36,6 +36,8 @@ pub struct Features {
     pub gif_image: bool,
     /// The caption level of `m.image`, `m.video`, `m.audio` and `m.file`, in that order.
     pub captions: [i64; 4],
+    /// The user's power level lets them send messages here; below it the composer gives way.
+    pub post: bool,
 }
 
 impl Features {
@@ -55,6 +57,7 @@ impl Features {
         gif_video: true,
         gif_image: true,
         captions: [2; 4],
+        post: true,
     };
 
     /// `as_file`: the GIF goes as an `image/gif` (Meta's networks, see `gifs::wants_gif_file`).
@@ -163,13 +166,42 @@ pub fn parse(content: &Value) -> Features {
         gif_video: takes(f, "fi.mau.gif", Some("video/mp4")),
         gif_image: takes(f, "m.image", Some("image/gif")),
         captions: ["m.image", "m.video", "m.audio", "m.file"].map(|t| f.get(t).map_or(0, |f| f.caption)),
+        post: true,
     }
 }
 
 /// The chat's features from the state the client has, the first bridge's when there are several;
 /// `None` in a room no bridge serves.
+/// A room whose power levels keep the user from posting (or reacting) is answered even without a
+/// bridge, with what that takes away.
 pub(super) async fn read(room: &Room) -> Option<Features> {
-    super::disappear::state(room, KIND).await.first().map(parse)
+    let features = super::disappear::state(room, KIND).await.first().map(parse);
+    let (post, react) = match room.power_levels().await {
+        Ok(levels) => {
+            let own = room.own_user_id();
+            (levels.user_can_send_message(own, MessageLikeEventType::RoomMessage), levels.user_can_send_message(own, MessageLikeEventType::Reaction))
+        }
+        Err(e) => {
+            log::debug!("power levels: {e}");
+            (true, true)
+        }
+    };
+    restrict(features, post, react)
+}
+
+fn restrict(features: Option<Features>, post: bool, react: bool) -> Option<Features> {
+    if post && react {
+        return features;
+    }
+    let mut f = features.unwrap_or(Features::ALL);
+    f.post = post;
+    if !react {
+        f.reaction = 0;
+    }
+    if !post {
+        (f.reply, f.edit) = (0, 0);
+    }
+    Some(f)
 }
 
 #[cfg(test)]
@@ -307,6 +339,15 @@ mod tests {
         assert_eq!(file.level("audio/ogg; codecs=opus"), -2);
         assert_eq!(file.level("audio/mp4"), 1);
         assert_eq!(file.level("video/mp4"), -2);
+    }
+
+    #[test]
+    fn power_levels_take_away_posting_and_reacting() {
+        assert_eq!(restrict(None, true, true), None);
+        let read_only = restrict(None, false, false).unwrap();
+        assert!((!read_only.post, read_only.reaction, read_only.reply, read_only.edit) == (true, 0, 0, 0));
+        let announce = restrict(Some(parse(&json!({ "reply": 2, "reaction": 2 }))), true, false).unwrap();
+        assert!(announce.post && announce.reaction == 0 && announce.reply == 2);
     }
 
     #[test]
