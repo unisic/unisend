@@ -453,23 +453,8 @@ impl BeeperApp {
             )
             .children(banners)
             .child(div().flex_1().min_h_0().relative().child(list).when(!mobile, |el| el.vertical_scrollbar(&self.settings_scroll)));
-        let Some(page) = self.settings_pages.last().copied() else {
-            let strip = frame::drag(div().absolute().top_0().left_0().w_full().h(px(BAR_H)), window, cx);
-            let empty = v_flex()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .relative()
-                .items_center()
-                .justify_center()
-                .gap(px(10.))
-                .text_size(fs(14.))
-                .text_color(p.faint)
-                .child(strip)
-                .when(!mobile, |el| el.child(Icon::new(IconName::Settings).size_8()))
-                .child(t!("Choose a setting"));
-            return h_flex().size_full().child(list).child(empty).into_any_element();
-        };
+        // Beside the list there is always a page: the first, until another is chosen.
+        let page = self.settings_pages.last().copied().unwrap_or(Page::Appearance);
         let deep = self.settings_pages.len() > 1;
         let body = self.render_page(page, window, cx);
         let title = screen_title(page.title()).min_w_0().truncate();
@@ -532,7 +517,7 @@ impl BeeperApp {
         // The ID heads the list in the profile card; this says which kind of account it is.
         let account = if self.beeper { "Beeper" } else { "Matrix" };
         let updates = self.updates_summary();
-        let selected = self.settings_pages.first().copied().filter(|_| split);
+        let selected = split.then(|| self.settings_pages.first().copied().unwrap_or(Page::Appearance));
         let category = |page: Page, icon: IconName, summary: SharedString, cx: &mut Context<Self>| {
             link(page.id(), page.title(), summary, Some(icon), Some(IconName::ChevronRight), cx)
                 // A step above the hover's fill, so the chosen page reads apart from the one under the pointer.

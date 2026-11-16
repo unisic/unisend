@@ -103,7 +103,6 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Checking…", "Sprawdzanie…"),
     ("Choose a PIN of 4 to 8 digits", "Ustaw PIN z 4 do 8 cyfr"),
     ("Choose a chat", "Wybierz czat"),
-    ("Choose a setting", "Wybierz ustawienie"),
     ("Choose another way", "Wybierz inny sposób"),
     ("Choose at least {n} more", "Wybierz jeszcze co najmniej {n}"),
     ("Choose font file…", "Wybierz plik czcionki…"),
