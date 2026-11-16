@@ -37,7 +37,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::{
     AbortOnDrop, deleted, utd, Delivery, Ev, Kind, OwnRead, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
-    format, marks, network, other_person, plain, sticker, disappear, features,
+    format, marks, bridge_names, other_person, plain, sticker, disappear, features,
 };
 use crate::i18n::t;
 
@@ -84,7 +84,7 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
     let viewer = Arc::new(Viewer {
         own: room.own_user_id().to_owned(),
         service: room.service_members().unwrap_or_default(),
-        bridged: network(room).await.is_some(),
+        bridged: bridge_names(room).await.0.is_some(),
     });
     let timeline = TimelineBuilder::new(room)
         .track_read_marker_and_receipts(TimelineReadReceiptTracking::AllEvents)

@@ -313,6 +313,9 @@ pub struct RoomSummary {
     /// Bridge network, e.g. "WhatsApp"; none for native Matrix rooms.
     #[serde(default)]
     pub network: Option<String>,
+    /// The server, workspace, forum or community the chat belongs to, from `m.bridge` `network`.
+    #[serde(default)]
+    pub parent: Option<String>,
     #[serde(default)]
     pub unread: u64,
     /// Unread messages that mention the user.
@@ -2192,6 +2195,7 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>) -> RoomSummary {
         // A stripped invitation carries no time: it is dated when it arrives.
         ts: prev.map_or(now_ms() as u64, |p| p.ts),
         network: None,
+        parent: None,
         unread: 0,
         mentions: 0,
         dm,
@@ -2455,9 +2459,12 @@ async fn summarize(
         Some(peer) if room.name().is_none() => display_name(room, peer).await,
         _ => room.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| seen.id.to_string()),
     };
-    let network = match seen.network {
-        Some(n) => Some(n),
-        None => network(room).await,
+    let (network, parent) = match (seen.network, seen.parent) {
+        (Some(n), Some(p)) => (Some(n), Some(p)),
+        (n, p) => {
+            let (found, parent) = bridge_names(room).await;
+            (n.or(found), p.or(parent))
+        }
     };
     let mode = notif.get_user_defined_room_notification_mode(room.room_id()).await;
     let done = match room.account_data(DONE.into()).await {
@@ -2468,6 +2475,7 @@ async fn summarize(
     let mut s = RoomSummary {
         name,
         network,
+        parent,
         dm: peer.is_some(),
         preview: current(seen.preview),
         preview_id: seen.preview_id,
@@ -2633,6 +2641,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 preview_id,
                 ts: newest.unwrap_or(0),
                 network: prev.as_ref().and_then(|p| p.network.clone()),
+                parent: prev.as_ref().and_then(|p| p.parent.clone()),
                 order: order.max().max(prev.as_ref().map(|p| p.order)).unwrap_or(0),
                 unread: 0,
                 dm,
@@ -3028,19 +3037,24 @@ pub(crate) async fn request(room: &Room) -> bool {
     })
 }
 
-async fn network(room: &Room) -> Option<String> {
+/// The bridge's name for the network, and the name of the chat's parent (a Discord server, a
+/// Slack workspace, a Telegram forum, a WhatsApp community) when `m.bridge` has one.
+async fn bridge_names(room: &Room) -> (Option<String>, Option<String>) {
     #[derive(Deserialize)]
-    struct Protocol {
-        id: String,
+    struct Section {
+        id: Option<String>,
         displayname: Option<String>,
     }
-    let events = room.get_state_events(StateEventType::from("m.bridge")).await.ok()?;
-    events.iter().find_map(|e| {
+    let Ok(events) = room.get_state_events(StateEventType::from("m.bridge")).await else { return (None, None) };
+    let found = events.iter().find_map(|e| {
         let RawAnySyncOrStrippedState::Sync(raw) = e else { return None };
         let content: serde_json::Value = raw.get_field("content").ok()??;
-        let p: Protocol = serde_json::from_value(content.get("protocol")?.clone()).ok()?;
-        Some(p.displayname.unwrap_or(p.id))
-    })
+        let section = |key: &str| content.get(key).and_then(|v| serde_json::from_value::<Section>(v.clone()).ok());
+        let protocol = section("protocol")?;
+        let parent = section("network").and_then(|n| n.displayname).filter(|n| !n.trim().is_empty());
+        Some((protocol.displayname.or(protocol.id), parent))
+    });
+    found.unwrap_or((None, None))
 }
 
 /// Room avatar, or for a one-to-one chat the other person's, as a small thumbnail.

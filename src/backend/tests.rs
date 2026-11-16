@@ -868,6 +868,7 @@ fn archive_rule_matches_beeper() {
         preview_id: None,
         ts,
         network: None,
+        parent: None,
         unread,
         mentions: 0,
         dm: false,

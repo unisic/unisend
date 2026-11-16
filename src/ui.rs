@@ -1741,8 +1741,13 @@ impl BeeperApp {
                         // Nothing readable to preview: an undecrypted message says no more than "Message".
                         let preview = room.preview.as_deref().filter(|p| !p.ends_with(crate::backend::utd()));
                         let meta = match (room.network.as_deref().map(short_network), short_time(room.ts)) {
-                            (Some(network), time) if time.is_empty() => network.to_owned(),
-                            (Some(network), time) => format!("{network} · {time}"),
+                            (Some(network), time) => {
+                                let network = match room.parent.as_deref() {
+                                    Some(parent) => format!("{network} · {}", clip_chars(parent, PARENT_CHARS)),
+                                    None => network.to_owned(),
+                                };
+                                if time.is_empty() { network } else { format!("{network} · {time}") }
+                            }
                             (None, time) => time,
                         };
                         let pan_id = id.clone();
@@ -1990,7 +1995,10 @@ impl BeeperApp {
         }
         let room = self.open.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id));
         let name = room.map(|r| r.name.clone()).unwrap_or_default();
-        let network = room.and_then(|r| r.network.clone());
+        let network = room.and_then(|r| match (&r.network, &r.parent) {
+            (Some(network), Some(parent)) => Some(format!("{network} · {parent}")),
+            (network, _) => network.clone(),
+        });
         let header_avatar = room.map(|r| avatar(&r.name, self.avatars.get(&r.id), 36., cx));
         let dm = room.is_some_and(|r| r.dm);
         // The newest message: the user's tells its way to the others, someone else's what its sender sees.
@@ -3749,6 +3757,17 @@ fn sheet_row_idle(id: &'static str, icon: IconName, label: impl Into<SharedStrin
         .child(label.into())
 }
 
+/// The parent's name in a chat row, shortened to what a phone's row can spare.
+const PARENT_CHARS: usize = 14;
+
+fn clip_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let head: String = text.chars().take(max - 1).collect();
+    format!("{}…", head.trim_end())
+}
+
 /// A network's name as the chat list has room for it: "Facebook Messenger" is Messenger there,
 /// "Google Messages (SMS)" is SMS.
 fn short_network(name: &str) -> &str {
@@ -4091,8 +4110,14 @@ impl BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced};
+    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced, clip_chars};
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
+
+    #[test]
+    fn parent_names_clip_to_what_the_row_spares() {
+        assert_eq!(clip_chars("Rust PL", 14), "Rust PL");
+        assert_eq!(clip_chars("Serwer Rust Polska", 14), "Serwer Rust P…");
+    }
 
     #[test]
     fn pasted_pictures_land_apart_and_plainly_named() {
@@ -4116,6 +4141,7 @@ mod tests {
             preview_id: None,
             ts: 0,
             network: None,
+            parent: None,
             unread: 0,
             mentions: 0,
             dm: false,
