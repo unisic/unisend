@@ -2317,9 +2317,19 @@ impl BeeperApp {
                                 };
                                 let said = state.as_ref().map(|(mark, r)| this.receipt_mark(r, mark, state_level.as_ref().map(|(v, before)| (before.as_ref(), *v)), cx));
                                 let ink = if failed { p.negative } else { this.on_wallpaper(p.faint, cx) };
+                                let read = state.as_ref().is_some_and(|(_, r)| matches!(r, Receipt::Seen { .. }));
+                                let details = m.id.clone();
                                 el.child(
                                     h_flex()
+                                        .id("status-line")
                                         .max_w_full()
+                                        // Who read it, and when, is one tap away, as the menu's Info.
+                                        .when(read, |el| {
+                                            el.cursor_pointer().on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                                                cx.stop_propagation();
+                                                this.open_people(people::Shown::Details(details.clone()), Some(e.position()), cx);
+                                            }))
+                                        })
                                         .gap(px(3.))
                                         // A little over its padding and one line at GPUI's default 1.618 leading, so it starts unclipped.
                                         .when_some(shrink, |el, v| el.max_h((px(4.) + fs(20.)) * (1. - v)).overflow_hidden().opacity(1. - v))
@@ -2329,8 +2339,8 @@ impl BeeperApp {
                                         .font_features(tabular())
                                         .text_color(ink)
                                         .when(this.disappears(ix), |el| el.child(Icon::new(IconName::Timer).size_3().text_color(ink)))
-                                        // A group's readers can be longer than the column: their words wrap.
-                                        .child(h_flex().min_w_0().when(worded, |el| el.items_start()).children(time).children(said)),
+                                        // One line however many read it: the time stays whole, the words end in an ellipsis.
+                                        .child(h_flex().min_w_0().children(time.map(|time| div().flex_none().child(time))).children(said)),
                                 )
                             }),
                     )
@@ -2672,9 +2682,9 @@ impl BeeperApp {
         if self.tail != Some(ix) && self.tapped.as_deref() != Some(m.id.as_str()) {
             return None;
         }
-        let (readers, who) = self.readers(ix);
+        let readers = self.readers(ix);
         if !readers.is_empty() {
-            return Some(Receipt::Seen { who: who.filter(|_| !dm), readers });
+            return Some(Receipt::Seen { group: !dm, readers });
         }
         let waited = (chrono::Utc::now().timestamp_millis() as u64).saturating_sub(m.ts) > BRIDGE_WAIT_MS;
         Some(match state {
@@ -2685,22 +2695,16 @@ impl BeeperApp {
         })
     }
 
-    /// Who has read message `ix`, by the receipts on it or under it, each with a name, and all of
-    /// them named as a sentence would.
-    fn readers(&self, ix: usize) -> (Vec<(OwnedUserId, String)>, Option<String>) {
+    /// Who has read message `ix`, by the receipts on it or under it, each with a name.
+    fn readers(&self, ix: usize) -> Vec<(OwnedUserId, String)> {
         let mut readers: Vec<&OwnedUserId> = Vec::new();
         for (user, _) in self.msgs[ix..].iter().flat_map(|row| &row.seen) {
             if !readers.contains(&user) {
                 readers.push(user);
             }
         }
-        if readers.is_empty() {
-            return (Vec::new(), None);
-        }
         let name = |user: &OwnedUserId| self.msgs.iter().rev().find(|m| m.from == *user && !m.sender.is_empty()).map(|m| m.sender.as_str());
-        let named = readers.iter().map(|user| ((*user).clone(), name(user).map_or_else(|| user.localpart().to_owned(), str::to_owned))).collect();
-        let known: Vec<&str> = readers.iter().filter_map(|user| name(user)).collect();
-        (named, Some(if known.len() == readers.len() { people(&known).0 } else { readers.len().to_string() }))
+        readers.iter().map(|user| ((*user).clone(), name(user).map_or_else(|| user.localpart().to_owned(), str::to_owned))).collect()
     }
 
     /// Someone else's message `ix` as its sender's app shows it, where the network says.

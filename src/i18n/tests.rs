@@ -157,3 +157,14 @@ fn tr_in_ignores_the_current_language() {
     assert_eq!(tr_in("You", false), "You");
     assert_eq!(tr_in("Archive|verb", false), "Archive");
 }
+
+#[test]
+fn polish_readers_line() {
+    let others = |n: u64| fill(plurals()["Seen by {who} and {n} other"][polish_form(n)], &[("who", &"Ania"), ("n", &n)]);
+    assert_eq!(fill(tr_in("Seen by {who}", true), &[("who", &"Ania")]), "Przeczytane przez: Ania");
+    assert_eq!(fill(tr_in("Seen by {one} and {two}", true), &[("one", &"Ania"), ("two", &"Bartek")]), "Przeczytane przez: Ania i Bartek");
+    assert_eq!(others(2), "Przeczytane przez: Ania i 2 inne osoby");
+    assert_eq!(others(5), "Przeczytane przez: Ania i 5 innych osób");
+    assert_eq!(others(22), "Przeczytane przez: Ania i 22 inne osoby");
+    assert_eq!(tr_in("Seen", true), "Przeczytano");
+}

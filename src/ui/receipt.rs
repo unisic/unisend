@@ -100,8 +100,8 @@ pub(super) enum Receipt {
     Sending,
     Sent,
     Delivered,
-    /// Read; `who` names the readers in a group and is `None` in a direct chat.
-    Seen { who: Option<String>, readers: Vec<(OwnedUserId, String)> },
+    /// Read; in a group the words name the readers.
+    Seen { group: bool, readers: Vec<(OwnedUserId, String)> },
     /// The bridge's reason, empty when it gave none.
     Failed(String),
     /// Someone else's message as its sender's app shows it; `me` is the user (id, name).
@@ -115,8 +115,13 @@ impl Receipt {
             Self::Sending => t!("Sending…").to_owned(),
             Self::Sent => t!("Sent").to_owned(),
             Self::Delivered => t!("Delivered").to_owned(),
-            Self::Seen { who: None, .. } => t!("Seen").to_owned(),
-            Self::Seen { who: Some(who), .. } => t!("Seen by {who}", who = who),
+            Self::Seen { group: true, readers } => match readers.as_slice() {
+                [] => t!("Seen").to_owned(),
+                [(_, one)] => t!("Seen by {who}", who = one),
+                [(_, one), (_, two)] => t!("Seen by {one} and {two}", one = one, two = two),
+                [(_, one), rest @ ..] => tn!(rest.len(), "Seen by {who} and {n} other", "Seen by {who} and {n} others", who = one),
+            },
+            Self::Seen { group: false, .. } => t!("Seen").to_owned(),
             Self::Failed(why) if why.is_empty() => t!("Not sent").to_owned(),
             Self::Failed(why) => t!("Not sent: {why}", why = why),
             Self::Theirs { view, .. } => match view {
@@ -184,7 +189,7 @@ pub(super) fn mark(receipt: &Receipt, style: ReceiptStyle) -> Option<Mark> {
         (_, Receipt::Sent) => glyph(RingTick, false),
         (_, Receipt::Delivered) => glyph(Disc, false),
         // Messenger: the reader's face in a direct chat; a group's row would hold too many.
-        (ReceiptStyle::Circles, Receipt::Seen { who: None, readers }) => faces(readers, 1),
+        (ReceiptStyle::Circles, Receipt::Seen { group: false, readers }) => faces(readers, 1),
         (ReceiptStyle::Circles, Receipt::Seen { .. }) => glyph(DiscTicks, true),
         (_, Receipt::Seen { readers, .. }) => faces(readers, FACES),
         (_, Receipt::Failed(_)) => unreachable!("handled above"),
@@ -216,7 +221,7 @@ impl BeeperApp {
         let soft = if faint == read_ink { faint.opacity(0.6) } else { faint };
         let draw = |mark: &Mark| -> AnyElement {
             match mark {
-                Mark::Words(words) => div().child(words.clone()).into_any_element(),
+                Mark::Words(words) => div().truncate().child(words.clone()).into_any_element(),
                 Mark::Failed { icon, words } => h_flex()
                     .gap(px(3.))
                     .when(*icon, |el| el.child(Icon::new(IconName::CircleAlert).size(fs(13.)).text_color(p.negative)))
@@ -273,17 +278,29 @@ mod tests {
     use super::{Glyph, Kind, Mark, Msg, OwnRead, OwnedUserId, Receipt, ReceiptStyle, View, heard, mark, their_view};
 
     fn seen(dm: bool) -> Receipt {
-        let readers = ["@a:x", "@b:x", "@c:x", "@d:x"].iter().take(if dm { 1 } else { 4 }).map(|u| (OwnedUserId::try_from(*u).unwrap(), u[1..2].to_owned())).collect();
-        Receipt::Seen { who: (!dm).then(|| "a, b, c and d".to_owned()), readers }
+        seen_by(if dm { 1 } else { 4 }, !dm)
+    }
+
+    fn seen_by(n: usize, group: bool) -> Receipt {
+        let readers = ["@a:x", "@b:x", "@c:x", "@d:x", "@e:x"].iter().take(n).map(|u| (OwnedUserId::try_from(*u).unwrap(), u[1..2].to_owned())).collect();
+        Receipt::Seen { group, readers }
     }
 
     #[test]
     fn text_is_the_words_of_today() {
         assert_eq!(mark(&Receipt::Sent, ReceiptStyle::Text), Some(Mark::Words("Sent".into())));
         assert_eq!(mark(&seen(true), ReceiptStyle::Text), Some(Mark::Words("Seen".into())));
-        assert_eq!(mark(&seen(false), ReceiptStyle::Text), Some(Mark::Words("Seen by a, b, c and d".into())));
+        assert_eq!(mark(&seen(false), ReceiptStyle::Text), Some(Mark::Words("Seen by a and 3 others".into())));
     }
 
+    #[test]
+    fn a_group_names_one_or_two_readers_and_counts_the_rest() {
+        let words = |n| seen_by(n, true).words();
+        assert_eq!(words(1), "Seen by a");
+        assert_eq!(words(2), "Seen by a and b");
+        assert_eq!(words(3), "Seen by a and 2 others");
+        assert_eq!(seen_by(3, false).words(), "Seen");
+    }
     #[test]
     fn ticks_count_up_and_darken_when_read() {
         let g = |r: &Receipt| mark(r, ReceiptStyle::Ticks);
