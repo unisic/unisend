@@ -3249,8 +3249,9 @@ impl BeeperApp {
             return None;
         }
         let (v, faint) = (shown.progress, p.faint);
-        // An activity indicator may loop; at 24 frames a second it costs little while it lasts.
-        let pulse = Animation::new(Duration::from_millis(1200)).repeat().with_max_fps(24.);
+        // Each frame of it redraws the whole window (gpui marks every ancestor view dirty), and a
+        // bridge may keep someone typing for minutes: 8 frames a second still reads as a pulse.
+        let pulse = Animation::new(Duration::from_millis(1200)).repeat().with_max_fps(8.);
         let dots = h_flex().gap(px(3.)).with_animation("typing-dots", pulse, move |el, t| {
             el.children((0..3).map(|n| {
                 let phase = (t - n as f32 * 0.2).rem_euclid(1.);
