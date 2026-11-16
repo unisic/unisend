@@ -570,6 +570,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Undo", "Cofnij"),
     ("Unknown chat", "Nieznany czat"),
     ("Unlock", "Odblokuj"),
+    ("Unlock encrypted messages", "Odblokuj zaszyfrowane wiadomości"),
     ("Unmute", "Wyłącz wyciszenie"),
     ("Unpin", "Odepnij"),
     ("Unread", "Nieprzeczytane"),

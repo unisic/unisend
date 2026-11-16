@@ -205,6 +205,9 @@ pub struct BeeperApp {
     recovery: Entity<InputState>,
     composer: Entity<InputState>,
     need_recovery: bool,
+    /// The chat list's unlock row shows its field; `recovery_later` puts the row away until the next start.
+    recovery_open: bool,
+    recovery_later: bool,
     /// The connection is lost and being retried.
     offline: bool,
     /// Holds keyboard focus when no input does, so Escape (Android's back) still reaches the app.
@@ -540,6 +543,8 @@ impl BeeperApp {
             recovery,
             composer,
             need_recovery: false,
+            recovery_open: false,
+            recovery_later: false,
             offline: false,
             focus: cx.focus_handle(),
             dir,
@@ -2069,6 +2074,7 @@ impl BeeperApp {
             .children(banners)
             .when(self.sync_stopped, |el| el.child(self.render_sync_stopped(cx)))
             .children((!archive && !self.searching).then(|| self.render_attention(cx)).flatten())
+            .when(!archive && !self.searching, |el| el.children(self.render_recovery(cx)))
             .child(self.list_touch(cx))
             .child(div().flex_1().min_h_0().child(if state == RoomsView::Skeleton {
                 skeleton(p).into_any_element()
@@ -3331,6 +3337,88 @@ impl BeeperApp {
         )
     }
 
+    /// Locked encrypted messages: one row under the chat list's filters, the code's field only once asked for.
+    fn render_recovery(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.need_recovery || self.recovery_later {
+            return None;
+        }
+        let p = Palette::of(cx);
+        let open = self.recovery_open;
+        let head = h_flex()
+            .id("recovery-row")
+            .min_h(px(TAP))
+            .py(px(6.))
+            .pl(px(GAP))
+            .gap(px(10.))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.recovery_open = !this.recovery_open;
+                cx.notify();
+            }))
+            .child(Icon::new(IconName::LockOpen).size_4().flex_none().text_color(p.warning))
+            // A narrow column wraps it rather than cut the words short.
+            .child(div().flex_1().min_w_0().text_color(p.warning).child(t!("Unlock encrypted messages")))
+            .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).size_4().flex_none().text_color(p.faint));
+        let later = h_flex()
+            .id("recovery-later")
+            .h(px(TAP))
+            .px(px(GAP))
+            .flex_none()
+            .rounded_full()
+            .cursor_pointer()
+            .text_color(p.muted)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.recovery_later = true;
+                cx.notify();
+            }))
+            .child(t!("Later"));
+        Some(
+            v_flex()
+                .flex_none()
+                .mx(px(GUTTER))
+                .mt(px(4.))
+                .rounded(px(RADIUS))
+                .bg(p.warning_bg)
+                .text_size(fs(14.))
+                .line_height(fs(20.))
+                .child(h_flex().child(head.flex_1().min_w_0()).child(later))
+                .when(open, |el| {
+                    el.child(
+                        v_flex()
+                            .px(px(GAP))
+                            .pb(px(GAP))
+                            .gap(px(10.))
+                            .child(div().text_color(p.muted).child(t!(
+                                "Encrypted messages are locked on this device. Copy your recovery code from another device where you are signed in (in Unisend: Settings, Devices), then paste it here."
+                            )))
+                            .child(div().w_full().child(Input::new(&self.recovery)))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .justify_end()
+                                    .child(
+                                        Button::new("paste-recovery")
+                                            .h(px(TAP))
+                                            .px(px(GUTTER))
+                                            .label(t!("Paste"))
+                                            .on_click(cx.listener(|this, _, window, cx| this.paste_recovery(window, cx))),
+                                    )
+                                    .child(
+                                        Button::new("recover")
+                                            .primary()
+                                            .h(px(TAP))
+                                            .px(px(GUTTER))
+                                            .label(t!("Unlock"))
+                                            .loading(self.busy)
+                                            .disabled(self.busy)
+                                            .on_click(cx.listener(|this, _, window, cx| this.recover(window, cx))),
+                                    ),
+                            ),
+                    )
+                }),
+        )
+    }
+
     fn render_banners(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         // Fades and opens in, closes and fades out; it sits above everything, so opening its
@@ -3367,38 +3455,6 @@ impl BeeperApp {
                 )
             })
             .children(update)
-            .when(self.need_recovery, |el| {
-                el.child(
-                    card()
-                        .bg(p.warning_bg)
-                        .child(div().text_color(p.warning).child(
-                            t!("Encrypted messages are locked on this device. Copy your recovery code from another device where you are signed in (in Unisend: Settings, Devices), then paste it here."),
-                        ))
-                        .child(div().w_full().child(Input::new(&self.recovery)))
-                        .child(
-                            h_flex()
-                                .gap(px(8.))
-                                .justify_end()
-                                .child(
-                                    Button::new("paste-recovery")
-                                        .h(px(TAP))
-                                        .px(px(GUTTER))
-                                        .label(t!("Paste"))
-                                        .on_click(cx.listener(|this, _, window, cx| this.paste_recovery(window, cx))),
-                                )
-                                .child(
-                                    Button::new("recover")
-                                        .primary()
-                                        .h(px(TAP))
-                                        .px(px(GUTTER))
-                                        .label(t!("Unlock"))
-                                        .loading(self.busy)
-                                        .disabled(self.busy)
-                                        .on_click(cx.listener(|this, _, window, cx| this.recover(window, cx))),
-                                ),
-                        ),
-                )
-            })
             .when(error.should_render(), |el| {
                 let measured = card_h.get();
                 el.child(

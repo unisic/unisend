@@ -389,7 +389,7 @@ impl BeeperApp {
             )
             // A card standing above the cards keeps their spacing.
             .children(banners.map(|banners| {
-                let card = self.need_recovery || self.error.is_some();
+                let card = self.error.is_some();
                 div().w_full().max_w(px(PANEL_W)).px(px(edge - GUTTER)).when(card, |el| el.pb(px(GAP * 2. - 8.))).child(banners)
             }))
             .child(scrolled)
