@@ -13,7 +13,7 @@ const MAX_ROWS: usize = 200;
 const MAX_PICKED: usize = 256;
 /// A pause in typing this long asks the server; each keystroke does not.
 const SEARCH_DELAY: Duration = Duration::from_millis(300);
-const DIALOG_W: f32 = 340.;
+pub(super) const DIALOG_W: f32 = 340.;
 
 #[derive(Default)]
 pub(super) struct People {

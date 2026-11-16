@@ -249,20 +249,25 @@ async fn own_read(timeline: &Timeline) -> OwnRead {
     OwnRead { read: newest.map(|id| (id.to_string(), row)), public }
 }
 
-/// Sends the room's features now and again whenever sync brings the event or a change of power levels; the SDK has stored
-/// the state by the time it calls the handler.
+/// Sends the room's features and the user's right to delete others' messages now, and again
+/// whenever sync brings either event; the SDK has stored the state by the time it calls the handler.
 async fn follow_features(room: &Room, ev: &mpsc::Sender<Ev>) -> EventHandlerDropGuard {
-    let _ = ev.send(Ev::Features { room: room.room_id().to_owned(), features: features::read(room).await }).await;
+    let _ = ev.send(features_event(room).await).await;
     let ev = ev.clone();
     let handle = room.client().add_room_event_handler(room.room_id(), move |raw: Raw<AnySyncStateEvent>, room: Room| {
         let ev = ev.clone();
         async move {
             if matches!(raw.get_field::<String>("type").ok().flatten().as_deref(), Some(features::KIND | "m.room.power_levels")) {
-                let _ = ev.send(Ev::Features { room: room.room_id().to_owned(), features: features::read(&room).await }).await;
+                let _ = ev.send(features_event(&room).await).await;
             }
         }
     });
     room.client().event_handler_drop_guard(handle)
+}
+
+async fn features_event(room: &Room) -> Ev {
+    let moderate = room.power_levels().await.is_ok_and(|levels| levels.user_can_redact_event_of_other(room.own_user_id()));
+    Ev::Features { room: room.room_id().to_owned(), features: features::read(room).await, moderate }
 }
 
 /// The items a change brings: new ones, and ones that took the place of an old one.

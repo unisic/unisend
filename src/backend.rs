@@ -301,7 +301,8 @@ pub enum Ev {
     Disappear { room: OwnedRoomId, setting: Disappearing },
     /// What the open chat's network takes, when it opens and whenever its bridge says anew.
     /// `None`: no bridge says, so the chat is plain Matrix and takes everything.
-    Features { room: OwnedRoomId, features: Option<Features> },
+    /// `moderate`: the user's power level lets them delete other people's messages.
+    Features { room: OwnedRoomId, features: Option<Features>, moderate: bool },
     /// A chat's details for its info screen; sent again as more is known.
     Info(OwnedRoomId, Box<info::Details>),
     Group { room: OwnedRoomId, change: group::Change },

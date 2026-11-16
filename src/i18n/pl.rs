@@ -440,8 +440,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Seen", "Przeczytano"),
     ("Seen by {one} and {two}", "Przeczytane przez: {one} i {two}"),
     ("Seen by {who}", "Przeczytane przez: {who}"),
-    ("Select", "Zaznacz"),
     ("Select messages", "Zaznacz wiadomości"),
+    ("Select multiple", "Zaznacz wiele"),
     ("Send", "Wyślij"),
     ("Send code", "Wyślij kod"),
     ("Send to", "Wyślij do"),
@@ -722,6 +722,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
 /// Keyed by the English singular; the forms are one (1), few (2-4, 22-24) and many (0, 5-21, 25...).
 #[rustfmt::skip]
 pub(super) static PLURAL: &[(&str, [&str; 3])] = &[
+    ("Delete message?", ["Usunąć wiadomość?", "Usunąć {n} wiadomości?", "Usunąć {n} wiadomości?"]),
     ("Forward {n} message", ["Przekaż {n} wiadomość", "Przekaż {n} wiadomości", "Przekaż {n} wiadomości"]),
     ("Forwarded to {done} of {n} chat: {error}", ["Przekazano do {done} z {n} czatu: {error}", "Przekazano do {done} z {n} czatów: {error}", "Przekazano do {done} z {n} czatów: {error}"]),
     ("Forwarded to {n} chat", ["Przekazano do {n} czatu", "Przekazano do {n} czatów", "Przekazano do {n} czatów"]),

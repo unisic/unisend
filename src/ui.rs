@@ -391,7 +391,7 @@ pub struct BeeperApp {
     people: rooms::People,
     disappear: disappear::Disappear,
     /// What the open chat's network takes, once read.
-    features: Option<(OwnedRoomId, Option<crate::backend::Features>)>,
+    features: Option<(OwnedRoomId, Option<crate::backend::Features>, bool)>,
     /// View-once media the user opened this session, so it is not offered again while the bridge
     /// takes it away; at most `MAX_OPENED_ONCE`.
     opened_once: Vec<String>,
@@ -908,9 +908,9 @@ impl BeeperApp {
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
             ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_) | Ev::RecoveryCode(_)) => self.on_verify_event(ev, cx),
             Ev::Disappear { room, setting } => self.on_disappear(room, setting),
-            Ev::Features { room, features } => {
+            Ev::Features { room, features, moderate } => {
                 if self.open.as_ref() == Some(&room) {
-                    self.features = Some((room, features));
+                    self.features = Some((room, features, moderate));
                 }
             }
             Ev::Info(room, details) => self.info_details(room, *details, cx),
@@ -1078,7 +1078,7 @@ impl BeeperApp {
         } else if self.viewer.is_some() {
             // Android's back is a gesture and animates; a desktop's Escape is a key and does not.
             self.dismiss_viewer(gpui_kit::is_mobile(), cx);
-        } else if self.close_confirm(cx) {
+        } else if self.close_confirm(cx) || self.close_delete(cx) {
         } else if self.preview.open() {
             self.close_preview(true, window, cx);
         } else if self.menu_open() {
@@ -1449,7 +1449,13 @@ impl BeeperApp {
 
     /// The open chat's features as its bridge publishes them; `None` without a bridge or until read.
     fn published(&self) -> Option<&crate::backend::Features> {
-        self.features.as_ref().filter(|(room, _)| self.open.as_ref() == Some(room)).and_then(|(_, f)| f.as_ref())
+        self.features.as_ref().filter(|(room, ..)| self.open.as_ref() == Some(room)).and_then(|(_, f, _)| f.as_ref())
+    }
+
+    /// The user may delete other people's messages in the open chat: a moderator of a plain Matrix
+    /// chat. A bridge would only hide them on Matrix, so a bridged chat never offers it.
+    fn moderates(&self) -> bool {
+        self.features.as_ref().is_some_and(|(room, _, moderate)| self.open.as_ref() == Some(room) && *moderate) && self.open_network().is_none()
     }
 
     /// The composer's characters and the network's limit, when the chat has one.
