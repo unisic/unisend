@@ -470,9 +470,13 @@ async fn note(client: &Client) -> Result<OwnedRoomId> {
     let mark = Raw::new(&json!({ "type": super::NOTE_TO_SELF, "state_key": "", "content": {} }))?.cast_unchecked();
     request.initial_state = vec![InitialStateEvent::with_empty_state_key(RoomEncryptionEventContent::with_recommended_defaults()).to_raw_any(), mark];
     let room = client.create_room(request).await?;
-    // The chat opens once its state has come back in a sync: before that it does not know it is a
-    // note and opens as a group ("You created the group"). Bounded: sync may be down.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), room.sync_up()).await;
+    // The chat opens once its marker has come back in a sync: before that it opens as a group ("You
+    // created the group"). A sync can bring the room before the marker, so `sync_up` is not enough.
+    // Bounded: sync may be down.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !super::is_note(&room).await && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     Ok(room.room_id().to_owned())
 }
 

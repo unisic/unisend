@@ -1499,6 +1499,33 @@ async fn keys_backed_up_late_unlock_the_open_chat() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A note to self made from the New chat screen opens as a note at once: no "You created the
+/// group" line, which a chat opened before its marker synced would show.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn a_new_note_to_self_opens_as_a_note() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-note-{tag}"));
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    alice.handle(Cmd::People(rooms::Ask::Note)).await.unwrap();
+    let rooms::Answer::Ready(note) = people_answer(&mut seat, "the note", 30).await else { panic!("no note") };
+    assert!(is_note(&alice.client().unwrap().get_room(&note).unwrap()).await, "the marker is known when the note opens");
+    alice.handle(Cmd::Open(note)).await.unwrap();
+    let far = tokio::time::Instant::now() + Duration::from_secs(60);
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            seat.next("rows", far).await;
+        }
+    })
+    .await;
+    let lines: Vec<_> = seat.rows.iter().map(|m| m.body.clone()).collect();
+    assert!(!lines.iter().any(|b| b.contains("created")), "{lines:?}");
+}
+
 /// Answers of the New chat screen and of leaving, as the UI sees them.
 async fn people_answer(seat: &mut Seat, what: &str, secs: u64) -> rooms::Answer {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
