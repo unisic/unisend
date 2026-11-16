@@ -82,6 +82,7 @@ impl BeeperApp {
             // From the info screen there is no sheet open yet to show the timers in.
             this.chat_sheet = Some(room.clone());
             this.disappear.picking = true;
+            this.info.member = None;
             cx.notify();
         })))
     }

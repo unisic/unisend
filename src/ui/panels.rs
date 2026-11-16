@@ -30,6 +30,7 @@ pub(super) enum Panel {
 /// A page under Settings: a category of its list, or the choices of one setting in a category.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Page {
+    Profile,
     Appearance,
     Chats,
     Notifications,
@@ -48,6 +49,7 @@ pub(super) enum Page {
 impl Page {
     fn title(self) -> &'static str {
         match self {
+            Self::Profile => t!("Profile"),
             Self::Appearance => t!("Appearance"),
             Self::Chats => t!("Chats"),
             Self::Notifications => t!("Notifications"),
@@ -77,6 +79,7 @@ impl BeeperApp {
         if panel == Panel::Settings {
             self.settings_pages.clear();
             self.load_devices(cx);
+            self.send(Cmd::Profile, cx);
         }
         self.panel = Some(panel);
         cx.notify();
@@ -435,7 +438,8 @@ impl BeeperApp {
             LockMode::Phone => t!("Unlocked with the phone lock"),
             LockMode::Pin => t!("Unlocked with the app PIN"),
         };
-        let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
+        // The ID heads the list in the profile card; this says which kind of account it is.
+        let account = if self.beeper { "Beeper" } else { "Matrix" };
         let updates = self.updates_summary();
         let selected = self.settings_pages.first().copied().filter(|_| split);
         let category = |page: Page, icon: IconName, summary: SharedString, cx: &mut Context<Self>| {
@@ -451,6 +455,7 @@ impl BeeperApp {
         };
         v_flex()
             .gap(px(GAP * 2.))
+            .child(self.profile_card(selected == Some(Page::Profile), split, cx))
             .child(
                 card(cx)
                     .child(category(Page::Appearance, IconName::Palette, look.into(), cx))
@@ -464,7 +469,7 @@ impl BeeperApp {
             )
             .child(
                 card(cx)
-                    .child(category(Page::Account, IconName::User, user.into(), cx))
+                    .child(category(Page::Account, IconName::User, account.into(), cx))
                     .when_some(updates, |el, summary| el.child(category(Page::Updates, IconName::Download, summary.into(), cx))),
             )
             .child(
@@ -483,7 +488,7 @@ impl BeeperApp {
             )
     }
 
-    fn open_page(&mut self, page: Page, cx: &mut Context<Self>) {
+    pub(super) fn open_page(&mut self, page: Page, cx: &mut Context<Self>) {
         // Two levels at most, and a second tap that lands before the page is drawn opens nothing.
         if self.settings_pages.len() < 2 && self.settings_pages.last() != Some(&page) {
             self.settings_pages.push(page);
@@ -501,6 +506,7 @@ impl BeeperApp {
             Page::Privacy => self.render_privacy(cx),
             Page::Devices => self.render_devices(cx).into_any_element(),
             Page::Account => self.render_account(cx),
+            Page::Profile => self.render_profile(cx),
             Page::Updates => self.render_updates(cx).map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
             Page::Emoji => self.render_emoji(cx),
             Page::Receipts => pick("receipts", ReceiptStyle::ALL, s.receipts, ReceiptStyle::label, |s, style| s.receipts = style, cx),
