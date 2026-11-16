@@ -855,7 +855,7 @@ impl BeeperApp {
                 .when(!enabled, |el| el.text_color(Palette::of(cx).faint))
                 .when(enabled && !on, |el| el.on_click(cx.listener(move |this, _, _, cx| this.change_lock(Goal::Mode(value), cx))))
         };
-        let pin_detail = if android { t!("4 to 8 digits, set only for Unisend.") } else { t!("4 to 8 digits, asked when Unisend starts.") };
+        let pin_detail = if android { t!("4 to 8 digits, set only for Unisend.") } else { t!("4 to 8 digits, asked when Unisend opens.") };
         let phone_detail =
             if phone { t!("Fingerprint, face or the phone's PIN, pattern or password.") } else { t!("Set a PIN, pattern or password in the phone's settings first.") };
         v_flex()

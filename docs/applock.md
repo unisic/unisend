@@ -52,6 +52,14 @@ switched on. If the phone's lock is removed later, the app opens without asking.
 Someone holding the unlocked phone opening Unisend. It does not encrypt anything: the messages,
 keys and session stay as readable as before to anyone who can read the app's files (root, a
 backup tool with that access, a forensic copy), and four to eight digits are guessed offline in
-little time whatever the hash. Notifications still show senders and message text while the app is
-locked; the system's lock-screen notification settings decide that. Desktop asks for the App PIN
-once, at start: it has no "leaving the app" to time.
+little time whatever the hash. On Android notifications still show senders and message text while the app is
+locked; the system's lock-screen notification settings decide that.
+
+## Desktop
+
+App PIN only. It is asked at start, and again when a window opens after the last one closed: with
+the app running on in the background (Linux tray, macOS Dock), closing the window is leaving the
+app. Desktop offers no auto-lock choice, so the lock comes at once, as Android's "Immediately"
+(`BeeperApp::hidden`, `applock::lock`). While locked, desktop notifications name only the chat
+("New message") and offer no Reply, Mark as read or Mute; clicking one opens the window on the PIN,
+then the chat.

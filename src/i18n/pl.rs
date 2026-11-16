@@ -7,7 +7,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("1 hour|mute", "1 godzinę"),
     ("1 minute", "1 minuta"),
     ("30 minutes", "30 minut"),
-    ("4 to 8 digits, asked when Unisend starts.", "Od 4 do 8 cyfr, wpisywany przy uruchomieniu aplikacji Unisend."),
+    ("4 to 8 digits, asked when Unisend opens.", "Od 4 do 8 cyfr, wpisywany przy otwieraniu aplikacji Unisend."),
     ("4 to 8 digits, set only for Unisend.", "Od 4 do 8 cyfr, ustawiany tylko dla aplikacji Unisend."),
     ("5 minutes", "5 minut"),
     ("7 days|mute", "7 dni"),

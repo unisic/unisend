@@ -1,8 +1,8 @@
 //! App lock and screen security. On Android `dev.gpui.beeper.AppLock` decides when the app is
 //! locked and asks for the phone's lock; the app PIN is checked here (`pin`) and drawn by
-//! `ui::pinpad`. Desktop has the app PIN only, asked once when the app starts. Cost: one JNI call
-//! per frame while the lock is on, a 250 ms poll only while locked or while the phone's lock is
-//! being confirmed.
+//! `ui::pinpad`. Desktop has the app PIN only, asked when the app starts and when its window
+//! reopens. Cost: one JNI call per frame while the lock is on, a 250 ms poll only while locked or
+//! while the phone's lock is being confirmed.
 
 pub(crate) mod pin;
 
@@ -217,7 +217,8 @@ mod jni_calls {
     }
 }
 
-/// Desktop has no phone lock and no "leaving the app" to time: the app PIN is asked once, at start.
+/// Desktop has no phone lock. The app PIN is asked at start, and again when a window opens after
+/// the last one closed (the app runs on with no window): closing the window is leaving the app.
 #[cfg(not(target_os = "android"))]
 mod jni_calls {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -235,6 +236,9 @@ mod jni_calls {
     pub fn authenticate() {}
     pub fn unlock() {
         LOCKED.store(false, Ordering::Relaxed);
+    }
+    pub fn lock() {
+        LOCKED.store(true, Ordering::Relaxed);
     }
     pub fn confirm() {}
     pub fn take_confirm() -> Confirm {
@@ -269,6 +273,8 @@ pub(crate) fn watch<T: 'static>(cx: &mut Context<T>) {
 }
 
 pub(crate) use jni_calls::{authenticate, available, configure, confirm, is_locked, take_confirm, unlock};
+#[cfg(not(target_os = "android"))]
+pub(crate) use jni_calls::lock;
 
 /// The lock screen: opaque ground, the app's name, and the button that asks again.
 pub(crate) fn screen(cx: &App) -> Stateful<Div> {

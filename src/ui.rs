@@ -1625,6 +1625,10 @@ impl BeeperApp {
         crate::FOREGROUND.store(false, std::sync::atomic::Ordering::Relaxed);
         self.drafts.save();
         crate::backend::save_search();
+        // Desktop shows no auto-lock choice: leaving locks at once, as Android's "Immediately".
+        if self.settings.lock.mode != crate::applock::LockMode::Off {
+            crate::applock::lock();
+        }
     }
 
     /// Opens the chat a tapped notification was for.
