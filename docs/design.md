@@ -110,8 +110,8 @@ The common acts take one gesture, and each also has a slower way that can be fou
 - A tap on a message shows or hides the line under it: its time and, for your own, its status
   (who has read it in a group); a second tap or a tap on another message takes it back.
 - A long press on a message lifts it over a dimmed screen with six reactions above it and its
-  acts under it: Reply, Edit (your own), Open link, Copy, Save, Forward, Select multiple, Info,
-  each where it applies, and one Delete that asks whether for you or for everyone. The right mouse button, or the dots beside a message
+  acts under it: Reply, Edit (your own), Open link, Copy, Save, Forward, Select multiple, Reactions
+  (who reacted, when it has any), Info, each where it applies, and one Delete that asks whether for you or for everyone. The right mouse button, or the dots beside a message
   on a wide window, opens the same acts at the pointer; the heart and arrow there react and
   reply. A tap anywhere else closes it.
 - A double tap likes the message (the heart), and a second double tap takes it back.

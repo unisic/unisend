@@ -113,6 +113,7 @@ pub(super) enum Act {
     Save,
     Forward,
     Select,
+    Reactions,
     Info,
 }
 
@@ -130,6 +131,7 @@ impl Act {
             Act::Save => ("act-save", IconName::Download, t!("Save to gallery")),
             Act::Forward => ("act-forward", IconName::Forward, t!("Forward")),
             Act::Select => ("act-select", IconName::ListChecks, t!("Select multiple")),
+            Act::Reactions => ("act-reactions", IconName::FaceSlightlySmiling, t!("Reactions")),
             Act::Info => ("act-info", IconName::Info, t!("Info")),
         }
     }
@@ -181,14 +183,17 @@ fn taken(mut acts: Vec<Act>, m: &Msg, caps: &Features) -> Vec<Act> {
     acts
 }
 
-/// Forward, Select and Info, for a message that reached the server.
+/// Forward, Select, Reactions (when it has any) and Info, for a message that reached the server.
 fn more_acts(m: &Msg) -> Vec<Act> {
     if !m.id.starts_with('$') {
         return Vec::new();
     }
     let mut out = Vec::new();
     out.extend(super::forward::forwardable(m).then_some(Act::Forward));
-    out.extend([Act::Select, Act::Info]);
+    out.push(Act::Select);
+    // Who reacted, without a long press on a badge, where a slip toggles a reaction.
+    out.extend((!m.reactions.is_empty()).then_some(Act::Reactions));
+    out.push(Act::Info);
     out
 }
 
@@ -664,6 +669,10 @@ impl BeeperApp {
                 let at = self.menu.as_ref().filter(|m| m.kind != MenuKind::Touch).map(|m| m.at);
                 self.open_people(super::people::Shown::Details(id.to_owned()), at, cx);
             }
+            Act::Reactions => {
+                let at = self.menu.as_ref().filter(|m| m.kind != MenuKind::Touch).map(|m| m.at);
+                self.open_people(super::people::Shown::Reactions(id.to_owned(), None), at, cx);
+            }
         }
         self.close_menu(cx);
     }
@@ -964,6 +973,10 @@ mod tests {
         assert_eq!(acts(&m, MenuKind::List, false), touch[1..]);
         assert_eq!(acts(&m, MenuKind::List, true)[..3], [Act::Reply, Act::React, Act::Edit]);
         assert_eq!(touch[touch.len() - 3..], [Act::Select, Act::Info, Act::Delete]);
+        let mut liked = m.clone();
+        liked.reactions.push(crate::backend::Reaction { key: "👍".to_owned(), count: 1, own: false, by: Vec::new() });
+        let with = acts(&liked, MenuKind::Touch, false);
+        assert_eq!(with[with.len() - 4..], [Act::Select, Act::Reactions, Act::Info, Act::Delete]);
         let mut theirs = m.clone();
         theirs.own = false;
         assert_eq!(acts(&theirs, MenuKind::Touch, false).last(), Some(&Act::Delete), "anyone's can be hidden here");
