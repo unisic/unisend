@@ -149,6 +149,8 @@ const MAX_FACES: usize = 64;
 const MAX_ARRIVALS: usize = 3;
 /// Link and quote pictures fading in at once, at most.
 const MAX_THUMB_FADES: usize = 60;
+/// File sizes learnt by downloading, for the open chat.
+const MAX_SIZES: usize = 256;
 /// Pages of older messages loaded to find a quoted one before giving up.
 const SEEK_PAGES: u8 = 5;
 
@@ -275,6 +277,8 @@ pub struct BeeperApp {
     viewer: Option<(String, Option<Arc<Image>>)>,
     /// Attachments being downloaded to open.
     fetching: HashSet<String>,
+    /// Sizes of the open chat's files whose sender gave none, read once they were downloaded.
+    sizes: HashMap<String, u64>,
     uploads: usize,
     preview: caption::Preview,
     /// The message whose reactions and actions are showing.
@@ -582,6 +586,7 @@ impl BeeperApp {
             asked: HashSet::new(),
             viewer: None,
             fetching: HashSet::new(),
+            sizes: HashMap::new(),
             uploads: 0,
             preview: caption::Preview::new(window, cx),
             menu: None,
@@ -767,6 +772,14 @@ impl BeeperApp {
             Ev::Viewed(id, bytes) => self.viewed(id, bytes),
             Ev::Fetched(id, path) => {
                 self.fetching.remove(&id);
+                let media = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()).or_else(|| self.info_media(&id));
+                let sizeless = media.is_some_and(|media| media.size.is_none_or(|s| s == 0));
+                if sizeless && let Some(len) = path.as_ref().and_then(|path| std::fs::metadata(path).ok()).map(|meta| meta.len()).filter(|&len| len > 0) {
+                    if self.sizes.len() >= MAX_SIZES {
+                        self.sizes.clear();
+                    }
+                    self.sizes.insert(id.clone(), len);
+                }
                 if let Some(path) = path.filter(|path| !self.voice_fetched(&id, path, cx)) {
                     let media = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()).or_else(|| self.info_media(&id));
                     if !media.is_some_and(|media| video::play(&path, media)) {
@@ -1406,7 +1419,8 @@ impl BeeperApp {
         let detail = if self.fetching.contains(&m.id) {
             t!("Downloading…").to_owned()
         } else {
-            match (media.duration, media.size) {
+            // A sender may give no size, or 0: then it shows once the file was downloaded, or not at all.
+            match (media.duration, media.size.filter(|&s| s > 0).or_else(|| self.sizes.get(&m.id).copied())) {
                 (Some(d), _) => length(d),
                 (None, Some(size)) => file_size(size),
                 (None, None) => String::new(),
@@ -1543,6 +1557,7 @@ impl BeeperApp {
         }
         self.close_viewer(cx);
         self.fetching.clear();
+        self.sizes.clear();
         (self.swipe, self.swipe_back, self.flash, self.seek, self.fresh_reaction, self.strip_last) = (None, None, None, None, None, None);
         (self.bubble_press, self.status_last, self.tapped) = (None, None, None);
         self.own_read = OwnRead::default();
