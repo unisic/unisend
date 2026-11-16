@@ -47,6 +47,9 @@ use crate::i18n::t;
 /// Beeper's bridges say in events of this type what the network did with a message.
 const SEND_STATUS: &str = "com.beeper.message_send_status";
 const STABLE_POLL: &str = "m.poll.start";
+const CALL_HANGUP: &str = "m.call.hangup";
+/// A MatrixRTC (Element Call) member's state, under its unstable and its stable name.
+const CALL_MEMBER: [&str; 2] = ["org.matrix.msc3401.call.member", "m.call.member"];
 /// People named as typing, readers kept per row, replies whose original is asked for: each is
 /// someone else's data and gets a ceiling.
 const MAX_TYPING: usize = 8;
@@ -355,6 +358,8 @@ fn shown(event: &AnySyncTimelineEvent, rules: &RoomVersionRules, dm: bool, big: 
         AnySyncTimelineEvent::MessageLike(_) if default_event_filter(event, rules) => true,
         // The SDK reads only the unstable poll; a stable one is shown from its content, without votes.
         AnySyncTimelineEvent::MessageLike(message) if message.event_type().to_string() == STABLE_POLL => true,
+        // A missed call is told by the hang-up; `event_row` hides the others.
+        AnySyncTimelineEvent::MessageLike(message) if message.event_type().to_string() == CALL_HANGUP => true,
         // A message type the SDK does not know is read by its body, as the chat list reads it.
         AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Original(e))) => {
             !matches!(e.content.relates_to, Some(Relation::Replacement(_))) && !e.content.body().trim().is_empty()
@@ -362,6 +367,7 @@ fn shown(event: &AnySyncTimelineEvent, rules: &RoomVersionRules, dm: bool, big: 
         AnySyncTimelineEvent::MessageLike(_) => false,
         // Told in a one-to-one chat too: whether what is written there stays is the chat's business.
         AnySyncTimelineEvent::State(state) if state.event_type().to_string() == disappear::TIMER => true,
+        AnySyncTimelineEvent::State(state) if CALL_MEMBER.contains(&state.event_type().to_string().as_str()) => true,
         AnySyncTimelineEvent::State(_) if dm => false,
         AnySyncTimelineEvent::State(AnySyncStateEvent::RoomMember(SyncStateEvent::Original(member))) => {
             let by_bot = service.contains(&member.sender);
@@ -431,6 +437,12 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
             match &like.kind {
                 MsgLikeKind::Message(_) if json.as_ref().is_some_and(disappear::repeats_state) => m.kind = Kind::Hidden,
                 MsgLikeKind::Message(_) => m.link = json.as_ref().and_then(link_preview),
+                MsgLikeKind::Other(other) if other.event_type().to_string() == CALL_HANGUP => {
+                    match call_line(CALL_HANGUP, json.as_ref(), None, &m.sender, m.own) {
+                        Some(line) => (m.kind, m.body) = (Kind::Notice, line),
+                        None => m.kind = Kind::Hidden,
+                    }
+                }
                 MsgLikeKind::Other(other) if other.event_type().to_string() == STABLE_POLL => {
                     m.poll = json.as_ref().and_then(|c| Poll::parse(c, false));
                     m.kind = if m.poll.is_some() { Kind::Message } else { Kind::Hidden };
@@ -450,6 +462,17 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
             m.kind = Kind::Hidden;
         }
         TimelineItemContent::MembershipChange(change) => membership(&mut m, change, viewer),
+        TimelineItemContent::CallInvite | TimelineItemContent::RtcNotification { .. } => {
+            (m.kind, m.body) = (Kind::Notice, call_line(CALL_INVITE, None, None, &m.sender, m.own).unwrap_or_default());
+        }
+        TimelineItemContent::OtherState(state) if CALL_MEMBER.contains(&state.content().event_type().to_string().as_str()) => {
+            let prev = event.latest_json().and_then(|raw| raw.get_field::<serde_json::Value>("unsigned").ok().flatten());
+            let prev = prev.as_ref().and_then(|unsigned| unsigned.get("prev_content"));
+            match call_line(CALL_MEMBER[0], json.as_ref(), prev, &m.sender, m.own) {
+                Some(line) => (m.kind, m.body) = (Kind::Notice, line),
+                None => m.kind = Kind::Hidden,
+            }
+        }
         TimelineItemContent::OtherState(state) if state.content().event_type().to_string() == disappear::TIMER => {
             let actor = (!viewer.service.contains(event.sender())).then_some(if m.own { t!("You") } else { m.sender.as_str() });
             let prev = event.latest_json().and_then(|raw| raw.get_field::<serde_json::Value>("unsigned").ok().flatten());
@@ -577,6 +600,29 @@ fn membership(m: &mut Msg, change: &RoomMembershipChange, viewer: &Viewer) {
     }
 }
 
+const CALL_INVITE: &str = "m.call.invite";
+
+/// A call as one quiet line, from its event's type (`CALL_INVITE` also for a MatrixRTC ring) and
+/// content; `None` for the events of a call that get none: an answered call's hang-up, a member
+/// leaving the call or renewing their place in it.
+fn call_line(kind: &str, content: Option<&serde_json::Value>, prev: Option<&serde_json::Value>, sender: &str, own: bool) -> Option<String> {
+    // A member's state is empty, or has no memberships, once they left.
+    let in_call = |c: Option<&serde_json::Value>| {
+        c.and_then(serde_json::Value::as_object).is_some_and(|o| !o.is_empty() && o.get("memberships").is_none_or(|m| m.as_array().is_some_and(|a| !a.is_empty())))
+    };
+    let reason = content.and_then(|c| c.get("reason")).and_then(serde_json::Value::as_str);
+    Some(match kind {
+        CALL_INVITE if own => t!("You called").to_owned(),
+        CALL_INVITE => t!("Call from {name}", name = sender),
+        CALL_HANGUP if reason == Some("invite_timeout") => t!("Missed call").to_owned(),
+        _ if CALL_MEMBER.contains(&kind) && in_call(content) && !in_call(prev) => match own {
+            true => t!("You joined the call").to_owned(),
+            false => t!("{name} joined the call", name = sender),
+        },
+        _ => return None,
+    })
+}
+
 /// A change of someone's membership as a line; `None` for the ones that get no line. `actor` is
 /// whoever did it to `subject`, when that is someone else and known, and whether that is the user.
 /// Each case is a whole sentence, so a translation can inflect it.
@@ -645,6 +691,22 @@ mod tests {
         let event: AnySyncTimelineEvent = serde_json::from_value(event).unwrap();
         let viewer = Viewer { own: "@a:x".try_into().unwrap(), service: BTreeSet::new(), bridged: false };
         shown(&event, &RoomVersionRules::V11, false, false, &viewer)
+    }
+
+    #[test]
+    fn calls_get_one_quiet_line() {
+        assert_eq!(call_line(CALL_INVITE, None, None, "Ann", false).unwrap(), "Call from Ann");
+        assert_eq!(call_line(CALL_INVITE, None, None, "Me", true).unwrap(), "You called");
+        let hangup = |reason: &str| call_line(CALL_HANGUP, Some(&json!({ "call_id": "c", "version": "1", "reason": reason })), None, "Ann", false);
+        assert_eq!(hangup("invite_timeout").unwrap(), "Missed call");
+        assert_eq!(hangup("user_hangup"), None);
+        let member = json!({ "application": "m.call", "call_id": "", "device_id": "D", "focus_active": { "type": "livekit" } });
+        assert_eq!(call_line(CALL_MEMBER[0], Some(&member), None, "Ann", false).unwrap(), "Ann joined the call");
+        assert_eq!(call_line(CALL_MEMBER[0], Some(&member), Some(&member), "Ann", false), None, "a renewal");
+        assert_eq!(call_line(CALL_MEMBER[1], Some(&json!({})), Some(&member), "Ann", false), None, "a leave");
+        assert_eq!(call_line(CALL_MEMBER[0], Some(&json!({ "memberships": [] })), None, "Ann", false), None);
+        assert!(shows(CALL_HANGUP, json!({ "call_id": "c", "version": "1", "party_id": "p", "reason": "invite_timeout" })));
+        assert!(shows("m.call.invite", json!({ "call_id": "c", "version": "1", "party_id": "p", "lifetime": 60000, "offer": { "type": "offer", "sdp": "v=0" } })));
     }
 
     #[test]
