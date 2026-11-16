@@ -911,6 +911,7 @@ fn archive_rule_matches_beeper() {
         unread,
         mentions: 0,
         dm: false,
+        note: false,
         pinned,
         low_priority: false,
         muted: false,
@@ -1981,4 +1982,14 @@ async fn a_group_is_changed_by_its_admin_only_and_the_profile_by_its_owner() {
     let me = group::profile(&alice).await.unwrap();
     assert_eq!(me.name, "Alicja");
     assert!(me.picture.is_some_and(|p| !p.is_empty()));
+}
+
+#[test]
+fn an_unnamed_group_is_titled_by_its_people_not_its_bot() {
+    let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(group_title(&[], 3), None, "no hero known: the SDK's title stands");
+    assert_eq!(group_title(&n(&["Ann"]), 1).as_deref(), Some("Ann"));
+    assert_eq!(group_title(&n(&["Ann", "Bob"]), 2).as_deref(), Some("Ann, Bob"));
+    assert_eq!(group_title(&n(&["Ann", "Bob", "Cy", "Di"]), 4).as_deref(), Some("Ann, Bob, Cy and 1 other"));
+    assert_eq!(group_title(&n(&["Ann", "Bob"]), 9).as_deref(), Some("Ann, Bob and 7 others"));
 }

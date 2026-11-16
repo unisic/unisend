@@ -373,6 +373,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("On|notifications", "Włączone"),
     ("Start one with +.", "Zacznij nowy przyciskiem +."),
     ("Nothing was recorded", "Nic nie nagrano"),
+    ("Note to self", "Notatka do siebie"),
     ("Notifications", "Powiadomienia"),
     ("Not muted", "Nie wyciszono"),
     ("Open", "Otwórz"),
@@ -760,6 +761,7 @@ pub(super) static PLURAL: &[(&str, [&str; 3])] = &[
     ("Wrong PIN. {n} attempt left. Try again, or leave it empty to skip.", ["Błędny PIN. Została {n} próba. Spróbuj ponownie albo zostaw puste, aby pominąć.", "Błędny PIN. Zostały {n} próby. Spróbuj ponownie albo zostaw puste, aby pominąć.", "Błędny PIN. Zostało {n} prób. Spróbuj ponownie albo zostaw puste, aby pominąć."]),
     ("{n} vote", ["{n} głos", "{n} głosy", "{n} głosów"]),
     ("{n} week", ["{n} tydzień", "{n} tygodnie", "{n} tygodni"]),
+    ("{names} and {n} other", ["{names} i {n} inna osoba", "{names} i {n} inne osoby", "{names} i {n} innych osób"]),
     ("{one}, {two} and {n} other", ["{one}, {two} i {n} inna osoba", "{one}, {two} i {n} inne osoby", "{one}, {two} i {n} innych osób"]),
     ("{who} joined", ["{who} dołączył(a)", "{who} dołączyli", "{who} dołączyli"]),
 ];

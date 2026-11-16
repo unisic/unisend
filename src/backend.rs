@@ -69,7 +69,7 @@ use tokio::sync::mpsc;
 
 use crate::beeper;
 use crate::bridges::{self, Flow, Guild, Network, Step};
-use crate::i18n::{n_, t, tr_in};
+use crate::i18n::{n_, t, tn, tr_in};
 
 const CHANNEL_CAP: usize = 64;
 const PAGE: u16 = 40;
@@ -391,6 +391,9 @@ pub struct RoomSummary {
     /// Who has read that message, as their public receipts on it say; a few, named.
     #[serde(default)]
     pub read_by: Vec<(OwnedUserId, String)>,
+    /// The user's note to self (`com.beeper.rooms.note_to_self`): only they are in it.
+    #[serde(default)]
+    pub note: bool,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -1343,6 +1346,9 @@ impl State {
                 if !self.incognito.load(Ordering::Relaxed) {
                     let room = self.room(&room_id)?;
                     tokio::spawn(async move {
+                        if is_note(&room).await {
+                            return;
+                        }
                         if let Err(e) = room.typing_notice(on).await {
                             log::debug!("typing notice: {e}");
                         }
@@ -2418,6 +2424,7 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>, live: bool) -> Room
         moved_to: None,
         own_last: false,
         read_by: Vec::new(),
+        note: false,
     }
 }
 
@@ -2559,6 +2566,8 @@ async fn mark_read(room: &Room, newest: Option<OwnedEventId>, private: bool) -> 
     if let Some(id) = newest {
         // `m.fully_read` is the user's own account data, never shown to others, so it suits private receipts too.
         let receipts = matrix_sdk::room::Receipts::new().fully_read_marker(id.clone());
+        // No one else is in a note to self; nothing about it is sent.
+        let private = private || is_note(room).await;
         let receipts = if private { receipts.private_read_receipt(id) } else { receipts.public_read_receipt(id) };
         room.send_multiple_receipts(receipts).await?;
     }
@@ -2721,10 +2730,13 @@ async fn summarize(
     peer: Option<OwnedUserId>,
     seen: RoomSummary,
 ) -> RoomSummary {
+    let note = is_note(room).await;
     let name = match &peer {
+        _ if note => t!("Note to self").to_owned(),
         // A bridged one-to-one room also holds the bridge bot, which the SDK's computed name
         // counts: "Ann, and 2 others". Beeper titles it with the other person alone.
         Some(peer) if room.name().is_none() => display_name(room, peer).await,
+        _ if room.name().is_none() && room.canonical_alias().is_none() && let Some(title) = unnamed_group(room).await => title,
         _ => room.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| seen.id.to_string()),
     };
     let (network, parent) = match (seen.network, seen.parent) {
@@ -2747,7 +2759,8 @@ async fn summarize(
         name,
         network,
         parent,
-        dm: peer.is_some(),
+        dm: peer.is_some() || note,
+        note,
         preview: current(seen.preview),
         preview_id: seen.preview_id,
         unread,
@@ -2993,6 +3006,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 moved_to: None,
                 own_last: amended.or(msgs.last()).map(|m| m.own).or_else(|| prev.as_ref().map(|p| p.own_last)).unwrap_or(false),
                 read_by: Vec::new(),
+                note: false,
             };
             let mut summary = summarize(&room, &notif, peer, seen).await;
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);
@@ -3400,6 +3414,50 @@ fn mention_ranges(body: &str, names: &[&str], room: bool) -> Vec<std::ops::Range
     out
 }
 
+/// The chat is the user's note to self. Beeper marks it with an empty-keyed state event of this type.
+async fn is_note(room: &Room) -> bool {
+    let events = room.get_state_events(StateEventType::from(NOTE_TO_SELF)).await.unwrap_or_default();
+    events.iter().any(|e| matches!(e, RawAnySyncOrStrippedState::Sync(raw) if raw.get_field::<String>("state_key").ok().flatten().is_some_and(|k| k.is_empty())))
+}
+
+pub(crate) const NOTE_TO_SELF: &str = "com.beeper.rooms.note_to_self";
+
+/// The title of an unnamed group that has a bridge bot: the SDK's computed one counts the bot
+/// ("Ann and Bridge bot"), this names the people alone. `None` when the room has no service
+/// member, or no one is known to name, and the SDK's title stands.
+async fn unnamed_group(room: &Room) -> Option<String> {
+    let mut service = room.service_members().unwrap_or_default();
+    // A bridge that lists no functional members still names its bot in `m.bridge`.
+    service.extend(disappear::state(room, "m.bridge").await.iter().filter_map(|c| UserId::parse(c.get("bridgebot")?.as_str()?).ok()));
+    if service.is_empty() {
+        return None;
+    }
+    let own = room.own_user_id();
+    let heroes: Vec<OwnedUserId> = room.clone_info().heroes().iter().map(|h| h.user_id.clone()).filter(|u| u != own && !service.contains(u)).collect();
+    let mut names = Vec::new();
+    for user in heroes.iter().take(GROUP_NAMED) {
+        names.push(display_name(room, user).await);
+    }
+    let people = (room.joined_members_count() + room.invited_members_count()).saturating_sub(1 + service.len() as u64);
+    group_title(&names, people)
+}
+
+/// Names an unnamed group's title lists, at most.
+const GROUP_NAMED: usize = 3;
+
+/// Up to `GROUP_NAMED` of the people, then how many more there are; `people` counts everyone but the user.
+fn group_title(names: &[String], people: u64) -> Option<String> {
+    let shown = &names[..names.len().min(GROUP_NAMED)];
+    if shown.is_empty() {
+        return None;
+    }
+    let list = shown.join(", ");
+    Some(match people.saturating_sub(shown.len() as u64) {
+        0 => list,
+        more => tn!(more, "{names} and {n} other", "{names} and {n} others", names = list),
+    })
+}
+
 async fn display_name(room: &Room, user: &UserId) -> String {
     match room.get_member_no_sync(user).await {
         Ok(Some(m)) => m.name().to_owned(),
@@ -3501,7 +3559,8 @@ async fn bridge_names(room: &Room) -> (Option<String>, Option<String>) {
 /// Room avatar, or for a one-to-one chat the other person's, as a small thumbnail.
 async fn avatar(client: &Client, room_id: &RoomId) -> Result<Option<Vec<u8>>> {
     let Some(room) = client.get_room(room_id) else { return Ok(None) };
-    let url = match room.avatar_url() {
+    let own = if is_note(&room).await { client.account().get_avatar_url().await.ok().flatten() } else { None };
+    let url = match own.or_else(|| room.avatar_url()) {
         Some(url) => url,
         None => {
             let Some(person) = other_person(&room).await else { return Ok(None) };

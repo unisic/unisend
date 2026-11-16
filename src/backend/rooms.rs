@@ -14,6 +14,7 @@ use matrix_sdk::{
     reqwest::{Method, Url},
     ruma::{
         OwnedRoomId, OwnedUserId, RoomId, UserId,
+        serde::Raw,
         api::client::room::create_room,
         events::{InitialStateEvent, StateEventType, room::encryption::RoomEncryptionEventContent},
     },
@@ -114,6 +115,8 @@ pub enum Ask {
     /// An identifier typed for a group: who it is.
     Resolve { target: Target, who: String },
     Start { target: Target, who: String },
+    /// The user's note to self: the one there is, or a new one.
+    Note,
     Group { target: Target, kind: String, name: String, people: Vec<String> },
 }
 
@@ -204,6 +207,7 @@ pub(super) fn handle(client: Client, api: Option<Api>, rooms: Rooms, ev: mpsc::S
                 Err(e) => Answer::Failed(super::plain(&format!("{e:#}"))),
             },
             Ask::Start { target, who } => outcome(start(&client, api.as_ref(), &target, &who).await),
+            Ask::Note => outcome(note(&client).await),
             Ask::Group { target, kind, name, people } => outcome(group(&client, api.as_ref(), &target, &kind, &name, people).await),
         };
         let _ = ev.send(Ev::People(answer)).await;
@@ -450,6 +454,22 @@ async fn start(client: &Client, api: Option<&Api>, target: &Target, who: &str) -
             arrived(client, RoomId::parse(room)?).await
         }
     }
+}
+
+/// Beeper's own note to self: a private encrypted room of one, named "Note to self" and marked by
+/// an empty `com.beeper.rooms.note_to_self` state event (read from the owner's Beeper account).
+async fn note(client: &Client) -> Result<OwnedRoomId> {
+    for room in client.joined_rooms() {
+        if super::is_note(&room).await {
+            return Ok(room.room_id().to_owned());
+        }
+    }
+    let mut request = create_room::v3::Request::new();
+    request.name = Some("Note to self".to_owned());
+    request.preset = Some(create_room::v3::RoomPreset::PrivateChat);
+    let mark = Raw::new(&json!({ "type": super::NOTE_TO_SELF, "state_key": "", "content": {} }))?.cast_unchecked();
+    request.initial_state = vec![InitialStateEvent::with_empty_state_key(RoomEncryptionEventContent::with_recommended_defaults()).to_raw_any(), mark];
+    Ok(client.create_room(request).await?.room_id().to_owned())
 }
 
 async fn group(client: &Client, api: Option<&Api>, target: &Target, kind: &str, name: &str, people: Vec<String>) -> Result<OwnedRoomId> {

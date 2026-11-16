@@ -4720,6 +4720,7 @@ mod tests {
             unread: 0,
             mentions: 0,
             dm: false,
+            note: false,
             pinned: false,
             low_priority: false,
             muted: false,

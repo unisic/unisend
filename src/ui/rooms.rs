@@ -762,6 +762,15 @@ impl BeeperApp {
                     .into_any_element(),
             );
         }
+        let title = t!("Note to self");
+        if !new.group && new.target == Target::Matrix && title.to_lowercase().contains(&query.to_lowercase()) {
+            let face = self.rooms.iter().find(|r| r.note).map(|r| avatar(&r.name, self.avatars.get(&r.id), AVATAR, cx));
+            rows.push(
+                row("note-to-self".into(), title.into(), String::new(), face.map_or_else(|| icon_disc(IconName::User), |f| f.into_any_element()), None)
+                    .on_click(cx.listener(|this, _, _, cx| this.ask_new(Ask::Note, cx)))
+                    .into_any_element(),
+            );
+        }
         if let Some(who) = identifier {
             let what = if new.group { t!("Add to group") } else { t!("New chat") };
             rows.push(
