@@ -3,21 +3,14 @@
 How to build, test and package Unisend beyond the short steps in the [README](../README.md).
 The crate and binary are named `beeper-gpui`, the Android app id is `dev.gpui.beeper`.
 
-## Fedora linker note
+## Platforms
 
-Fedora without `libxkbcommon-x11-devel`: the linker needs the unversioned
-`libxkbcommon-x11.so`. Without root:
+Each platform's build steps, its status and where its code lives:
+[Android](platforms/android.md), [Linux](platforms/linux.md), [macOS](platforms/macos.md),
+[Windows](platforms/windows.md). iOS has no port yet: see [parity.md](parity.md).
 
-    mkdir -p target/linkshim
-    ln -sf /usr/lib64/libxkbcommon-x11.so.0 target/linkshim/libxkbcommon-x11.so
-    RUSTFLAGS="-L $PWD/target/linkshim" cargo run --release
-
-## Windows and macOS
-
-`.github/workflows/build.yml` builds both on GitHub's runners (also Linux and the Android APK); it
-has never run, because the repository has never been pushed. A Windows build cannot be made on
-Linux: GPUI compiles its shaders with `fxc.exe`, on a Windows host only. iOS has no port yet: see
-[parity.md](parity.md).
+`.github/workflows/build.yml` builds all four on GitHub's runners. It starts on a `v*` tag or by
+hand, and neither has happened: every step in it is unverified.
 
 ## GIF picker (KLIPY)
 
@@ -38,20 +31,11 @@ variable, Settings has no Updates section. `scripts/release.sh` builds a release
 from the environment and writes `update.json`; a GitHub release can serve it at the stable
 `https://github.com/<owner>/<repo>/releases/latest/download/update.json`, any static host works.
 
-## Java in a Rust app
-
-Everything the app does is Rust: the UI, Matrix, encryption, storage. Java is there only where
-Android accepts nothing else: some platform parts exist only as Java classes to extend or
-register (the Activity, the keyboard's `InputConnection`, a foreground `Service`, the receiver of
-notification buttons, the share sheet), and Rust reaches the rest of the Android API over JNI
-through small Java helpers. `android/app/src/main/java/dev/gpui/mobile` comes from gpui-mobile
-(Apache-2.0, see the README there, which names the files changed here);
-`android/app/src/main/java/dev/gpui/beeper` holds this app's Android ends: notifications and the
-background connection, sharing, files and the gallery, camera, voice messages, video playback,
-location, contacts, app lock, the Keystore-wrapped data key, network sign-in, updates and the
-per-app language.
-
 ## Tests
+
+`cargo test --lib` needs no server: the unit tests beside the code,
+the translation check among them ([i18n.md](i18n.md)). It builds for the host, so it covers no
+other platform's `cfg` blocks. The tests below are `#[ignore]`d because they need a homeserver.
 
 `src/backend/tests.rs` runs login, sync, E2EE send/decrypt and key recovery
 (wrong key, malformed key, history and previews decrypted from the key backup)
@@ -80,4 +64,8 @@ there:
 Debug desktop builds read `BEEPER_GPUI_HOMESERVER` to point at such a server,
 and `BEEPER_GPUI_API` and `BEEPER_GPUI_BRIDGES` to point the account API and the
 bridge login API at stand-ins; `BEEPER_GPUI_DATA_DIR` picks the data directory
-(with a pre-seeded `session.json`, and `settings.json` for the theme).
+(with a pre-seeded `session.json`, and `settings.json` for the theme). Debug desktop builds also
+stand in for two Android screens: `BEEPER_GPUI_SHARE` (file paths, one per line) and
+`BEEPER_GPUI_SHARE_TEXT` open the "Send to" screen as a share from another app would, and
+`BEEPER_GPUI_GALLERY` (a directory) shows the attach sheet's photo grid, with
+`BEEPER_GPUI_GALLERY_ACCESS` (`none`, `partial`) for its states without full access.

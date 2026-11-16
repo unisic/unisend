@@ -102,14 +102,14 @@ is not started.
 | Background connection on Android | part | a foreground service (type `specialUse`, no daily limit) keeps the process connected while the app is in the background; it ends when the app is swiped away, and Android's Doze can delay it. Its quiet notice is posted once per run, so one swiped away stays away. Settings, Notifications, "Stay connected in the background" turns it off (then messages arrive only while the app is open). No push (FCM, UnifiedPush) |
 | Settings | part | theme (dark by default), incognito, chat networks, sign out; kept locally, not in `com.beeper.desktop.prefs`. Beeper's chat list, notification, shortcut and AI settings: todo |
 | Incognito mode (Hide reading and typing) | done | on: `m.read.private` and no typing notices; off: `m.read`. On by default |
-| Interface language | part | English and Polish, following the system language (Android's locale; on desktop `LC_ALL`, `LC_MESSAGES`, `LANG`). No in-app switch. Glossary and how to add a string: `docs/i18n.md` |
+| Interface language | part | English and Polish, following the system language (Android's locale; on desktop `LC_ALL`, `LC_MESSAGES`, `LANG`) or the choice in Settings, Appearance. Glossary and how to add a string: `docs/i18n.md` |
 | Command bar, hotkeys | todo | local |
 | Tray icon, launch at login, deep links | todo | local |
 | Media viewer | part | pictures only; pinch, double-tap and ctrl+wheel zoom, pan; a sideways swipe or Left/Right pages through the chat's loaded pictures (reaching the oldest asks for older history once); a swipe up or down closes; a tap shows or hides a bar with sender and time, the caption, and Reply, Forward, Save to gallery (Android 10+, desktop Pictures/Unisend), Share (Android). No position count, no videos in the row |
 | PDF preview, storage manager | todo | local |
 | Feedback, help hub, subscription banners | todo | Beeper services |
 | Emoji rendering | part | bundled bitmap Noto Color Emoji (GPUI cannot draw COLRv1). On Linux, emoji that a system text font also holds (the heart U+2764 among them) draw as that font's outline: cosmic-text asks DejaVu Sans before the emoji font |
-| Windows, macOS builds | part | a CI workflow builds them on GitHub's runners (`.github/workflows/build.yml`, never run: nothing is pushed); `packaging/macos` makes the `.app`. Not built locally: GPUI's Windows shaders need `fxc.exe` on a Windows host, Apple's SDK needs a Mac. Unsigned builds meet SmartScreen and Gatekeeper warnings |
+| Windows, macOS builds | part | a CI workflow builds them on GitHub's runners (`.github/workflows/build.yml`, never run: it waits for a `v*` tag); `packaging/macos` makes the `.app`. macOS compiles and is in progress; Windows passes `cargo check` for `x86_64-pc-windows-gnu` and has never run, its real build needing `fxc.exe` on a Windows host. Unsigned builds meet SmartScreen and Gatekeeper warnings. Details: `docs/platforms/` |
 | iOS | todo | gpui-mobile has an iOS back end; this app has no iOS entry point, no Xcode project, and no counterpart of its Android helpers (in-app browser sign-in, notifications, background connection, which iOS allows only through push). Needs an Apple Developer account to reach anyone |
 
 ## Per network

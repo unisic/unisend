@@ -1,6 +1,7 @@
 #!/bin/sh
 # Regenerates every icon. The master is unisend.py, which writes the SVGs rendered here and the
-# Android vector drawables copied here. Needs ImageMagick 7 built with librsvg, and python3.
+# Android vector drawables copied here. Needs ImageMagick 7 built with librsvg, python3, and for the
+# macOS icon Xcode 26 or later (actool, ictool).
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root="$here/../.."
@@ -37,8 +38,20 @@ for s, d in zip(sizes, data):
 open(out, "wb").write(head + b"".join(data))
 PY
 
+# macOS 26 and later read the Liquid Glass icon from Assets.car, compiled from the Icon Composer document.
+mkdir "$tmp/car"
+xcrun actool "$svg/Unisend.icon" --compile "$tmp/car" --app-icon Unisend --platform macosx \
+    --target-device mac --minimum-deployment-target 11.0 --output-partial-info-plist "$tmp/car/info.plist" >/dev/null
+cp "$tmp/car/Assets.car" "$root/packaging/macos/Assets.car"
+# Older macOS reads the .icns: the same document rendered by ictool, since actool's .icns stops at 256 px.
+ictool="$(xcode-select -p)/../Applications/Icon Composer.app/Contents/Executables/ictool"
+for s in 16 32 64 128 256 512 1024; do
+    "$ictool" "$svg/Unisend.icon" --export-image --output-file "$tmp/glass-$s.png" --platform macOS \
+        --rendition Default --width "$s" --height "$s" --scale 1 >/dev/null
+    # ictool writes 16-bit PNGs; 8-bit ones cut the .icns from 3 MB to 0.7 MB.
+    magick "$tmp/glass-$s.png" -depth 8 -strip "PNG32:$tmp/icns-$s.png"
+done
 # ImageMagick cannot write ICNS; the container is a header plus PNG chunks keyed by OSType.
-for s in 16 32 64 128 256 512 1024; do png "$(tile "$s")" "$s" "$tmp/icns-$s.png"; done
 python3 - "$tmp" "$root/packaging/macos/Unisend.icns" <<'PY'
 import struct, sys
 tmp, out = sys.argv[1], sys.argv[2]

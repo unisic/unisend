@@ -10,6 +10,8 @@
 	<string>beeper-gpui</string>
 	<key>CFBundleIconFile</key>
 	<string>Unisend</string>
+	<key>CFBundleIconName</key>
+	<string>Unisend</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.gpui.beeper</string>
 	<key>CFBundleInfoDictionaryVersion</key>
