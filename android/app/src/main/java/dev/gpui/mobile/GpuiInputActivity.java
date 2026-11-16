@@ -11,6 +11,7 @@ import android.text.Spannable;
 import android.text.Spanned;
 import android.text.TextWatcher;
 import android.text.style.SuggestionSpan;
+import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -457,7 +458,33 @@ public class GpuiInputActivity extends NativeActivity {
             if (code == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
                 nativeIme(session, 4, "", 0, 0);
             }
-            return super.onKeyPreIme(code, event);
+            // A hardware keyboard's characters reach the native queue only after the IME, where
+            // gpui-mobile turns them into key presses without inserting their text: type them here.
+            // shortcut: the IME never sees them, so one that composes from hardware keys (CJK) does
+            // not; upgrade when gpui-mobile inserts an unhandled key's character itself.
+            String typed = shown && isFocused() ? typed(event) : null;
+            if (typed == null) return super.onKeyPreIme(code, event);
+            if (event.getAction() == KeyEvent.ACTION_DOWN) type(typed);
+            return true;
+        }
+
+        /** The text a key types into a field, or null for a shortcut, a control key or a dead key. */
+        String typed(KeyEvent event) {
+            if (event.isCtrlPressed() || event.isMetaPressed()) return null;
+            int c = event.getUnicodeChar();
+            if (c == 0 || (c & KeyCharacterMap.COMBINING_ACCENT) != 0 || Character.isISOControl(c)) return null;
+            return new String(Character.toChars(c));
+        }
+
+        /** Types at the selection as the EditText's own key listener would, sent to Rust as one edit. */
+        void type(String typed) {
+            depth++;
+            Editable text = getText();
+            BaseInputConnection.removeComposingSpans(text);
+            int s = Math.max(0, Selection.getSelectionStart(text)), e = Math.max(0, Selection.getSelectionEnd(text));
+            text.replace(Math.min(s, e), Math.max(s, e), typed);
+            Selection.setSelection(text, Math.min(s, e) + typed.length());
+            endEdit();
         }
 
         @Override public InputConnection onCreateInputConnection(EditorInfo info) {
@@ -539,6 +566,12 @@ public class GpuiInputActivity extends NativeActivity {
                     }
                     if (event.getKeyCode() == KeyEvent.KEYCODE_ENTER) {
                         if (event.getAction() == KeyEvent.ACTION_DOWN) commitText("\n", 1);
+                        return true;
+                    }
+                    // A key the IME sends goes past onKeyPreIme to the native queue, which drops its character.
+                    String typed = typed(event);
+                    if (typed != null) {
+                        if (event.getAction() == KeyEvent.ACTION_DOWN) commitText(typed, 1);
                         return true;
                     }
                     return super.sendKeyEvent(event);
