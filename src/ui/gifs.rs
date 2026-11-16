@@ -80,7 +80,7 @@ impl BeeperApp {
         g.gifs.clear();
         (g.pages, g.loading, g.more, g.failed) = (0, false, false, false);
         for (_, image) in g.previews.drain() {
-            image.remove_asset(cx);
+            self.released.push(image, cx);
         }
     }
 

@@ -2752,7 +2752,7 @@ impl App {
 
     /// Check whether an asset is present in GPUI's cache (loading or loaded),
     /// without fetching it.
-    #[cfg(any(test, feature = "test-support"))]
+    // murmur patch: not test-only, so an app can free an image's atlas tile without decoding it
     pub fn has_asset<A: Asset>(&self, source: &A::Source) -> bool {
         let asset_id = (TypeId::of::<A>(), hash(source));
         self.loading_assets.contains_key(&asset_id)

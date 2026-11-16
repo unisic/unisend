@@ -133,7 +133,7 @@ impl BeeperApp {
         self.fields.clear();
         self.field_subs.clear();
         if let Some(qr) = self.qr.take() {
-            qr.remove_asset(cx);
+            self.released.push(qr, cx);
         }
     }
 

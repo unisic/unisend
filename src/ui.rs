@@ -143,6 +143,8 @@ const TYPING_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
 const BRIDGE_WAIT_MS: u64 = 2 * 60 * 1000;
 /// Inline thumbnails kept decoded; each is at most 2.6 MB of pixels.
 const MAX_THUMBS: usize = 60;
+/// Images let go of while no frame is drawn (the app in the background) waiting for the next one.
+const MAX_RELEASED: usize = 16;
 /// Sender pictures kept for the open chat; people past that many keep their initials.
 const MAX_FACES: usize = 64;
 /// Messages that can be arriving at once; more in one go is a page of history, not news.
@@ -369,6 +371,8 @@ pub struct BeeperApp {
     page_scroll: ScrollHandle,
     /// Room avatars; `None` while loading or when the room has none. One entry per room at most.
     avatars: HashMap<OwnedRoomId, Option<Arc<Image>>>,
+    /// Images let go of; their GPU atlas tiles are freed with the next frame.
+    released: Released,
     /// Pictures of the people writing in the open chat; `None` while loading or when they have
     /// none. At most `MAX_FACES`, 37 kB of pixels each.
     faces: HashMap<OwnedUserId, Option<Arc<Image>>>,
@@ -642,6 +646,7 @@ impl BeeperApp {
             drafts,
             place: navigate::Place::default(),
             avatars: HashMap::new(),
+            released: Released::default(),
             peeked: HashSet::new(),
             share,
             fwd,
@@ -760,7 +765,7 @@ impl BeeperApp {
                         // Forgetting the request lets it load again when scrolled back to.
                         self.asked.remove(&old);
                         if let Some(image) = self.thumbs.remove(&old) {
-                            image.remove_asset(cx);
+                            self.released.push(image, cx);
                         }
                     }
                 }
@@ -1138,7 +1143,7 @@ impl BeeperApp {
         if let Some(closed) = self.viewer.take()
             && let Some((_, Some(image))) = self.viewer_last.replace(closed)
         {
-            image.remove_asset(cx);
+            self.released.push(image, cx);
         }
         self.drop_near(cx);
         cx.notify();
@@ -1534,7 +1539,7 @@ impl BeeperApp {
         self.thumb_order.clear();
         self.thumb_at.clear();
         for (_, image) in self.thumbs.drain() {
-            image.remove_asset(cx);
+            self.released.push(image, cx);
         }
         self.close_viewer(cx);
         self.fetching.clear();
@@ -1542,10 +1547,8 @@ impl BeeperApp {
         (self.bubble_press, self.status_last, self.tapped) = (None, None, None);
         self.own_read = OwnRead::default();
         self.arrivals.clear();
-        for (_, image) in self.faces.drain() {
-            if let Some(image) = image {
-                image.remove_asset(cx);
-            }
+        for image in self.faces.drain().filter_map(|(_, image)| image) {
+            self.released.push(image, cx);
         }
         (self.menu, self.press, self.chat_sheet) = (None, None, None);
         self.close_people(cx);
@@ -4063,8 +4066,38 @@ fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperA
     }
 }
 
+/// Images let go of since the last frame. `remove_asset` alone frees the decoded copy but leaves
+/// the image's tile in the GPU atlas until the window closes, and the tile can only be freed with
+/// the window at hand, hence the wait for the next frame.
+#[derive(Default)]
+struct Released(Vec<Arc<Image>>);
+
+impl Released {
+    fn push(&mut self, image: Arc<Image>, cx: &mut App) {
+        if self.0.len() < MAX_RELEASED {
+            self.0.push(image);
+        } else {
+            // No frame for a while: the decoded copy goes now, the tile stays with the window.
+            image.remove_asset(cx);
+        }
+    }
+
+    fn free(&mut self, window: &mut Window, cx: &mut App) {
+        for image in self.0.drain(..) {
+            // Asked first: `get_render_image` decodes an image that was never drawn.
+            if image.is_asset_cached(cx)
+                && let Some(render) = image.clone().get_render_image(window, cx)
+            {
+                cx.drop_image(render, Some(window));
+            }
+            image.remove_asset(cx);
+        }
+    }
+}
+
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.released.free(window, cx);
         let locked = self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked();
         // The chat left open behind the lock is read once the lock is passed, as an opening is.
         if crate::LOCKED.swap(locked, std::sync::atomic::Ordering::Relaxed)
