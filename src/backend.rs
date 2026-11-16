@@ -246,6 +246,8 @@ pub enum Ev {
     /// An attachment finished uploading, or failed.
     Attached,
     Networks(Vec<Network>),
+    /// Logins that need signing in again, as (bridge, login name); checked now and then.
+    Attention(Vec<(String, String)>),
     Flows(String, Vec<Flow>),
     LoginStep(Step),
     /// A request made for the settings pages failed; `Error` carries the reason.
@@ -1084,6 +1086,10 @@ impl State {
         search::start(&self.dir, &client, &self.seal);
         let user = client.user_id().map(ToOwned::to_owned);
         self.client = Some(client);
+        // Tests sign in to a local server as if it were Beeper's; its token stays off Beeper's API.
+        if let Some(api) = self.api().ok().filter(|_| !cfg!(test)) {
+            self.tasks.push(tokio::spawn(watch_networks(api, self.ev.clone())));
+        }
         if let Some(user) = user {
             self.emit(Ev::Ready { user, beeper: self.beeper, seal: self.seal.clone() }).await;
         }
@@ -2265,6 +2271,24 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// How often Beeper is asked whether a network's login broke: one GET of its account API.
+const NETWORK_CHECK: Duration = Duration::from_secs(15 * 60);
+
+/// Notices a login that broke while Unisend runs, so the chat list can say so; the first check is at once.
+async fn watch_networks(api: bridges::Api, ev: mpsc::Sender<Ev>) {
+    loop {
+        match api.attention().await {
+            Ok(logins) => {
+                if ev.send(Ev::Attention(logins)).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => log::debug!("network check: {e:#}"),
+        }
+        tokio::time::sleep(NETWORK_CHECK).await;
     }
 }
 

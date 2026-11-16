@@ -253,7 +253,14 @@ impl BeeperApp {
 
     pub(super) fn on_panel_event(&mut self, ev: Ev, cx: &mut Context<Self>) {
         match ev {
-            Ev::Networks(networks) => (self.networks, self.working) = (Some(networks), false),
+            Ev::Networks(networks) => {
+                self.attention = networks
+                    .iter()
+                    .flat_map(|n| n.logins.iter().filter(|l| bridges::needs_sign_in(&l.state)).map(|l| (n.bridge.clone(), l.name.clone())))
+                    .collect();
+                (self.networks, self.working) = (Some(networks), false);
+            }
+            Ev::Attention(logins) => self.attention = logins,
             Ev::Flows(bridge, flows) if self.panel == Some(Panel::Login) => match <[_; 1]>::try_from(flows) {
                 // Nothing to choose from.
                 Ok([only]) => self.start_flow(bridge, only.id, cx),
@@ -893,6 +900,36 @@ impl BeeperApp {
                 ),
             )
             .into_any_element()
+    }
+
+    /// A quiet line over the chat list while a network's login needs signing in again; it opens Networks.
+    pub(super) fn render_attention(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = Palette::of(cx);
+        let text = match self.attention.as_slice() {
+            [] => return None,
+            [(bridge, _)] => t!("{network} needs you to sign in again.", network = bridges::display_name(bridge)),
+            [(first, _), rest @ ..] if rest.iter().all(|(b, _)| b == first) => t!("{network} needs you to sign in again.", network = bridges::display_name(first)),
+            _ => t!("Some networks need you to sign in again.").to_owned(),
+        };
+        Some(
+            h_flex()
+                .id("network-attention")
+                .mx(px(GUTTER))
+                .mt(px(4.))
+                .mb(px(4.))
+                .min_h(px(TAP))
+                .px(px(GAP))
+                .gap(px(GAP))
+                .rounded(px(RADIUS))
+                .bg(p.surface)
+                .role(Role::Button)
+                .cursor_pointer()
+                .active(|el| el.bg(p.raised))
+                .on_click(cx.listener(|this, _, _, cx| this.open_panel(Panel::Networks, cx)))
+                .child(div().flex_1().min_w_0().text_size(fs(14.)).line_height(fs(20.)).text_color(p.warning).child(text))
+                .child(Icon::new(IconName::ChevronRight).size_4().flex_none().text_color(p.faint))
+                .into_any_element(),
+        )
     }
 
     fn render_add(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

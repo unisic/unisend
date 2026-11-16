@@ -219,6 +219,8 @@ pub struct BeeperApp {
     networks: Option<Vec<Network>>,
     /// The login whose details are shown, as (bridge, login ID).
     account: Option<(String, String)>,
+    /// Logins that need signing in again, as (bridge, login name), for the chat list's notice.
+    attention: Vec<(String, String)>,
     /// The login being signed in again, in place of adding one.
     relogin: Option<String>,
     /// Ways to sign in to the chosen bridge, when it offers more than one.
@@ -530,6 +532,7 @@ impl BeeperApp {
             panel: None,
             networks: None,
             account: None,
+            attention: Vec::new(),
             relogin: None,
             flows: None,
             step: None,
@@ -655,6 +658,7 @@ impl BeeperApp {
                     self.unencrypted = false;
                 }
                 (self.panel, self.networks, self.user) = (None, None, None);
+                self.attention.clear();
                 self.rooms.clear();
                 self.refilter(cx);
                 self.close_room(cx);
@@ -666,7 +670,7 @@ impl BeeperApp {
                 self.busy = false;
                 self.error = None;
             }
-            ev @ (Ev::Networks(_) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
+            ev @ (Ev::Networks(_) | Ev::Attention(_) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
             Ev::Ready { user, beeper, seal } => {
                 self.beeper = beeper;
                 self.unencrypted = cfg!(target_os = "android") && crate::vault::layout(&self.dir) == crate::vault::Layout::Legacy;
@@ -2028,6 +2032,7 @@ impl BeeperApp {
                 el.child(filters)
             })
             .children(banners)
+            .children((!archive && !self.searching).then(|| self.render_attention(cx)).flatten())
             .child(self.list_touch(cx))
             .child(div().flex_1().min_h_0().child(if state == RoomsView::Skeleton {
                 skeleton(p).into_any_element()

@@ -32,6 +32,8 @@ pub const KNOWN: [(&str, &str); 12] = [
     ("gvoice", "Google Voice"),
 ];
 
+/// Broken logins kept for the chat list's notice; more than this many still read as "several".
+const MAX_ATTENTION: usize = 16;
 /// Waiting for a scan or an approval on the other device.
 const WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -41,6 +43,20 @@ const START_ATTEMPTS: u32 = 30;
 /// A login the user has to sign in to again; the other states pass by themselves.
 pub fn needs_sign_in(state: &str) -> bool {
     matches!(state, "BAD_CREDENTIALS" | "UNKNOWN_ERROR")
+}
+
+/// Logins an account can hold that need signing in again, as Beeper's account API reports them:
+/// bridge and login name.
+fn attention(whoami: &Value) -> Vec<(String, String)> {
+    let bridges = whoami.pointer("/user/bridges").and_then(Value::as_object).into_iter().flatten();
+    let logins = bridges.filter(|(bridge, _)| *bridge != "hungryserv").flat_map(|(bridge, info)| {
+        let states = info.get("remoteState").and_then(Value::as_object).into_iter().flatten();
+        states.filter(|(_, state)| state.get("state_event").and_then(Value::as_str).is_some_and(needs_sign_in)).map(move |(id, state)| {
+            let name = state.get("remote_name").and_then(Value::as_str).filter(|n| !n.is_empty()).unwrap_or(id);
+            (bridge.clone(), name.to_owned())
+        })
+    });
+    logins.take(MAX_ATTENTION).collect()
 }
 
 pub fn display_name(bridge: &str) -> &str {
@@ -185,6 +201,12 @@ impl Api {
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
+    }
+
+    /// Logins that need signing in again, from one call to Beeper's account API: the states it last
+    /// heard from each bridge (`remoteState`, bridge-manager api/beeperapi/whoami.go).
+    pub async fn attention(&self) -> Result<Vec<(String, String)>> {
+        Ok(attention(&self.send(Method::GET, format!("{}/whoami", self.api), None, CALL_TIMEOUT).await?))
     }
 
     /// Ways to log in to a bridge, starting the bridge first when the account does not run it yet.
@@ -392,6 +414,23 @@ mod tests {
         assert_eq!(step("whatsapp", "L", &qr).unwrap().kind, StepKind::Show { kind: "qr".into(), data: "2@abc".into() });
         assert_eq!(step("whatsapp", "L", &json!({ "type": "complete", "step_id": "s" })).unwrap().kind, StepKind::Done);
         assert!(step("whatsapp", "L", &json!({ "type": "hologram" })).is_err());
+    }
+
+    #[test]
+    fn broken_logins_from_beepers_whoami() {
+        let whoami = json!({ "user": { "bridges": {
+            "whatsapp": { "remoteState": { "48600": { "state_event": "CONNECTED", "remote_name": "+48 600" } } },
+            "facebookgo": { "remoteState": {
+                "100": { "state_event": "BAD_CREDENTIALS", "remote_name": "Dean" },
+                "200": { "state_event": "LOGGED_OUT", "remote_name": "Old" },
+                "300": { "state_event": "UNKNOWN_ERROR" }
+            } },
+            "signal": { "bridgeState": { "stateEvent": "RUNNING" } },
+            "hungryserv": { "remoteState": { "x": { "state_event": "BAD_CREDENTIALS" } } }
+        } } });
+        let want = [("facebookgo", "Dean"), ("facebookgo", "300")].map(|(b, n)| (b.to_owned(), n.to_owned()));
+        assert_eq!(attention(&whoami), want);
+        assert!(attention(&Value::Null).is_empty());
     }
 
     #[test]
