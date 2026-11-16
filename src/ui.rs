@@ -499,6 +499,10 @@ impl BeeperApp {
                 crate::backend::save_search();
             }
             if active {
+                // The unlock watch stopped while the app was away; the system's prompt may pass meanwhile.
+                if this.settings.lock.mode != crate::applock::LockMode::Off {
+                    crate::applock::watch(cx);
+                }
                 // The animation setting may have changed while the app was away.
                 motion::follow_system(cx);
                 this.follow_platform_language(window, cx);

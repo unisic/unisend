@@ -249,7 +249,8 @@ mod jni_calls {
 
 static WATCHING: AtomicBool = AtomicBool::new(false);
 
-/// Redraws once the credential has been accepted. One loop at most, it ends at the unlock.
+/// Redraws once the credential has been accepted. One loop at most, it ends at the unlock, or
+/// when the app leaves the foreground: the lock screen and the window's return start it again.
 pub(crate) fn watch<T: 'static>(cx: &mut Context<T>) {
     if WATCHING.swap(true, Ordering::AcqRel) {
         return;
@@ -257,7 +258,7 @@ pub(crate) fn watch<T: 'static>(cx: &mut Context<T>) {
     cx.spawn(async move |this, cx| {
         loop {
             cx.background_executor().timer(POLL).await;
-            if !is_locked() {
+            if !is_locked() || !crate::FOREGROUND.load(Ordering::Relaxed) {
                 break;
             }
         }
