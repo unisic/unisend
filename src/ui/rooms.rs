@@ -701,9 +701,9 @@ impl BeeperApp {
             );
         }
         if let Some(who) = identifier {
-            let title = if new.group { t!("Add {who}", who = who) } else { t!("Chat with {who}", who = who) };
+            let what = if new.group { t!("Add to group") } else { t!("New chat") };
             rows.push(
-                row("identifier".into(), title, String::new(), icon_disc(if new.group { IconName::Plus } else { IconName::MessageCircle }), None)
+                row("identifier".into(), who.clone(), what.to_owned(), icon_disc(if new.group { IconName::Plus } else { IconName::MessageCircle }), None)
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_identifier(who.clone(), cx)))
                     .into_any_element(),
             );
