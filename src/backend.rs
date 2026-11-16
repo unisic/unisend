@@ -334,7 +334,7 @@ pub enum ChatAction {
     Unread(bool),
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoomSummary {
     pub id: OwnedRoomId,
     pub name: String,
@@ -2932,7 +2932,10 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
             announce(&client, &dir, &rooms, &summary, prev.as_ref(), &msgs);
-            changed.push(summary);
+            // Typing, receipts and room account data bring a room here without changing its row.
+            if prev.as_ref() != Some(&summary) {
+                changed.push(summary);
+            }
         }
         for id in resp.rooms.invited.keys() {
             let Some(room) = client.get_room(id) else { continue };
