@@ -3,7 +3,7 @@
     <string name="you">Ty</string>
     <string name="chat">Czat</string>
     <string name="reply">Odpowiedz</string>
-    <string name="mark_read">Oznacz jako przeczytane</string>
+    <string name="mark_read">Przeczytane</string>
     <string name="reply_not_sent">Nie wysłano. Otwórz Unisend i spróbuj ponownie.</string>
     <string name="mute_failed">Nie wyciszono. Otwórz Unisend i spróbuj ponownie.</string>
     <string name="channel_direct">Wiadomości prywatne</string>
