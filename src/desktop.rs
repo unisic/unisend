@@ -69,7 +69,7 @@ fn closing(window: &mut Window, cx: &mut App) {
     let app = main.app.clone();
     // The view's text fields and its own observers were made with this window; the next one takes them.
     window.hand_listeners_on(cx);
-    app.update(cx, |app, _| app.hidden());
+    app.update(cx, |app, cx| app.hidden(cx));
 }
 
 /// Brings the window to front, opening a new one on the kept view when it was closed.

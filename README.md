@@ -39,7 +39,7 @@ bridges bring WhatsApp, Signal, Messenger, Instagram, Telegram and other network
 
 - Photos, videos and files, with a caption; drag and drop or paste on desktop
 - Full-screen picture viewer with zoom; a video player on Android
-- Voice messages: recorded and played in the chat on Android
+- Voice messages: recorded and played in the chat on Android and Linux
 - Emoji picker with search, recents and skin tones; a GIF picker in builds with a KLIPY key
 - Each chat's media, links and files in its info page
 - Sending your location from Android
@@ -114,7 +114,8 @@ crate and binary are still named `beeper-gpui`, and the Android app id is `dev.g
 ### Linux
 
 Needs a stable Rust toolchain and the development packages for xcb, xkbcommon (with x11),
-fontconfig, freetype and wayland. Then:
+fontconfig, freetype, wayland and GStreamer (voice messages; see
+[docs/development.md](docs/development.md)). Then:
 
     cargo build --release
     packaging/linux/install.sh

@@ -1,8 +1,9 @@
 //! Voice messages. On Android, holding the microphone (in the send button's place while the composer
 //! is empty) records; letting go sends, sliding left throws it away, sliding up keeps it recording
 //! without the finger. Voice messages and audio files play inside their bubble, one at a time.
-//! `dev.gpui.beeper.Voice` owns the recorder and the player. Desktop has no microphone button and
-//! opens audio in the system's player, as it has no Ogg Opus decoder.
+//! `dev.gpui.beeper.Voice` owns the recorder and the player. On Linux, `linux.rs` does the same
+//! through GStreamer, and a click on the microphone records at once, as if slid up to keep going.
+//! Windows and macOS have no microphone button and open audio in the system's player.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -12,8 +13,15 @@ use super::*;
 use crate::backend::voice::{BARS, resample};
 use crate::i18n::t;
 
-/// Whether audio plays inside the app.
-const INLINE: bool = cfg!(target_os = "android");
+/// Whether audio plays and records inside the app.
+#[cfg(target_os = "android")]
+fn inline() -> bool {
+    true
+}
+#[cfg(not(target_os = "android"))]
+fn inline() -> bool {
+    native::ready()
+}
 /// How often the level is read while recording, and the position while playing.
 const TICK: Duration = Duration::from_millis(100);
 /// Longest recording; the recorder stops itself here as well (`MAX_MS` in Voice.java).
@@ -116,10 +124,10 @@ fn loudness(amplitude: i32) -> f32 {
 }
 
 impl BeeperApp {
-    /// Whether the send button is a microphone: Android, an open chat that takes voice notes,
-    /// nothing typed, not editing.
+    /// Whether the send button is a microphone: Android or Linux with GStreamer, an open chat that
+    /// takes voice notes, nothing typed, not editing.
     pub(super) fn mic_shown(&self, cx: &App) -> bool {
-        INLINE && self.open.is_some() && self.caps().voice && !matches!(self.compose, Compose::Edit(_)) && self.composer.read(cx).value().is_empty()
+        inline() && self.open.is_some() && self.caps().voice && !matches!(self.compose, Compose::Edit(_)) && self.composer.read(cx).value().is_empty()
     }
 
     /// The composer turned empty or stopped being empty, or blank: the send button changes.
@@ -382,6 +390,37 @@ impl BeeperApp {
         .detach();
     }
 
+    /// Linux: loads GStreamer off the UI thread, and on quit stops what records or plays (an
+    /// unsent recording is deleted) before the process ends.
+    #[cfg(target_os = "linux")]
+    pub(super) fn voice_setup(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            if run(native::init).await == Some(true) {
+                let _ = this.update(cx, |_, cx| cx.notify());
+            }
+        })
+        .detach();
+        cx.on_app_quit(|this, cx| {
+            this.stop_voice(cx);
+            let done = run(|| ());
+            async move {
+                done.await;
+            }
+        })
+        .detach();
+    }
+
+    /// A click on the microphone: a mouse cannot hold and slide, so it records until stopped or sent.
+    pub(super) fn mic_click(&mut self, cx: &mut Context<Self>) {
+        if self.voice.rec.is_some() {
+            return;
+        }
+        self.mic_down(cx);
+        if let Some(rec) = self.voice.rec.as_mut().filter(|r| r.state == RecState::Holding) {
+            rec.state = RecState::Locked;
+        }
+    }
+
     /// The chat closed: nothing records or plays on.
     pub(super) fn stop_voice(&mut self, cx: &mut Context<Self>) {
         self.cancel_recording(cx);
@@ -429,7 +468,7 @@ impl BeeperApp {
     /// A file arrived from the media cache; true when it is one this player handles.
     pub(super) fn voice_fetched(&mut self, id: &str, path: &Path, cx: &mut Context<Self>) -> bool {
         let audio = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()).is_some_and(|m| matches!(m.kind, MediaKind::Voice | MediaKind::Audio));
-        if !INLINE || !audio {
+        if !inline() || !audio {
             return false;
         }
         if self.voice.files.len() >= MAX_FILES {
@@ -451,6 +490,7 @@ impl BeeperApp {
         let speed = SPEEDS[self.voice.speed].0;
         cx.notify();
         cx.spawn(async move |this, cx| {
+            let file = path.clone();
             let length = run(move || native::play(&path, from, speed)).await.flatten();
             let playing = this.update(cx, |this, cx| {
                 let Some(play) = this.voice.play.as_mut().filter(|p| p.epoch == epoch) else { return false };
@@ -459,7 +499,15 @@ impl BeeperApp {
                     None => {
                         let id = this.voice.play.take().map(|p| p.id);
                         this.voice.files.retain(|(f, _)| Some(f) != id.as_ref());
-                        this.error = Some(t!("Could not play this audio").into());
+                        let media = this.msgs.iter().find(|m| Some(&m.id) == id.as_ref()).and_then(|m| m.media.as_ref());
+                        match media {
+                            // GStreamer may lack this file's decoder; the system's player may have one.
+                            Some(media) if cfg!(not(target_os = "android")) => {
+                                let mime = media.mime.clone();
+                                crate::open_file(cx, &file, mime.as_deref());
+                            }
+                            _ => this.error = Some(t!("Could not play this audio").into()),
+                        }
                     }
                 }
                 cx.notify();
@@ -530,14 +578,14 @@ impl BeeperApp {
         let (id, owned) = (m.id.clone(), media.clone());
         let button = cx.listener(move |this, _: &ClickEvent, _, cx| {
             cx.stop_propagation();
-            if INLINE {
+            if inline() {
                 this.toggle_play(&id, Some(&owned), cx);
             } else {
                 this.open_media(id.clone(), owned.clone(), cx);
             }
         });
-        // Desktop hands the file to the system's player, from anywhere on the row as before.
-        let (on_button, on_row) = if INLINE { (Some(button), None) } else { (None, Some(button)) };
+        // Without the player in the app, the file goes to the system's player, from anywhere on the row.
+        let (on_button, on_row) = if inline() { (Some(button), None) } else { (None, Some(button)) };
         let detail = if self.fetching.contains(&m.id) { Some(t!("Downloading…").to_owned()) } else { None };
         h_flex()
             .id(SharedString::from(format!("{}-voice", m.id)))
@@ -558,7 +606,7 @@ impl BeeperApp {
                             .text_size(fs(12.))
                             .font_features(tabular())
                             .child(div().opacity(0.7).child(detail.unwrap_or(time)))
-                            .when(INLINE && play.is_some(), |el| el.child(self.speed_chip(&m.id, p, cx))),
+                            .when(inline() && play.is_some(), |el| el.child(self.speed_chip(&m.id, p, cx))),
                     ),
             )
             .into_any_element()
@@ -583,7 +631,7 @@ impl BeeperApp {
 
     /// The waveform, with a tap to seek and, while its audio is loaded, a drag to scrub.
     fn seekable(&self, m: &Msg, media: &Media, wave: Div, cx: &mut Context<Self>) -> Div {
-        if !INLINE {
+        if !inline() {
             return wave;
         }
         let weak = cx.entity().downgrade();
@@ -857,7 +905,9 @@ fn post(job: impl FnOnce() + Send + 'static) {
     static WORKER: OnceLock<Option<SyncSender<Job>>> = OnceLock::new();
     let worker = WORKER.get_or_init(|| {
         let (tx, rx) = sync_channel::<Job>(16);
-        let spawned = std::thread::Builder::new().name("voice".into()).stack_size(256 * 1024).spawn(move || rx.into_iter().for_each(|job| job()));
+        // GStreamer loads its plugins on the calling thread.
+        let stack = if cfg!(target_os = "linux") { 1024 * 1024 } else { 256 * 1024 };
+        let spawned = std::thread::Builder::new().name("voice".into()).stack_size(stack).spawn(move || rx.into_iter().for_each(|job| job()));
         spawned.map_err(|e| log::warn!("voice thread: {e}")).ok().map(|_| tx)
     });
     if let Some(worker) = worker {
@@ -974,12 +1024,20 @@ mod native {
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as native;
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
 mod native {
-    //! Desktop records and plays nothing; these keep the shared code compiling.
+    //! Windows and macOS record and play nothing; these keep the shared code compiling.
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    pub fn ready() -> bool {
+        false
+    }
     pub fn access() -> bool {
         false
     }
