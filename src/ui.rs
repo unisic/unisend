@@ -73,7 +73,7 @@ use panels::Panel;
 use receipt::{Mark, Receipt};
 
 use crate::{Keyboard, Palette};
-use crate::bridges::{Flow, Network, Step};
+use crate::bridges::{Flow, Guild, Network, Step};
 use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, OwnRead, Pending, Quote, QuoteState, RoomSummary};
 
 const NARROW: f32 = 720.;
@@ -220,6 +220,14 @@ pub struct BeeperApp {
     panel: Option<Panel>,
     /// `None` until loaded.
     networks: Option<Vec<Network>>,
+    /// The login whose details are shown, as (bridge, login ID).
+    account: Option<(String, String)>,
+    /// Logins that need signing in again, as (bridge, login name), for the chat list's notice.
+    attention: Vec<(String, String)>,
+    /// The Discord servers of the account shown, by its login ID.
+    guilds: Option<(String, Vec<Guild>)>,
+    /// The login being signed in again, in place of adding one.
+    relogin: Option<String>,
     /// Ways to sign in to the chosen bridge, when it offers more than one.
     flows: Option<(String, Vec<Flow>)>,
     step: Option<Step>,
@@ -533,6 +541,10 @@ impl BeeperApp {
             unencrypted: false,
             panel: None,
             networks: None,
+            account: None,
+            attention: Vec::new(),
+            guilds: None,
+            relogin: None,
             flows: None,
             step: None,
             fields: Vec::new(),
@@ -659,6 +671,7 @@ impl BeeperApp {
                     self.unencrypted = false;
                 }
                 (self.panel, self.networks, self.user) = (None, None, None);
+                self.attention.clear();
                 self.rooms.clear();
                 self.refilter(cx);
                 self.close_room(cx);
@@ -670,7 +683,7 @@ impl BeeperApp {
                 self.busy = false;
                 self.error = None;
             }
-            ev @ (Ev::Networks(_) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
+            ev @ (Ev::Networks(_) | Ev::Attention(_) | Ev::Guilds(..) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
             Ev::Ready { user, beeper, seal } => {
                 self.beeper = beeper;
                 self.sync_stopped = false;
@@ -1538,7 +1551,7 @@ impl BeeperApp {
     fn render_login(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let on_code = self.screen == Screen::Code;
         let (title, hint, input, label) = if on_code {
-            (t!("Check your email"), t!("Enter the code Beeper sent you."), &self.code, t!("Sign in"))
+            (t!("Check your email"), t!("Enter the code from the email."), &self.code, t!("Sign in"))
         } else {
             (t!("Sign in to Beeper"), t!("We will email you a sign-in code."), &self.email, t!("Send code"))
         };
@@ -1617,6 +1630,7 @@ impl BeeperApp {
         }
         match tab {
             Tab::Chats | Tab::Archive => {
+                self.cancel_login(cx);
                 self.panel = None;
                 self.only_unread = false;
                 self.set_view(if tab == Tab::Archive { View::Archive } else { View::Inbox }, cx);
@@ -2039,6 +2053,7 @@ impl BeeperApp {
             })
             .children(banners)
             .when(self.sync_stopped, |el| el.child(self.render_sync_stopped(cx)))
+            .children((!archive && !self.searching).then(|| self.render_attention(cx)).flatten())
             .child(self.list_touch(cx))
             .child(div().flex_1().min_h_0().child(if state == RoomsView::Skeleton {
                 skeleton(p).into_any_element()
@@ -4085,7 +4100,7 @@ impl BeeperApp {
                 let mut banners = in_column.then(|| self.render_banners(window, cx).into_any_element());
                 let panel = self.panel.map(|panel| self.render_panel(panel, narrow, banners.take(), window, cx));
                 let body = if narrow {
-                    let deep_panel = matches!(self.panel, Some(Panel::Add | Panel::Login | Panel::NewChat));
+                    let deep_panel = matches!(self.panel, Some(Panel::Add | Panel::Account | Panel::Login | Panel::NewChat));
                     match self.panel {
                         Some(base @ (Panel::Settings | Panel::Networks)) => self.slide.base = Some(base),
                         None => self.slide.base = None,

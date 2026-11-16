@@ -80,6 +80,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         verify: verify::Verifier::default(),
         info: None,
         peer: None,
+        login: None,
         replaceable: false,
         update: None,
     };

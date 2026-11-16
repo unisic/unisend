@@ -21,15 +21,28 @@ pub(super) struct People {
     new: Option<NewChat>,
 }
 
-/// A chat the user asked to leave; drawn once the backend says whether its bridge can delete it.
-struct Confirm {
-    room: OwnedRoomId,
-    name: String,
-    network: Option<String>,
-    dm: bool,
-    delete: Option<bool>,
-    /// Block the person behind an invitation or a message request, then leave.
-    block: bool,
+/// What a dialog asks the user to confirm.
+pub(super) struct Confirm {
+    pub(super) name: String,
+    pub(super) network: Option<String>,
+    pub(super) what: Confirming,
+}
+
+pub(super) enum Confirming {
+    /// A chat the user asked to leave; drawn once the backend says whether its bridge can delete it.
+    /// `block`: block the person behind an invitation or a message request, then leave.
+    Leave { room: OwnedRoomId, dm: bool, delete: Option<bool>, block: bool },
+    /// Signing an account out of a network; `name` is the account's.
+    SignOut { bridge: String, login: String },
+    /// Turning a Discord server off; `name` is the server's.
+    StopGuild { bridge: String, login: String, guild: String },
+}
+
+impl Confirm {
+    /// A leave waits to know whether the bridge can delete the chat.
+    fn ready(&self) -> bool {
+        !matches!(self.what, Confirming::Leave { delete: None, .. })
+    }
 }
 
 pub(super) struct NewChat {
@@ -107,17 +120,34 @@ fn looks_like_identifier(q: &str, target: &Target, caps: &Caps) -> bool {
     (caps.phone && phone) || (caps.email && q.contains('@') && !q.contains(' ')) || (caps.username && !q.contains(char::is_whitespace))
 }
 
-/// What the leave dialog says and its button, in whole sentences.
+/// What the dialog says and its button, in whole sentences.
 fn wording(c: &Confirm) -> (String, String, &'static str) {
     let network = c.network.as_deref().unwrap_or(t!("the network"));
-    if c.block {
+    let (delete, dm, block) = match &c.what {
+        Confirming::Leave { delete, dm, block, .. } => (*delete, *dm, *block),
+        Confirming::StopGuild { .. } => {
+            return (
+                t!("Turn off {name}?", name = c.name),
+                t!("Its channels are removed from your chats in every Beeper app. Turning it on again brings them back.").to_owned(),
+                t!("Turn off"),
+            );
+        }
+        Confirming::SignOut { .. } => {
+            return (
+                t!("Sign out of {network}?", network = network),
+                t!("{name} is signed out of {network} in every Beeper app. Its chats stop updating and may disappear from the list. To bring them back, you sign in and pair again.", name = c.name, network = network),
+                t!("Sign out"),
+            );
+        }
+    };
+    if block {
         let body = match &c.network {
             Some(network) => t!("{network} blocks them for you and the request is deleted. They are not told.", network = network),
             None => t!("You won't see anything from them in Unisend again, and the invitation is declined. They are not told.").to_owned(),
         };
         return (t!("Block {name}?", name = c.name), body, t!("Block"));
     }
-    match (c.network.is_some(), c.delete == Some(true), c.dm) {
+    match (c.network.is_some(), delete == Some(true), dm) {
         (true, true, true) => (
             t!("Delete {name}?", name = c.name),
             t!("The chat is deleted from Unisend and from your {network} account. The other person keeps their copy.", network = network),
@@ -163,10 +193,9 @@ impl BeeperApp {
 
     pub(super) fn ask_leave(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
         let Some(r) = self.rooms.iter().find(|r| r.id == room) else { return };
-        let mut confirm = Confirm { room: room.clone(), name: r.name.clone(), network: r.network.clone(), dm: r.dm, delete: None, block: false };
-        if confirm.network.is_none() {
-            confirm.delete = Some(false);
-        } else if !self.send(Cmd::People(Ask::LeaveOptions(room)), cx) {
+        let local = r.network.is_none();
+        let confirm = Confirm { name: r.name.clone(), network: r.network.clone(), what: Confirming::Leave { room: room.clone(), dm: r.dm, delete: local.then_some(false), block: false } };
+        if !local && !self.send(Cmd::People(Ask::LeaveOptions(room)), cx) {
             return;
         }
         self.people.confirm = Some(confirm);
@@ -180,20 +209,20 @@ impl BeeperApp {
             Some(Pending::Invite { name, .. }) if !name.is_empty() => name.clone(),
             _ => r.name.clone(),
         };
-        self.people.confirm = Some(Confirm { room, name, network: r.network.clone(), dm: r.dm, delete: Some(false), block: true });
+        self.people.confirm = Some(Confirm { name, network: r.network.clone(), what: Confirming::Leave { room, dm: r.dm, delete: Some(false), block: true } });
         cx.notify();
     }
 
     /// Turns an invitation down at once: nothing is lost that cannot come back with a new one.
     pub(super) fn decline(&mut self, room: OwnedRoomId, cx: &mut Context<Self>) {
         let Some(r) = self.rooms.iter().find(|r| r.id == room) else { return };
-        self.people.confirm = Some(Confirm { room, name: r.name.clone(), network: None, dm: r.dm, delete: Some(false), block: false });
-        self.leave(cx);
+        self.people.confirm = Some(Confirm { name: r.name.clone(), network: None, what: Confirming::Leave { room, dm: r.dm, delete: Some(false), block: false } });
+        self.confirmed(cx);
     }
 
     /// The leave or delete dialog is asking about this chat, or waiting to.
     pub(super) fn confirming(&self, room: &OwnedRoomId) -> bool {
-        self.people.confirm.as_ref().is_some_and(|c| c.room == *room)
+        self.people.confirm.as_ref().is_some_and(|c| matches!(&c.what, Confirming::Leave { room: r, .. } if r == room))
     }
 
     /// Escape closes the dialog first.
@@ -205,27 +234,52 @@ impl BeeperApp {
         open
     }
 
-    fn leave(&mut self, cx: &mut Context<Self>) {
+    /// Asks before a Discord server is turned off: its chats go with it.
+    pub(super) fn ask_stop_guild(&mut self, bridge: String, login: String, guild: String, name: String, cx: &mut Context<Self>) {
+        self.people.confirm = Some(Confirm { name, network: Some("Discord".into()), what: Confirming::StopGuild { bridge, login, guild } });
+        cx.notify();
+    }
+
+    /// Asks before an account is signed out of a network.
+    pub(super) fn ask_sign_out(&mut self, bridge: String, login: String, name: String, network: String, cx: &mut Context<Self>) {
+        self.people.confirm = Some(Confirm { name, network: Some(network), what: Confirming::SignOut { bridge, login } });
+        cx.notify();
+    }
+
+    fn confirmed(&mut self, cx: &mut Context<Self>) {
         let Some(c) = self.people.confirm.take() else { return };
-        let delete = c.delete == Some(true);
-        let ask = if c.block { Ask::Block(c.room.clone()) } else { Ask::Leave { room: c.room.clone(), delete } };
+        let (room, delete, block) = match c.what {
+            Confirming::Leave { room, delete, block, .. } => (room, delete == Some(true), block),
+            Confirming::StopGuild { bridge, login, guild } => {
+                self.set_guild(bridge, login, guild, false, cx);
+                return;
+            }
+            Confirming::SignOut { bridge, login } => {
+                self.working = self.send(Cmd::Logout { bridge, login }, cx);
+                self.account = None;
+                self.panel = Some(Panel::Networks);
+                cx.notify();
+                return;
+            }
+        };
+        let ask = if block { Ask::Block(room.clone()) } else { Ask::Leave { room: room.clone(), delete } };
         if !self.send(Cmd::People(ask), cx) {
             return;
         }
         // It leaves the list at once; the backend puts it back if leaving fails.
-        self.rooms.retain(|r| r.id != c.room);
+        self.rooms.retain(|r| r.id != room);
         self.refilter(cx);
-        if self.open.as_ref() == Some(&c.room) {
+        if self.open.as_ref() == Some(&room) {
             self.close_room(cx);
         }
     }
 
     pub(super) fn render_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.people.confirm.as_ref().is_some_and(|c| c.delete.is_some());
+        let live = self.people.confirm.as_ref().is_some_and(Confirm::ready);
         let shown = Presence::new("leave-dialog", live).transition(if live { motion::enter() } else { motion::exit() }).sample(window, cx);
         // The words outlive the confirmation so the dialog can fade out showing what it asked.
         let last = window.use_keyed_state("leave-dialog-last", cx, |_, _| None::<(String, String, &'static str)>);
-        if let Some(c) = self.people.confirm.as_ref().filter(|c| c.delete.is_some()) {
+        if let Some(c) = self.people.confirm.as_ref().filter(|c| c.ready()) {
             let words = wording(c);
             if last.read(cx).as_ref() != Some(&words) {
                 last.update(cx, |l, _| *l = Some(words));
@@ -278,7 +332,7 @@ impl BeeperApp {
                             this.close_confirm(cx);
                         }))
                     }))
-                    .child(button("leave-confirm", act, p.negative, gpui_kit::white()).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.leave(cx))))),
+                    .child(button("leave-confirm", act, p.negative, gpui_kit::white()).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.confirmed(cx))))),
             )
             .opacity(v)
             .top(px(8. * (1. - v)));
@@ -467,8 +521,10 @@ impl BeeperApp {
     pub(super) fn on_people(&mut self, answer: Answer, cx: &mut Context<Self>) {
         match answer {
             Answer::LeaveOptions { room, delete } => {
-                if let Some(c) = self.people.confirm.as_mut().filter(|c| c.room == room) {
-                    c.delete = Some(delete);
+                if let Some(Confirm { what: Confirming::Leave { room: asked, delete: answer, .. }, .. }) = self.people.confirm.as_mut()
+                    && *asked == room
+                {
+                    *answer = Some(delete);
                 }
             }
             Answer::Caps(target, caps) => {
@@ -723,7 +779,7 @@ fn ready_to_create(new: &NewChat, group: &crate::backend::rooms::GroupCaps, cx: 
 
 #[cfg(test)]
 mod tests {
-    use super::{Confirm, looks_like_identifier, wording};
+    use super::{Confirm, Confirming, looks_like_identifier, wording};
     use crate::backend::rooms::{Caps, Target};
 
     #[test]
@@ -741,20 +797,29 @@ mod tests {
 
     #[test]
     fn the_dialog_promises_a_remote_delete_only_when_the_bridge_offers_one() {
-        let mut c = Confirm { room: "!a:b".try_into().unwrap(), name: "Ann".into(), network: Some("WhatsApp".into()), dm: true, delete: Some(true), block: false };
+        let leave = |delete, block| Confirming::Leave { room: "!a:b".try_into().unwrap(), dm: true, delete: Some(delete), block };
+        let mut c = Confirm { name: "Ann".into(), network: Some("WhatsApp".into()), what: leave(true, false) };
         assert_eq!(wording(&c).2, "Delete");
         assert!(wording(&c).1.contains("your WhatsApp account"));
-        c.delete = Some(false);
+        c.what = leave(false, false);
         let (title, body, act) = wording(&c);
         assert_eq!((title.as_str(), act), ("Leave Ann?", "Leave"));
         assert!(body.contains("cannot delete it"));
         c.network = None;
         assert!(!wording(&c).1.contains("WhatsApp"));
-        c.block = true;
+        c.what = leave(false, true);
         let (title, body, act) = wording(&c);
         assert_eq!((title.as_str(), act), ("Block Ann?", "Block"));
         assert!(body.contains("invitation is declined"));
         c.network = Some("Instagram".into());
         assert!(wording(&c).1.starts_with("Instagram blocks them"));
+    }
+
+    #[test]
+    fn signing_out_of_a_network_says_what_is_lost() {
+        let c = Confirm { name: "+48 600".into(), network: Some("WhatsApp".into()), what: Confirming::SignOut { bridge: "whatsapp".into(), login: "1".into() } };
+        let (title, body, act) = wording(&c);
+        assert_eq!((title.as_str(), act), ("Sign out of WhatsApp?", "Sign out"));
+        assert!(body.contains("pair again"));
     }
 }

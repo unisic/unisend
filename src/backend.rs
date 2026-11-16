@@ -68,7 +68,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::beeper;
-use crate::bridges::{self, Flow, Network, Step};
+use crate::bridges::{self, Flow, Guild, Network, Step};
 use crate::i18n::{n_, t, tr_in};
 
 const CHANNEL_CAP: usize = 64;
@@ -133,10 +133,17 @@ pub enum Cmd {
     Networks,
     /// Ways to log in to a bridge; starts the bridge when the account does not run it yet.
     Flows(String),
-    LoginStart { bridge: String, flow: String },
+    /// `relogin`: the login signed in again, in place of a new one.
+    LoginStart { bridge: String, flow: String, relogin: Option<String> },
     /// Answers a login step; the values are empty for a step that only waits.
     LoginSubmit(Step, HashMap<String, String>),
+    /// The user left a login before it completed: the bridge stops waiting for it.
+    LoginCancel(Step),
     Logout { bridge: String, login: String },
+    /// A Discord login's servers.
+    Guilds { bridge: String, login: String },
+    /// Starts or stops bringing in a Discord server, then lists the servers again.
+    BridgeGuild { bridge: String, login: String, guild: String, on: bool },
     /// Read receipts stay private while on.
     Incognito(bool),
     SignOut,
@@ -260,7 +267,11 @@ pub enum Ev {
     /// An attachment is in the send queue, or failed before it.
     Attached,
     Networks(Vec<Network>),
+    /// Logins that need signing in again, as (bridge, login name); checked now and then.
+    Attention(Vec<(String, String)>),
     Flows(String, Vec<Flow>),
+    /// A login's Discord servers, by login ID.
+    Guilds(String, Vec<Guild>),
     LoginStep(Step),
     /// A request made for the settings pages failed; `Error` carries the reason.
     PanelFailed,
@@ -834,6 +845,8 @@ struct State {
     info: Option<AbortOnDrop>,
     /// Looks up the person behind a chat's sheet; a newer sheet replaces it.
     peer: Option<AbortOnDrop>,
+    /// The network login's request in flight; leaving the login cancels it.
+    login: Option<AbortOnDrop>,
     /// The account on disk cannot be opened here (key gone, session unreadable), so a sign-in may
     /// replace it; otherwise a sign-in never deletes a session that may still open.
     replaceable: bool,
@@ -859,7 +872,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     let _ = std::fs::remove_file(dir.join("klipy-id"));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
-        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, replaceable: false, update: None };
+        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, replaceable: false, update: None };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
     #[cfg(not(target_os = "android"))]
     tokio::spawn(crate::notify::serve(st.dir.clone()));
@@ -1101,6 +1114,10 @@ impl State {
         search::start(&self.dir, &client, &self.seal);
         let user = client.user_id().map(ToOwned::to_owned);
         self.client = Some(client);
+        // Tests sign in to a local server as if it were Beeper's; its token stays off Beeper's API.
+        if let Some(api) = self.api().ok().filter(|_| !cfg!(test)) {
+            self.tasks.push(tokio::spawn(watch_networks(api, self.ev.clone())));
+        }
         if let Some(user) = user {
             self.emit(Ev::Ready { user, beeper: self.beeper, seal: self.seal.clone() }).await;
         }
@@ -1480,13 +1497,23 @@ impl State {
                     panel(&ev, api.flows(&bridge).await.map(|flows| Ev::Flows(bridge, flows))).await;
                 });
             }
-            Cmd::LoginStart { bridge, flow } => {
+            Cmd::LoginStart { bridge, flow, relogin } => {
                 let (api, ev) = (self.api()?, self.ev.clone());
-                tokio::spawn(async move { panel(&ev, api.start(&bridge, &flow).await.map(Ev::LoginStep)).await });
+                self.login = Some(AbortOnDrop(tokio::spawn(async move { panel(&ev, api.start(&bridge, &flow, relogin.as_deref()).await.map(Ev::LoginStep)).await })));
             }
             Cmd::LoginSubmit(step, values) => {
                 let (api, ev) = (self.api()?, self.ev.clone());
-                tokio::spawn(async move { panel(&ev, api.submit(&step, &values).await.map(Ev::LoginStep)).await });
+                self.login = Some(AbortOnDrop(tokio::spawn(async move { panel(&ev, api.submit(&step, &values).await.map(Ev::LoginStep)).await })));
+            }
+            Cmd::LoginCancel(step) => {
+                self.login = None;
+                let api = self.api()?;
+                tokio::spawn(async move {
+                    // Unknown to the bridge by now (finished, timed out) is as good as cancelled.
+                    if let Err(e) = api.cancel(&step.bridge, &step.login_id).await {
+                        log::debug!("login cancel: {e:#}");
+                    }
+                });
             }
             Cmd::Logout { bridge, login } => {
                 let (api, ev) = (self.api()?, self.ev.clone());
@@ -1506,6 +1533,20 @@ impl State {
                     self.tasks.pop();
                     self.tasks.push(task);
                 }
+            }
+            Cmd::Guilds { bridge, login } => {
+                let (api, ev) = (self.api()?, self.ev.clone());
+                tokio::spawn(async move { panel(&ev, api.guilds(&bridge, &login).await.map(|g| Ev::Guilds(login, g))).await });
+            }
+            Cmd::BridgeGuild { bridge, login, guild, on } => {
+                let (api, ev) = (self.api()?, self.ev.clone());
+                tokio::spawn(async move {
+                    let done = async {
+                        api.bridge_guild(&bridge, &login, &guild, on).await?;
+                        api.guilds(&bridge, &login).await
+                    };
+                    panel(&ev, done.await.map(|g| Ev::Guilds(login, g))).await;
+                });
             }
             Cmd::SignOut => {
                 // Waited for, so the sync loop cannot write the chat list after the wipe below.
@@ -2395,6 +2436,24 @@ struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// How often Beeper is asked whether a network's login broke: one GET of its account API.
+const NETWORK_CHECK: Duration = Duration::from_secs(15 * 60);
+
+/// Notices a login that broke while Unisend runs, so the chat list can say so; the first check is at once.
+async fn watch_networks(api: bridges::Api, ev: mpsc::Sender<Ev>) {
+    loop {
+        match api.attention().await {
+            Ok(logins) => {
+                if ev.send(Ev::Attention(logins)).await.is_err() {
+                    return;
+                }
+            }
+            Err(e) => log::debug!("network check: {e:#}"),
+        }
+        tokio::time::sleep(NETWORK_CHECK).await;
     }
 }
 

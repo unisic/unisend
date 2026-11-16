@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Message;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
@@ -11,14 +13,20 @@ import android.webkit.WebSettings;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.json.JSONTokener;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 /**
  * A browser for signing in to a chat network. It closes once the address matches the pattern the
- * bridge gave and the cookies the bridge needs exist, and hands back the site's cookies, which is
- * what the bridge logs in with. The pattern alone is not enough: Messenger's also matches its own
+ * bridge gave and every value the bridge needs exists, and hands back the site's cookies, the
+ * local storage keys asked for, and what the bridge's own script found, which is what the bridge
+ * logs in with. The pattern alone is not enough: Messenger's also matches its own
  * sign-in and captcha pages. {@link #run} is called from Rust over JNI and blocks until then, or
  * until the user closes the page.
  */
@@ -29,21 +37,37 @@ public final class WebLogin extends Activity {
     private static String userAgent;
     private static Pattern done;
     private static String[] domains;
-    /** "name@domain" for each cookie the bridge cannot do without. */
+    /**
+     * One entry per field the bridge cannot do without, its sources tab-separated:
+     * "c:name@domain" a cookie, "s:key" local storage, "f:id" the script's result.
+     */
     private static String[] required;
+    private static String[] storage;
+    /** The bridge's script; it resolves to an object keyed by field ID. */
+    private static String script;
+    /** Local storage values and the script's result, by key. */
+    private static final Map<String, String> found = new ConcurrentHashMap<>();
+    /** How often the page is asked for local storage and the script's result. */
+    private static final long PROBE_MS = 500;
 
     private WebView web;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable probe = this::probe;
 
-    /** Returns "name=value; ..." for the given domains, or null when there are no cookies. */
+    /** Returns a JSON object of what was found, or null when nothing was. */
     public static String run(
-            Activity activity, String url, String agent, String pattern, String domainList, String requiredList) {
+            Activity activity, String url, String agent, String pattern, String domainList, String requiredList,
+            String storageList, String extractJs) {
         CountDownLatch wait = new CountDownLatch(1);
         latch = wait;
         result = null;
         startUrl = url;
         userAgent = agent;
         domains = domainList.isEmpty() ? new String[0] : domainList.split(",");
-        required = requiredList.isEmpty() ? new String[0] : requiredList.split(",");
+        required = requiredList.isEmpty() ? new String[0] : requiredList.split("\n");
+        storage = storageList.isEmpty() ? new String[0] : storageList.split("\n");
+        script = extractJs;
+        found.clear();
         try {
             done = pattern.isEmpty() ? null : Pattern.compile(pattern);
         } catch (PatternSyntaxException e) {
@@ -110,6 +134,7 @@ public final class WebLogin extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
+                start(view);
                 check(url);
             }
 
@@ -120,25 +145,102 @@ public final class WebLogin extends Activity {
         });
         setContentView(web);
         web.loadUrl(startUrl);
+        if (storage.length > 0 || !script.isEmpty()) {
+            handler.postDelayed(probe, PROBE_MS);
+        }
+    }
+
+    /** Runs the bridge's script once per page; its result is read back by {@link #probe}. */
+    private static void start(WebView view) {
+        if (script.isEmpty()) {
+            return;
+        }
+        view.evaluateJavascript(
+                "(function(){if(window.__unisendLogin!==undefined)return;window.__unisendLogin=null;"
+                        + "Promise.resolve(" + script + ").then(function(r){window.__unisendLogin=JSON.stringify(r||{});},function(){});})()",
+                null);
+    }
+
+    /** Reads local storage and the script's result, then checks whether the sign-in is done. */
+    private void probe() {
+        if (web == null) {
+            return;
+        }
+        StringBuilder js = new StringBuilder("JSON.stringify({\"\":window.__unisendLogin||null");
+        for (String key : storage) {
+            js.append(',').append(JSONObject.quote("s:" + key)).append(":localStorage.getItem(").append(JSONObject.quote(key)).append(')');
+        }
+        web.evaluateJavascript(js.append("})").toString(), value -> {
+            take(value);
+            if (web != null) {
+                check(web.getUrl());
+                handler.postDelayed(probe, PROBE_MS);
+            }
+        });
+    }
+
+    /** `value` is the JSON text of a JSON string, as evaluateJavascript gives it. */
+    private static void take(String value) {
+        try {
+            Object text = new JSONTokener(value).nextValue();
+            if (!(text instanceof String)) {
+                return;
+            }
+            JSONObject all = new JSONObject((String) text);
+            for (java.util.Iterator<String> keys = all.keys(); keys.hasNext(); ) {
+                String key = keys.next();
+                String v = all.optString(key, "");
+                if (key.isEmpty()) {
+                    Object result = all.opt("");
+                    if (result instanceof String) {
+                        JSONObject fields = new JSONObject((String) result);
+                        for (java.util.Iterator<String> ids = fields.keys(); ids.hasNext(); ) {
+                            String id = ids.next();
+                            String f = fields.optString(id, "");
+                            if (!f.isEmpty() && !"null".equals(f)) {
+                                found.put("f:" + id, f);
+                            }
+                        }
+                    }
+                } else if (!v.isEmpty() && !"null".equals(v) && !all.isNull(key)) {
+                    found.put(key, v);
+                }
+            }
+        } catch (JSONException e) {
+            // A page that has not got there yet, or a result that is not an object.
+        }
     }
 
     private void check(String url) {
         boolean arrived = done == null || (url != null && done.matcher(url).find());
-        if (arrived && required.length > 0 && hasRequiredCookies()) {
+        if (arrived && required.length > 0 && hasRequired()) {
             finish();
         }
     }
 
-    private static boolean hasRequiredCookies() {
-        for (String cookie : required) {
-            int at = cookie.indexOf('@');
-            String name = at < 0 ? cookie : cookie.substring(0, at);
-            String jar = at < 0 ? "" : cookies(cookie.substring(at + 1));
-            if (!("; " + jar).contains("; " + name + "=")) {
+    /** Every required field has a value from one of its sources. */
+    private static boolean hasRequired() {
+        for (String field : required) {
+            boolean any = false;
+            for (String source : field.split("\t")) {
+                any |= has(source);
+            }
+            if (!any) {
                 return false;
             }
         }
         return true;
+    }
+
+    private static boolean has(String source) {
+        if (source.startsWith("c:")) {
+            String cookie = source.substring(2);
+            int at = cookie.indexOf('@');
+            String name = at < 0 ? cookie : cookie.substring(0, at);
+            String jar = at < 0 ? "" : cookies(cookie.substring(at + 1));
+            return ("; " + jar).contains("; " + name + "=");
+        }
+        return found.containsKey(source);
     }
 
     /** The domain's cookies as "name=value; ...", whether set for the bare domain or for www. */
@@ -168,17 +270,26 @@ public final class WebLogin extends Activity {
 
     @Override
     protected void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
         CookieManager.getInstance().flush();
-        StringBuilder all = new StringBuilder();
-        for (String domain : domains) {
-            String jar = cookies(domain);
-            if (!jar.isEmpty()) {
-                if (all.length() > 0) {
-                    all.append("; ");
+        JSONObject all = new JSONObject();
+        try {
+            for (String domain : domains) {
+                for (String pair : cookies(domain).split("; ")) {
+                    int eq = pair.indexOf('=');
+                    if (eq > 0) {
+                        all.put(pair.substring(0, eq), pair.substring(eq + 1));
+                    }
                 }
-                all.append(jar);
             }
+            // Local storage by its key, the script's result by field ID.
+            for (Map.Entry<String, String> e : found.entrySet()) {
+                all.put(e.getKey().substring(2), e.getValue());
+            }
+        } catch (JSONException e) {
+            // put() only throws for a null key or a non-finite number.
         }
+        found.clear();
         result = all.length() > 0 ? all.toString() : null;
         // The bridge has its cookies now: leave no signed-in session of that network in the app.
         if (web != null) {
