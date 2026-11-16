@@ -6,10 +6,11 @@ use std::collections::HashMap;
 use matrix_sdk::{
     EncryptionState, Room, RoomMemberships,
     room::RoomMemberRole,
-    ruma::{OwnedRoomId, OwnedUserId, UserId},
+    ruma::{OwnedRoomId, OwnedUserId, UserId, events::room::power_levels::RoomPowerLevels},
 };
 use tokio::sync::mpsc;
 
+use super::group::{self, Can};
 use super::{Block, Ev, Msg, link_preview, messages, other_person, to_msgs};
 
 /// Events read back through the history at most, and messages worth listing kept at most: the
@@ -36,6 +37,8 @@ pub struct Member {
     pub id: OwnedUserId,
     pub name: String,
     pub role: Role,
+    /// The user may remove them from the group.
+    pub removable: bool,
 }
 
 #[derive(Clone, Default)]
@@ -52,6 +55,9 @@ pub struct Details {
     pub members: Vec<Member>,
     pub joined: u64,
     pub members_loaded: bool,
+    pub can: Can,
+    /// The room's bridge as `(bridge, login)`, for starting a chat with a member through it.
+    pub bridge: Option<(String, String)>,
 }
 
 /// Tells the UI the chat's details, then what its history holds, page by page. Runs until the
@@ -73,10 +79,12 @@ pub(super) async fn run(room: Room, ev: mpsc::Sender<Ev>) {
         details.encrypted = room.latest_encryption_state().await.ok().and_then(encrypted);
     }
     if let Some(peer) = &peer {
-        details.identifiers = peer_identifiers(&room, peer).await;
+        details.identifiers = identifiers_of(&room, peer).await;
     } else {
-        details.members = members(&room).await;
-        details.members_loaded = true;
+        let (can, levels) = group::can(&room).await;
+        details.members = members(&room, levels.as_ref()).await;
+        (details.can, details.members_loaded) = (can, true);
+        details.bridge = group::bridge(&room).await;
     }
     if ev.send(Ev::Info(id.clone(), Box::new(details))).await.is_err() {
         return;
@@ -91,7 +99,7 @@ fn encrypted(state: EncryptionState) -> Option<bool> {
     }
 }
 
-async fn peer_identifiers(room: &Room, peer: &UserId) -> Vec<String> {
+pub(super) async fn identifiers_of(room: &Room, peer: &UserId) -> Vec<String> {
     match room.client().account().fetch_user_profile_of(peer).await {
         Ok(profile) => {
             let mut ids = identifiers(profile.get("com.beeper.bridge.identifiers"));
@@ -108,7 +116,7 @@ async fn peer_identifiers(room: &Room, peer: &UserId) -> Vec<String> {
 /// How the other person in a one-to-one chat is known on its network; empty in a group.
 pub(super) async fn peer(room: Room, ev: mpsc::Sender<Ev>) {
     let Some(peer) = other_person(&room).await else { return };
-    let ids = peer_identifiers(&room, &peer).await;
+    let ids = identifiers_of(&room, &peer).await;
     let _ = ev.send(Ev::PeerIds(room.room_id().to_owned(), ids)).await;
 }
 
@@ -160,7 +168,7 @@ fn identifiers(value: Option<&serde_json::Value>) -> Vec<String> {
 }
 
 /// Joined members with their roles. Fetches the list when lazy loading left it incomplete.
-async fn members(room: &Room) -> Vec<Member> {
+async fn members(room: &Room, levels: Option<&RoomPowerLevels>) -> Vec<Member> {
     let list = match room.members(RoomMemberships::JOIN).await {
         Ok(list) => list,
         Err(e) => {
@@ -174,6 +182,7 @@ async fn members(room: &Room) -> Vec<Member> {
         .map(|m| Member {
             id: m.user_id().to_owned(),
             name: m.name().to_owned(),
+            removable: levels.is_some_and(|l| m.user_id() != room.own_user_id() && l.user_can_kick_user(room.own_user_id(), m.user_id())),
             role: match m.suggested_role_for_power_level() {
                 _ if service.contains(m.user_id()) => Role::Service,
                 RoomMemberRole::Creator => Role::Creator,
@@ -284,7 +293,7 @@ mod tests {
 
     #[test]
     fn members_sort_by_role_then_name() {
-        let m = |name: &str, role| Member { id: format!("@{}:x", name.to_lowercase()).try_into().unwrap(), name: name.into(), role };
+        let m = |name: &str, role| Member { id: format!("@{}:x", name.to_lowercase()).try_into().unwrap(), name: name.into(), role, removable: false };
         let mut list = vec![m("bob", Role::Member), m("Zed", Role::Admin), m("Ann", Role::Member), m("bot", Role::Service), m("Cy", Role::Creator)];
         sort_members(&mut list);
         let names: Vec<&str> = list.iter().map(|m| m.name.as_str()).collect();

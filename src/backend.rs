@@ -198,6 +198,12 @@ pub enum Cmd {
     InfoClose,
     /// How the other person in a one-to-one chat is known on its network; answered with `PeerIds`.
     PeerIds(OwnedRoomId),
+    /// Changes a group; answered with `Ev::Group` once the server took it, else `Ev::Error`.
+    Group { room: OwnedRoomId, change: group::Change },
+    /// People who could be added to a group; answered with `Candidates`.
+    Candidates(OwnedRoomId),
+    /// How a member of a group is known on its network; answered with `MemberIds`.
+    MemberIds(OwnedRoomId, OwnedUserId),
     /// Messages matching `query` in one room, or in every room; answered with `Found`.
     Search { room: Option<OwnedRoomId>, query: String },
     /// Looks for a newer release; answered with `Ev::Update`.
@@ -278,6 +284,9 @@ pub enum Ev {
     Features { room: OwnedRoomId, features: Option<Features> },
     /// A chat's details for its info screen; sent again as more is known.
     Info(OwnedRoomId, Box<info::Details>),
+    Group { room: OwnedRoomId, change: group::Change },
+    Candidates { room: OwnedRoomId, list: Vec<(OwnedUserId, String)> },
+    MemberIds(OwnedUserId, Vec<String>),
     /// What checking for or installing an update did.
     Update(update::Step),
     /// The answer to `Cmd::PeerIds`; never sent for a group.
@@ -1696,6 +1705,39 @@ impl State {
                 self.info = Some(AbortOnDrop(tokio::spawn(info::run(room, self.ev.clone()))));
             }
             Cmd::InfoClose => self.info = None,
+            Cmd::Group { room: room_id, change } => {
+                let (room, client, ev) = (self.room(&room_id)?, self.client()?.clone(), self.ev.clone());
+                tokio::spawn(async move {
+                    match group::change(&room, &change).await {
+                        Ok(()) => {
+                            if matches!(change, group::Change::Photo(_))
+                                && let Ok(Some(bytes)) = avatar(&client, &room_id).await
+                            {
+                                let _ = ev.send(Ev::Avatar(room_id.clone(), bytes)).await;
+                            }
+                            let _ = ev.send(Ev::Group { room: room_id, change }).await;
+                        }
+                        Err(e) => {
+                            log::warn!("group change: {e:#}");
+                            let _ = ev.send(Ev::Error(t!("Could not change the group: {error}", error = format!("{e:#}")))).await;
+                        }
+                    }
+                });
+            }
+            Cmd::Candidates(room_id) => {
+                let (room, client, ev) = (self.room(&room_id)?, self.client()?.clone(), self.ev.clone());
+                tokio::spawn(async move {
+                    let list = group::candidates(&client, &room).await;
+                    let _ = ev.send(Ev::Candidates { room: room_id, list }).await;
+                });
+            }
+            Cmd::MemberIds(room_id, user) => {
+                let (room, ev) = (self.room(&room_id)?, self.ev.clone());
+                tokio::spawn(async move {
+                    let ids = info::identifiers_of(&room, &user).await;
+                    let _ = ev.send(Ev::MemberIds(user, ids)).await;
+                });
+            }
             Cmd::PeerIds(room_id) => {
                 let room = self.room(&room_id)?;
                 self.peer = Some(AbortOnDrop(tokio::spawn(info::peer(room, self.ev.clone()))));
@@ -3253,6 +3295,7 @@ pub(crate) mod caption;
 mod strip;
 pub(crate) mod forward;
 mod info;
+pub(crate) mod group;
 mod polls;
 mod rich;
 pub use rich::{Block, Rich, Run};
@@ -3261,7 +3304,6 @@ pub use polls::{Place, Poll};
 pub(crate) mod pollnew;
 pub use pollnew::NewPoll;
 pub use info::{Details, MAX_MEMBERS, MAX_SCAN, Role, links_profiles, profile_link};
-#[cfg(test)]
 pub use info::Member;
 
 mod timeline;

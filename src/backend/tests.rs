@@ -1872,3 +1872,66 @@ async fn a_read_chat_opens_again_without_the_new_messages_divider() {
     assert!(!seat.rows.iter().any(|m| m.kind == Kind::Unread), "divider in a read chat: {:?}", seat.rows.iter().map(|m| (&m.kind, &m.body)).collect::<Vec<_>>());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn a_group_is_changed_by_its_admin_only() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-group-{tag}"));
+    let login = |name: &'static str| {
+        let (hs, root, secret, tag) = (hs.clone(), root.clone(), secret.clone(), tag.clone());
+        async move {
+            let c = Client::builder().homeserver_url(&hs).sqlite_store(root.join(name), None).build().await.unwrap();
+            let mut data = JsonObject::new();
+            data.insert("token".into(), jwt(&secret, &format!("{name}{tag}")).into());
+            c.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+            c
+        }
+    };
+    let (alice, bob, carol) = (login("alice").await, login("bob").await, login("carol").await);
+    let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+    req.name = Some("Before".into());
+    req.invite = vec![bob.user_id().unwrap().to_owned()];
+    let group = alice.create_room(req).await.unwrap();
+    let id = group.room_id().to_owned();
+    bob.join_room_by_id(&id).await.unwrap();
+    // Carol shares a one-to-one chat with Alice, so she is offered when adding people.
+    let dm = carol.create_dm(alice.user_id().unwrap()).await.unwrap();
+    alice.sync_once(SyncSettings::default()).await.unwrap();
+    alice.join_room_by_id(dm.room_id()).await.unwrap();
+    alice.sync_once(SyncSettings::default()).await.unwrap();
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+
+    let (can, _) = group::can(&alice.get_room(&id).unwrap()).await;
+    assert_eq!(can, group::Can { name: true, photo: true, topic: true, invite: true, remove: true });
+    let (can, _) = group::can(&bob.get_room(&id).unwrap()).await;
+    assert!(!can.edit() && !can.remove, "a member who is not an admin changes nothing: {can:?}");
+    assert!(group::change(&bob.get_room(&id).unwrap(), &group::Change::Name("Bob's".into())).await.is_err());
+
+    let found = group::candidates(&alice, &alice.get_room(&id).unwrap()).await;
+    assert_eq!(found.iter().map(|(u, _)| u.clone()).collect::<Vec<_>>(), [carol.user_id().unwrap().to_owned()]);
+
+    let photo = root.join("photo.jpg");
+    image::RgbImage::from_pixel(64, 48, image::Rgb([200, 40, 40])).save(&photo).unwrap();
+    let room = alice.get_room(&id).unwrap();
+    for change in [
+        group::Change::Name("  After  ".into()),
+        group::Change::Topic("About".into()),
+        group::Change::Photo(photo.clone()),
+        group::Change::Invite(carol.user_id().unwrap().to_owned()),
+        group::Change::Remove(bob.user_id().unwrap().to_owned()),
+    ] {
+        group::change(&room, &change).await.unwrap_or_else(|e| panic!("{change:?}: {e:#}"));
+    }
+    alice.sync_once(SyncSettings::default()).await.unwrap();
+    let room = alice.get_room(&id).unwrap();
+    assert_eq!(room.name().as_deref(), Some("After"));
+    assert_eq!(room.topic().as_deref(), Some("About"));
+    assert!(room.avatar_url().is_some());
+    let invited = room.members_no_sync(RoomMemberships::INVITE).await.unwrap();
+    assert!(invited.iter().any(|m| Some(m.user_id()) == carol.user_id()));
+    let joined = room.members_no_sync(RoomMemberships::JOIN).await.unwrap();
+    assert!(!joined.iter().any(|m| Some(m.user_id()) == bob.user_id()));
+}

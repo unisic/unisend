@@ -38,6 +38,8 @@ enum Row {
     /// Facts about the chat on one surface. Leaving and disappearing messages join it here.
     Facts,
     Members,
+    /// Adding people, for whoever may.
+    Add,
     Member(usize),
     AllMembers,
     Shelves,
@@ -66,8 +68,8 @@ struct FileItem {
 }
 
 pub(super) struct Info {
-    room: Option<OwnedRoomId>,
-    details: Option<Details>,
+    pub(super) room: Option<OwnedRoomId>,
+    pub(super) details: Option<Details>,
     media: Vec<(String, Media)>,
     links: Vec<LinkItem>,
     files: Vec<FileItem>,
@@ -81,6 +83,10 @@ pub(super) struct Info {
     cols: usize,
     /// When the screen came (true) or went, for the phone's push.
     nav: Option<(Instant, bool)>,
+    /// The member whose sheet is up.
+    pub(super) member: Option<group::Picked>,
+    /// Editing the group or adding people, in the list's place.
+    pub(super) page: Option<group::Page>,
 }
 
 impl Default for Info {
@@ -99,6 +105,8 @@ impl Default for Info {
             rows: Vec::new(),
             cols: 3,
             nav: None,
+            member: None,
+            page: None,
         }
     }
 }
@@ -162,6 +170,9 @@ fn rows(info: &Info, group: bool) -> Vec<Row> {
     let mut out = vec![Row::Head, Row::Actions, Row::Facts];
     if group && let Some(d) = &info.details {
         out.push(Row::Members);
+        if d.can.invite {
+            out.push(Row::Add);
+        }
         let shown = if info.all_members { d.members.len() } else { d.members.len().min(MEMBERS_SHOWN) };
         out.extend((0..shown).map(Row::Member));
         if d.members.len() > shown || (info.all_members && d.joined > d.members.len() as u64) {
@@ -248,7 +259,9 @@ impl BeeperApp {
     }
 
     pub(super) fn close_info(&mut self, cx: &mut Context<Self>) {
-        if self.end_info() {
+        if self.info.page.take().is_some() {
+            cx.notify();
+        } else if self.end_info() {
             self.info.nav = Some((Instant::now(), false));
             cx.notify();
         }
@@ -381,7 +394,12 @@ impl BeeperApp {
         )
         .flex_1()
         .min_h_0();
-        let close = round_button("info-close", if beside { IconName::X } else { IconName::ArrowLeft }, cx)
+        let page_title = self.group_page_title();
+        let body = match self.render_group_page(cx) {
+            Some(page) => page,
+            None => body.into_any_element(),
+        };
+        let close = round_button("info-close", if beside && page_title.is_none() { IconName::X } else { IconName::ArrowLeft }, cx)
             .on_click(cx.listener(|this, _, _, cx| this.close_info(cx)));
         let slide = self.info_slide(cx).filter(|_| self.info.nav.is_some_and(|(_, push)| push));
         if slide.is_some() {
@@ -393,7 +411,7 @@ impl BeeperApp {
             .when_some(slide, |el, (v, far)| el.relative().left(px(far * (1. - v))).opacity(v))
             .child(
                 header().when(end > 0., |el| el.pr(px(GUTTER - 10. + end))).map(|el| {
-                    let title = div().flex_1().min_w_0().pl(px(if beside && end == 0. { 10. } else { 4. })).child(screen_title(t!("Chat info")));
+                    let title = div().flex_1().min_w_0().pl(px(if beside && end == 0. { 10. } else { 4. })).child(screen_title(page_title.unwrap_or(t!("Chat info"))));
                     let title = frame::drag(title.when(end > 0., |el| el.h_full().flex().items_center()), window, cx);
                     // Its close button keeps away from the window's own close button.
                     if beside && end == 0. { el.child(title).child(close) } else { el.child(close).child(title) }
@@ -491,6 +509,11 @@ impl BeeperApp {
                 });
                 let room = summary.map(|r| r.id);
                 let timer = room.as_ref().and_then(|id| self.disappear_entry(id, true, cx)).map(|row| row.px(px(GAP)));
+                let edit = details.as_ref().filter(|d| d.can.edit()).map(|_| {
+                    sheet_row("info-edit-group", IconName::Pencil, t!("Edit group"), p.text, window, cx)
+                        .px(px(GAP))
+                        .on_click(cx.listener(|this, _, window, cx| this.open_group_edit(window, cx)))
+                });
                 let leave = room.map(|id| self.leave_row(id, true, window, cx).px(px(GAP)));
                 edge()
                     .pb(px(GAP))
@@ -502,6 +525,7 @@ impl BeeperApp {
                             .children(topic.map(|t| fact(IconName::Info, t.into())))
                             .child(fact(icon, text.into()))
                             .children(open)
+                            .children(edit)
                             .children(timer)
                             .children(leave),
                     )
@@ -514,10 +538,29 @@ impl BeeperApp {
                 };
                 edge().pt(px(8.)).pb(px(4.)).text_size(fs(12.)).text_color(p.faint).child(text).into_any_element()
             }
+            Row::Add => h_flex()
+                .id("info-add-members")
+                .w_full()
+                .h(px(ROW_H))
+                .px(px(GUTTER))
+                .gap(px(12.))
+                .cursor_pointer()
+                .active(|el| el.bg(p.surface))
+                .child(div().size(px(MEMBER_AVATAR)).flex().flex_none().items_center().justify_center().rounded_full().bg(p.surface).child(Icon::new(IconName::UserPlus).size_5().text_color(p.text)))
+                .child(div().text_size(fs(16.)).child(t!("Add members")))
+                .on_click(cx.listener(|this, _, window, cx| this.open_group_add(window, cx)))
+                .into_any_element(),
             Row::Member(ix) => {
                 let Some(m) = details.as_ref().and_then(|d| d.members.get(ix)).cloned() else { return div().into_any_element() };
                 self.info_face(&m.id);
+                // Bridge bots and the user have nothing to offer here.
+                let tappable = m.role != Role::Service && self.user.as_ref() != Some(&m.id);
                 h_flex()
+                    .id(("info-member", ix))
+                    .when(tappable, |el| {
+                        let m = m.clone();
+                        el.cursor_pointer().active(|el| el.bg(p.surface)).on_click(cx.listener(move |this, _, _, cx| this.open_member(m.clone(), cx)))
+                    })
                     .w_full()
                     .h(px(ROW_H))
                     .px(px(GUTTER))
@@ -748,7 +791,7 @@ mod tests {
     #[test]
     fn group_rows_show_a_few_members_then_all() {
         let mut info = Info::default();
-        let member = |n: usize| crate::backend::Member { id: format!("@u{n}:x").try_into().unwrap(), name: format!("u{n}"), role: Role::Member };
+        let member = |n: usize| crate::backend::Member { id: format!("@u{n}:x").try_into().unwrap(), name: format!("u{n}"), role: Role::Member, removable: false };
         info.details = Some(Details { members: (0..12).map(member).collect(), joined: 300, members_loaded: true, ..Details::default() });
         let r = rows(&info, true);
         assert_eq!(r.iter().filter(|r| matches!(r, Row::Member(_))).count(), MEMBERS_SHOWN);

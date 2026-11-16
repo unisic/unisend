@@ -38,6 +38,7 @@ mod location;
 mod gifs;
 mod mentions;
 mod info;
+mod group;
 mod menu;
 mod navigate;
 pub(crate) mod motion;
@@ -874,6 +875,9 @@ impl BeeperApp {
                 }
             }
             Ev::Info(room, details) => self.info_details(room, *details, cx),
+            Ev::Group { room, change } => self.group_changed(room, change, cx),
+            Ev::Candidates { room, list } => self.candidates_arrived(room, list, cx),
+            Ev::MemberIds(user, ids) => self.member_ids(user, ids, cx),
             Ev::Update(step) => self.on_update(step),
             Ev::PeerIds(room, ids) => {
                 if self.chat_sheet.as_ref() == Some(&room) {
@@ -3089,6 +3093,7 @@ impl BeeperApp {
         self.chat_sheet = Some(id);
         self.sheet_at = at;
         self.disappear.picking = false;
+        self.info.member = None;
         cx.notify();
     }
 
@@ -3106,6 +3111,11 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let room = self.sheet_last.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id))?;
         let (id, title) = (room.id.clone(), room.name.clone());
+        if self.info.member.is_some()
+            && let Some((key, rows)) = self.member_sheet(live, window, cx)
+        {
+            return Some(self.sheet(&self.chat_motion, frame, key, title, rows, |this| &mut this.chat_motion, window, cx));
+        }
         if self.disappear.picking
             && let Some((title, rows)) = self.disappear_sheet(&id, live, cx)
         {
