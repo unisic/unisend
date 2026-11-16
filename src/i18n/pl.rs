@@ -418,6 +418,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Recovery code", "Kod odzyskiwania"),
     ("Recovery code accepted, but the account's key storage is incomplete", "Przyjęto kod odzyskiwania, ale magazyn kluczy konta jest niekompletny"),
     ("Recovery code was not accepted", "Nie przyjęto kodu odzyskiwania"),
+    ("Received", "Otrzymano"),
     ("Red", "Czerwony"),
     ("Rename", "Zmień nazwę"),
     ("Reply", "Odpowiedz"),
