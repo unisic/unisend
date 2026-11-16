@@ -734,6 +734,10 @@ impl BeeperApp {
                     .child(div().pb(px(8.)).child(incoming)),
             )
             .child(section(t!("Chat list"), cx).child(card(cx).child(choice(Page::SwipeLeft, left, cx)).child(choice(Page::SwipeRight, right, cx))))
+            .when(!gpui_kit::is_mobile(), |el| {
+                let keys = link("keyboard-shortcuts", t!("Keyboard shortcuts"), "".into(), None, Some(IconName::ChevronRight), cx).on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx)));
+                el.child(card(cx).child(keys))
+            })
             .into_any_element()
     }
 
