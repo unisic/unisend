@@ -141,7 +141,21 @@ impl BeeperApp {
 }
 
 /// A sheet row with a label made at run time; without an icon, its place stays empty so labels line up.
+pub(super) fn plain_row(id: impl Into<ElementId>, label: impl Into<SharedString>, cx: &App) -> Stateful<Div> {
+    choice_row(id, cx).child(label.into())
+}
+
+/// A choice row whose icon column stays reserved, so labels line up whether or not one is shown.
 pub(super) fn timer_row(id: impl Into<ElementId>, icon: Option<IconName>, label: impl Into<SharedString>, cx: &App) -> Stateful<Div> {
+    choice_row(id, cx)
+        .child(match icon {
+            Some(icon) => Icon::new(icon).size_5().into_any_element(),
+            None => div().size_5().flex_none().into_any_element(),
+        })
+        .child(label.into())
+}
+
+fn choice_row(id: impl Into<ElementId>, cx: &App) -> Stateful<Div> {
     let p = Palette::of(cx);
     h_flex()
         .id(id)
@@ -152,9 +166,4 @@ pub(super) fn timer_row(id: impl Into<ElementId>, icon: Option<IconName>, label:
         .text_size(fs(16.))
         .text_color(p.text)
         .cursor_pointer()
-        .child(match icon {
-            Some(icon) => Icon::new(icon).size_5().into_any_element(),
-            None => div().size_5().flex_none().into_any_element(),
-        })
-        .child(label.into())
 }

@@ -670,13 +670,9 @@ impl BeeperApp {
 
     fn act_rows(&self, id: &str, acts: Vec<Act>, h: f32, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
         let p = Palette::of(cx);
-        let dm = self.open.as_ref().and_then(|open| self.rooms.iter().find(|r| &r.id == open)).is_some_and(|r| r.dm);
-        // In a group, what the user wants of their own message's details is who read it.
-        let read_by = !dm && self.msgs.iter().any(|m| m.id == id && m.own);
         acts.into_iter()
             .map(|act| {
                 let (name, icon, label) = act.look();
-                let label = if read_by && act == Act::Info { t!("Read by|menu") } else { label };
                 let ink = if act == Act::Delete { p.negative } else { p.text };
                 let id = id.to_owned();
                 h_flex()

@@ -3,7 +3,7 @@
 //! timed mute is kept in `settings.json` and one timer lifts it.
 
 use super::*;
-use super::disappear::timer_row;
+use super::disappear::plain_row;
 use matrix_sdk::notification_settings::RoomNotificationMode;
 use std::collections::BTreeMap;
 
@@ -96,7 +96,7 @@ impl BeeperApp {
             .into_iter()
             .enumerate()
             .map(|(ix, (label, ms))| {
-                let row = timer_row(("mute-choice", ix), None, label, cx);
+                let row = plain_row(("mute-choice", ix), label, cx);
                 if !live {
                     return row;
                 }

@@ -483,7 +483,8 @@ impl BeeperApp {
                             .active(|el| el.bg(p.raised))
                             .child(Icon::new(icon).size_5())
                             .child(div().max_w_full().px(px(4.)).text_size(fs(12.)).line_height(fs(15.)).text_center().text_color(p.muted).line_clamp(2).text_ellipsis().child(label))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                                this.sheet_at = Some(e.position());
                                 this.chat_action(id.clone(), action, true, cx);
                             }))
                     })))
