@@ -342,6 +342,9 @@ where
                     if motion(this).drag(e) {
                         closed(this, cx);
                     }
+                    if start && motion(this).held() {
+                        own_pan();
+                    }
                     cx.notify();
                     true
                 });
@@ -354,6 +357,53 @@ where
     )
     .absolute()
     .inset_0()
+}
+
+thread_local! {
+    /// Whether an overlay took the touch pan in progress.
+    static OWNED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Called by an overlay on a step of a touch pan it takes. The rest of that pan then reaches nothing
+/// under the overlay, even once the overlay is gone: GPUI sends the glide after a fling as more steps
+/// at the point the pan began, after the finger's `Ended`, and by then a dismissed sheet no longer
+/// covers that point, so they would scroll the list under it.
+pub(super) fn own_pan() {
+    OWNED.set(true);
+}
+
+/// Whether a pan is still owned once the first guard has seen this step: a new pan starts unowned.
+fn reset(owned: bool, phase: TouchPhase) -> bool {
+    owned && phase != TouchPhase::Started
+}
+
+/// Whether a step is kept from everything under the overlays. A mouse wheel's notch is never part
+/// of a touch pan, so a pan that ended without a fling cannot hold it back.
+fn withheld(owned: bool, delta: &ScrollDelta) -> bool {
+    owned && matches!(delta, ScrollDelta::Pixels(_))
+}
+
+/// Laid first and last on the screen, around every overlay. The first forgets the owner as a pan
+/// starts. The last runs in the capture phase after every overlay's own capture handler and before
+/// every bubble handler, where lists scroll, and stops an owned pan there.
+pub(super) fn pan_guard(first: bool) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
+                if !phase.capture() {
+                    return;
+                }
+                if first {
+                    OWNED.set(reset(OWNED.get(), e.touch_phase));
+                } else if withheld(OWNED.get(), &e.delta) {
+                    cx.stop_propagation();
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
 }
 
 /// The pill on a sheet's top that says it can be dragged down.
@@ -381,7 +431,9 @@ mod tests {
 
     use gpui_kit::TouchPhase;
 
-    use super::{SCRIM, SheetMotion, dismisses, motion, stagger};
+    use gpui_kit::{ScrollDelta, point, px};
+
+    use super::{OWNED, SCRIM, SheetMotion, dismisses, motion, own_pan, reset, stagger, withheld};
 
     const FRAME: Duration = Duration::from_millis(8);
 
@@ -533,6 +585,42 @@ mod tests {
         s.set_live(false);
         s.advance(t0, true);
         assert!(!s.mounted);
+    }
+
+    /// One step dispatched as the screen runs it: the first guard, an overlay's capture handler
+    /// that may take the pan, the last guard. True when the step reaches what lies under the overlays.
+    fn reaches_under(phase: TouchPhase, wheel: bool, overlay_takes: bool) -> bool {
+        let delta = if wheel { ScrollDelta::Lines(point(0., 1.)) } else { ScrollDelta::Pixels(point(px(0.), px(30.))) };
+        OWNED.set(reset(OWNED.get(), phase));
+        if overlay_takes {
+            own_pan();
+        }
+        !withheld(OWNED.get(), &delta)
+    }
+
+    #[test]
+    fn a_pan_taken_by_an_overlay_never_scrolls_what_is_under_it() {
+        use TouchPhase::{Ended, Moved, Started};
+        // Down from a sheet's grip, released fast: the sheet closes and GPUI's fling glide follows.
+        assert!(!reaches_under(Started, false, true));
+        assert!(!reaches_under(Moved, false, false));
+        assert!(!reaches_under(Ended, false, false), "the release that dismisses");
+        for _ in 0..30 {
+            assert!(!reaches_under(Moved, false, false), "the glide once the sheet is gone");
+        }
+        assert!(!reaches_under(Ended, false, false), "the glide's end");
+        // The next pan, on the timeline, scrolls it, and so does a touch that catches its fling.
+        assert!(reaches_under(Started, false, false));
+        assert!(reaches_under(Moved, false, false));
+        assert!(reaches_under(Ended, false, false));
+        assert!(reaches_under(Ended, false, false));
+        assert!(reaches_under(Started, false, false));
+        // The viewer takes a pan at its release, in the bubble phase, after the last guard saw it.
+        assert!(reaches_under(Ended, false, false));
+        own_pan();
+        assert!(!reaches_under(Moved, false, false));
+        // A mouse wheel after an owned pan that had no fling still scrolls.
+        assert!(reaches_under(Moved, true, false));
     }
 
     #[test]

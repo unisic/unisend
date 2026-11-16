@@ -2558,15 +2558,9 @@ impl BeeperApp {
             .truncate()
             .text_size(fs(14.))
             .text_color(p.faint)
-            .when(live, |el| {
-                el.on_scroll_wheel(cx.listener(move |this, e: &ScrollWheelEvent, _, cx| {
-                    if motion(this).drag(e) {
-                        close(this, cx);
-                    }
-                    cx.notify();
-                }))
-            })
-            .child(title);
+            .relative()
+            .child(title)
+            .when(live, |el| el.child(sheet::grip(cx, motion, close)));
         let view = cx.entity_id();
         let body = state.fit("sheet-rows", key, v_flex().child(head).children(rows), view, window, cx);
         sheet::scrim("sheet", frame)
@@ -4037,6 +4031,7 @@ impl BeeperApp {
                 let preview = self.render_preview(window, cx);
                 let verify = self.render_verify_sheet(window, cx);
                 root.relative()
+                    .child(sheet::pan_guard(true))
                     .when(!in_column, |el| el.child(self.render_banners(window, cx)))
                     .child(div().flex_1().min_h_0().child(body))
                     .children(frame::controls(window, cx))
@@ -4053,6 +4048,7 @@ impl BeeperApp {
                     .children(viewer)
                     .children(self.render_confirm(window, cx))
                     .children(verify)
+                    .child(sheet::pan_guard(false))
                     .into_any_element()
             }
         }

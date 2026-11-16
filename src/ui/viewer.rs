@@ -613,6 +613,8 @@ impl BeeperApp {
             TouchPhase::Moved => self.pull_by(dx, dy, now),
             TouchPhase::Ended => {
                 let Some(mut pull) = self.zoom.pull.take() else { return };
+                // A thrown picture closes the viewer while the fling's glide still comes.
+                sheet::own_pan();
                 // A finger that rested before lifting has no speed left.
                 pull.samples.push_back((now, pull.offset));
                 let speed = super::gallery::speed(&pull.samples);
