@@ -3613,7 +3613,7 @@ mod features;
 pub use features::Features;
 mod search;
 pub use search::Hit;
-pub(crate) use search::{MAX_HITS, MIN_QUERY};
+pub(crate) use search::{MAX_HITS, MIN_QUERY, save as save_search};
 
 pub(crate) mod rooms;
 

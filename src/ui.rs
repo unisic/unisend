@@ -485,6 +485,7 @@ impl BeeperApp {
             crate::FOREGROUND.store(active, std::sync::atomic::Ordering::Relaxed);
             if !active {
                 this.drafts.save();
+                crate::backend::save_search();
             }
             if active {
                 // The animation setting may have changed while the app was away.
