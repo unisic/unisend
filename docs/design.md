@@ -46,7 +46,11 @@ bar at the bottom; on a wide window, a column on the left. The active one is whi
 `faint`; no pill, no accent (a pointer hovering gets a `surface` row). Settings and Networks are
 screens, not menus; their content keeps to a 560 column.
 
-Chats has three filters as round chips under the title: All, Unread, Low priority.
+Chats has its folders as round chips under the title, in one row that scrolls sideways when it does not
+fit: All, Unread (with its count), Direct, Groups, one per chat network (only with two or more networks),
+the user's own folders, and Low priority last. Settings, Chats, Chat folders hides any built-in chip and
+makes, renames, orders and deletes the user's folders; a chat joins one from its sheet, "Add to folder".
+The folders and the chip last chosen are kept on this device only, in `settings.json`.
 
 ## Chat list
 

@@ -32,6 +32,7 @@ pub(crate) use caption::video_frame;
 mod cards;
 mod emojipick;
 mod contacts;
+pub(crate) mod folders;
 mod forward;
 mod frame;
 mod disappear;
@@ -436,6 +437,7 @@ pub struct BeeperApp {
     verify: verify::Ui,
     /// The user's own name and picture.
     profile: profile::Ui,
+    folders: folders::Ui,
     info: info::Info,
     _subs: Vec<Subscription>,
     accounts: accounts::Accounts,
@@ -502,6 +504,7 @@ impl BeeperApp {
         let share = sharein::ShareIn::new(window, cx, &mut subs);
         let verify = verify::Ui::new(window, cx, &mut subs);
         let profile = profile::Ui::new(window, cx, &mut subs);
+        let folders = folders::Ui::new(settings.folder.clone(), window, cx, &mut subs);
         let find = search::Find::new(window, cx, &mut subs);
         subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
@@ -723,6 +726,7 @@ impl BeeperApp {
             audience: people::People::default(),
             verify,
             profile,
+            folders,
             info: info::Info::default(),
             _subs: subs,
             accounts,
@@ -1095,12 +1099,17 @@ impl BeeperApp {
 
     fn refilter(&mut self, cx: &mut Context<Self>) {
         let query = self.search.read(cx).value().trim().to_lowercase();
+        // The archive is its own tab and ignores the chips; elsewhere the chip says which section and filter.
+        let pick = if self.view == View::Archive { folders::Pick::All } else { self.effective_pick() };
+        if self.view != View::Archive {
+            (self.view, self.only_unread) = (if pick == folders::Pick::LowPriority { View::LowPriority } else { View::Inbox }, pick == folders::Pick::Unread);
+        }
         let passes = |r: &RoomSummary| {
             // A search looks through every section.
             if !query.is_empty() {
                 return r.name.to_lowercase().contains(&query);
             }
-            in_view(self.view, r) && (!self.only_unread || r.is_unread()) && !replaced(&self.rooms, r)
+            in_view(self.view, r) && (!self.only_unread || r.is_unread()) && self.in_folder(&pick, r) && !replaced(&self.rooms, r)
         };
         self.shown = self.rooms.iter().enumerate().filter(|(_, r)| passes(r)).map(|(ix, _)| ix).collect();
         cx.notify();
@@ -1825,11 +1834,6 @@ impl BeeperApp {
         self.refilter(cx);
     }
 
-    fn set_filter(&mut self, view: View, only_unread: bool, cx: &mut Context<Self>) {
-        self.only_unread = only_unread;
-        self.set_view(view, cx);
-    }
-
     /// The keys a desktop chat app answers, as listed in `keys::SHORTCUTS`.
     fn shortcut(&mut self, k: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let locked = self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked();
@@ -2197,6 +2201,8 @@ impl BeeperApp {
             (t!("No chat or message matches"), None)
         } else if self.only_unread {
             (t!("Nothing unread"), None)
+        } else if self.folder_is_custom() {
+            (t!("Nothing in this folder"), Some(how(t!("Add to folder"))))
         } else {
             match self.view {
                 View::Inbox => (t!("No chats here yet"), None),
@@ -2204,13 +2210,14 @@ impl BeeperApp {
                 View::LowPriority => (t!("Nothing in low priority"), Some(how(t!("Move to low priority")))),
             }
         };
-        let show_all = (self.only_unread && !has_query).then(|| {
+        let narrowed = !matches!(self.effective_pick(), folders::Pick::All | folders::Pick::LowPriority);
+        let show_all = (narrowed && !archive && !has_query).then(|| {
             Button::new("show-all")
                 .mt(px(10.))
                 .h(px(TAP))
                 .px(px(GUTTER))
                 .label(t!("Show all"))
-                .on_click(cx.listener(|this, _, _, cx| this.set_filter(View::Inbox, false, cx)))
+                .on_click(cx.listener(|this, _, _, cx| this.set_pick(folders::Pick::All, cx)))
         });
         // Alone on a narrow window, the list's top row ends under the window buttons.
         let end = if frame::viewport(window).width < px(NARROW) { frame::reserve(window) } else { 0. };
@@ -2240,39 +2247,7 @@ impl BeeperApp {
                     this.set_searching(true, window, cx);
                 })))
         };
-        let waiting = self.rooms.iter().filter(|r| !r.archived && !r.low_priority && r.is_unread() && !replaced(&self.rooms, r)).count();
-        let seg = press::Segments::new("filters", window, cx);
-        let chips = [
-            (t!("All"), View::Inbox, false, 0),
-            (t!("Unread"), View::Inbox, true, waiting),
-            (t!("Low priority"), View::LowPriority, false, 0),
-        ];
-        let chosen = chips.iter().position(|&(_, view, only_unread, _)| self.view == view && self.only_unread == only_unread);
-        let slider = chosen.and_then(|ix| seg.pill("filters-pill", ix, p.raised, window, cx));
-        let measured = slider.is_some();
-        let filters = chips.into_iter().enumerate().map(|(ix, (label, view, only_unread, count))| {
-            let on = chosen == Some(ix);
-            let press = (!on).then(|| press::area(label, Duration::ZERO, p.surface, window, cx).rounded_full());
-            // The pill is slimmer than what a finger needs; the target around it is not.
-            h_flex().id(label).flex_none().h(px(TAP)).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.set_filter(view, only_unread, cx))).child(
-                h_flex()
-                    .id("pill")
-                    .relative()
-                    .h(px(36.))
-                    .px(px(if gpui_kit::is_mobile() { GAP } else { 10. }))
-                    .gap(px(6.))
-                    .rounded_full()
-                    .text_size(fs(14.))
-                    .text_color(if on { p.text } else { p.muted })
-                    .when(on && !measured, |el| el.bg(p.raised))
-                    .child(seg.probe(ix))
-                    .children(press)
-                    .child(label)
-                    .when(count > 0, |el| el.child(div().text_color(p.faint).font_features(tabular()).child(count.to_string()))),
-            )
-        });
-        // A mouse has no finger to drag the row along: a larger text size or a longer language scrolls it under the wheel.
-        let filters = h_flex().id("filter-row").flex_none().relative().px(px(GUTTER)).pb(px(4.)).gap(px(4.)).when(!gpui_kit::is_mobile(), |el| el.overflow_x_scroll()).child(seg.container()).children(slider).children(filters);
+        let filters = self.render_chips(window, cx);
         v_flex()
             .size_full()
             .child(h_flex().flex_none().h(px(BAR_H)).pl(px(GUTTER)).pr(px(if self.searching { GUTTER } else { GUTTER - 10. } + end)).child(top))
@@ -3456,7 +3431,7 @@ impl BeeperApp {
         }
         self.chat_sheet = Some(id);
         self.sheet_at = at;
-        (self.disappear.picking, self.mute_picking) = (false, false);
+        (self.disappear.picking, self.mute_picking, self.folders.picking) = (false, false, false);
         self.info.member = None;
         cx.notify();
     }
@@ -3468,7 +3443,7 @@ impl BeeperApp {
             self.sheet_last = self.chat_sheet.clone();
         }
         let Some(frame) = self.chat_motion.sample(self.chat_sheet.is_some(), window, cx) else {
-            self.sheet_last = None;
+            (self.sheet_last, self.folders.picking) = (None, false);
             return None;
         };
         let live = frame.live;
@@ -3488,6 +3463,10 @@ impl BeeperApp {
         if self.mute_picking {
             let (title, rows) = self.mute_sheet(room, live, cx);
             return Some(self.sheet(&self.chat_motion, frame, 4, title, rows, |this| &mut this.chat_motion, window, cx));
+        }
+        if self.folders.picking {
+            let (title, rows) = self.folder_sheet(&id, live, cx);
+            return Some(self.sheet(&self.chat_motion, frame, 5, title, rows, |this| &mut this.chat_motion, window, cx));
         }
         if self.chat_sheet_inside {
             let [_, _, mute, archive, _] = chat_actions(room);
@@ -3523,6 +3502,7 @@ impl BeeperApp {
             });
         }
         rows.extend(self.disappear_entry(&id, live, cx));
+        rows.push(self.folder_entry(live, window, cx));
         rows.push(self.leave_row(id, live, window, cx));
         Some(self.sheet(&self.chat_motion, frame, 0, title, rows, |this| &mut this.chat_motion, window, cx))
     }
@@ -3574,6 +3554,7 @@ impl BeeperApp {
         if let Some(row) = self.disappear_entry(&id, live, cx) {
             rows.insert(3, row);
         }
+        rows.push(self.folder_entry(live, window, cx));
         rows.push(self.leave_row(id, live, window, cx));
         self.sheet(&self.chat_motion, frame, 0, title, rows, |this| &mut this.chat_motion, window, cx)
     }
@@ -3853,7 +3834,7 @@ fn screen_title(title: &'static str) -> Div {
 }
 
 /// An icon to tap, with a finger-sized target.
-fn round_button(id: &'static str, icon: IconName, cx: &App) -> Stateful<Div> {
+fn round_button(id: impl Into<ElementId>, icon: IconName, cx: &App) -> Stateful<Div> {
     let p = Palette::of(cx);
     div()
         .id(id)
