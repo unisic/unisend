@@ -109,9 +109,10 @@ impl State {
         };
         let back = back.to_string();
         let answer = back.clone();
+        let slot = crate::accounts::slot_of(&self.dir);
         let listen = AbortOnDrop(tokio::spawn(async move {
             let url = tokio::time::timeout(WAIT, listen(listener)).await.ok().flatten();
-            if let Some(tx) = commands() {
+            if let Some(tx) = commands(slot) {
                 let _ = tx.send(Cmd::BrowserDone { back: answer, url }).await;
             }
         }));

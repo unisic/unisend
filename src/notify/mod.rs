@@ -52,6 +52,8 @@ const APP_ID: &str = "dev.gpui.beeper";
 enum Req {
     Show { chat: String, name: String, icon: String, line: String, alert: bool },
     Close(String),
+    /// Closes the chats of the account in this slot, signed out.
+    CloseAccount(usize),
     /// Answered once every notification is closed.
     CloseAll(Option<tokio::sync::oneshot::Sender<()>>),
 }
@@ -124,6 +126,10 @@ pub(crate) fn close(chat: &str) {
 
 pub(crate) fn close_all() {
     request(Req::CloseAll(None));
+}
+
+pub(crate) fn close_account(slot: usize) {
+    request(Req::CloseAccount(slot));
 }
 
 /// While the app PIN is asked, notifications say only which chat has a new message and offer no
@@ -355,6 +361,13 @@ pub(crate) async fn serve(dir: PathBuf) {
                 }
                 Some(Req::Close(chat)) => {
                     if let Some(old) = shown.remove(&chat) {
+                        drop_entry(service.sink.as_mut(), old).await;
+                    }
+                }
+                Some(Req::CloseAccount(slot)) => {
+                    let (gone, kept): (VecDeque<Entry>, _) = std::mem::take(&mut shown.0).into_iter().partition(|e| crate::accounts::split(&e.chat).0 == slot);
+                    shown.0 = kept;
+                    for old in gone {
                         drop_entry(service.sink.as_mut(), old).await;
                     }
                 }

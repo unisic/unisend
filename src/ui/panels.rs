@@ -179,7 +179,7 @@ impl BeeperApp {
         for (input, text) in fields {
             input.update(cx, |input, cx| input.set_placeholder(text, window, cx));
         }
-        self.send(Cmd::Relabel, cx);
+        self.accounts.tell_all(|| Cmd::Relabel);
         cx.refresh_windows();
     }
 
@@ -194,7 +194,8 @@ impl BeeperApp {
     fn set_incognito(&mut self, on: bool, cx: &mut Context<Self>) {
         self.settings.incognito = on;
         self.settings.save(&self.dir);
-        self.send(Cmd::Incognito(on), cx);
+        self.accounts.tell_all(|| Cmd::Incognito(on));
+        cx.notify();
     }
 
     fn set_incognito_keyboard(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -544,6 +545,7 @@ impl BeeperApp {
         v_flex()
             .gap(px(GAP * 2.))
             .child(self.profile_card(selected == Some(Page::Profile), split, cx))
+            .when(self.accounts.open, |el| el.child(self.render_accounts(cx)))
             .child(
                 card(cx)
                     .child(category(Page::Appearance, IconName::Palette, look.into(), cx))
@@ -885,7 +887,10 @@ impl BeeperApp {
                     .role(Role::Button)
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        crate::background(false);
+                        // Only this account signs out; the others keep their connection.
+                        if !this.accounts.others_signed_in() {
+                            crate::background(false);
+                        }
                         this.panel = None;
                         this.send(Cmd::SignOut, cx);
                     }))

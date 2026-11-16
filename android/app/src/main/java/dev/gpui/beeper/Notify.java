@@ -192,6 +192,25 @@ public final class Notify {
         }
     }
 
+    /** One account signed out while another stays: that account's chats' notifications go. */
+    public static void forgetAccount(Activity activity, String slot) {
+        Context context = activity.getApplicationContext();
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        for (StatusBarNotification shown : manager.getActiveNotifications()) {
+            String tag = shown.getTag();
+            if (shown.getId() == 0 && tag != null && !tag.equals(SUMMARY) && slotOf(tag).equals(slot)) {
+                manager.cancel(tag, 0);
+            }
+        }
+        summarize(context, manager, null, false);
+    }
+
+    /** The account a chat's key names, as accounts::split reads it: an added account's digit, else "0". */
+    private static String slotOf(String chat) {
+        char first = chat.isEmpty() ? '0' : chat.charAt(0);
+        return first >= '1' && first <= '2' ? String.valueOf(first) : "0";
+    }
+
     /** Signed out: no background connection, no notifications, and no chats left in share sheets or the launcher. */
     public static void stop(Activity activity) {
         disconnect(activity);

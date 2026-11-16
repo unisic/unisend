@@ -2388,3 +2388,104 @@ async fn sso_browser_signin() {
     st.handle(Cmd::SignOut).await.unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Waits until `bob` sees `body` in `room`, and says who sent it.
+async fn sender_of(bob: &Client, room: &RoomId, body: &str) -> String {
+    for _ in 0..30 {
+        let resp = bob.sync_once(SyncSettings::default().timeout(Duration::from_secs(2))).await.unwrap();
+        for ev in resp.rooms.joined.get(room).map(|u| u.timeline.events.as_slice()).unwrap_or_default() {
+            let content = ev.raw().get_field::<serde_json::Value>("content").ok().flatten();
+            if content.as_ref().and_then(|c| c.get("body")).and_then(|b| b.as_str()) == Some(body) {
+                return ev.raw().get_field::<String>("sender").unwrap().unwrap();
+            }
+        }
+    }
+    panic!("{body:?} never reached {room}");
+}
+
+/// Two accounts side by side, as the app runs them: each with its own backend from `start` and its
+/// own folder under `accounts`, both syncing. A notification's reply goes to the account its key
+/// names, and one account signing out leaves the other signed in and sending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn two_accounts_run_side_by_side_and_sign_out_alone() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-accounts-{tag}"));
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+
+    // Slots 1 and 2: the first slot's backend would serve the desktop's notifications, which a test must not.
+    let names = [(1, format!("dana{tag}")), (2, format!("erin{tag}"))];
+    let mut rooms = Vec::new();
+    for (slot, name) in &names {
+        let dir = crate::accounts::dir(&root, *slot);
+        let (mut st, mut seat) = state(dir.clone(), &hs);
+        st.login_jwt(jwt(&secret, name)).await.unwrap();
+        wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+        let mut request = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+        request.invite = vec![bob.user_id().unwrap().to_owned()];
+        rooms.push(st.client().unwrap().create_room(request).await.unwrap().room_id().to_owned());
+        for task in st.tasks.drain(..) {
+            task.abort();
+        }
+        drop((st, seat));
+        // JWT sessions are Beeper's; this one is on the local server.
+        let mut session = saved(&dir);
+        session.homeserver = Some(hs.clone());
+        std::fs::write(dir.join("session.json"), serde_json::to_vec(&session).unwrap()).unwrap();
+    }
+    assert_eq!(crate::accounts::added(&root), vec![1, 2]);
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+    for room in &rooms {
+        bob.join_room_by_id(room).await.unwrap();
+    }
+    bob.sync_once(SyncSettings::default()).await.unwrap();
+
+    let backends: Vec<Backend> = names.iter().map(|(slot, _)| start(crate::accounts::dir(&root, *slot))).collect();
+    let mut seats = Vec::new();
+    let mut cmds = Vec::new();
+    let mut threads = Vec::new();
+    for backend in backends {
+        cmds.push(backend.cmd);
+        threads.push(backend.thread);
+        seats.push(Seat { rx: backend.events, rows: Vec::new() });
+    }
+    for (seat, (_, name)) in seats.iter_mut().zip(&names) {
+        let user = wait_for(seat, "Ready from the saved session", |e| match e {
+            Ev::Ready { user, .. } => Some(user),
+            _ => None,
+        })
+        .await;
+        assert_eq!(user.localpart(), name);
+    }
+
+    // A reply from a notification goes out from the account the key names, into its chat.
+    let dana = format!("@{}:", names[0].1);
+    let erin = format!("@{}:", names[1].1);
+    // One at a time: a sync that brings both would be read for the first alone.
+    assert!(reply(&crate::accounts::key(1, rooms[0].as_str()), "from dana"));
+    assert!(sender_of(&bob, &rooms[0], "from dana").await.starts_with(&dana));
+    assert!(reply(&crate::accounts::key(2, rooms[1].as_str()), "from erin"));
+    assert!(sender_of(&bob, &rooms[1], "from erin").await.starts_with(&erin));
+
+    // Erin signs out; Dana stays signed in and still sends.
+    cmds[1].send(Cmd::SignOut).await.unwrap();
+    wait_for(&mut seats[1], "NeedLogin", |e| matches!(e, Ev::NeedLogin).then_some(())).await;
+    assert!(!crate::vault::signed_in(&crate::accounts::dir(&root, 2)));
+    assert!(crate::vault::signed_in(&crate::accounts::dir(&root, 1)));
+    assert!(reply(&crate::accounts::key(1, rooms[0].as_str()), "dana again"));
+    assert!(sender_of(&bob, &rooms[0], "dana again").await.starts_with(&dana));
+
+    // Letting go of an account's channel ends its backend: the thread returns.
+    for slot in [1, 2] {
+        forget(slot);
+    }
+    drop(cmds);
+    let joined = tokio::task::spawn_blocking(move || threads.into_iter().all(|t| t.join().is_ok()));
+    assert!(tokio::time::timeout(Duration::from_secs(30), joined).await.expect("backends ended").unwrap());
+    let _ = std::fs::remove_dir_all(&root);
+}

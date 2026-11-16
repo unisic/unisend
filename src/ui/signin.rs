@@ -210,6 +210,7 @@ impl BeeperApp {
                         this.error = None;
                         cx.notify();
                     })))
+                    .children(self.back_to_accounts(cx))
                     .children(self.error.clone().map(|e| div().text_size(fs(14.)).text_color(p.negative).child(e))),
             )
     }

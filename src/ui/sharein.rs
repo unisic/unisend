@@ -142,7 +142,12 @@ impl BeeperApp {
         }
         self.chat_sheet = None;
         self.gallery.menu = false;
-        let target = incoming.chat.and_then(|chat| OwnedRoomId::try_from(chat).map_err(|e| log::warn!("share target: {e}")).ok());
+        // A target of an account not shown, left from before a switch, gives way to the picker.
+        let target = incoming.chat.and_then(|chat| {
+            let (slot, room) = crate::accounts::split(&chat);
+            let room = OwnedRoomId::try_from(room).map_err(|e| log::warn!("share target: {e}")).ok();
+            room.filter(|_| slot == self.accounts.active())
+        });
         self.share.text = incoming.text;
         // A Direct Share target with text alone needs no screen.
         if incoming.uris.is_empty()
@@ -256,8 +261,8 @@ impl BeeperApp {
             .map(|r| {
                 // The picture a notification of the chat left, when one did; see `notification_icon`.
                 let file: String = r.id.as_str().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-                let icon = Some(self.dir.join("notify").join(file)).filter(|p| p.is_file());
-                (r.id.to_string(), r.name.clone(), icon)
+                let icon = Some(self.account_dir().join("notify").join(file)).filter(|p| p.is_file());
+                (self.chat_key(&r.id), r.name.clone(), icon)
             })
             .collect();
         crate::share::publish(&chats);

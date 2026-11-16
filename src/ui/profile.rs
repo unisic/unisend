@@ -27,6 +27,20 @@ impl Ui {
         }));
         Self { name: String::new(), picture: None, field, loaded: false }
     }
+
+    /// The name and picture, handed to the switcher as the window turns to another account.
+    pub(super) fn take(&mut self) -> (String, Option<Arc<Image>>) {
+        (std::mem::take(&mut self.name), self.picture.take())
+    }
+
+    /// What the switcher kept of the account, shown until the server's answer replaces it.
+    pub(super) fn show(&mut self, name: String, picture: Option<Arc<Image>>) {
+        (self.name, self.picture) = (name, picture);
+    }
+
+    pub(super) fn picture(&self) -> Option<Arc<Image>> {
+        self.picture.clone()
+    }
 }
 
 impl BeeperApp {
@@ -39,7 +53,7 @@ impl BeeperApp {
         cx.notify();
     }
 
-    fn profile_name(&self) -> String {
+    pub(super) fn profile_name(&self) -> String {
         if self.profile.name.is_empty() { self.user.as_ref().map(|u| u.localpart().to_owned()).unwrap_or_default() } else { self.profile.name.clone() }
     }
 
@@ -48,9 +62,13 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let user = self.user.as_ref().map(ToString::to_string).unwrap_or_default();
         let name = self.profile_name();
+        let toggle = self.accounts_toggle(cx);
         card(cx).child(
+            h_flex().gap(px(4.)).child(
             h_flex()
                 .id("settings-profile")
+                .flex_1()
+                .min_w_0()
                 .min_h(px(FACE + 16.))
                 .py(px(8.))
                 .mx(px(-8.))
@@ -78,6 +96,9 @@ impl BeeperApp {
                     }
                     this.open_profile(window, cx);
                 })),
+            )
+            // Beside the row, not in it: a click on it must not open the profile too.
+            .child(toggle),
         )
     }
 
