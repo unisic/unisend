@@ -149,6 +149,15 @@ const MAX_FACES: usize = 64;
 const MAX_ARRIVALS: usize = 3;
 /// Link and quote pictures fading in at once, at most.
 const MAX_THUMB_FADES: usize = 60;
+/// A message estimated past this many lines shows its first `SHORT_LINES` and Show more; the
+/// estimate takes a line of a paragraph as `LINE_CHARS` characters. Collapsed, a plain body is laid
+/// out only up to `SHORT_CHARS`.
+const LONG_LINES: usize = 30;
+const SHORT_LINES: usize = 20;
+const LINE_CHARS: usize = 40;
+const SHORT_CHARS: usize = 2000;
+/// Long messages opened in full at once in a chat; past that the oldest choice is forgotten.
+const MAX_EXPANDED: usize = 64;
 /// Reaction badges under a message; the rest are behind "+k".
 const MAX_CHIPS: usize = 7;
 /// File sizes learnt by downloading, for the open chat.
@@ -262,6 +271,8 @@ pub struct BeeperApp {
     own_read: OwnRead,
     /// Someone else's message whose status line a tap showed.
     tapped: Option<String>,
+    /// Long messages of the open chat the user opened in full with Show more.
+    expanded: HashSet<String>,
     /// What the typing line said last, drawn while it leaves.
     typing_last: SharedString,
     /// When the others were last told that the user is writing.
@@ -579,6 +590,7 @@ impl BeeperApp {
             typing: Vec::new(),
             own_read: OwnRead::default(),
             tapped: None,
+            expanded: HashSet::new(),
             typing_last: SharedString::default(),
             typing_sent: None,
             tail: None,
@@ -1182,6 +1194,18 @@ impl BeeperApp {
     }
 
     /// Asks once for the picture of whoever wrote this message.
+    /// Show more: the message opens in full where it is.
+    fn expand(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.expanded.len() >= MAX_EXPANDED {
+            self.expanded.clear();
+        }
+        self.expanded.insert(id.to_owned());
+        if let Some(ix) = self.msgs.iter().position(|m| m.id == id) {
+            self.timeline.remeasure_items(ix..ix + 1);
+        }
+        cx.notify();
+    }
+
     fn want_face(&mut self, from: OwnedUserId) {
         if self.faces.contains_key(&from) || self.faces.len() >= MAX_FACES || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
             return;
@@ -1562,6 +1586,7 @@ impl BeeperApp {
         self.sizes.clear();
         (self.swipe, self.swipe_back, self.flash, self.seek, self.fresh_reaction, self.strip_last) = (None, None, None, None, None, None);
         (self.bubble_press, self.status_last, self.tapped) = (None, None, None);
+        self.expanded.clear();
         self.own_read = OwnRead::default();
         self.arrivals.clear();
         for (_, image) in self.faces.drain() {
@@ -2220,6 +2245,8 @@ impl BeeperApp {
                 let first = prev.is_none_or(|p| !joined(p, m));
                 let last = next.is_none_or(|n| !joined(m, n));
                 let faded = m.deleted || crate::backend::undecrypted(&m.body);
+                // Copy and Forward still take the whole body.
+                let collapsed = !faded && !this.expanded.contains(&m.id) && long(&m.body);
                 // As in Signal, an edit is told in the line under the bubble, before the time.
                 let edited = m.edited && !m.deleted;
                 // Where a run's bubbles meet, their corners on the sender's side are tighter; a picture
@@ -2359,10 +2386,32 @@ impl BeeperApp {
                                 .px(px(text_x))
                                 .map(|el| if jumbo { el.text_size(fs(40.)).line_height(fs(48.)) } else { el.text_size(fs(16.)).line_height(fs(22.)) })
                                 .when(faded, |el| el.italic().text_color(inside.faint))
+                                .when(collapsed, |el| el.max_h(fs(22.) * SHORT_LINES as f32).overflow_hidden())
                                 .child(match m.rich.as_ref().filter(|_| !faded) {
                                     Some(rich) => rich::body(m, rich, inside, ink),
+                                    None if collapsed => {
+                                        let cut = m.body.char_indices().nth(SHORT_CHARS).map_or(m.body.len(), |(at, _)| at);
+                                        crate::emoji::styled(m.body[..cut].to_owned(), marks.into_iter().filter(|(r, _)| r.end <= cut).collect()).into_any_element()
+                                    }
                                     None => crate::emoji::styled(m.body.clone(), marks).into_any_element(),
                                 }),
+                        )
+                    })
+                    .when(collapsed, |el| {
+                        let id = m.id.clone();
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("{}-more", m.id)))
+                                .px(px(text_x))
+                                .text_size(fs(14.))
+                                .line_height(fs(20.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.expand(&id, cx);
+                                }))
+                                .child(t!("Show more")),
                         )
                     })
                     .children(link_card)
@@ -3659,6 +3708,12 @@ fn corners<E: Styled>(el: E, own: bool, top: f32, bottom: f32) -> E {
     }
 }
 
+/// A body too long to show whole at first: past `LONG_LINES` lines, a long paragraph counting
+/// as several.
+fn long(body: &str) -> bool {
+    body.lines().map(|line| line.chars().count().div_ceil(LINE_CHARS).max(1)).sum::<usize>() > LONG_LINES
+}
+
 /// Whether a message is one to three emoji and nothing else. Flags (two regional indicators),
 /// skin tones and sequences joined by U+200D count as one.
 fn emoji_only(text: &str) -> bool {
@@ -4372,13 +4427,22 @@ impl BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced, clip_chars, joined_line};
+    use super::{long, Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced, clip_chars, joined_line};
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
 
     #[test]
     fn parent_names_clip_to_what_the_row_spares() {
         assert_eq!(clip_chars("Rust PL", 14), "Rust PL");
         assert_eq!(clip_chars("Serwer Rust Polska", 14), "Serwer Rust P…");
+    }
+
+    #[test]
+    fn only_long_messages_are_collapsed() {
+        assert!(!long("short"));
+        assert!(!long(&"line\n".repeat(30)));
+        assert!(long(&"line\n".repeat(31)));
+        assert!(!long(&"a".repeat(1200)), "one paragraph of 30 lines");
+        assert!(long(&"a".repeat(1201)));
     }
 
     #[test]

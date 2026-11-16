@@ -461,6 +461,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Share location", "Udostępnij lokalizację"),
     ("Show|notification", "Pokazuj"),
     ("Show all {more}", "Pokaż wszystkich ({more})"),
+    ("Show more", "Pokaż więcej"),
     ("Showing only the photos you allowed.", "Widać tylko zdjęcia, do których dano dostęp."),
     ("Showing the newest matches. Type more to narrow them down.", "Widać najnowsze wyniki. Wpisz więcej, aby zawęzić."),
     ("Showing {shown} of {all} members.", "Widać {shown} z {all} członków."),
