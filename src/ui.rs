@@ -79,7 +79,8 @@ use crate::{Keyboard, Palette};
 use crate::bridges::{Flow, Guild, Network, Step};
 use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, OwnRead, Pending, Quote, QuoteState, RoomSummary};
 
-const NARROW: f32 = 720.;
+/// A tablet held upright keeps one pane: beside a list, its conversation would be phone-narrow.
+const NARROW: f32 = if gpui_kit::is_mobile() { 840. } else { 720. };
 // Metrics; `docs/design.md` gives the reasons.
 const ROOM_ROW_H: f32 = 72.;
 const AVATAR: f32 = 48.;
@@ -99,6 +100,8 @@ const NAV_W: f32 = 210.;
 const LIST_W: f32 = 384.;
 /// The navigation as icons alone, on a desktop window narrower than `RAIL_BELOW`.
 const RAIL_W: f32 = 60.;
+/// A tablet's navigation: icons over their labels, Android's navigation rail.
+const TABLET_RAIL_W: f32 = 80.;
 /// Where the labelled navigation would leave the conversation under about 800 wide.
 const RAIL_BELOW: f32 = 1400.;
 /// Widest a message and a sheet grow on a wide window.
@@ -1887,7 +1890,7 @@ impl BeeperApp {
     }
 
     fn nav_w(window: &Window) -> f32 {
-        if Self::rail(window) { RAIL_W } else { NAV_W }
+        if gpui_kit::is_mobile() { TABLET_RAIL_W } else if Self::rail(window) { RAIL_W } else { NAV_W }
     }
 
     fn render_nav(&mut self, narrow: bool, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1909,6 +1912,8 @@ impl BeeperApp {
                 .map(|el| {
                     if narrow {
                         el.flex_1().h_full().flex_col().justify_center().gap(px(4.)).text_size(fs(12.))
+                    } else if gpui_kit::is_mobile() {
+                        el.h(px(NAV_H)).flex_col().justify_center().gap(px(4.)).text_size(fs(12.)).rounded(px(RADIUS))
                     } else {
                         el.h(px(TAP))
                             .gap(px(GAP))
@@ -1917,14 +1922,19 @@ impl BeeperApp {
                             .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.surface)).active(|el| el.bg(p.raised)))
                     }
                 })
-                .child(Icon::new(icon).size_5())
+                // On a touch screen the open tab's icon sits in a pill, as in Signal; a desktop row stays plain.
+                .map(|el| if narrow || gpui_kit::is_mobile() {
+                    el.child(div().px(px(16.)).py(px(4.)).rounded_full().when(tab == current, |el| el.bg(p.raised)).child(Icon::new(icon).size_5()))
+                } else {
+                    el.child(Icon::new(icon).size_5())
+                })
                 .map(|el| if rail { el.aria_label(tr(label)).tooltip(move |window, cx| Tooltip::new(tr(label)).build(window, cx)) } else { el.child(tr(label)) })
         });
         if narrow {
             h_flex().flex_none().h(px(NAV_H)).bg(p.ground).border_t_1().border_color(p.rule).children(items)
         } else {
             let name = h_flex().h(px(BAR_H)).text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD);
-            let name = if rail { name } else { name.px(px(GAP)).child("Unisend") };
+            let name = if rail || gpui_kit::is_mobile() { name } else { name.px(px(GAP)).child("Unisend") };
             v_flex()
                 .flex_none()
                 .w(px(Self::nav_w(window)))
