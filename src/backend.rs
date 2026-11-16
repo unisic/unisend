@@ -2377,7 +2377,8 @@ fn announce_invite(client: &Client, dir: &Path, rooms: &Rooms, notif: &Notificat
 }
 
 /// A chat the user is invited to, from the stripped state the invitation carries.
-async fn invitation(room: &Room, prev: Option<&RoomSummary>) -> RoomSummary {
+/// `live`: it came in while the app was running, not in the backlog of a first sign-in.
+async fn invitation(room: &Room, prev: Option<&RoomSummary>, live: bool) -> RoomSummary {
     let details = room.invite_details().await.ok();
     let by = details.as_ref().map(|d| d.inviter_id.clone());
     let inviter = match &details {
@@ -2395,8 +2396,9 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>) -> RoomSummary {
         name,
         preview: None,
         preview_id: None,
-        // A stripped invitation carries no time: it is dated when it arrives.
-        ts: prev.map_or(now_ms() as u64, |p| p.ts),
+        // Stripped state carries no time (Synapse 1.165 sends none): an invitation is dated when it
+        // arrives. One from before the first sign-in has no known time and sorts below the chats.
+        ts: prev.map_or(if live { now_ms() as u64 } else { 0 }, |p| p.ts),
         network: None,
         parent: None,
         unread: 0,
@@ -2995,9 +2997,10 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 continue;
             }
             let prev = rooms.lock().unwrap().get(id).cloned();
-            let summary = invitation(&room, prev.as_ref()).await;
+            let live = synced || !first_run;
+            let summary = invitation(&room, prev.as_ref(), live).await;
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
-            if prev.is_none() && (synced || !first_run) {
+            if prev.is_none() && live {
                 announce_invite(&client, &dir, &rooms, &notif, &summary);
             }
             changed.push(summary);

@@ -560,7 +560,8 @@ impl BeeperApp {
                 let Some(m) = details.as_ref().and_then(|d| d.members.get(ix)).cloned() else { return div().into_any_element() };
                 self.info_face(&m.id);
                 // Bridge bots and the user have nothing to offer here.
-                let tappable = m.role != Role::Service && self.user.as_ref() != Some(&m.id);
+                let me = self.user.as_ref() == Some(&m.id);
+                let tappable = m.role != Role::Service && !me;
                 h_flex()
                     .id(("info-member", ix))
                     .when(tappable, |el| {
@@ -572,7 +573,7 @@ impl BeeperApp {
                     .px(px(GUTTER))
                     .gap(px(12.))
                     .child(avatar(&m.name, self.faces.get(&m.id), MEMBER_AVATAR, cx))
-                    .child(div().flex_1().min_w_0().text_size(fs(16.)).truncate().child(m.name.clone()))
+                    .child(div().flex_1().min_w_0().text_size(fs(16.)).truncate().child(if me { t!("You").to_owned() } else { m.name.clone() }))
                     .children(role_label(m.role).map(|r| div().flex_none().text_size(fs(12.)).text_color(p.faint).child(r)))
                     .into_any_element()
             }
