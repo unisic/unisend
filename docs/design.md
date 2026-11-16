@@ -107,9 +107,13 @@ when it is back.
 
 The common acts take one gesture, and each also has a slower way that can be found by looking.
 
-- A tap on a message opens its panel right at the finger: six reactions in a row, then Reply,
-  Copy, and for your own messages Edit and Delete. A long press or the right mouse button opens
-  the same panel. A tap anywhere else closes it.
+- A tap on a message shows or hides the line under it: its time and, for your own, its status
+  (who has read it in a group); a second tap or a tap on another message takes it back.
+- A long press on a message lifts it over a dimmed screen with six reactions above it and its
+  acts under it: Reply, Edit (your own), Open link, Copy, Save, Forward, Select multiple, Info,
+  each where it applies, and one Delete that asks whether for you or for everyone. The right mouse button, or the dots beside a message
+  on a wide window, opens the same acts at the pointer; the heart and arrow there react and
+  reply. A tap anywhere else closes it.
 - A double tap likes the message (the heart), and a second double tap takes it back.
 - A sideways swipe on a message replies to it.
 - A long press or the right mouse button on a chat in the list, or the dots in a chat's header,
