@@ -73,6 +73,9 @@ impl Page {
 
 impl BeeperApp {
     pub(super) fn open_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
+        if panel != Panel::Login {
+            self.cancel_login(cx);
+        }
         if panel == Panel::Networks && self.beeper {
             self.working = self.send(Cmd::Networks, cx);
         }
@@ -97,6 +100,7 @@ impl BeeperApp {
         let group = self.panel == Some(Panel::NewChat) && self.new_chat_back(cx);
         self.panel = match self.panel {
             Some(Panel::Login) => {
+                self.cancel_login(cx);
                 self.end_login(cx);
                 Some(Panel::Networks)
             }
@@ -105,6 +109,15 @@ impl BeeperApp {
             _ => None,
         };
         cx.notify();
+    }
+
+    /// Leaving a login before it completed tells the bridge, which would otherwise wait for it
+    /// half an hour, and drops the request waiting on it.
+    pub(super) fn cancel_login(&mut self, cx: &mut Context<Self>) {
+        if let Some(step) = self.step.take_if(|s| s.kind != StepKind::Done) {
+            self.send(Cmd::LoginCancel(step), cx);
+            self.end_login(cx);
+        }
     }
 
     fn end_login(&mut self, cx: &mut Context<Self>) {
@@ -201,6 +214,7 @@ impl BeeperApp {
 
     /// `relogin` signs that login in again in place of adding one.
     fn choose_network(&mut self, bridge: &str, relogin: Option<String>, cx: &mut Context<Self>) {
+        self.cancel_login(cx);
         self.end_login(cx);
         self.relogin = relogin;
         self.panel = Some(Panel::Login);
@@ -981,10 +995,15 @@ impl BeeperApp {
             StepKind::Input(wanted) => {
                 if self.fields.is_empty() {
                     for field in wanted {
-                        let state = cx.new(|cx| InputState::new(window, cx).placeholder(field.name.clone()).masked(field.kind == "password"));
+                        let state = cx.new(|cx| {
+                            let mut input = InputState::new(window, cx).placeholder(field.name.clone()).masked(field.kind == "password");
+                            input.set_value(field.default_value.clone(), window, cx);
+                            input
+                        });
                         // Codes, PINs and passwords must not be autocorrected.
                         let keyboard = match field.kind.as_str() {
                             "email" => Keyboard::Email,
+                            _ if bridges::digits_only(&field.pattern) => Keyboard::Number,
                             _ => Keyboard::Key,
                         };
                         self.field_subs.push(cx.subscribe_in(&state, window, move |this, _, event: &InputEvent, _, cx| match event {
@@ -996,11 +1015,24 @@ impl BeeperApp {
                 }
                 v_flex()
                     .gap_3()
-                    .children(wanted.iter().zip(&self.fields).map(|(field, (_, input))| {
+                    .children(wanted.iter().zip(&self.fields).map(|(field, (id, input))| {
+                        let choice = (field.kind == "select" && !field.options.is_empty()).then(|| {
+                            let chosen = input.read(cx).value().to_string();
+                            card(cx).children(field.options.iter().enumerate().map(|(ix, label)| {
+                                let on = *label == chosen;
+                                let (input, label) = (input.clone(), label.clone());
+                                option((SharedString::from(format!("select-{id}")), ix), &label, "", on, cx).when(!on, |el| {
+                                    el.on_click(cx.listener(move |_, _, window, cx| input.update(cx, |i, cx| i.set_value(label.clone(), window, cx))))
+                                })
+                            }))
+                        });
                         v_flex()
                             .gap_1()
                             .child(div().text_size(fs(14.)).font_weight(FontWeight::MEDIUM).child(field.name.clone()))
-                            .child(Input::new(input))
+                            .map(|el| match choice {
+                                Some(choice) => el.child(choice),
+                                None => el.child(Input::new(input)),
+                            })
                             .when(!field.description.is_empty(), |el| el.child(note(&field.description)))
                     }))
                     .child(h_flex().child(
@@ -1013,8 +1045,10 @@ impl BeeperApp {
                     ))
                     .into_any_element()
             }
-            StepKind::Cookies(_) => {
+            StepKind::Cookies(wanted) => {
                 let phone = cfg!(target_os = "android");
+                // Values a browser keeps outside its cookies: pasted as JSON by these names.
+                let other: Vec<String> = wanted.fields.iter().filter(|f| f.cookies.is_empty()).map(|f| format!("\"{}\"", f.id)).collect();
                 v_flex()
                     .gap_3()
                     .child(note(if phone {
@@ -1029,6 +1063,9 @@ impl BeeperApp {
                             .disabled(self.working)
                             .on_click(cx.listener(|this, _, _, cx| this.browser_login(cx))),
                     ))
+                    .when(!phone && !other.is_empty(), |el| {
+                        el.child(note(&t!("This network also needs values the browser keeps outside its cookies. Paste everything as one JSON object with these names: {names}.", names = other.join(", "))))
+                    })
                     .child(Input::new(&self.cookie_paste))
                     .child(h_flex().child(
                         Button::new("login-cookies")
@@ -1052,6 +1089,19 @@ impl BeeperApp {
                 })
                 .child(note(t!("Waiting for the other device…")))
                 .into_any_element(),
+            StepKind::Passkey => {
+                let (bridge, relogin) = (step.bridge.clone(), self.relogin.clone());
+                v_flex()
+                    .gap_3()
+                    .child(note(t!("This step asks for a passkey, which Unisend cannot use yet. Choose another way to sign in; on WhatsApp, use the code you type on your phone.")))
+                    .child(h_flex().child(
+                        Button::new("login-other-way")
+                            .primary()
+                            .label(t!("Choose another way"))
+                            .on_click(cx.listener(move |this, _, _, cx| this.choose_network(&bridge, relogin.clone(), cx))),
+                    ))
+                    .into_any_element()
+            }
             StepKind::Done => v_flex()
                 .gap_3()
                 .child(div().text_size(fs(16.)).child(t!("{name} is connected.", name = name)))

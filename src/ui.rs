@@ -1611,6 +1611,7 @@ impl BeeperApp {
         }
         match tab {
             Tab::Chats | Tab::Archive => {
+                self.cancel_login(cx);
                 self.panel = None;
                 self.only_unread = false;
                 self.set_view(if tab == Tab::Archive { View::Archive } else { View::Inbox }, cx);

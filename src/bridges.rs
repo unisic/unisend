@@ -17,7 +17,9 @@ use serde_json::{Value, json};
 use crate::i18n::t;
 
 /// Bridges Beeper hosts that log in through this API, with the names its apps show.
-pub const KNOWN: [(&str, &str); 12] = [
+/// Google Chat's bridge is the legacy one, without this API, and Bluesky's runs only on the
+/// device in Beeper's apps (Beeper Desktop's bridge table: `bridge-local-bluesky`), so neither is here.
+pub const KNOWN: [(&str, &str); 11] = [
     ("whatsapp", "WhatsApp"),
     ("signal", "Signal"),
     ("telegram", "Telegram"),
@@ -28,7 +30,6 @@ pub const KNOWN: [(&str, &str); 12] = [
     ("slackgo", "Slack"),
     ("linkedin", "LinkedIn"),
     ("gmessages", "Google Messages"),
-    ("googlechat", "Google Chat"),
     ("gvoice", "Google Voice"),
 ];
 
@@ -104,6 +105,8 @@ pub enum StepKind {
     Cookies(Cookies),
     /// `kind` is `qr`, `emoji`, `code` or `nothing`.
     Show { kind: String, data: String },
+    /// A passkey (WebAuthn) the bridge wants signed; Unisend cannot sign one yet.
+    Passkey,
     Done,
 }
 
@@ -119,6 +122,18 @@ pub struct Field {
     pub kind: String,
     #[serde(default)]
     pub options: Vec<String>,
+    #[serde(default)]
+    pub default_value: String,
+    /// A regex the value matches, e.g. `^[0-9]{6}$` for Messenger's history PIN.
+    #[serde(default)]
+    pub pattern: String,
+}
+
+/// A pattern that only digits match, such as `^[0-9]{6}$` or `^\d+$`: a number pad fits it.
+pub fn digits_only(pattern: &str) -> bool {
+    let body = pattern.trim_start_matches('^').trim_end_matches('$');
+    let rest = body.replace("[0-9]", "").replace("\\d", "");
+    rest.len() < body.len() && rest.chars().all(|c| c.is_ascii_digit() || "{},+*?".contains(c))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -129,6 +144,8 @@ pub struct Cookies {
     /// The browser has finished when its address matches this.
     pub wait_for: String,
     pub fields: Vec<CookieField>,
+    /// JavaScript the page runs to find fields itself; it resolves to an object keyed by field ID.
+    pub extract_js: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -137,6 +154,8 @@ pub struct CookieField {
     pub required: bool,
     /// Cookie names that can fill this field, with the domain each lives on.
     pub cookies: Vec<(String, String)>,
+    /// Keys in the site's local storage that can fill it.
+    pub storage: Vec<String>,
 }
 
 /// Where the two APIs live and who is asking.
@@ -240,11 +259,18 @@ impl Api {
             StepKind::Input(_) => ("user_input", json!(values), CALL_TIMEOUT),
             StepKind::Cookies(_) => ("cookies", json!(values), CALL_TIMEOUT),
             StepKind::Show { .. } => ("display_and_wait", json!({}), WAIT_TIMEOUT),
+            StepKind::Passkey => bail!(t!("Unisend cannot sign in with a passkey yet")),
             StepKind::Done => bail!(t!("the login is already complete")),
         };
         let path = format!("login/step/{}/{}/{kind}", current.login_id, current.step_id);
         let json = self.bridge(&current.bridge, Method::POST, &path, Some(body), timeout).await?;
         step(&current.bridge, &current.login_id, &json)
+    }
+
+    /// Ends a login that is still waiting, so the bridge stops waiting for it too.
+    pub async fn cancel(&self, bridge: &str, login_id: &str) -> Result<()> {
+        self.bridge(bridge, Method::POST, &format!("login/cancel/{login_id}"), Some(json!({})), CALL_TIMEOUT).await?;
+        Ok(())
     }
 
     pub async fn logout(&self, bridge: &str, login: &str) -> Result<()> {
@@ -290,15 +316,14 @@ fn step(bridge: &str, login_id: &str, json: &Value) -> Result<Step> {
         }
         Some("cookies") => {
             let fields = json.pointer("/cookies/fields").and_then(Value::as_array).into_iter().flatten().filter_map(|f| {
-                let cookies = f.get("sources").and_then(Value::as_array).into_iter().flatten().filter_map(|s| {
-                    (s.get("type")?.as_str()? == "cookie").then_some(())?;
-                    let domain = s.get("cookie_domain").and_then(Value::as_str).unwrap_or_default();
-                    Some((s.get("name")?.as_str()?.to_owned(), domain.to_owned()))
-                });
+                let sources = f.get("sources").and_then(Value::as_array).into_iter().flatten();
+                let of = |kind: &'static str| sources.clone().filter(move |s| s.get("type").and_then(Value::as_str) == Some(kind)).filter_map(|s| Some((s, s.get("name")?.as_str()?.to_owned())));
+                let cookies = of("cookie").map(|(s, name)| (name, s.get("cookie_domain").and_then(Value::as_str).unwrap_or_default().to_owned()));
                 Some(CookieField {
                     id: f.get("id")?.as_str()?.to_owned(),
                     required: f.get("required").and_then(Value::as_bool).unwrap_or(false),
                     cookies: cookies.collect(),
+                    storage: of("local_storage").map(|(_, name)| name).collect(),
                 })
             });
             StepKind::Cookies(Cookies {
@@ -306,9 +331,11 @@ fn step(bridge: &str, login_id: &str, json: &Value) -> Result<Step> {
                 user_agent: text("/cookies/user_agent"),
                 wait_for: text("/cookies/wait_for_url_pattern"),
                 fields: fields.collect(),
+                extract_js: text("/cookies/extract_js"),
             })
         }
         Some("display_and_wait") => StepKind::Show { kind: text("/display_and_wait/type"), data: text("/display_and_wait/data") },
+        Some("webauthn") => StepKind::Passkey,
         Some("complete") => StepKind::Done,
         other => bail!(t!("this app does not know the login step {step}", step = format!("{other:?}"))),
     };
@@ -344,11 +371,14 @@ pub fn parse_cookies(pasted: &str) -> HashMap<String, String> {
         .collect()
 }
 
-/// Values for the step's fields from a cookie jar; `Err` names a required cookie that is missing.
+/// Values for the step's fields from what the browser gave: cookies and local storage by their
+/// names, and anything else (an `extract_js` result, pasted JSON) by field ID. `Err` names a
+/// required value that is missing.
 pub fn fill_cookies(fields: &[CookieField], jar: &HashMap<String, String>) -> Result<HashMap<String, String>, String> {
     let mut values = HashMap::new();
     for field in fields {
-        match field.cookies.iter().find_map(|(name, _)| jar.get(name)) {
+        let names = field.cookies.iter().map(|c| &c.0).chain(&field.storage).chain([&field.id]);
+        match names.filter_map(|name| jar.get(name)).find(|v| !v.is_empty()) {
             Some(value) => {
                 values.insert(field.id.clone(), value.clone());
             }
@@ -379,11 +409,19 @@ mod tests {
 
     #[test]
     fn required_cookies_are_checked() {
-        let field = |id: &str, required| CookieField { id: id.to_owned(), required, cookies: vec![(id.to_owned(), "facebook.com".to_owned())] };
+        let field = |id: &str, required| CookieField { id: id.to_owned(), required, cookies: vec![(id.to_owned(), "facebook.com".to_owned())], storage: vec![] };
         let fields = [field("c_user", true), field("xs", true), field("datr", false)];
         let jar = parse_cookies("c_user=100; xs=tok");
         assert_eq!(fill_cookies(&fields, &jar).unwrap().len(), 2);
         assert_eq!(fill_cookies(&fields, &parse_cookies("c_user=100")), Err("xs".to_owned()));
+
+        // Discord's token has no cookie: its page script, or pasted JSON, gives it by field ID.
+        let token = CookieField { id: "token".into(), required: true, cookies: vec![], storage: vec!["token".into()] };
+        let x = CookieField { id: "castle_token".into(), required: true, cookies: vec![], storage: vec![] };
+        let got = fill_cookies(&[token, x], &parse_cookies(r#"{"token": "abc", "castle_token": "c1"}"#)).unwrap();
+        assert_eq!((got["token"].as_str(), got["castle_token"].as_str()), ("abc", "c1"));
+        let empty = CookieField { id: "token".into(), required: true, cookies: vec![], storage: vec![] };
+        assert_eq!(fill_cookies(&[empty], &parse_cookies(r#"{"token": ""}"#)), Err("token".to_owned()));
     }
 
     #[test]
@@ -404,6 +442,24 @@ mod tests {
         let StepKind::Cookies(c) = &parsed.kind else { panic!("{parsed:?}") };
         assert_eq!((parsed.step_id.as_str(), c.url.as_str(), c.fields.len()), ("fi.mau.meta.cookies", "https://www.messenger.com/", 1));
         assert_eq!(c.fields[0].cookies, [("xs".to_owned(), "messenger.com".to_owned())]);
+
+        let discord = json!({ "type": "cookies", "step_id": "fi.mau.discord.cookies", "cookies": {
+            "url": "https://discord.com/login", "extract_js": "new Promise(r => r({}))",
+            "fields": [{ "id": "token", "required": true, "sources": [
+                { "type": "special", "name": "fi.mau.discord.token" }, { "type": "local_storage", "name": "token" }
+            ] }]
+        } });
+        let StepKind::Cookies(d) = step("discordgo", "L", &discord).unwrap().kind else { panic!() };
+        assert_eq!((d.extract_js.as_str(), d.fields[0].cookies.len(), d.fields[0].storage.as_slice()), ("new Promise(r => r({}))", 0, ["token".to_owned()].as_slice()));
+
+        let pin = json!({ "type": "user_input", "step_id": "fi.mau.meta.history_pin", "user_input": { "fields": [
+            { "type": "password", "id": "pin", "name": "PIN", "optional": true, "pattern": "^[0-9]{6}$" },
+            { "type": "select", "id": "m", "name": "Method", "options": ["SMS", "App"], "default_value": "App" }
+        ] } });
+        let StepKind::Input(f) = step("facebookgo", "L", &pin).unwrap().kind else { panic!() };
+        assert!(digits_only(&f[0].pattern));
+        assert_eq!((f[1].options.len(), f[1].default_value.as_str()), (2, "App"));
+        assert_eq!(step("whatsapp", "L", &json!({ "type": "webauthn", "step_id": "fi.mau.whatsapp.login.passkey" })).unwrap().kind, StepKind::Passkey);
 
         let input = json!({ "type": "user_input", "step_id": "s", "user_input": { "fields": [
             { "type": "phone_number", "id": "phone", "name": "Phone number", "description": "With country code" }
@@ -431,6 +487,16 @@ mod tests {
         let want = [("facebookgo", "Dean"), ("facebookgo", "300")].map(|(b, n)| (b.to_owned(), n.to_owned()));
         assert_eq!(attention(&whoami), want);
         assert!(attention(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn number_pad_only_for_digit_patterns() {
+        for digits in ["^[0-9]{6}$", "^\\d+$", "[0-9]{4,8}", "^\\d{6}$"] {
+            assert!(digits_only(digits), "{digits}");
+        }
+        for other in ["", "^[a-z0-9]+$", "^.{6}$", "^\\+?[0-9]+$", "^(SMS|App)$"] {
+            assert!(!digits_only(other), "{other}");
+        }
     }
 
     #[test]

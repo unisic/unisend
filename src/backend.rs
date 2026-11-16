@@ -136,6 +136,8 @@ pub enum Cmd {
     LoginStart { bridge: String, flow: String, relogin: Option<String> },
     /// Answers a login step; the values are empty for a step that only waits.
     LoginSubmit(Step, HashMap<String, String>),
+    /// The user left a login before it completed: the bridge stops waiting for it.
+    LoginCancel(Step),
     Logout { bridge: String, login: String },
     /// Read receipts stay private while on.
     Incognito(bool),
@@ -818,6 +820,8 @@ struct State {
     info: Option<AbortOnDrop>,
     /// Looks up the person behind a chat's sheet; a newer sheet replaces it.
     peer: Option<AbortOnDrop>,
+    /// The network login's request in flight; leaving the login cancels it.
+    login: Option<AbortOnDrop>,
     /// The account on disk cannot be opened here (key gone, session unreadable), so a sign-in may
     /// replace it; otherwise a sign-in never deletes a session that may still open.
     replaceable: bool,
@@ -843,7 +847,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     let _ = std::fs::remove_file(dir.join("klipy-id"));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
         rooms: Rooms::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), notif: None,
-        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, replaceable: false, update: None };
+        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, replaceable: false, update: None };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
     #[cfg(not(target_os = "android"))]
     tokio::spawn(crate::notify::serve(st.dir.clone()));
@@ -1466,11 +1470,21 @@ impl State {
             }
             Cmd::LoginStart { bridge, flow, relogin } => {
                 let (api, ev) = (self.api()?, self.ev.clone());
-                tokio::spawn(async move { panel(&ev, api.start(&bridge, &flow, relogin.as_deref()).await.map(Ev::LoginStep)).await });
+                self.login = Some(AbortOnDrop(tokio::spawn(async move { panel(&ev, api.start(&bridge, &flow, relogin.as_deref()).await.map(Ev::LoginStep)).await })));
             }
             Cmd::LoginSubmit(step, values) => {
                 let (api, ev) = (self.api()?, self.ev.clone());
-                tokio::spawn(async move { panel(&ev, api.submit(&step, &values).await.map(Ev::LoginStep)).await });
+                self.login = Some(AbortOnDrop(tokio::spawn(async move { panel(&ev, api.submit(&step, &values).await.map(Ev::LoginStep)).await })));
+            }
+            Cmd::LoginCancel(step) => {
+                self.login = None;
+                let api = self.api()?;
+                tokio::spawn(async move {
+                    // Unknown to the bridge by now (finished, timed out) is as good as cancelled.
+                    if let Err(e) = api.cancel(&step.bridge, &step.login_id).await {
+                        log::debug!("login cancel: {e:#}");
+                    }
+                });
             }
             Cmd::Logout { bridge, login } => {
                 let (api, ev) = (self.api()?, self.ev.clone());

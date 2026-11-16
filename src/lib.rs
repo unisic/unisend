@@ -636,6 +636,8 @@ pub(crate) enum Keyboard {
     Email,
     /// Codes and recovery keys: no auto-capitalisation or autocorrect, which would corrupt base58.
     Key,
+    /// Digits only, such as a PIN or a one-time code.
+    Number,
 }
 
 pub(crate) fn show_keyboard(kind: Keyboard) {
@@ -644,6 +646,7 @@ pub(crate) fn show_keyboard(kind: Keyboard) {
         Keyboard::Text => gpui_mobile::KeyboardType::Default,
         Keyboard::Email => gpui_mobile::KeyboardType::EmailAddress,
         Keyboard::Key => gpui_mobile::KeyboardType::URL,
+        Keyboard::Number => gpui_mobile::KeyboardType::NumberPad,
     });
     #[cfg(not(target_os = "android"))]
     let _ = kind;
@@ -893,7 +896,8 @@ pub(crate) fn clear_notification(chat: &str) {
     notify::close(chat);
 }
 
-/// Signs in to a chat network in a browser and returns its cookies as `name=value; ...`.
+/// Signs in to a chat network in a browser and returns what it found as a JSON object: the
+/// cookies by name, local storage by key, and the `extract_js` result by field ID.
 /// Desktop has no embedded browser: it opens the page in the system's, and the user pastes the
 /// cookies; so it returns nothing.
 pub(crate) fn web_login(cx: &mut gpui_kit::App, wanted: &bridges::Cookies) -> gpui_kit::Task<Option<String>> {
@@ -909,11 +913,24 @@ pub(crate) fn web_login(cx: &mut gpui_kit::App, wanted: &bridges::Cookies) -> gp
         domains.sort_unstable();
         domains.dedup();
         let domains = domains.join(",");
-        let required: Vec<String> = wanted.fields.iter().filter(|f| f.required).flat_map(|f| &f.cookies).map(|c| format!("{}@{}", c.0, c.1)).collect();
-        let required = required.join(",");
+        // One line per required field, its sources tab-separated: `c:name@domain`, `s:key`, `f:id`.
+        let required: Vec<String> = wanted
+            .fields
+            .iter()
+            .filter(|f| f.required)
+            .map(|f| {
+                let cookies = f.cookies.iter().map(|c| format!("c:{}@{}", c.0, c.1));
+                let storage = f.storage.iter().map(|k| format!("s:{k}"));
+                let script = (!wanted.extract_js.is_empty()).then(|| format!("f:{}", f.id));
+                cookies.chain(storage).chain(script).collect::<Vec<_>>().join("\t")
+            })
+            .collect();
+        let required = required.join("\n");
+        let storage: Vec<&str> = wanted.fields.iter().flat_map(|f| &f.storage).map(String::as_str).collect();
+        let (storage, script) = (storage.join("\n"), wanted.extract_js.clone());
         // Blocks until the browser closes, so off the UI thread.
         cx.background_spawn(async move {
-            android_files::web_login(&url, &agent, &pattern, &domains, &required).map_err(|e| log::warn!("web login: {e}")).ok()?
+            android_files::web_login(&url, &agent, &pattern, &domains, &required, &storage, &script).map_err(|e| log::warn!("web login: {e}")).ok()?
         })
     }
 }
@@ -1057,18 +1074,19 @@ mod android_files {
         })
     }
 
-    pub fn web_login(url: &str, agent: &str, pattern: &str, domains: &str, required: &str) -> Result<Option<String>, String> {
+    pub fn web_login(url: &str, agent: &str, pattern: &str, domains: &str, required: &str, storage: &str, script: &str) -> Result<Option<String>, String> {
         helpers::with_env(|env| {
             let activity = helpers::activity(env)?;
             let class = helpers::find_app_class(env, "dev.gpui.beeper.WebLogin")?;
             let mut text = |s: &str| env.new_string(s).map_err(|e| e.to_string());
             let (url, agent, pattern, domains, required) = (text(url)?, text(agent)?, text(pattern)?, text(domains)?, text(required)?);
+            let (storage, script) = (text(storage)?, text(script)?);
             let cookies = env
                 .call_static_method(
                     &class,
                     jni::jni_str!("run"),
                     jni::jni_sig!(
-                        "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+                        "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
                     ),
                     &[
                         JValue::Object(&activity),
@@ -1077,6 +1095,8 @@ mod android_files {
                         JValue::Object(&pattern),
                         JValue::Object(&domains),
                         JValue::Object(&required),
+                        JValue::Object(&storage),
+                        JValue::Object(&script),
                     ],
                 )
                 .and_then(|v| v.l())
