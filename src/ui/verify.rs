@@ -252,6 +252,12 @@ impl BeeperApp {
                 panels::card(cx)
                     .child(panels::row(t!("This device"), this_status, cx).when(can_verify, |el| {
                         el.child(pill("verify-start", t!("Verify"), p.text, cx).on_click(cx.listener(|this, _, _, cx| this.start_verify(cx))))
+                    }).when(self.need_recovery, |el| {
+                        // The code goes in the chat list's unlock row, open and back even after "Later".
+                        el.child(pill("recovery-unlock", t!("Unlock"), p.text, cx).on_click(cx.listener(|this, _, window, cx| {
+                            (this.recovery_later, this.recovery_open) = (false, true);
+                            this.set_tab(Tab::Chats, window, cx);
+                        })))
                     }))
                     .child(panels::row(t!("Cross-signing"), keys, cx)),
             )
@@ -267,6 +273,10 @@ impl BeeperApp {
         let label = t!("Recovery code");
         let to = |state: fn() -> Recovery| cx.listener(move |this: &mut Self, _: &ClickEvent, _: &mut Window, cx| this.recovery_set(state(), cx));
         match &self.verify.recovery {
+            // Locked out of the keys, so no code is kept here: no "Show" that only says so.
+            Recovery::Hidden if self.need_recovery => {
+                panels::row(label, t!("None is kept on this device. Unlock it with your code once and it is kept here."), cx)
+            }
             Recovery::Hidden => panels::row(label, t!("Unlocks encrypted messages on another device. Copy it here, paste it there."), cx)
                 .child(pill("recovery-show", t!("Show|recovery code"), p.text, cx).on_click(cx.listener(|this, _, _, cx| this.recovery_ask(Cmd::RecoveryCode, cx)))),
             Recovery::Busy => panels::row(label, t!("Loading…"), cx),

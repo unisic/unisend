@@ -1290,7 +1290,9 @@ impl State {
                             ))
                         }
                         RecoveryError::SecretStorage(SecretStorageError::SecretStorageKey(_)) => {
-                            anyhow!(t!("This is not a recovery code. Check it for typos: {error}", error = e))
+                            // The decoder's detail ("invalid character 'O' at byte 0") means nothing to a person.
+                            log::debug!("recovery code: {e}");
+                            anyhow!(t!("This is not a recovery code. It is 48 letters and digits in groups of four; check it for typos."))
                         }
                         e => anyhow::Error::new(e).context(t!("Recovery code was not accepted")),
                     });

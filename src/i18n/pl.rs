@@ -570,7 +570,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("This device", "To urządzenie"),
     ("This font's colour format (COLRv1) cannot be drawn yet. Choose one with bitmap emoji.", "Formatu kolorów tej czcionki (COLRv1) nie da się jeszcze rysować. Wybierz czcionkę z emoji bitmapowymi."),
     ("This is how messages look.", "Tak wyglądają wiadomości."),
-    ("This is not a recovery code. Check it for typos: {error}", "To nie jest kod odzyskiwania. Sprawdź, czy nie ma literówek: {error}"),
+    ("This is not a recovery code. It is 48 letters and digits in groups of four; check it for typos.", "To nie jest kod odzyskiwania. Ma 48 liter i cyfr w grupach po cztery; sprawdź, czy nie ma literówek."),
     ("This message cannot be forwarded", "Tej wiadomości nie można przekazać"),
     ("This recovery code is valid but does not match your account's current key. It may be an older code; get the current one from another app where you are signed in.", "Ten kod odzyskiwania jest poprawny, ale nie pasuje do obecnego klucza konta. Może to starszy kod; pobierz aktualny z innej zalogowanej aplikacji."),
     ("This server asks for a kind of confirmation Unisend does not offer. Sign the device out from Beeper or Element.", "Ten serwer wymaga potwierdzenia, którego Unisend nie obsługuje. Wyloguj urządzenie w Beeperze lub Elemencie."),
