@@ -23,7 +23,8 @@ the build at the runtime library instead of its pkg-config file:
     export SYSTEM_DEPS_GSTREAMER_1_0_NO_PKG_CONFIG=1 SYSTEM_DEPS_GSTREAMER_1_0_LIB=gstreamer-1.0
     RUSTFLAGS="-L $PWD/target/linkshim" cargo build
 
-The binary then needs `libgstreamer-1.0.so.0` to start, which every KDE and GNOME install has.
+The binary then needs `libgstreamer-1.0.so.0` to start, from the distribution's `gstreamer1`
+(Fedora) or `libgstreamer1.0-0` (Debian, Ubuntu) package; without it the app does not start at all.
 Playing and recording also need the base and good plugins (`playbin`, `scaletempo`, `opusenc`,
 `oggmux`, `autoaudiosrc`, `autoaudiosink`); when one is missing, or a file has no decoder, audio
 opens in the system's player and there is no microphone button, as on Windows and macOS.
