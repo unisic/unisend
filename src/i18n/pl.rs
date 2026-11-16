@@ -290,7 +290,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Mark unread", "Do przeczytania"),
     ("Media", "Multimedia"),
     ("Media that can be viewed once cannot be forwarded", "Multimediów do jednorazowego wyświetlenia nie można przekazać"),
-    ("Mentions only", "Tylko wzmianki"),
+    ("Mentions still notify.", "Wzmianki nadal będą powiadamiać."),
     ("Message", "Wiadomość"),
     ("Message deleted", "Wiadomość usunięta"),
     ("Message details", "Szczegóły wiadomości"),
