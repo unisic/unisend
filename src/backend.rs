@@ -456,6 +456,9 @@ pub enum Kind {
     Notice,
     /// `sender` joined. Joins that follow one another are told on one line.
     Joined,
+    /// `by` (the user's "You" when `own`) invited `sender`, also told in `body`. Invitations one
+    /// person sends one after another are told on one line.
+    Invited { by: String },
     /// The day the rows under it belong to.
     Day,
     /// The rows under it are new since the user last read the chat.

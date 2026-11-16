@@ -598,6 +598,10 @@ fn membership(m: &mut Msg, change: &RoomMembershipChange, viewer: &Viewer) {
     match change.change() {
         Some(MembershipChange::Joined | MembershipChange::InvitationAccepted) => (m.kind, m.sender) = (Kind::Joined, subject),
         Some(change) => match membership_line(change, actor.map(|a| (a, m.own)), &subject, me) {
+            Some(line) if change == MembershipChange::Invited && !me => {
+                m.kind = Kind::Invited { by: actor.unwrap_or_default().to_owned() };
+                (m.sender, m.body) = (subject, line);
+            }
             Some(line) => (m.kind, m.body) = (Kind::Notice, line),
             None => m.kind = Kind::Hidden,
         },

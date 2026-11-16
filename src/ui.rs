@@ -2850,7 +2850,16 @@ impl BeeperApp {
                 let mut names: Vec<&str> =
                     self.msgs[..=ix].iter().rev().take(MAX_JOINED).take_while(|m| m.kind == Kind::Joined).map(|m| m.sender.as_str()).collect();
                 names.reverse();
-                (tn!(names.len(), "{who} joined", "{who} joined", who = people(&names).0), self.on_wallpaper(p.faint, cx))
+                (joined_line(&names), self.on_wallpaper(p.faint, cx))
+            }
+            // So are invitations one person sends one after another.
+            Kind::Invited { by } if self.msgs.get(ix + 1).is_none_or(|next| next.kind != m.kind || next.from != m.from) => {
+                let mut names: Vec<&str> =
+                    self.msgs[..=ix].iter().rev().take(MAX_JOINED).take_while(|row| row.kind == m.kind && row.from == m.from).map(|row| row.sender.as_str()).collect();
+                names.reverse();
+                let who = people(&names).0;
+                let text = if m.own { t!("You invited {object}", object = who) } else { t!("{actor} invited {object}", actor = by, object = who) };
+                (text, self.on_wallpaper(p.faint, cx))
             }
             _ => return div().into_any_element(),
         };
@@ -3532,6 +3541,16 @@ fn chat_actions(room: &RoomSummary) -> [(&'static str, IconName, ChatAction); 5]
             (t!("Move to low priority"), IconName::ChevronsDown, ChatAction::LowPriority(true))
         },
     ]
+}
+
+/// Who joined, one after another, as one line: "You and Ann joined" takes the plural of "you".
+fn joined_line(names: &[&str]) -> String {
+    let who = people(names).0;
+    match names {
+        [one] if *one == t!("You") => t!("You joined").to_owned(),
+        _ if names.contains(&t!("You")) => t!("{who} joined|with you", who = who),
+        _ => tn!(names.len(), "{who} joined", "{who} joined", who = who),
+    }
 }
 
 /// Names as a phrase, and whether it stands for more than one person: "Ann", "Ann and Bob",
@@ -4306,13 +4325,20 @@ impl BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced, clip_chars};
+    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced, clip_chars, joined_line};
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
 
     #[test]
     fn parent_names_clip_to_what_the_row_spares() {
         assert_eq!(clip_chars("Rust PL", 14), "Rust PL");
         assert_eq!(clip_chars("Serwer Rust Polska", 14), "Serwer Rust P…");
+    }
+
+    #[test]
+    fn joins_with_the_user_read_as_one_sentence() {
+        assert_eq!(joined_line(&["You"]), "You joined");
+        assert_eq!(joined_line(&["You", "Ann"]), "You and Ann joined");
+        assert_eq!(joined_line(&["Ann", "Bob", "Cy", "Di"]), "Ann, Bob and 2 others joined");
     }
 
     #[test]
