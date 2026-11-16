@@ -1248,10 +1248,10 @@ async fn a_chat_opens_at_once_after_the_store_lost_its_events() {
     assert!(took < Duration::from_secs(2), "the messages took {took:?}");
 }
 
-/// Not a check: times a long encrypted group read on a new device whose keys are only in the
-/// backup. SLOW_N messages (with replies and pictures) from two people, read through a hop of
-/// SLOW_RTT_MS; SLOW_PREVIEWS chat-list previews asked for just before the thumbnails. The seed
-/// is kept in the temporary directory for the next run.
+/// Mostly a measurement: times a long encrypted group read on a new device whose keys are only in
+/// the backup, and checks that no quote stays locked. SLOW_N messages (with replies and pictures)
+/// from two people, read through a hop of SLOW_RTT_MS; SLOW_PREVIEWS chat-list previews asked for
+/// just before the thumbnails. The seed is kept in the temporary directory for the next run.
 /// Run: SLOW_N=2000 ... cargo test --lib long_history_timings -- --include-ignored --nocapture
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "measurement, needs a local homeserver with JWT login"]
@@ -1409,6 +1409,15 @@ async fn measure_slowload(hs: &str, secret: &str, rtt: Duration, root: &Path, al
         }
     }
     eprintln!("timing: scroll: {} messages loaded after {}, readable after {} (at most {most_locked} locked)", messages(&seat.rows), loaded.unwrap(), since(scrolled));
+
+    // Replies whose quoted message was looked up before its key came.
+    let quoted = std::time::Instant::now();
+    let locked_quotes = |rows: &[Msg]| rows.iter().filter(|m| m.reply.as_ref().is_some_and(|q| undecrypted(&q.text))).count();
+    eprintln!("timing: quotes: {} locked of {}", locked_quotes(&seat.rows), seat.rows.iter().filter(|m| m.reply.is_some()).count());
+    let quotes_by = tokio::time::Instant::now() + Duration::from_secs(60);
+    while locked_quotes(&seat.rows) > 0 && tokio::time::timeout_at(quotes_by, seat.next("quotes", quotes_by + Duration::from_secs(1))).await.is_ok() {}
+    eprintln!("timing: quotes: {} still locked after {}", locked_quotes(&seat.rows), since(quoted));
+    assert_eq!(locked_quotes(&seat.rows), 0, "quotes stayed locked though their keys are in the backup");
 
     let pictures: Vec<_> = seat.rows.iter().filter_map(|m| m.media.clone().map(|media| (m.id.clone(), media))).collect();
     let thumbs = std::time::Instant::now();

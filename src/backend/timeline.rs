@@ -4,7 +4,7 @@
 //! each of its items looks like as a row.
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -40,7 +40,7 @@ use matrix_sdk_ui::timeline::{
 use tokio::sync::{broadcast, mpsc};
 
 use super::{
-    AbortOnDrop, act, deleted, utd, utd_because, Delivery, Ev, Kind, OwnRead, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
+    AbortOnDrop, act, deleted, undecrypted, utd, utd_because, Delivery, Ev, Kind, OwnRead, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
     format, marks, bridge_names, other_person, plain, sticker, disappear, features,
 };
 use crate::i18n::t;
@@ -87,6 +87,8 @@ struct Viewer {
     bridged: bool,
     /// Who made the room: their first join is told by the creation line.
     creators: Vec<OwnedUserId>,
+    /// Quoted messages read after the SDK had given up on them, by their event.
+    unlocked: std::sync::Mutex<HashMap<String, Quote>>,
 }
 
 /// Starts following a room: sends the rows it has now, then every change to them, and who is
@@ -101,6 +103,7 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
         service: room.service_members().unwrap_or_default(),
         bridged: bridge_names(room).await.0.is_some(),
         creators: room.creators().unwrap_or_default(),
+        unlocked: Default::default(),
     });
     let timeline = TimelineBuilder::new(room)
         .track_read_marker_and_receipts(TimelineReadReceiptTracking::AllEvents)
@@ -119,8 +122,9 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
     // On a phone every lookup is a round trip: made beside the rows, a chat full of replies or of
     // locked messages does not hold back the rows after them.
     let (lookups, mut wanted) = mpsc::channel::<(Vec<String>, Vec<OwnedEventId>)>(LOOKUP_QUEUE);
+    let relabel = Arc::new(tokio::sync::Notify::new());
     let lookup = tokio::spawn({
-        let timeline = timeline.clone();
+        let (timeline, viewer, relabel) = (timeline.clone(), viewer.clone(), relabel.clone());
         async move {
             let mut wait = KEY_RETRY_FIRST;
             let mut again = tokio::time::Instant::now() + wait;
@@ -136,7 +140,7 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
                         let sessions: Vec<String> = items.iter().rev().filter_map(|item| locked(item)).collect();
                         wait = (wait * 2).min(KEY_RETRY_MOST);
                         again = tokio::time::Instant::now() + wait;
-                        if sessions.is_empty() || !timeline.room().client().encryption().backups().are_enabled().await {
+                        if !timeline.room().client().encryption().backups().are_enabled().await {
                             continue;
                         }
                         (sessions, Vec::new())
@@ -154,10 +158,10 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
                         }
                     })
                     .await;
+                unlock_quotes(&timeline, &viewer, &relabel).await;
             }
         }
     });
-    let relabel = Arc::new(tokio::sync::Notify::new());
     // A receipt on an event the timeline had not loaded yet gets its row only once it is loaded.
     let rows_changed = Arc::new(tokio::sync::Notify::new());
     let rows = tokio::spawn({
@@ -330,9 +334,53 @@ fn unknown_quote(item: &Arc<TimelineItem>) -> Option<OwnedEventId> {
 /// The session of a message that could not be decrypted.
 fn locked(item: &TimelineItem) -> Option<String> {
     let TimelineItemContent::MsgLike(like) = item.as_event()?.content() else { return None };
-    match &like.kind {
+    session(&like.kind)
+}
+
+fn session(kind: &MsgLikeKind) -> Option<String> {
+    match kind {
         MsgLikeKind::UnableToDecrypt(EncryptedMessage::MegolmV1AesSha2 { session_id, .. }) => Some(session_id.clone()),
         _ => None,
+    }
+}
+
+/// The message a reply quotes and the session of its key, when the quote could not be decrypted.
+fn locked_quote(item: &TimelineItem) -> Option<(OwnedEventId, String)> {
+    let TimelineItemContent::MsgLike(like) = item.as_event()?.content() else { return None };
+    let reply = like.in_reply_to.as_ref()?;
+    let TimelineDetails::Ready(quoted) = &reply.event else { return None };
+    let TimelineItemContent::MsgLike(quoted) = &quoted.content else { return None };
+    Some((reply.event_id.clone(), session(&quoted.kind)?))
+}
+
+/// Quotes of messages that were looked up before their key came: the SDK keeps those locked for
+/// good, so once the key may be in they are read again here and every row is built again.
+async fn unlock_quotes(timeline: &Timeline, viewer: &Viewer, relabel: &tokio::sync::Notify) {
+    let items = timeline.items().await;
+    let mut wanted: Vec<(OwnedEventId, String)> = Vec::new();
+    for found in items.iter().rev().filter_map(|item| locked_quote(item)) {
+        let known = viewer.unlocked.lock().unwrap().contains_key(found.0.as_str());
+        if !known && wanted.len() < MAX_KEY_FETCHES && !wanted.iter().any(|(id, _)| *id == found.0) {
+            wanted.push(found);
+        }
+    }
+    if wanted.is_empty() || viewer.unlocked.lock().unwrap().len() >= MAX_QUOTES_FETCHED {
+        return;
+    }
+    let room = timeline.room();
+    fetch_keys(room, wanted.iter().map(|(_, session)| session.clone())).await;
+    let events = futures_util::future::join_all(wanted.iter().map(|(id, _)| room.event(id, None))).await;
+    let events: Vec<_> = events.into_iter().filter_map(Result::ok).filter(|event| !event.kind.is_utd()).collect();
+    let (read, _) = super::to_msgs(room, &events).await;
+    let mut unlocked = viewer.unlocked.lock().unwrap();
+    let before = unlocked.len();
+    for m in read {
+        if unlocked.len() < MAX_QUOTES_FETCHED {
+            unlocked.insert(m.id.clone(), m.quote());
+        }
+    }
+    if unlocked.len() > before {
+        relabel.notify_one();
     }
 }
 
@@ -458,7 +506,10 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
     match event.content() {
         TimelineItemContent::MsgLike(like) => {
             fill(&mut m, &like.kind, &viewer.own);
-            m.reply = like.in_reply_to.as_ref().map(|reply| quote(reply, &viewer.own));
+            m.reply = like.in_reply_to.as_ref().map(|reply| quote(reply, &viewer.own)).map(|q| match undecrypted(&q.text) {
+                true => viewer.unlocked.lock().unwrap().get(q.id.as_str()).cloned().unwrap_or(q),
+                false => q,
+            });
             m.reactions = like
                 .reactions
                 .iter()
@@ -735,13 +786,13 @@ mod tests {
     fn shows(kind: &str, content: serde_json::Value) -> bool {
         let event = json!({ "type": kind, "event_id": "$e", "sender": "@b:x", "origin_server_ts": 1, "content": content });
         let event: AnySyncTimelineEvent = serde_json::from_value(event).unwrap();
-        let viewer = Viewer { own: "@a:x".try_into().unwrap(), service: BTreeSet::new(), bridged: false, creators: Vec::new() };
+        let viewer = Viewer { own: "@a:x".try_into().unwrap(), service: BTreeSet::new(), bridged: false, creators: Vec::new(), unlocked: Default::default() };
         shown(&event, &RoomVersionRules::V11, false, false, &viewer)
     }
 
     #[test]
     fn a_group_opens_with_its_creation_not_its_creators_join() {
-        let viewer = Viewer { own: "@a:x".try_into().unwrap(), service: BTreeSet::new(), bridged: false, creators: vec!["@b:x".try_into().unwrap()] };
+        let viewer = Viewer { own: "@a:x".try_into().unwrap(), service: BTreeSet::new(), bridged: false, creators: vec!["@b:x".try_into().unwrap()], unlocked: Default::default() };
         let state = |kind: &str, key: &str, content: serde_json::Value, unsigned: serde_json::Value, dm: bool| {
             let event = json!({ "type": kind, "state_key": key, "event_id": "$e", "sender": if key.is_empty() { "@b:x" } else { key }, "origin_server_ts": 1, "content": content, "unsigned": unsigned });
             shown(&serde_json::from_value(event).unwrap(), &RoomVersionRules::V11, dm, false, &viewer)
