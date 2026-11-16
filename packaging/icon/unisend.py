@@ -13,8 +13,11 @@ Writes the masters render.sh rasterises and copies, all on the 108-unit Android 
   splash.svg        Android splash: violet disc (the 72-unit circle the splash shows) and the mark
   ic_launcher_background.xml, ic_launcher_foreground.xml, ic_launcher_monochrome.xml,
   splash_icon.xml   the same layers as Android vector drawables, for res/drawable
+  Unisend.icon/     macOS 26+ Icon Composer document: each half a Liquid Glass layer on a 1024
+                    canvas over a near-black violet fill; the system draws its mask, glass and modes
 No dependencies beyond python3.
 """
+import json
 import os
 import sys
 
@@ -27,6 +30,8 @@ TILE_RX = 24
 LAYER = dict(scale=0.84, dx=1.0, dy=-0.5)
 TILE_SCALE = 1.4  # a desktop tile has no launcher mask eating its edges, so the mark is drawn larger
 SMALL_PX = 108 / 16  # icon-small is drawn on a 16 px grid so its edges land on whole pixels at 16, 32, 48
+MAC_K = 1024 / 108 * 1.15  # the mark spans about 55% of the Icon Composer canvas
+MAC_LEFT, MAC_FILL = "#b066ff", ("#2a1840", "#120a1c")
 
 
 def num(v):
@@ -102,6 +107,27 @@ def vector(paths, colours):
             f'    android:viewportWidth="108"\n    android:viewportHeight="108">{body}\n</vector>\n')
 
 
+def srgb(hex_colour):
+    return "srgb:" + ",".join(f"{int(hex_colour[i:i + 2], 16) / 255:.5f}" for i in (1, 3, 5)) + ",1.00000"
+
+
+def mac_icon():
+    """The Icon Composer document: icon.json and one layer SVG per half, each in its own group."""
+    left, right = mark((lambda x, y: (512 + MAC_K * (x - 54), 512 + MAC_K * (y - 55)), MAC_K))
+    head = '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">'
+    groups = [{"layers": [{"image-name": f"{n}.svg", "name": n, "glass": True}],
+               "shadow": {"kind": "layer-color", "opacity": 0.5}, "specular": True,
+               "translucency": {"enabled": True, "value": 0.4}} for n in ("right", "left")]
+    doc = {"fill": {"linear-gradient": [srgb(c) for c in MAC_FILL],
+                    "orientation": {"start": {"x": 0.5, "y": 0}, "stop": {"x": 0.5, "y": 0.7}}},
+           "groups": groups, "supported-platforms": {"squares": ["macOS"]}}
+    return {
+        "Unisend.icon/icon.json": json.dumps(doc, indent=2) + "\n",
+        "Unisend.icon/Assets/left.svg": f'{head}<path d="{left}" fill="{MAC_LEFT}"/></svg>\n',
+        "Unisend.icon/Assets/right.svg": f'{head}<path d="{right}" fill="{WHITE}"/></svg>\n',
+    }
+
+
 def files():
     s = LAYER["scale"]
     layer = mark(around_centre(s, LAYER["dx"], LAYER["dy"]))
@@ -123,15 +149,17 @@ def files():
         "ic_launcher_foreground.xml": vector(layer, two),
         "ic_launcher_monochrome.xml": vector(layer, mono),
         "splash_icon.xml": vector((disc, *layer), (VIOLET, *two)),
+        **mac_icon(),
     }
 
 
 def main():
     if len(sys.argv) != 2:
         sys.exit("usage: unisend.py OUTDIR")
-    os.makedirs(sys.argv[1], exist_ok=True)
     for name, body in files().items():
-        with open(os.path.join(sys.argv[1], name), "w") as f:
+        out = os.path.join(sys.argv[1], name)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out, "w") as f:
             f.write(body)
 
 
