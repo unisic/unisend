@@ -80,6 +80,8 @@ struct Viewer {
     service: BTreeSet<OwnedUserId>,
     /// The chat is on another network, where a message has arrived only once its bridge says so.
     bridged: bool,
+    /// Who made the room: their first join is told by the creation line.
+    creators: Vec<OwnedUserId>,
 }
 
 /// Starts following a room: sends the rows it has now, then every change to them, and who is
@@ -92,6 +94,7 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
         own: room.own_user_id().to_owned(),
         service: room.service_members().unwrap_or_default(),
         bridged: bridge_names(room).await.0.is_some(),
+        creators: room.creators().unwrap_or_default(),
     });
     let timeline = TimelineBuilder::new(room)
         .track_read_marker_and_receipts(TimelineReadReceiptTracking::AllEvents)
@@ -374,11 +377,14 @@ fn shown(event: &AnySyncTimelineEvent, rules: &RoomVersionRules, dm: bool, big: 
         AnySyncTimelineEvent::State(state) if state.event_type().to_string() == disappear::TIMER => true,
         AnySyncTimelineEvent::State(state) if CALL_MEMBER.contains(&state.event_type().to_string().as_str()) => true,
         AnySyncTimelineEvent::State(_) if dm => false,
+        AnySyncTimelineEvent::State(AnySyncStateEvent::RoomCreate(create)) => !service.contains(create.sender()),
         AnySyncTimelineEvent::State(AnySyncStateEvent::RoomMember(SyncStateEvent::Original(member))) => {
             let by_bot = service.contains(&member.sender);
+            let founding = member.unsigned.prev_content.is_none() && viewer.creators.contains(&member.state_key);
             !service.contains(&member.state_key)
                 && (!big || member.state_key == viewer.own)
                 && match member.membership_change() {
+                    Change::Joined if founding => false,
                     Change::Joined | Change::InvitationAccepted | Change::Left | Change::Kicked | Change::KickedAndBanned | Change::Banned => true,
                     // A bridge invites people on its way to joining them.
                     Change::Invited => !by_bot,
@@ -670,6 +676,8 @@ fn state_line(change: &AnyOtherStateEventContentChange, actor: Option<&str>, own
         (AnyOtherStateEventContentChange::RoomTopic(_), true, _) => t!("The description was changed").to_owned(),
         (AnyOtherStateEventContentChange::RoomTopic(_), false, true) => t!("You changed the description").to_owned(),
         (AnyOtherStateEventContentChange::RoomTopic(_), false, false) => t!("{actor} changed the description", actor = actor),
+        (AnyOtherStateEventContentChange::RoomCreate(_), false, true) => t!("You created the group").to_owned(),
+        (AnyOtherStateEventContentChange::RoomCreate(_), false, false) => t!("{actor} created the group", actor = actor),
         _ => return None,
     })
 }
@@ -698,8 +706,23 @@ mod tests {
     fn shows(kind: &str, content: serde_json::Value) -> bool {
         let event = json!({ "type": kind, "event_id": "$e", "sender": "@b:x", "origin_server_ts": 1, "content": content });
         let event: AnySyncTimelineEvent = serde_json::from_value(event).unwrap();
-        let viewer = Viewer { own: "@a:x".try_into().unwrap(), service: BTreeSet::new(), bridged: false };
+        let viewer = Viewer { own: "@a:x".try_into().unwrap(), service: BTreeSet::new(), bridged: false, creators: Vec::new() };
         shown(&event, &RoomVersionRules::V11, false, false, &viewer)
+    }
+
+    #[test]
+    fn a_group_opens_with_its_creation_not_its_creators_join() {
+        let viewer = Viewer { own: "@a:x".try_into().unwrap(), service: BTreeSet::new(), bridged: false, creators: vec!["@b:x".try_into().unwrap()] };
+        let state = |kind: &str, key: &str, content: serde_json::Value, unsigned: serde_json::Value, dm: bool| {
+            let event = json!({ "type": kind, "state_key": key, "event_id": "$e", "sender": if key.is_empty() { "@b:x" } else { key }, "origin_server_ts": 1, "content": content, "unsigned": unsigned });
+            shown(&serde_json::from_value(event).unwrap(), &RoomVersionRules::V11, dm, false, &viewer)
+        };
+        let join = json!({ "membership": "join" });
+        assert!(state("m.room.create", "", json!({ "creator": "@b:x", "room_version": "11" }), json!({}), false));
+        assert!(!state("m.room.create", "", json!({ "room_version": "11" }), json!({}), true), "a one-to-one chat has no creation line");
+        assert!(!state("m.room.member", "@b:x", join.clone(), json!({}), false), "the creator's first join");
+        assert!(state("m.room.member", "@b:x", join.clone(), json!({ "prev_content": { "membership": "leave" } }), false), "the creator coming back");
+        assert!(state("m.room.member", "@c:x", join, json!({}), false));
     }
 
     #[test]
