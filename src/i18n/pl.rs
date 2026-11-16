@@ -409,7 +409,6 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("React", "Zareaguj"),
     ("Reactions", "Reakcje"),
     ("Read by", "Przeczytane przez"),
-    ("Read by|menu", "Kto przeczytał"),
     ("Read or unread", "Przeczytane lub nie"),
     ("Recent", "Ostatnie"),
     ("Recovery code", "Kod odzyskiwania"),
