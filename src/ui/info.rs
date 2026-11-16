@@ -455,15 +455,14 @@ impl BeeperApp {
             }
             Row::Actions => {
                 let Some(room) = summary else { return div().into_any_element() };
-                let [(_, read_icon, read), pin, mute, archive, _] = chat_actions(&room);
-                // The sheet's "Mark as unread" does not fit a quarter of a phone.
-                let unread = (if room.is_unread() { t!("Mark read") } else { t!("Mark unread") }, read_icon, read);
+                // No read or unread here: the chat is open, so it is read; the list's sheet and swipe mark it.
+                let [_, pin, mute, archive, _] = chat_actions(&room);
                 // A muted chat's tile says how: "Muted until 14:30"; a tap unmutes it.
                 let mute_state = self.mute_state(&room);
                 let id = room.id.clone();
                 edge()
                     .pb(px(GAP))
-                    .child(h_flex().items_stretch().gap(px(8.)).children([mute, pin, archive, unread].into_iter().enumerate().map(|(ix, (label, icon, action))| {
+                    .child(h_flex().items_stretch().gap(px(8.)).children([mute, pin, archive].into_iter().enumerate().map(|(ix, (label, icon, action))| {
                         let id = id.clone();
                         let (label, icon): (SharedString, _) = match (ix, &mute_state) {
                             (0, Some(state)) => (state.clone().into(), IconName::BellOff),

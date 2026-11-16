@@ -920,6 +920,8 @@ fn archive_rule_matches_beeper() {
         dated: true,
         pending: None,
         moved_to: None,
+        own_last: false,
+        read_by: Vec::new(),
     };
     let done = |updated_ts, at_order| Done { updated_ts, at_order };
     let now = 10_000;

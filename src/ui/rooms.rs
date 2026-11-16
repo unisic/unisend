@@ -172,7 +172,69 @@ fn wording(c: &Confirm) -> (String, String, &'static str) {
     }
 }
 
+/// The marks the backend puts before a media summary ("📷 Photo"), drawn as the icon they stand for.
+const MEDIA_MARKS: [(&str, IconName); 8] = [
+    ("📷", IconName::Camera),
+    ("🖼", IconName::Image),
+    ("🎬", IconName::Video),
+    ("🎤", IconName::Mic),
+    ("🎵", IconName::Music),
+    ("📍", IconName::MapPin),
+    ("📊", IconName::ChartBar),
+    ("📎", IconName::Paperclip),
+];
+
+/// A preview split around its media mark: the sender part, the icon, the words after it. The mark
+/// starts the summary, which starts the preview or follows a sender's name and ": ".
+fn media_mark(preview: &str) -> Option<(&str, IconName, &str)> {
+    let starts = std::iter::once(0).chain(preview.match_indices(": ").map(|(at, _)| at + 2));
+    for start in starts {
+        let rest = &preview[start..];
+        for (mark, icon) in MEDIA_MARKS {
+            if let Some(tail) = rest.strip_prefix(mark) {
+                let tail = tail.strip_prefix('\u{fe0f}').unwrap_or(tail);
+                if let Some(words) = tail.strip_prefix(' ') {
+                    return Some((&preview[..start], icon, words));
+                }
+            }
+        }
+    }
+    None
+}
+
 impl BeeperApp {
+    /// A chat row's second line: who is writing, or the newest message with its state and, for
+    /// media, the icon of its kind.
+    pub(super) fn row_preview(&self, room: &RoomSummary, preview: Option<&str>, cx: &App) -> AnyElement {
+        let p = Palette::of(cx);
+        if let Some(names) = self.list_typing.get(&room.id).filter(|n| !n.is_empty()) {
+            let text = if room.dm {
+                t!("typing…").to_owned()
+            } else {
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                let (who, many) = people(&names);
+                if many { t!("{who} are typing…", who = who) } else { t!("{who} is typing…", who = who) }
+            };
+            return div().truncate().text_color(p.muted).child(text).into_any_element();
+        }
+        let text = preview.unwrap_or(t!("Message"));
+        let status = self.row_mark(room, cx);
+        let Some((before, icon, words)) = media_mark(text) else {
+            let line = crate::emoji::styled(text.to_owned(), Vec::new());
+            return match status {
+                Some(status) => h_flex().gap(px(4.)).child(status).child(div().flex_1().min_w_0().truncate().child(line)).into_any_element(),
+                None => line.into_any_element(),
+            };
+        };
+        h_flex()
+            .gap(px(4.))
+            .children(status)
+            .when(!before.is_empty(), |el| el.child(div().flex_initial().min_w_0().truncate().child(crate::emoji::styled(before.trim_end().to_owned(), Vec::new()))))
+            .child(Icon::new(icon).size(px(14.)).flex_none().text_color(p.faint))
+            .child(div().flex_1().min_w_0().truncate().child(crate::emoji::styled(words.to_owned(), Vec::new())))
+            .into_any_element()
+    }
+
     /// The last row of a chat's sheet.
     pub(super) fn leave_row(&self, room: OwnedRoomId, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = Palette::of(cx);
@@ -701,9 +763,9 @@ impl BeeperApp {
             );
         }
         if let Some(who) = identifier {
-            let title = if new.group { t!("Add {who}", who = who) } else { t!("Chat with {who}", who = who) };
+            let what = if new.group { t!("Add to group") } else { t!("New chat") };
             rows.push(
-                row("identifier".into(), title, String::new(), icon_disc(if new.group { IconName::Plus } else { IconName::MessageCircle }), None)
+                row("identifier".into(), who.clone(), what.to_owned(), icon_disc(if new.group { IconName::Plus } else { IconName::MessageCircle }), None)
                     .on_click(cx.listener(move |this, _, _, cx| this.pick_identifier(who.clone(), cx)))
                     .into_any_element(),
             );
@@ -779,7 +841,7 @@ fn ready_to_create(new: &NewChat, group: &crate::backend::rooms::GroupCaps, cx: 
 
 #[cfg(test)]
 mod tests {
-    use super::{Confirm, Confirming, looks_like_identifier, wording};
+    use super::{Confirm, Confirming, looks_like_identifier, media_mark, wording};
     use crate::backend::rooms::{Caps, Target};
 
     #[test]
@@ -821,5 +883,15 @@ mod tests {
         let (title, body, act) = wording(&c);
         assert_eq!((title.as_str(), act), ("Sign out of WhatsApp?", "Sign out"));
         assert!(body.contains("pair again"));
+    }
+
+    #[test]
+    fn media_marks_become_icons() {
+        let split = |p| media_mark(p).map(|(before, _, words)| (before, words));
+        assert_eq!(split("Ty: 📷 Zdjęcie: nad jeziorem"), Some(("Ty: ", "Zdjęcie: nad jeziorem")));
+        assert_eq!(split("📎 notes.pdf"), Some(("", "notes.pdf")));
+        assert_eq!(split("Re: work: 🎬 Film"), Some(("Re: work: ", "Film")), "a name may hold \": \"");
+        assert_eq!(split("Ania: and 📷 later"), None, "a mark inside someone's text stays");
+        assert_eq!(split("Ola: Cześć"), None);
     }
 }

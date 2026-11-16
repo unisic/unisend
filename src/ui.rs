@@ -224,6 +224,9 @@ pub struct BeeperApp {
     recovery: Entity<InputState>,
     composer: Entity<InputState>,
     need_recovery: bool,
+    /// The chat list's unlock row shows its field; `recovery_later` puts the row away until the next start.
+    recovery_open: bool,
+    recovery_later: bool,
     /// The connection is lost and being retried.
     offline: bool,
     /// Holds keyboard focus when no input does, so Escape (Android's back) still reaches the app.
@@ -273,6 +276,8 @@ pub struct BeeperApp {
     msgs: Vec<Msg>,
     /// Who is writing in the open conversation.
     typing: Vec<String>,
+    /// Who is writing in each chat, for the list; one entry per chat someone writes in, gone when they stop.
+    list_typing: HashMap<OwnedRoomId, Vec<String>>,
     /// How far the user has read the open chat, publicly and at all.
     own_read: OwnRead,
     /// Someone else's message whose status line a tap showed.
@@ -334,6 +339,8 @@ pub struct BeeperApp {
     mute_picking: bool,
     /// Wakes when the soonest timed mute ends.
     mute_timer: Option<Task<()>>,
+    /// The sheet came from the open chat's header: what to do inside it, not the list's actions.
+    chat_sheet_inside: bool,
     /// Where a mouse opened the chat's or the attach sheet: on a desktop it opens there as a list.
     sheet_at: Option<Point<Pixels>>,
     /// The sheet's chat and its other person's page in their network's app, as `(app, link)`.
@@ -573,6 +580,8 @@ impl BeeperApp {
             recovery,
             composer,
             need_recovery: false,
+            recovery_open: false,
+            recovery_later: false,
             offline: false,
             focus: cx.focus_handle(),
             dir,
@@ -604,6 +613,7 @@ impl BeeperApp {
             open: None,
             msgs: Vec::new(),
             typing: Vec::new(),
+            list_typing: HashMap::new(),
             own_read: OwnRead::default(),
             tapped: None,
             expanded: HashSet::new(),
@@ -636,6 +646,7 @@ impl BeeperApp {
             chat_sheet: None,
             mute_picking: false,
             mute_timer: None,
+            chat_sheet_inside: false,
             sheet_at: None,
             peer_link: None,
             gallery: gallery::Gallery::default(),
@@ -848,6 +859,7 @@ impl BeeperApp {
                 }
             }
             Ev::RoomGone(id) => {
+                self.list_typing.remove(&id);
                 self.rooms.retain(|r| r.id != id);
                 self.refilter(cx);
                 if self.open.as_ref() == Some(&id) {
@@ -923,6 +935,13 @@ impl BeeperApp {
                         // The last page's rows can arrive after this; they are looked through then.
                         self.seek = Some((id, 0));
                     }
+                }
+            }
+            Ev::ListTyping { room, names } => {
+                if names.is_empty() {
+                    self.list_typing.remove(&room);
+                } else {
+                    self.list_typing.insert(room, names);
                 }
             }
             Ev::Typing { room, names } => {
@@ -2010,7 +2029,7 @@ impl BeeperApp {
                                                             .child(div().flex_none().text_color(p.faint).child(t!("Draft:")))
                                                             .child(div().flex_1().min_w_0().truncate().child(crate::emoji::styled(draft.replace('\n', " "), Vec::new())))
                                                             .into_any_element(),
-                                                        (None, None) => crate::emoji::styled(preview.unwrap_or(t!("Message")).to_owned(), Vec::new()).into_any_element(),
+                                                        (None, None) => this.row_preview(room, preview, cx),
                                                     }),
                                             )
                                             .when(room.pinned, |el| el.child(mark(IconName::Pin)))
@@ -2027,7 +2046,7 @@ impl BeeperApp {
                                     #[cfg(target_os = "android")]
                                     motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Heavy);
                                     // A held mouse button: the list opens where it is, as for the right button.
-                                    this.open_chat_sheet(id.clone(), Some(e.start_position), cx);
+                                    this.open_chat_sheet(id.clone(), Some(e.start_position), false, cx);
                                 }
                             })))
                             // The right button of a mouse.
@@ -2035,7 +2054,7 @@ impl BeeperApp {
                                 let id = room.id.clone();
                                 move |this, event: &ClickEvent, _, cx| {
                                     if event.is_secondary() {
-                                        this.open_chat_sheet(id.clone(), Some(event.position()), cx);
+                                        this.open_chat_sheet(id.clone(), Some(event.position()), false, cx);
                                     }
                                 }
                             }));
@@ -2083,17 +2102,29 @@ impl BeeperApp {
         let archive = self.view == View::Archive;
         let has_query = !self.search.read(cx).value().trim().is_empty();
         let state = list_state(self.synced, self.rooms.is_empty(), has_query);
-        let empty = if has_query {
-            t!("No chat or message matches")
+        // How a chat gets there: a long press on a phone, the right button under a mouse.
+        let how = |action: &str| {
+            if gpui_kit::is_mobile() { t!("Hold a chat and choose \"{action}\".", action = action) } else { t!("Right-click a chat and choose \"{action}\".", action = action) }
+        };
+        let (empty, hint) = if has_query {
+            (t!("No chat or message matches"), None)
         } else if self.only_unread {
-            t!("Nothing unread")
+            (t!("Nothing unread"), None)
         } else {
             match self.view {
-                View::Inbox => t!("No chats here yet"),
-                View::Archive => t!("Nothing archived"),
-                View::LowPriority => t!("Nothing in low priority"),
+                View::Inbox => (t!("No chats here yet"), None),
+                View::Archive => (t!("Nothing archived"), Some(how(t!("Archive|verb")))),
+                View::LowPriority => (t!("Nothing in low priority"), Some(how(t!("Move to low priority")))),
             }
         };
+        let show_all = (self.only_unread && !has_query).then(|| {
+            Button::new("show-all")
+                .mt(px(10.))
+                .h(px(TAP))
+                .px(px(GUTTER))
+                .label(t!("Show all"))
+                .on_click(cx.listener(|this, _, _, cx| this.set_filter(View::Inbox, false, cx)))
+        });
         // Alone on a narrow window, the list's top row ends under the window buttons.
         let end = if frame::viewport(window).width < px(NARROW) { frame::reserve(window) } else { 0. };
         let top = if self.searching {
@@ -2164,6 +2195,7 @@ impl BeeperApp {
             .children(banners)
             .when(self.sync_stopped, |el| el.child(self.render_sync_stopped(cx)))
             .children((!archive && !self.searching).then(|| self.render_attention(cx)).flatten())
+            .when(!archive && !self.searching, |el| el.children(self.render_recovery(cx)))
             .child(self.list_touch(cx))
             .child(div().flex_1().min_h_0().child(if state == RoomsView::Skeleton {
                 skeleton(p).into_any_element()
@@ -2172,7 +2204,17 @@ impl BeeperApp {
                 let note = note.child(div().text_size(fs(16.)).text_color(p.muted).child(t!("No chats yet")));
                 note.child(div().text_size(fs(14.)).text_color(p.faint).child(t!("Start one with +."))).into_any_element()
             } else if self.shown.is_empty() && self.message_rows() == 0 {
-                div().px(px(GUTTER)).py(px(GAP)).text_size(fs(14.)).text_color(p.faint).child(empty).into_any_element()
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(4.))
+                    .px(px(GUTTER))
+                    .text_center()
+                    .child(div().text_size(fs(16.)).text_color(p.muted).child(empty))
+                    .children(hint.map(|hint| div().text_size(fs(14.)).text_color(p.faint).child(hint)))
+                    .children(show_all)
+                    .into_any_element()
             } else {
                 list.into_any_element()
             }))
@@ -2713,7 +2755,7 @@ impl BeeperApp {
                     .when(room.is_some(), |el| {
                         el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
                             if let Some(id) = this.open.clone() {
-                                this.open_chat_sheet(id, Some(e.position()), cx);
+                                this.open_chat_sheet(id, Some(e.position()), true, cx);
                             }
                         })))
                     }),
@@ -3315,7 +3357,8 @@ impl BeeperApp {
         }
     }
 
-    fn open_chat_sheet(&mut self, id: OwnedRoomId, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+    fn open_chat_sheet(&mut self, id: OwnedRoomId, at: Option<Point<Pixels>>, inside: bool, cx: &mut Context<Self>) {
+        self.chat_sheet_inside = inside;
         let network = self.rooms.iter().find(|r| r.id == id).and_then(|r| r.network.as_deref());
         // One profile lookup at the homeserver, which already holds it, so the row shows only when it leads somewhere.
         if self.peer_link.as_ref().is_none_or(|(room, ..)| *room != id) && crate::backend::links_profiles(network) {
@@ -3357,6 +3400,10 @@ impl BeeperApp {
             let (title, rows) = self.mute_sheet(room, live, cx);
             return Some(self.sheet(&self.chat_motion, frame, 4, title, rows, |this| &mut this.chat_motion, window, cx));
         }
+        if self.chat_sheet_inside {
+            let [_, _, mute, archive, _] = chat_actions(room);
+            return Some(self.inside_sheet(id, title, [mute, archive], frame, window, cx));
+        }
         let mut rows: Vec<_> = chat_actions(room)
             .into_iter()
             .map(|(label, icon, action)| {
@@ -3389,6 +3436,57 @@ impl BeeperApp {
         rows.extend(self.disappear_entry(&id, live, cx));
         rows.push(self.leave_row(id, live, window, cx));
         Some(self.sheet(&self.chat_motion, frame, 0, title, rows, |this| &mut this.chat_motion, window, cx))
+    }
+
+    /// The open chat's own actions, as Signal has them inside a conversation; the rest stay on the list's sheet.
+    fn inside_sheet(
+        &mut self,
+        id: OwnedRoomId,
+        title: String,
+        acts: [(&'static str, IconName, ChatAction); 2],
+        frame: sheet::SheetFrame,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (p, live) = (Palette::of(cx), frame.live);
+        let close = |this: &mut Self, cx: &mut Context<Self>| {
+            this.chat_sheet = None;
+            cx.notify();
+        };
+        let mut rows = vec![
+            sheet_row("chat-info", IconName::Info, t!("Chat info"), p.text, window, cx).when(live, |row| {
+                row.on_click(cx.listener(move |this, _, _, cx| {
+                    close(this, cx);
+                    if !this.info_open() {
+                        this.toggle_info(cx);
+                    }
+                }))
+            }),
+            sheet_row("chat-find", IconName::Search, t!("Search"), p.text, window, cx).when(live, |row| {
+                row.on_click(cx.listener(move |this, _, window, cx| {
+                    close(this, cx);
+                    this.open_find(window, cx);
+                }))
+            }),
+        ];
+        for (label, icon, action) in acts {
+            let id = id.clone();
+            rows.push(sheet_row(label, icon, label, p.text, window, cx).when(live, |row| {
+                // Mute opens the same choice of how long as the list's sheet.
+                row.on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.chat_action(id.clone(), action, true, cx) || !this.mute_picking {
+                        close(this, cx);
+                    }
+                    cx.notify();
+                }))
+            }));
+        }
+        // Above Archive, as Signal orders them.
+        if let Some(row) = self.disappear_entry(&id, live, cx) {
+            rows.insert(3, row);
+        }
+        rows.push(self.leave_row(id, live, window, cx));
+        self.sheet(&self.chat_motion, frame, 0, title, rows, |this| &mut this.chat_motion, window, cx)
     }
 
     /// Who is writing, over the composer. It grows from nothing and shrinks back, so the messages
@@ -3490,6 +3588,88 @@ impl BeeperApp {
         )
     }
 
+    /// Locked encrypted messages: one row under the chat list's filters, the code's field only once asked for.
+    fn render_recovery(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.need_recovery || self.recovery_later {
+            return None;
+        }
+        let p = Palette::of(cx);
+        let open = self.recovery_open;
+        let head = h_flex()
+            .id("recovery-row")
+            .min_h(px(TAP))
+            .py(px(6.))
+            .pl(px(GAP))
+            .gap(px(10.))
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.recovery_open = !this.recovery_open;
+                cx.notify();
+            }))
+            .child(Icon::new(IconName::LockOpen).size_4().flex_none().text_color(p.warning))
+            // A narrow column wraps it rather than cut the words short.
+            .child(div().flex_1().min_w_0().text_color(p.warning).child(t!("Unlock encrypted messages")))
+            .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).size_4().flex_none().text_color(p.faint));
+        let later = h_flex()
+            .id("recovery-later")
+            .h(px(TAP))
+            .px(px(GAP))
+            .flex_none()
+            .rounded_full()
+            .cursor_pointer()
+            .text_color(p.muted)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.recovery_later = true;
+                cx.notify();
+            }))
+            .child(t!("Later"));
+        Some(
+            v_flex()
+                .flex_none()
+                .mx(px(GUTTER))
+                .mt(px(4.))
+                .rounded(px(RADIUS))
+                .bg(p.warning_bg)
+                .text_size(fs(14.))
+                .line_height(fs(20.))
+                .child(h_flex().child(head.flex_1().min_w_0()).child(later))
+                .when(open, |el| {
+                    el.child(
+                        v_flex()
+                            .px(px(GAP))
+                            .pb(px(GAP))
+                            .gap(px(10.))
+                            .child(div().text_color(p.muted).child(t!(
+                                "Encrypted messages are locked on this device. Copy your recovery code from another device where you are signed in (in Unisend: Settings, Devices), then paste it here."
+                            )))
+                            .child(div().w_full().child(Input::new(&self.recovery)))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .justify_end()
+                                    .child(
+                                        Button::new("paste-recovery")
+                                            .h(px(TAP))
+                                            .px(px(GUTTER))
+                                            .label(t!("Paste"))
+                                            .on_click(cx.listener(|this, _, window, cx| this.paste_recovery(window, cx))),
+                                    )
+                                    .child(
+                                        Button::new("recover")
+                                            .primary()
+                                            .h(px(TAP))
+                                            .px(px(GUTTER))
+                                            .label(t!("Unlock"))
+                                            .loading(self.busy)
+                                            .disabled(self.busy)
+                                            .on_click(cx.listener(|this, _, window, cx| this.recover(window, cx))),
+                                    ),
+                            ),
+                    )
+                }),
+        )
+    }
+
     fn render_banners(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         // Fades and opens in, closes and fades out; it sits above everything, so opening its
@@ -3526,38 +3706,6 @@ impl BeeperApp {
                 )
             })
             .children(update)
-            .when(self.need_recovery, |el| {
-                el.child(
-                    card()
-                        .bg(p.warning_bg)
-                        .child(div().text_color(p.warning).child(
-                            t!("Encrypted messages are locked on this device. Copy your recovery code from another device where you are signed in (in Unisend: Settings, Devices), then paste it here."),
-                        ))
-                        .child(div().w_full().child(Input::new(&self.recovery)))
-                        .child(
-                            h_flex()
-                                .gap(px(8.))
-                                .justify_end()
-                                .child(
-                                    Button::new("paste-recovery")
-                                        .h(px(TAP))
-                                        .px(px(GUTTER))
-                                        .label(t!("Paste"))
-                                        .on_click(cx.listener(|this, _, window, cx| this.paste_recovery(window, cx))),
-                                )
-                                .child(
-                                    Button::new("recover")
-                                        .primary()
-                                        .h(px(TAP))
-                                        .px(px(GUTTER))
-                                        .label(t!("Unlock"))
-                                        .loading(self.busy)
-                                        .disabled(self.busy)
-                                        .on_click(cx.listener(|this, _, window, cx| this.recover(window, cx))),
-                                ),
-                        ),
-                )
-            })
             .when(error.should_render(), |el| {
                 let measured = card_h.get();
                 el.child(
@@ -4565,6 +4713,8 @@ mod tests {
             dated: true,
             pending,
             moved_to: moved_to.map(|m| m.try_into().unwrap()),
+            own_last: false,
+            read_by: Vec::new(),
         };
         let old = room("!old:x", Some("!new:x"), None);
         assert!(!replaced(std::slice::from_ref(&old), &old));

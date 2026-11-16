@@ -389,7 +389,7 @@ impl BeeperApp {
             )
             // A card standing above the cards keeps their spacing.
             .children(banners.map(|banners| {
-                let card = self.need_recovery || self.error.is_some();
+                let card = self.error.is_some();
                 div().w_full().max_w(px(PANEL_W)).px(px(edge - GUTTER)).when(card, |el| el.pb(px(GAP * 2. - 8.))).child(banners)
             }))
             .child(scrolled)
@@ -484,12 +484,16 @@ impl BeeperApp {
         };
         let look = t!("{theme}, text {size}%", theme = theme, size = s.text_size.percent());
         let chats = t!("Message status: {style}", style = s.receipts.label());
-        let notices = if !cfg!(target_os = "android") {
-            t!("Send a test notification")
+        let notices: SharedString = if !cfg!(target_os = "android") {
+            // A summary states the setting; the test notification is a row inside the page.
+            match self.rooms.iter().filter(|r| r.muted).count() {
+                0 => t!("On|notifications").into(),
+                n => tn!(n, "On, {n} chat muted", "On, {n} chats muted").into(),
+            }
         } else if s.stay_connected {
-            t!("Arrive while Unisend is closed")
+            t!("Arrive while Unisend is closed").into()
         } else {
-            t!("Only while Unisend is open")
+            t!("Only while Unisend is open").into()
         };
         let privacy = match s.lock.mode {
             _ if self.unencrypted => t!("Data on this device is not encrypted"),
@@ -519,7 +523,7 @@ impl BeeperApp {
                 card(cx)
                     .child(category(Page::Appearance, IconName::Palette, look.into(), cx))
                     .child(category(Page::Chats, IconName::MessageCircle, chats.into(), cx))
-                    .child(category(Page::Notifications, IconName::Bell, notices.into(), cx)),
+                    .child(category(Page::Notifications, IconName::Bell, notices, cx)),
             )
             .child(
                 card(cx)
@@ -777,7 +781,7 @@ impl BeeperApp {
             .gap(px(GAP * 2.))
             .child(
                 card(cx)
-                    .child(row(t!("Incognito"), t!("Others do not see that you have read their messages."), cx).child(incognito))
+                    .child(row(t!("Hide reading and typing"), t!("Others will not see that you have read their messages or that you are typing."), cx).child(incognito))
                     .when(android, |el| el.child(row(t!("Incognito keyboard"), t!("The keyboard learns nothing from what you type. Off: better suggestions and voice typing."), cx).child(keyboard))),
             )
             .child(
