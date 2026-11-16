@@ -67,7 +67,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::beeper;
-use crate::bridges::{self, Flow, Network, Step};
+use crate::bridges::{self, Flow, Guild, Network, Step};
 use crate::i18n::{n_, t, tr_in};
 
 const CHANNEL_CAP: usize = 64;
@@ -139,6 +139,10 @@ pub enum Cmd {
     /// The user left a login before it completed: the bridge stops waiting for it.
     LoginCancel(Step),
     Logout { bridge: String, login: String },
+    /// A Discord login's servers.
+    Guilds { bridge: String, login: String },
+    /// Starts or stops bringing in a Discord server, then lists the servers again.
+    BridgeGuild { bridge: String, login: String, guild: String, on: bool },
     /// Read receipts stay private while on.
     Incognito(bool),
     SignOut,
@@ -251,6 +255,8 @@ pub enum Ev {
     /// Logins that need signing in again, as (bridge, login name); checked now and then.
     Attention(Vec<(String, String)>),
     Flows(String, Vec<Flow>),
+    /// A login's Discord servers, by login ID.
+    Guilds(String, Vec<Guild>),
     LoginStep(Step),
     /// A request made for the settings pages failed; `Error` carries the reason.
     PanelFailed,
@@ -1494,6 +1500,20 @@ impl State {
                         api.networks().await
                     };
                     panel(&ev, done.await.map(Ev::Networks)).await;
+                });
+            }
+            Cmd::Guilds { bridge, login } => {
+                let (api, ev) = (self.api()?, self.ev.clone());
+                tokio::spawn(async move { panel(&ev, api.guilds(&bridge, &login).await.map(|g| Ev::Guilds(login, g))).await });
+            }
+            Cmd::BridgeGuild { bridge, login, guild, on } => {
+                let (api, ev) = (self.api()?, self.ev.clone());
+                tokio::spawn(async move {
+                    let done = async {
+                        api.bridge_guild(&bridge, &login, &guild, on).await?;
+                        api.guilds(&bridge, &login).await
+                    };
+                    panel(&ev, done.await.map(|g| Ev::Guilds(login, g))).await;
                 });
             }
             Cmd::SignOut => {

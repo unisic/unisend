@@ -34,6 +34,8 @@ pub(super) enum Confirming {
     Leave { room: OwnedRoomId, dm: bool, delete: Option<bool>, block: bool },
     /// Signing an account out of a network; `name` is the account's.
     SignOut { bridge: String, login: String },
+    /// Turning a Discord server off; `name` is the server's.
+    StopGuild { bridge: String, login: String, guild: String },
 }
 
 impl Confirm {
@@ -123,6 +125,13 @@ fn wording(c: &Confirm) -> (String, String, &'static str) {
     let network = c.network.as_deref().unwrap_or(t!("the network"));
     let (delete, dm, block) = match &c.what {
         Confirming::Leave { delete, dm, block, .. } => (*delete, *dm, *block),
+        Confirming::StopGuild { .. } => {
+            return (
+                t!("Turn off {name}?", name = c.name),
+                t!("Its channels are removed from your chats in every Beeper app. Turning it on again brings them back.").to_owned(),
+                t!("Turn off"),
+            );
+        }
         Confirming::SignOut { .. } => {
             return (
                 t!("Sign out of {network}?", network = network),
@@ -225,6 +234,12 @@ impl BeeperApp {
         open
     }
 
+    /// Asks before a Discord server is turned off: its chats go with it.
+    pub(super) fn ask_stop_guild(&mut self, bridge: String, login: String, guild: String, name: String, cx: &mut Context<Self>) {
+        self.people.confirm = Some(Confirm { name, network: Some("Discord".into()), what: Confirming::StopGuild { bridge, login, guild } });
+        cx.notify();
+    }
+
     /// Asks before an account is signed out of a network.
     pub(super) fn ask_sign_out(&mut self, bridge: String, login: String, name: String, network: String, cx: &mut Context<Self>) {
         self.people.confirm = Some(Confirm { name, network: Some(network), what: Confirming::SignOut { bridge, login } });
@@ -235,6 +250,10 @@ impl BeeperApp {
         let Some(c) = self.people.confirm.take() else { return };
         let (room, delete, block) = match c.what {
             Confirming::Leave { room, delete, block, .. } => (room, delete == Some(true), block),
+            Confirming::StopGuild { bridge, login, guild } => {
+                self.set_guild(bridge, login, guild, false, cx);
+                return;
+            }
             Confirming::SignOut { bridge, login } => {
                 self.working = self.send(Cmd::Logout { bridge, login }, cx);
                 self.account = None;

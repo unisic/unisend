@@ -70,7 +70,7 @@ use panels::Panel;
 use receipt::{Mark, Receipt};
 
 use crate::{Keyboard, Palette};
-use crate::bridges::{Flow, Network, Step};
+use crate::bridges::{Flow, Guild, Network, Step};
 use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, OwnRead, Pending, Quote, QuoteState, RoomSummary};
 
 const NARROW: f32 = 720.;
@@ -221,6 +221,8 @@ pub struct BeeperApp {
     account: Option<(String, String)>,
     /// Logins that need signing in again, as (bridge, login name), for the chat list's notice.
     attention: Vec<(String, String)>,
+    /// The Discord servers of the account shown, by its login ID.
+    guilds: Option<(String, Vec<Guild>)>,
     /// The login being signed in again, in place of adding one.
     relogin: Option<String>,
     /// Ways to sign in to the chosen bridge, when it offers more than one.
@@ -533,6 +535,7 @@ impl BeeperApp {
             networks: None,
             account: None,
             attention: Vec::new(),
+            guilds: None,
             relogin: None,
             flows: None,
             step: None,
@@ -670,7 +673,7 @@ impl BeeperApp {
                 self.busy = false;
                 self.error = None;
             }
-            ev @ (Ev::Networks(_) | Ev::Attention(_) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
+            ev @ (Ev::Networks(_) | Ev::Attention(_) | Ev::Guilds(..) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
             Ev::Ready { user, beeper, seal } => {
                 self.beeper = beeper;
                 self.unencrypted = cfg!(target_os = "android") && crate::vault::layout(&self.dir) == crate::vault::Layout::Legacy;

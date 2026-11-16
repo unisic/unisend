@@ -15,6 +15,9 @@ use crate::{ChatColour, ThemeChoice};
 const ROW_H: f32 = 52.;
 const PANEL_W: f32 = 560.;
 use crate::bridges::{self, Step, StepKind};
+
+/// Discord's bridge on Beeper, the one with servers to switch on.
+const DISCORD: &str = "discordgo";
 use crate::i18n::t;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -225,7 +228,20 @@ impl BeeperApp {
         self.working = self.send(Cmd::LoginStart { bridge, flow, relogin: self.relogin.clone() }, cx);
     }
 
+    /// Shown switched at once; the answer, or a failure, sets the list from the bridge.
+    pub(super) fn set_guild(&mut self, bridge: String, login: String, guild: String, on: bool, cx: &mut Context<Self>) {
+        if let Some(g) = self.guilds.as_mut().filter(|(l, _)| *l == login).and_then(|(_, list)| list.iter_mut().find(|g| g.id == guild)) {
+            g.bridged = on;
+        }
+        self.send(Cmd::BridgeGuild { bridge, login, guild, on }, cx);
+        cx.notify();
+    }
+
     fn open_account(&mut self, bridge: String, login: String, cx: &mut Context<Self>) {
+        self.guilds = None;
+        if bridge == DISCORD {
+            self.send(Cmd::Guilds { bridge: bridge.clone(), login: login.clone() }, cx);
+        }
         self.account = Some((bridge, login));
         self.panel = Some(Panel::Account);
         cx.notify();
@@ -275,6 +291,11 @@ impl BeeperApp {
                 (self.networks, self.working) = (Some(networks), false);
             }
             Ev::Attention(logins) => self.attention = logins,
+            Ev::Guilds(login, list) => {
+                if self.account.as_ref().is_some_and(|(_, l)| *l == login) {
+                    self.guilds = Some((login, list));
+                }
+            }
             Ev::Flows(bridge, flows) if self.panel == Some(Panel::Login) => match <[_; 1]>::try_from(flows) {
                 // Nothing to choose from.
                 Ok([only]) => self.start_flow(bridge, only.id, cx),
@@ -299,6 +320,10 @@ impl BeeperApp {
             }
             Ev::PanelFailed => {
                 self.working = false;
+                // A switched server the bridge refused shows as it is again.
+                if let Some((bridge, login)) = self.account.clone().filter(|(b, _)| b == DISCORD && self.panel == Some(Panel::Account)) {
+                    self.send(Cmd::Guilds { bridge, login }, cx);
+                }
                 // A wait that failed cannot be resumed; the form steps can be tried again.
                 if matches!(self.step, Some(Step { kind: StepKind::Show { .. }, .. })) {
                     self.end_login(cx);
@@ -881,6 +906,7 @@ impl BeeperApp {
             let (bridge, id, name, network) = (network.bridge.clone(), login.id.clone(), login.name.clone(), network.name.clone());
             cx.listener(move |this, _, _, cx| this.ask_sign_out(bridge.clone(), id.clone(), name.clone(), network.clone(), cx))
         };
+        let servers = (network.bridge == DISCORD).then(|| self.render_guilds(&login.id, cx));
         v_flex()
             .gap(px(GAP * 2.))
             .child(
@@ -900,6 +926,7 @@ impl BeeperApp {
                     })
                     .child(footnote(t!("Signing in again keeps this account's chats. On Messenger it is also when the bridge asks for the PIN of your encrypted chat history."), cx)),
             )
+            .children(servers)
             .child(
                 card(cx).child(
                     h_flex()
@@ -913,6 +940,41 @@ impl BeeperApp {
                         .child(t!("Sign out")),
                 ),
             )
+            .into_any_element()
+    }
+
+    /// A Discord account's servers, each with a switch: the bridge brings in only those switched on.
+    fn render_guilds(&mut self, login: &str, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let list = match self.guilds.as_ref().filter(|(l, _)| l == login) {
+            None => div().text_size(fs(14.)).text_color(p.faint).child(t!("Loading…")).into_any_element(),
+            Some((_, list)) if list.is_empty() => div().text_size(fs(14.)).text_color(p.faint).child(t!("This account is in no server.")).into_any_element(),
+            Some((_, list)) => card(cx)
+                .children(list.iter().map(|g| {
+                    let weak = cx.entity().downgrade();
+                    let (login, id, name) = (login.to_owned(), g.id.clone(), g.name.clone());
+                    let detail = if g.available { "" } else { t!("Discord reports it unavailable now") };
+                    row(&g.name, detail, cx).child(
+                        Switch::new(SharedString::from(format!("guild-{}", g.id)))
+                            .checked(g.bridged)
+                            .disabled(!g.available && !g.bridged)
+                            .on_click(move |on, _, cx| {
+                                let (login, id, name) = (login.clone(), id.clone(), name.clone());
+                                let _ = weak.update(cx, |this, cx| {
+                                    if *on {
+                                        this.set_guild(DISCORD.to_owned(), login, id, true, cx);
+                                    } else {
+                                        this.ask_stop_guild(DISCORD.to_owned(), login, id, name, cx);
+                                    }
+                                });
+                            }),
+                    )
+                }))
+                .into_any_element(),
+        };
+        section(t!("Servers"), cx)
+            .child(list)
+            .child(footnote(t!("A server's channels come in as chats only while it is switched on."), cx))
             .into_any_element()
     }
 

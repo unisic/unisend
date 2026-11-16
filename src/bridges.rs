@@ -158,6 +158,24 @@ pub struct CookieField {
     pub storage: Vec<String>,
 }
 
+/// A Discord server of the signed-in account (megadiscord `provisioning.go` `guildEntry`).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Guild {
+    /// The guild's portal ID, `*` and the Discord ID.
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// Its channels come in as chats.
+    #[serde(default)]
+    pub bridged: bool,
+    /// Discord reports it down for now.
+    #[serde(default)]
+    pub available: bool,
+}
+
+/// Servers listed on the account screen; a longer list is cut.
+pub const MAX_GUILDS: usize = 200;
+
 /// Where the two APIs live and who is asking.
 #[derive(Clone)]
 pub struct Api {
@@ -267,6 +285,21 @@ impl Api {
         step(&current.bridge, &current.login_id, &json)
     }
 
+    /// The Discord servers of a login; the bridge brings in only those switched on
+    /// (megadiscord `provisioning.go`, `GET /v1/guilds`).
+    pub async fn guilds(&self, bridge: &str, login: &str) -> Result<Vec<Guild>> {
+        let json = self.provision(bridge, Method::GET, "v1/guilds", Some(login), None, CALL_TIMEOUT).await?;
+        Ok(guilds(&json))
+    }
+
+    /// Starts or stops bringing in a server. Stopping deletes its chats from the account
+    /// (`unbridgeGuild` deletes the portals).
+    pub async fn bridge_guild(&self, bridge: &str, login: &str, guild: &str, on: bool) -> Result<()> {
+        let method = if on { Method::POST } else { Method::DELETE };
+        self.provision(bridge, method, &format!("v1/guilds/{guild}"), Some(login), None, CALL_TIMEOUT).await?;
+        Ok(())
+    }
+
     /// Ends a login that is still waiting, so the bridge stops waiting for it too.
     pub async fn cancel(&self, bridge: &str, login_id: &str) -> Result<()> {
         self.bridge(bridge, Method::POST, &format!("login/cancel/{login_id}"), Some(json!({})), CALL_TIMEOUT).await?;
@@ -306,6 +339,13 @@ fn network(bridge: &str, state: String, detail: &Value) -> Network {
         state,
         logins: logins.collect(),
     }
+}
+
+fn guilds(json: &Value) -> Vec<Guild> {
+    let list = json.get("guilds").and_then(Value::as_array).into_iter().flatten();
+    let mut out: Vec<Guild> = list.filter_map(|g| serde_json::from_value(g.clone()).ok()).take(MAX_GUILDS).collect();
+    out.sort_by_cached_key(|g| g.name.to_lowercase());
+    out
 }
 
 fn step(bridge: &str, login_id: &str, json: &Value) -> Result<Step> {
@@ -497,6 +537,19 @@ mod tests {
         for other in ["", "^[a-z0-9]+$", "^.{6}$", "^\\+?[0-9]+$", "^(SMS|App)$"] {
             assert!(!digits_only(other), "{other}");
         }
+    }
+
+    #[test]
+    fn discord_servers_parse() {
+        let json = json!({ "guilds": [
+            { "id": "*2", "name": "rust", "avatar_url": "", "bridged": false, "available": true, "mxid": "", "auto_bridge_channels": false, "bridging_mode": "everything" },
+            { "id": "*1", "name": "Anime", "bridged": true, "available": true },
+            { "name": "no id" }
+        ] });
+        let g = guilds(&json);
+        assert_eq!(g.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(), ["*1", "*2"]);
+        assert!(g[0].bridged && !g[1].bridged);
+        assert!(guilds(&Value::Null).is_empty());
     }
 
     #[test]
