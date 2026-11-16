@@ -16,13 +16,14 @@ use matrix_sdk::ruma::{OwnedUserId, UserId};
 /// Members handed to the mention list; a bigger chat is cut to its first ones.
 pub(super) const MAX_MEMBERS: usize = 1000;
 
-/// Joined members of a chat other than `own`, as (user, name shown in the chat).
+/// Joined members of a chat other than `own` and its bridge's bots, as (user, name shown in the chat).
 pub(super) async fn members(room: &Room, own: &UserId) -> anyhow::Result<Vec<(OwnedUserId, String)>> {
+    let service = room.service_members().unwrap_or_default();
     let mut list: Vec<(OwnedUserId, String)> = room
         .members(RoomMemberships::JOIN)
         .await?
         .into_iter()
-        .filter(|m| m.user_id() != own)
+        .filter(|m| m.user_id() != own && !service.contains(m.user_id()))
         .take(MAX_MEMBERS)
         .map(|m| (m.user_id().to_owned(), m.name().to_owned()))
         .collect();

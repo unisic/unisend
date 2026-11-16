@@ -132,6 +132,22 @@ impl BeeperApp {
         self.mention.hits = hits;
     }
 
+    /// Asks once for the open chat's members, for a list that names them.
+    pub(super) fn want_members(&mut self) {
+        let Some(room) = self.open.clone() else { return };
+        if self.mention.room.as_ref() != Some(&room) {
+            self.mention = Mentions { room: Some(room.clone()), ..Mentions::default() };
+        }
+        if self.mention.members.is_empty() {
+            let _ = self.cmd.try_send(Cmd::Members(room));
+        }
+    }
+
+    /// The open chat's members other than the user, (user, name) by name; empty until they arrive.
+    pub(super) fn members(&self) -> &[(OwnedUserId, String)] {
+        if self.mention.room.is_some() && self.mention.room == self.open { &self.mention.members } else { &[] }
+    }
+
     pub(super) fn members_arrived(&mut self, room: OwnedRoomId, list: Vec<(OwnedUserId, String)>, cx: &mut Context<Self>) {
         if self.mention.room.as_ref() == Some(&room) {
             self.mention.members = list;

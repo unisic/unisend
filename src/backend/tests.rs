@@ -199,7 +199,7 @@ async fn login_sync_decrypt_send_recover() {
     let hi_id = alice_rx.rows.iter().rfind(|m| m.body == "hi bob").unwrap().id.clone();
     bob_room.send_single_receipt(create_receipt::v3::ReceiptType::Read, ReceiptThread::Unthreaded, EventId::parse(&hi_id).unwrap()).await.unwrap();
     let bob_id = bob.user_id().unwrap().to_owned();
-    until(&mut alice_rx, "bob's read receipt", |rows| rows.iter().skip_while(|m| m.id != hi_id).any(|m| m.seen.contains(&bob_id))).await;
+    until(&mut alice_rx, "bob's read receipt", |rows| rows.iter().skip_while(|m| m.id != hi_id).any(|m| m.seen.iter().any(|(user, _)| *user == bob_id))).await;
 
     // Bob starts writing: the open conversation says who.
     bob_room.typing_notice(true).await.unwrap();

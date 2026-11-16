@@ -231,8 +231,7 @@ pub enum Ev {
     OwnRead { room: OwnedRoomId, read: OwnRead },
     /// Thumbnail bytes as served (PNG, JPEG, ...).
     Avatar(OwnedRoomId, Vec<u8>),
-    /// A member's name in the chat and picture as served, whichever they have.
-    Face(OwnedUserId, Option<String>, Option<Vec<u8>>),
+    Face(OwnedUserId, Vec<u8>),
     /// JPEG or PNG, at most `THUMB_PX` on its longest side.
     Thumb(String, Vec<u8>),
     /// JPEG or PNG, at most `VIEW_PX`.
@@ -384,8 +383,9 @@ pub struct Msg {
     pub reactions: Vec<Reaction>,
     /// Where a message of the user's is on its way to the others.
     pub delivery: Delivery,
-    /// The other people whose read receipt stands on this row: they have read this far.
-    pub seen: Vec<OwnedUserId>,
+    /// The other people whose read receipt stands on this row, with when they sent it (ms, 0 when
+    /// unknown): they have read this far.
+    pub seen: Vec<(OwnedUserId, u64)>,
     /// The message disappears after this many ms (`com.beeper.disappearing_timer`); 0 when it
     /// stays. On a bridge's status row: the timer the bridge gave the user's message.
     pub disappear: u64,
@@ -583,6 +583,8 @@ pub struct Reaction {
     /// How many people gave it.
     pub count: usize,
     pub own: bool,
+    /// The others who gave it, in the order they did; at most `MAX_SEEN`.
+    pub by: Vec<OwnedUserId>,
 }
 
 /// One change to the rows of the open conversation, as the SDK's timeline reports it.
@@ -1266,10 +1268,10 @@ impl State {
                 tokio::spawn(async move {
                     let Ok(_permit) = permits.acquire().await else { return };
                     match face(&client, &room_id, &user).await {
-                        Ok((None, None)) => {}
-                        Ok((name, bytes)) => {
-                            let _ = ev.send(Ev::Face(user, name, bytes)).await;
+                        Ok(Some(bytes)) => {
+                            let _ = ev.send(Ev::Face(user, bytes)).await;
                         }
+                        Ok(None) => {}
                         Err(e) => log::debug!("face {user}: {e:#}"),
                     }
                 });
@@ -2898,16 +2900,12 @@ async fn avatar(client: &Client, room_id: &RoomId) -> Result<Option<Vec<u8>>> {
     Ok(Some(picture(client, url).await?))
 }
 
-/// A member's name and picture in a chat; bridges set them per chat, so the member event is
-/// asked, not the profile.
-async fn face(client: &Client, room_id: &RoomId, user: &UserId) -> Result<(Option<String>, Option<Vec<u8>>)> {
-    let Some(room) = client.get_room(room_id) else { return Ok((None, None)) };
-    let Some(member) = room.get_member_no_sync(user).await? else { return Ok((None, None)) };
-    let name = member.display_name().map(str::to_owned);
-    let Some(url) = member.avatar_url().map(ToOwned::to_owned) else { return Ok((name, None)) };
-    // The name still counts when the picture cannot be had.
-    let picture = picture(client, url).await.inspect_err(|e| log::debug!("face {user}: {e:#}")).ok();
-    Ok((name, picture))
+/// A member's picture in a chat; bridges set it per chat, so the member event is asked, not the
+/// profile.
+async fn face(client: &Client, room_id: &RoomId, user: &UserId) -> Result<Option<Vec<u8>>> {
+    let Some(room) = client.get_room(room_id) else { return Ok(None) };
+    let Some(url) = room.get_member_no_sync(user).await?.and_then(|m| m.avatar_url().map(ToOwned::to_owned)) else { return Ok(None) };
+    Ok(Some(picture(client, url).await?))
 }
 
 /// A small square thumbnail of an avatar, from the media cache when it is there.

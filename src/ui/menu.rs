@@ -113,6 +113,7 @@ pub(super) enum Act {
     Save,
     Forward,
     Select,
+    Info,
     DeleteForMe,
     DeleteForEveryone,
 }
@@ -131,6 +132,7 @@ impl Act {
             Act::Save => ("act-save", IconName::Download, t!("Save to gallery")),
             Act::Forward => ("act-forward", IconName::Forward, t!("Forward")),
             Act::Select => ("act-select", IconName::ListChecks, t!("Select")),
+            Act::Info => ("act-info", IconName::Info, t!("Info")),
             Act::DeleteForMe => ("act-delete-me", IconName::EyeOff, t!("Delete for me")),
             Act::DeleteForEveryone => ("act-delete-all", IconName::Trash, t!("Delete for everyone")),
         }
@@ -184,14 +186,14 @@ fn taken(mut acts: Vec<Act>, m: &Msg, caps: &Features) -> Vec<Act> {
     acts
 }
 
-/// Forward, Select and the two deletions, for a message that reached the server.
+/// Forward, Select, Info and the two deletions, for a message that reached the server.
 fn more_acts(m: &Msg) -> Vec<Act> {
     if !m.id.starts_with('$') {
         return Vec::new();
     }
     let mut out = Vec::new();
     out.extend(super::forward::forwardable(m).then_some(Act::Forward));
-    out.extend([Act::Select, Act::DeleteForMe]);
+    out.extend([Act::Select, Act::Info, Act::DeleteForMe]);
     out.extend(m.own.then_some(Act::DeleteForEveryone));
     out
 }
@@ -577,11 +579,11 @@ impl BeeperApp {
         if event.click_count() == 2 && id.starts_with('$') {
             self.double_tap(id, cx);
         }
-        // A tap shows or hides a message's status line, and in a group who has read it; the double
-        // tap's second click undoes its first.
+        // A tap shows or hides someone else's status line; the double tap's second click undoes its first.
         let swiped = self.swipe_back.as_ref().is_some_and(|(on, at)| on == id && at.elapsed() < Duration::from_millis(600));
         if event.click_count() <= 2 && !swiped && !self.menu_open() && !self.fwd.selecting() {
-            self.tapped = if self.tapped.as_deref() == Some(id) { None } else { Some(id.to_owned()) };
+            let theirs = self.msgs.iter().any(|m| m.id == id && !m.own);
+            self.tapped = if !theirs || self.tapped.as_deref() == Some(id) { None } else { Some(id.to_owned()) };
             cx.notify();
         }
     }
@@ -658,6 +660,10 @@ impl BeeperApp {
             Act::Save => self.export_message(id, crate::backend::Export::Save, cx),
             Act::Forward => self.forward_start(vec![id.to_owned()], window, cx),
             Act::Select => self.select_start(id, cx),
+            Act::Info => {
+                let at = self.menu.as_ref().filter(|m| m.kind != MenuKind::Touch).map(|m| m.at);
+                self.open_people(super::people::Shown::Details(id.to_owned()), at, cx);
+            }
             Act::DeleteForMe => self.hide_for_me(vec![id.to_owned()], cx),
             Act::DeleteForEveryone => {
                 if let Some(room) = self.open.clone() {

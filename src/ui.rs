@@ -45,6 +45,7 @@ mod panels;
 mod pinpad;
 mod press;
 mod slide;
+mod people;
 mod pollnew;
 pub(crate) mod receipt;
 mod rich;
@@ -351,14 +352,14 @@ pub struct BeeperApp {
     /// Pictures of the people writing in the open chat; `None` while loading or when they have
     /// none. At most `MAX_FACES`, 37 kB of pixels each.
     faces: HashMap<OwnedUserId, Option<Arc<Image>>>,
-    /// Their names in the open chat, fetched with their pictures; as many as `faces`.
-    names: HashMap<OwnedUserId, String>,
     /// Rooms whose missing or undecryptable preview was already re-read this session.
     peeked: HashSet<OwnedRoomId>,
     /// What another app shared in, and the "Send to" screen for it.
     share: sharein::ShareIn,
     /// Forwarding, selection mode and messages deleted on this device.
     fwd: forward::Forward,
+    /// A message's details or who gave its reactions.
+    audience: people::People,
     /// Settings' devices and the verification sheet.
     verify: verify::Ui,
     info: info::Info,
@@ -592,7 +593,6 @@ impl BeeperApp {
             emoji_pick,
             emoji_open: None,
             faces: HashMap::new(),
-            names: HashMap::new(),
             compose: Compose::New,
             more: false,
             loading: false,
@@ -607,6 +607,7 @@ impl BeeperApp {
             peeked: HashSet::new(),
             share,
             fwd,
+            audience: people::People::default(),
             verify,
             info: info::Info::default(),
             _subs: subs,
@@ -696,17 +697,10 @@ impl BeeperApp {
                     self.avatars.insert(id, Some(Arc::new(Image::from_bytes(format, bytes))));
                 }
             }
-            Ev::Face(user, name, bytes) => {
+            Ev::Face(user, bytes) => {
                 // Asked for by the chat that is open now, not by one closed meanwhile.
-                if let Some(slot) = self.faces.get_mut(&user) {
-                    if let Some(bytes) = bytes
-                        && let Some(format) = image_format(&bytes)
-                    {
-                        *slot = Some(Arc::new(Image::from_bytes(format, bytes)));
-                    }
-                    if let Some(name) = name {
-                        self.names.insert(user, name);
-                    }
+                if let (Some(slot), Some(format)) = (self.faces.get_mut(&user), image_format(&bytes)) {
+                    *slot = Some(Arc::new(Image::from_bytes(format, bytes)));
                 }
             }
             Ev::Thumb(id, bytes) => {
@@ -1040,6 +1034,7 @@ impl BeeperApp {
             self.close_preview(true, window, cx);
         } else if self.menu_open() {
             self.close_menu(cx);
+        } else if self.close_people(cx) {
         } else if self.chat_sheet.take().is_some() || std::mem::take(&mut self.gallery.menu) {
             cx.notify();
         } else if self.location.open {
@@ -1447,8 +1442,8 @@ impl BeeperApp {
                 image.remove_asset(cx);
             }
         }
-        self.names.clear();
         (self.menu, self.press, self.chat_sheet) = (None, None, None);
+        self.close_people(cx);
         self.find.close();
         self.compose = Compose::New;
         self.timeline.reset(0);
@@ -2068,22 +2063,12 @@ impl BeeperApp {
                     }
                 });
                 let style = this.settings.receipts;
-                let tapped = this.tapped.as_ref() == Some(&m.id);
                 let asked = match this.settings.incoming {
                     receipt::IncomingStatus::Always => last,
-                    receipt::IncomingStatus::OnTap => tapped,
+                    receipt::IncomingStatus::OnTap => this.tapped.as_ref() == Some(&m.id),
                 };
-                // A tapped message of a group names everyone who has read it.
-                let read_by: Vec<(OwnedUserId, String)> =
-                    if tapped && !dm && !m.deleted { this.readers(ix).0.into_iter().filter(|(user, _)| *user != m.from).collect() } else { Vec::new() };
-                let said = if m.own { this.delivery_line(ix, dm, tapped) } else if asked && !m.deleted { this.heard(ix) } else { None };
-                // The names below say who read it; beside the time it would say so twice.
-                let said = said.filter(|r| read_by.is_empty() || !matches!(r, Receipt::Seen { .. }));
+                let said = if m.own { this.delivery_line(ix, dm) } else if asked && !m.deleted { this.heard(ix) } else { None };
                 let state = said.and_then(|r| Some((receipt::mark(&r, style)?, r)));
-                let readers_line = (!read_by.is_empty()).then(|| {
-                    let names: Vec<&str> = read_by.iter().map(|(_, name)| name.as_str()).collect();
-                    tn!(read_by.len(), "Seen by {n} person: {who}", "Seen by {n} people: {who}", who = names.join(", "))
-                });
                 // Still only here, not yet with the server.
                 let leaving = m.delivery == Delivery::Sending && !m.id.starts_with('$');
                 let (id, held) = (m.id.clone(), m.id.clone());
@@ -2229,7 +2214,10 @@ impl BeeperApp {
                             .line_height(fs(18.))
                             .font_weight(FontWeight::MEDIUM)
                             .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, &key_owned, cx)))
+                            // As in Signal, a tap shows who gave it; the user's own row there takes it back.
+                            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                                this.open_people(people::Shown::Reactions(id.clone(), Some(key_owned.clone())), Some(e.position()), cx)
+                            }))
                             .child(crate::emoji::styled(key.to_owned(), Vec::new()))
                             .when(count > 1, |el| el.child(div().font_features(tabular()).child(count.to_string())))
                     }))
@@ -2245,10 +2233,6 @@ impl BeeperApp {
                     for (user, _) in readers.clone() {
                         this.want_face(user);
                     }
-                }
-                // Their names in the chat, for those who have written nothing loaded yet.
-                for (user, _) in read_by {
-                    this.want_face(user);
                 }
                 let m = &this.msgs[ix];
                 let side = if faces { px(SENDER + 8.) } else { px(0.) };
@@ -2321,13 +2305,13 @@ impl BeeperApp {
                             .pl(side)
                             .map(|el| if m.own { el.items_end() } else { el.items_start() })
                             .children(reactions)
-                            .when(last || state.is_some() || shrink.is_some() || readers_line.is_some(), |el| {
+                            .when(last || state.is_some() || shrink.is_some(), |el| {
                                 let failed = state.as_ref().is_some_and(|(_, r)| matches!(r, Receipt::Failed(_)));
                                 // Words follow the time after a dot, icons after a space.
                                 let worded = state.as_ref().is_some_and(|(mark, _)| matches!(mark, Mark::Words(_) | Mark::Failed { .. }));
                                 // A new state fades in where the old one was; the time stays.
                                 let time = match &state {
-                                    Some(_) if m.own && !last && !tapped => None,
+                                    Some(_) if m.own && !last => None,
                                     Some(_) if worded => Some(format!("{} \u{b7} ", clock(m.ts))),
                                     _ => Some(clock(m.ts)),
                                 };
@@ -2346,7 +2330,6 @@ impl BeeperApp {
                                         .when(this.disappears(ix), |el| el.child(Icon::new(IconName::Timer).size_3().text_color(ink)))
                                         .child(h_flex().children(time).children(said)),
                                 )
-                                .when_some(readers_line, |el, line| el.child(div().max_w(px(room)).px(px(GAP)).pt(px(2.)).text_size(fs(12.)).text_color(ink).child(line)))
                             }),
                     )
                     .children(this.selection_mark(m, cx));
@@ -2675,7 +2658,7 @@ impl BeeperApp {
 
     /// What became of the user's message at `ix`. Said of the newest message of the chat when it
     /// is the user's, and of any that failed.
-    fn delivery_line(&self, ix: usize, dm: bool, tapped: bool) -> Option<Receipt> {
+    fn delivery_line(&self, ix: usize, dm: bool) -> Option<Receipt> {
         let m = &self.msgs[ix];
         // The bridge's word on it follows it; the latest counts, except as a step back from delivered.
         let mut state = m.delivery.clone();
@@ -2690,7 +2673,7 @@ impl BeeperApp {
         if let Delivery::Failed(why) = state {
             return Some(Receipt::Failed(why));
         }
-        if self.tail != Some(ix) && !tapped {
+        if self.tail != Some(ix) {
             return None;
         }
         let (readers, who) = self.readers(ix);
@@ -2710,7 +2693,7 @@ impl BeeperApp {
     /// them named as a sentence would.
     fn readers(&self, ix: usize) -> (Vec<(OwnedUserId, String)>, Option<String>) {
         let mut readers: Vec<&OwnedUserId> = Vec::new();
-        for user in self.msgs[ix..].iter().flat_map(|row| &row.seen) {
+        for (user, _) in self.msgs[ix..].iter().flat_map(|row| &row.seen) {
             if !readers.contains(&user) {
                 readers.push(user);
             }
@@ -2718,9 +2701,7 @@ impl BeeperApp {
         if readers.is_empty() {
             return (Vec::new(), None);
         }
-        let name = |user: &OwnedUserId| {
-            self.names.get(user).map(String::as_str).or_else(|| self.msgs.iter().rev().find(|m| m.from == *user && !m.sender.is_empty()).map(|m| m.sender.as_str()))
-        };
+        let name = |user: &OwnedUserId| self.msgs.iter().rev().find(|m| m.from == *user && !m.sender.is_empty()).map(|m| m.sender.as_str());
         let named = readers.iter().map(|user| ((*user).clone(), name(user).map_or_else(|| user.localpart().to_owned(), str::to_owned))).collect();
         let known: Vec<&str> = readers.iter().filter_map(|user| name(user)).collect();
         (named, Some(if known.len() == readers.len() { people(&known).0 } else { readers.len().to_string() }))
@@ -4066,6 +4047,7 @@ impl BeeperApp {
                     .children(gifs)
                     .children(preview)
                     .children(self.render_forward_layers(window, cx))
+                    .children(self.render_people(window, cx))
                     .children(viewer)
                     .children(self.render_confirm(window, cx))
                     .children(verify)

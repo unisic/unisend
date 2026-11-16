@@ -405,8 +405,16 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
         TimelineItemContent::MsgLike(like) => {
             fill(&mut m, &like.kind, &viewer.own);
             m.reply = like.in_reply_to.as_ref().map(|reply| quote(reply, &viewer.own));
-            m.reactions =
-                like.reactions.iter().map(|(key, by)| Reaction { key: key.clone(), count: by.len(), own: by.contains_key(&viewer.own) }).collect();
+            m.reactions = like
+                .reactions
+                .iter()
+                .map(|(key, by)| Reaction {
+                    key: key.clone(),
+                    count: by.len(),
+                    own: by.contains_key(&viewer.own),
+                    by: by.keys().filter(|user| **user != viewer.own).take(MAX_SEEN).cloned().collect(),
+                })
+                .collect();
             let timer = json.as_ref().and_then(|c| c.get(disappear::TIMER)).map(disappear::timer);
             m.disappear = timer.map_or(0, |(ms, _)| ms);
             match &like.kind {
@@ -456,7 +464,13 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
         _ if m.own && viewer.bridged && !json.as_ref().is_some_and(|c| c.get("fi.mau.double_puppet_source").is_some()) => Delivery::Sending,
         _ => Delivery::Sent,
     };
-    m.seen = event.read_receipts().keys().filter(|user| **user != viewer.own && !viewer.service.contains(*user)).take(MAX_SEEN).cloned().collect();
+    m.seen = event
+        .read_receipts()
+        .iter()
+        .filter(|(user, _)| **user != viewer.own && !viewer.service.contains(*user))
+        .take(MAX_SEEN)
+        .map(|(user, receipt)| (user.clone(), receipt.ts.map_or(0, |ts| u64::from(ts.0))))
+        .collect();
     m
 }
 
