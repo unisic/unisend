@@ -690,6 +690,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Unlocked with the app PIN", "Odblokowanie PIN-em aplikacji"),
     ("Unlocked with the phone lock", "Odblokowanie blokadą telefonu"),
     ("Version {version}", "Wersja {version}"),
+    ("Version {version} (developer build)", "Wersja {version} (wersja deweloperska)"),
     ("{theme}, text {size}%", "{theme}, tekst {size}%"),
     ("Copied", "Skopiowano"),
     ("Copy", "Kopiuj"),

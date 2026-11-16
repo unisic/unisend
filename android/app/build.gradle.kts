@@ -7,8 +7,13 @@ android {
     namespace = "dev.gpui.beeper"
     compileSdk = 35
 
+    buildFeatures {
+        resValues = true
+    }
+
     defaultConfig {
-        applicationId = "dev.gpui.beeper"
+        applicationId = if (System.getenv("UNISEND_DEV") == "1") "dev.gpui.beeper.dev" else "dev.gpui.beeper"
+        resValue("string", "app_name", if (System.getenv("UNISEND_DEV") == "1") "Unisend Dev" else "Unisend")
         minSdk = 26
         // shortcut: targetSdk 35 enforces edge-to-edge, so adjustResize stops shrinking the content
         // rect and the keyboard covers the composer; raise it once IME insets are read via WindowInsets.

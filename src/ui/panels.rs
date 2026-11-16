@@ -539,7 +539,7 @@ impl BeeperApp {
                         .child(
                             v_flex()
                                 .child(div().text_size(fs(16.)).line_height(fs(22.)).child("Unisend"))
-                                .child(div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.muted).child(t!("Version {version}", version = env!("CARGO_PKG_VERSION")))),
+                                .child(div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.muted).child(if crate::backend::update::DEV { t!("Version {version} (developer build)", version = env!("CARGO_PKG_VERSION")) } else { t!("Version {version}", version = env!("CARGO_PKG_VERSION")) })),
                         ),
                 ),
             )
