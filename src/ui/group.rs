@@ -38,7 +38,7 @@ impl BeeperApp {
         self.info.room.clone()
     }
 
-    pub(super) fn open_member(&mut self, member: Member, cx: &mut Context<Self>) {
+    pub(super) fn open_member(&mut self, member: Member, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(room) = self.info_room() else { return };
         let bridged = self.rooms.iter().any(|r| r.id == room && r.network.is_some());
         if bridged {
@@ -46,7 +46,7 @@ impl BeeperApp {
         }
         self.info.member = Some(Picked { member, ids: Vec::new(), removing: false });
         self.chat_sheet = Some(room);
-        self.sheet_at = None;
+        self.sheet_at = Some(at);
         self.disappear.picking = false;
         cx.notify();
     }

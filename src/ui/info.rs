@@ -559,7 +559,7 @@ impl BeeperApp {
                     .id(("info-member", ix))
                     .when(tappable, |el| {
                         let m = m.clone();
-                        el.cursor_pointer().active(|el| el.bg(p.surface)).on_click(cx.listener(move |this, _, _, cx| this.open_member(m.clone(), cx)))
+                        el.cursor_pointer().active(|el| el.bg(p.surface)).on_click(cx.listener(move |this, e: &ClickEvent, _, cx| this.open_member(m.clone(), e.position(), cx)))
                     })
                     .w_full()
                     .h(px(ROW_H))
