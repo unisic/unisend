@@ -1184,7 +1184,8 @@ impl BeeperApp {
                                 Some(choice) => el.child(choice),
                                 None => el.child(Input::new(input)),
                             })
-                            .when(!field.description.is_empty(), |el| el.child(note(&field.description)))
+                            // The PIN step's own text above already says it in the user's language.
+                            .when(!field.description.is_empty() && step.step_id != bridges::HISTORY_PIN_STEP, |el| el.child(note(&field.description)))
                     }))
                     .child(h_flex().child(
                         Button::new("login-continue")
