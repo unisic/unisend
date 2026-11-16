@@ -115,8 +115,11 @@ impl BeeperApp {
         let message = sheet_row("member-message", IconName::MessageCircle, t!("Send message"), p.text, window, cx);
         let mention = sheet_row("member-mention", IconName::AtSign, t!("Mention"), p.text, window, cx);
         let remove = (details.can.remove && m.removable).then(|| sheet_row("member-remove", IconName::UserMinus, t!("Remove from group"), p.negative, window, cx));
+        let network = self.rooms.iter().find(|r| r.id == room).and_then(|r| r.network.clone());
+        let block = (self.user.as_ref() != Some(&m.id)).then(|| self.block_row(m.id.clone(), m.name.clone(), network, live, window, cx));
         if !live {
             rows.extend([message, mention]);
+            rows.extend(block);
             rows.extend(remove);
             return Some((2, rows));
         }
@@ -131,6 +134,7 @@ impl BeeperApp {
             this.close_info(cx);
             this.mention_member(user.clone(), name.clone(), window, cx);
         })));
+        rows.extend(block);
         rows.extend(remove.map(|row| {
             row.on_click(cx.listener(|this, _, _, cx| {
                 if let Some(picked) = this.info.member.as_mut() {

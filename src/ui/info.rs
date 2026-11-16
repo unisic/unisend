@@ -513,6 +513,7 @@ impl BeeperApp {
                         .px(px(GAP))
                         .on_click(move |_, _, cx| crate::open_link(cx, &url))
                 });
+                let block = summary.as_ref().filter(|r| r.dm).zip(details.as_ref().and_then(|d| d.peer.clone())).map(|(r, peer)| self.block_row(peer, r.name.clone(), r.network.clone(), true, window, cx).px(px(GAP)));
                 let room = summary.map(|r| r.id);
                 let timer = room.as_ref().and_then(|id| self.disappear_entry(id, true, cx)).map(|row| row.px(px(GAP)));
                 let edit = details.as_ref().filter(|d| d.can.edit()).map(|_| {
@@ -533,6 +534,7 @@ impl BeeperApp {
                             .children(open)
                             .children(edit)
                             .children(timer)
+                            .children(block)
                             .children(leave),
                     )
                     .into_any_element()

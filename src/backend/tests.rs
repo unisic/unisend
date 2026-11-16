@@ -73,6 +73,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         login_request: None,
         open: None,
         rooms: Rooms::default(),
+        blocked: Arc::default(),
         fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)),
         previews: Arc::new(tokio::sync::Semaphore::new(PROBES)),
         notif: None,
@@ -2540,5 +2541,69 @@ async fn two_accounts_run_side_by_side_and_sign_out_alone() {
     drop(cmds);
     let joined = tokio::task::spawn_blocking(move || threads.into_iter().all(|t| t.join().is_ok()));
     assert!(tokio::time::timeout(Duration::from_secs(30), joined).await.expect("backends ended").unwrap());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn a_person_is_blocked_unblocked_and_a_change_elsewhere_is_told() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-block-{tag}"));
+    let (alice_name, bob_name, cara_name) = (format!("alice{tag}"), format!("bob{tag}"), format!("cara{tag}"));
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &alice_name)).await.unwrap();
+    // The list is told as soon as the watcher starts, before or after Ready.
+    let (mut ready, mut first) = (false, None);
+    while !ready || first.is_none() {
+        wait_for(&mut seat, "Ready and the first list", |e| {
+            match e {
+                Ev::Ready { .. } => ready = true,
+                Ev::Blocked(list) => first = Some(list),
+                _ => {}
+            }
+            Some(())
+        })
+        .await;
+    }
+    assert!(first.unwrap().is_empty());
+
+    let login = |name: String, dir: &str| {
+        let (hs, token, path) = (hs.clone(), jwt(&secret, &name), root.join(dir));
+        async move {
+            let client = Client::builder().homeserver_url(&hs).sqlite_store(path, None).build().await.unwrap();
+            let mut data = JsonObject::new();
+            data.insert("token".into(), token.into());
+            client.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+            client.sync_once(SyncSettings::default()).await.unwrap();
+            client
+        }
+    };
+    let bob = login(bob_name, "bob").await;
+    bob.account().set_display_name(Some("Bob Builder")).await.unwrap();
+    let cara = login(cara_name, "cara").await;
+    let (bob_id, cara_id) = (bob.user_id().unwrap().to_owned(), cara.user_id().unwrap().to_owned());
+
+    alice.handle(Cmd::SetBlocked(bob_id.clone(), true)).await.unwrap();
+    let list = wait_for(&mut seat, "Bob blocked", |e| match e {
+        Ev::Blocked(list) if list.iter().any(|b| b.id == bob_id && b.name == "Bob Builder") => Some(list),
+        _ => None,
+    })
+    .await;
+    assert_eq!(list.len(), 1);
+
+    alice.handle(Cmd::SetBlocked(bob_id.clone(), false)).await.unwrap();
+    wait_for(&mut seat, "Bob unblocked", |e| matches!(e, Ev::Blocked(list) if list.is_empty()).then_some(())).await;
+
+    // Another device of the same account blocks Cara: this one is told by the sync.
+    let other = login(alice_name, "alice-other").await;
+    other.account().ignore_user(&cara_id).await.unwrap();
+    wait_for(&mut seat, "Cara blocked elsewhere", |e| matches!(e, Ev::Blocked(list) if list.iter().any(|b| b.id == cara_id)).then_some(())).await;
+
+    // The user cannot block themselves; the refusal reaches the error path.
+    let own = alice.client().unwrap().user_id().unwrap().to_owned();
+    alice.handle(Cmd::SetBlocked(own, true)).await.unwrap();
+    wait_for(&mut seat, "the refusal", |e| matches!(e, Ev::Error(_)).then_some(())).await;
     let _ = std::fs::remove_dir_all(&root);
 }

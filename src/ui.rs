@@ -43,6 +43,7 @@ mod mentions;
 mod info;
 mod group;
 mod profile;
+mod block;
 mod menu;
 mod navigate;
 pub(crate) mod motion;
@@ -355,6 +356,7 @@ pub struct BeeperApp {
     sheet_at: Option<Point<Pixels>>,
     /// The sheet's chat and its other person's page in their network's app, as `(app, link)`.
     peer_link: Option<(OwnedRoomId, &'static str, String)>,
+    blocked: block::Ui,
     /// The attach sheet's photos and videos.
     gallery: gallery::Gallery,
     location: location::Locate,
@@ -667,6 +669,7 @@ impl BeeperApp {
             chat_sheet_inside: false,
             sheet_at: None,
             peer_link: None,
+            blocked: block::Ui::default(),
             gallery: gallery::Gallery::default(),
             location: location::Locate::default(),
             poll_form: pollnew::Form::default(),
@@ -1024,6 +1027,8 @@ impl BeeperApp {
             Ev::MemberIds(user, ids) => self.member_ids(user, ids, cx),
             Ev::Profile(profile) => self.profile_arrived(profile, cx),
             Ev::Update(step) => self.on_update(step),
+            Ev::Blocked(list) => self.blocked_arrived(list, cx),
+            Ev::Peer(room, user) => self.peer_arrived(room, user, cx),
             Ev::PeerIds(room, ids) => {
                 if self.chat_sheet.as_ref() == Some(&room) {
                     let network = self.rooms.iter().find(|r| r.id == room).and_then(|r| r.network.as_deref());
@@ -2763,7 +2768,7 @@ impl BeeperApp {
         let end = self.chat_end(window);
 
         let drop_tint = p.surface;
-        let pending = self.render_pending_bar(cx);
+        let pending = self.render_pending_bar(cx).or_else(|| self.render_blocked_bar(cx));
         let composing = pending.is_none();
         v_flex()
             .size_full()
