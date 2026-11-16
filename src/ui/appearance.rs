@@ -268,7 +268,7 @@ impl BeeperApp {
                 match imported {
                     Some(Ok(bytes)) => {
                         if let Some(old) = this.look.photo.replace(Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes))) {
-                            old.remove_asset(cx);
+                            this.released.push(old, cx);
                         }
                         this.set_wallpaper(Wallpaper::Photo, cx);
                     }

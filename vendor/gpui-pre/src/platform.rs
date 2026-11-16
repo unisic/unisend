@@ -2992,7 +2992,7 @@ impl Image {
 
     /// Check whether this image is present in GPUI's asset cache (loading or
     /// loaded), without fetching it.
-    #[cfg(any(test, feature = "test-support"))]
+    // murmur patch: not test-only, so an app can free an image's atlas tile without decoding it
     pub fn is_asset_cached(self: &Arc<Self>, cx: &App) -> bool {
         ImageSource::Image(self.clone()).is_asset_cached(cx)
     }

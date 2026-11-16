@@ -57,8 +57,9 @@ const MAX_WORDS: usize = 8;
 /// Words around the match in a snippet.
 const SNIPPET_WORDS: i32 = 10;
 const FILE: &str = "search.sqlite3";
-/// How often a sealed index is written back while it changes.
-const SAVE_EVERY: Duration = Duration::from_secs(300);
+/// How often a sealed index is written back while it changes; it is also written when the app
+/// goes to the background (`save`), so this is only the backstop for an app left in front.
+const SAVE_EVERY: Duration = Duration::from_secs(30 * 60);
 // Mark the match in `snippet()`; stripped from indexed text so they cannot be faked.
 const OPEN: char = '\u{2}';
 const CLOSE: char = '\u{3}';
@@ -119,25 +120,31 @@ async fn write(changes: Vec<Change>) {
     }
 }
 
-/// Opens the index under `dir` and starts following `client`'s syncs.
+/// Starts the index under `dir` and follows `client`'s syncs. The index opens on its own thread
+/// (a sealed one is read and decrypted whole), so startup does not wait for it; writes queue up.
 pub(super) fn start(dir: &Path, client: &Client, seal: &Seal) {
-    let opened = match seal {
-        Seal::Plain => open(&dir.join(FILE)).map(|conn| (conn, None)),
-        Seal::Sealed(_) => {
-            let generation = *GENERATION.lock().unwrap();
-            open_sealed(dir, seal).map(|conn| (conn, Some(Saver { dir: dir.to_owned(), seal: seal.clone(), generation, dirty: false })))
-        }
-    };
-    let (conn, saver) = match opened {
-        Ok(opened) => opened,
-        Err(e) => {
-            log::warn!("search index: {e:#}");
+    let (tx, rx) = mpsc::channel(QUEUE);
+    let sealed = matches!(seal, Seal::Sealed(_));
+    let (dir, seal) = (dir.to_owned(), seal.clone());
+    let generation = *GENERATION.lock().unwrap();
+    let run = move || {
+        // Held while opening, so a sign-out cannot delete the files under it, nor a plain index be
+        // made again for an account that has just signed out.
+        let current = GENERATION.lock().unwrap();
+        if *current != generation {
             return;
         }
+        let opened = match &seal {
+            Seal::Plain => open(&dir.join(FILE)).map(|conn| (conn, None)),
+            Seal::Sealed(_) => open_sealed(&dir, &seal).map(|conn| (conn, Some(Saver { dir: dir.clone(), seal: seal.clone(), generation, dirty: false }))),
+        };
+        drop(current);
+        match opened {
+            Ok((conn, saver)) => serve(conn, rx, saver),
+            Err(e) => log::warn!("search index: {e:#}"),
+        }
     };
-    let (tx, rx) = mpsc::channel(QUEUE);
-    let sealed = saver.is_some();
-    if let Err(e) = std::thread::Builder::new().name("search".into()).spawn(move || serve(conn, rx, saver)) {
+    if let Err(e) = std::thread::Builder::new().name("search".into()).spawn(run) {
         log::warn!("search thread: {e}");
         return;
     }
@@ -161,6 +168,13 @@ pub(super) fn start(dir: &Path, client: &Client, seal: &Seal) {
         let rules = room.clone_info().room_version_rules_or_default().redaction;
         write(change(&event, room.room_id(), &rules).into_iter().collect()).await;
     });
+}
+
+/// Writes a sealed index back if it changed. Never waits: a full queue leaves it to the timer.
+pub(crate) fn save() {
+    if let Some(tx) = sender() {
+        let _ = tx.try_send(Op::Save);
+    }
 }
 
 /// Closes the index and deletes it: signed out, or a store left by another account.
@@ -417,10 +431,16 @@ fn serve(conn: Connection, mut rx: mpsc::Receiver<Op>, mut saver: Option<Saver>)
     while let Some(op) = rx.blocking_recv() {
         let result = match op {
             Op::Write(changes) => {
-                if let Some(saver) = &mut saver {
+                // A batch that changes nothing (an open chat sends its rows again on every receipt)
+                // leaves the sealed copy as it is.
+                let before = conn.total_changes();
+                let applied = apply(&conn, &changes, &mut count);
+                if let Some(saver) = &mut saver
+                    && conn.total_changes() != before
+                {
                     saver.dirty = true;
                 }
-                apply(&conn, &changes, &mut count)
+                applied
             }
             Op::Query { room, query, reply } => query_hits(&conn, room.as_deref(), &query).map(|found| {
                 let _ = reply.send(found);
@@ -643,6 +663,21 @@ mod tests {
         apply(&conn, &[add("$old", "!r", 1, "ancient words"), add("$new", "!r", 2, "fresh words")], &mut n).unwrap();
         assert_eq!(n, MAX_MESSAGES);
         assert_eq!(find(&conn, None, "words").len(), 0, "both were among the oldest rows");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_batch_sent_again_changes_nothing() {
+        let dir = temp("again");
+        let conn = open(&dir.join(FILE)).unwrap();
+        let mut n = 0;
+        let row = |body: &str| Change::Add { event: "$1".into(), room: "!r".into(), sender: "@a:x".into(), ts: 1, body: body.into(), replace: true };
+        apply(&conn, &[row("first words")], &mut n).unwrap();
+        let before = conn.total_changes();
+        apply(&conn, &[row("first words")], &mut n).unwrap();
+        assert_eq!(conn.total_changes(), before, "the same row again leaves the index as it was");
+        apply(&conn, &[row("other words")], &mut n).unwrap();
+        assert_ne!(conn.total_changes(), before);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -506,7 +506,7 @@ impl BeeperApp {
                     match bytes.and_then(|bytes| Some((image_format(&bytes)?, bytes))) {
                         Some((format, bytes)) => {
                             for old in g.thumbs.insert(id, Arc::new(Image::from_bytes(format, bytes))) {
-                                old.remove_asset(cx);
+                                this.released.push(old, cx);
                             }
                         }
                         None => {

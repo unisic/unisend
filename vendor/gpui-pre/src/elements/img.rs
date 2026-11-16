@@ -586,7 +586,7 @@ impl ImageSource {
 
     /// Check whether this image source is present in the asset system (loading
     /// or loaded), without fetching it.
-    #[cfg(any(test, feature = "test-support"))]
+    // murmur patch: not test-only, so an app can free an image's atlas tile without decoding it
     pub fn is_asset_cached(&self, cx: &App) -> bool {
         match self {
             ImageSource::Resource(resource) => cx.has_asset::<ImgResourceLoader>(resource),

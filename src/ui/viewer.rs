@@ -463,7 +463,7 @@ impl BeeperApp {
     pub(super) fn drop_near(&mut self, cx: &mut Context<Self>) {
         for (_, image) in self.zoom.near.drain(..) {
             if let Some(image) = image {
-                image.remove_asset(cx);
+                self.released.push(image, cx);
             }
         }
     }
@@ -485,7 +485,7 @@ impl BeeperApp {
             if wanted.iter().flatten().any(|w| *w == id) {
                 kept.push((id, image));
             } else if let Some(image) = image {
-                image.remove_asset(cx);
+                self.released.push(image, cx);
             }
         }
         for id in wanted.into_iter().flatten() {
@@ -943,7 +943,8 @@ impl BeeperApp {
         let live = self.viewer.is_some();
         if live {
             if let Some((_, Some(image))) = self.viewer_last.take() {
-                image.remove_asset(cx);
+                self.released.push(image, cx);
+                self.released.free(window, cx);
             }
         } else if self.viewer_last.is_none() {
             self.zoom.covers = None;
@@ -997,7 +998,8 @@ impl BeeperApp {
         if done {
             if !lands || self.zoom.landed {
                 if let Some((_, Some(image))) = self.viewer_last.take() {
-                    image.remove_asset(cx);
+                    self.released.push(image, cx);
+                    self.released.free(window, cx);
                 }
                 (self.zoom.covers, self.zoom.landed, self.zoom.exit) = (None, false, Exit::Fade);
                 return None;

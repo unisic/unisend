@@ -349,7 +349,7 @@ impl BeeperApp {
             "share-chats",
             s.rows.len(),
             cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                this.want_share_avatars(range.clone());
+                this.want_share_avatars(range.clone(), cx);
                 range
                     .map(|ix| {
                         let room = &this.rooms[this.share.rows[ix]];
@@ -450,14 +450,14 @@ impl BeeperApp {
 
     /// Asks once for the pictures of the chats the picker is drawing, leaving half the command
     /// channel to user actions as `fetch_rows` does.
-    fn want_share_avatars(&mut self, range: std::ops::Range<usize>) {
+    fn want_share_avatars(&mut self, range: std::ops::Range<usize>, cx: &mut App) {
         if self.cmd.capacity() < self.cmd.max_capacity() / 2 {
             return;
         }
         let wanted: Vec<OwnedRoomId> =
             self.share.rows[range].iter().map(|&ix| &self.rooms[ix].id).filter(|id| !self.avatars.contains_key(*id)).cloned().collect();
         if !wanted.is_empty() && self.cmd.try_send(Cmd::Avatars(wanted.clone())).is_ok() {
-            self.avatars.extend(wanted.into_iter().map(|id| (id, None)));
+            self.asked_avatars(wanted, cx);
         }
     }
 }

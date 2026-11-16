@@ -210,7 +210,7 @@ impl BeeperApp {
                         Some((strip, big)) => {
                             let image = |bytes: Vec<u8>| image_format(&bytes).map(|format| Arc::new(Image::from_bytes(format, bytes)));
                             if let Some(old) = entry.strip.take() {
-                                old.remove_asset(cx);
+                                this.released.push(old, cx);
                             }
                             entry.strip = image(strip);
                             if let Some(big) = big.and_then(image) {
@@ -235,7 +235,7 @@ impl BeeperApp {
             if ix.abs_diff(cur) > 1
                 && let Some(big) = entry.big.take()
             {
-                big.remove_asset(cx);
+                self.released.push(big, cx);
             }
         }
     }
@@ -300,7 +300,7 @@ impl BeeperApp {
         }
         let gone = p.entries.remove(p.cur);
         for image in [gone.strip, gone.big].into_iter().flatten() {
-            image.remove_asset(cx);
+            self.released.push(image, cx);
         }
         if p.entries.is_empty() {
             return self.close_preview(true, window, cx);
@@ -323,7 +323,7 @@ impl BeeperApp {
         let reply = p.reply_to.take();
         for entry in p.entries.drain(..) {
             for image in [entry.strip, entry.big].into_iter().flatten() {
-                image.remove_asset(cx);
+                self.released.push(image, cx);
             }
         }
         p.field.update(cx, |f, cx| f.set_value("", window, cx));

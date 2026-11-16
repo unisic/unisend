@@ -165,7 +165,7 @@ impl BeeperApp {
 
     pub(super) fn drop_peek(&mut self, cx: &mut Context<Self>) {
         if let Some((image, _)) = self.gallery.peek.take().and_then(|p| p.full) {
-            image.remove_asset(cx);
+            self.released.push(image, cx);
         }
     }
 
@@ -243,7 +243,7 @@ impl BeeperApp {
 
     pub(super) fn drop_early(&mut self, cx: &mut Context<Self>) {
         if let Some(image) = self.gallery.early.take().and_then(|e| e.full) {
-            image.remove_asset(cx);
+            self.released.push(image, cx);
         }
     }
 

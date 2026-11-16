@@ -334,7 +334,7 @@ pub enum ChatAction {
     Unread(bool),
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoomSummary {
     pub id: OwnedRoomId,
     pub name: String,
@@ -2755,12 +2755,14 @@ fn unread(encrypted: bool, server: (u64, u64), client: Option<(u64, u64)>) -> (u
 /// (a first sync would then carry every chat ever left), so a chat left on another device stays
 /// "joined" here; the server's own list settles it with one request. Skipped when offline.
 async fn drop_left(client: &Client, rooms: &Rooms, ev: &mpsc::Sender<Ev>) {
+    // Only rooms known before the request: one the sync adds meanwhile may be missing from its answer.
+    let known: Vec<OwnedRoomId> = rooms.lock().unwrap().keys().cloned().collect();
     let joined: std::collections::HashSet<OwnedRoomId> = match client.send(joined_rooms::v3::Request::new()).await {
         Ok(response) => response.joined_rooms.into_iter().collect(),
         Err(e) => return log::debug!("joined rooms: {e}"),
     };
     let invited = |id: &OwnedRoomId| client.get_room(id).is_some_and(|r| r.state() == RoomState::Invited);
-    let left: Vec<OwnedRoomId> = rooms.lock().unwrap().keys().filter(|id| !joined.contains(*id) && !invited(id)).cloned().collect();
+    let left: Vec<OwnedRoomId> = known.into_iter().filter(|id| !joined.contains(id) && !invited(id)).collect();
     for id in left {
         rooms.lock().unwrap().remove(&id);
         let _ = ev.send(Ev::RoomGone(id)).await;
@@ -2770,10 +2772,12 @@ async fn drop_left(client: &Client, rooms: &Rooms, ev: &mpsc::Sender<Ev>) {
 /// Rooms without new events never pass through the sync loop, so their cached summaries miss
 /// fields added since and changes made on other devices. Store reads only.
 async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &Rooms) -> Vec<RoomSummary> {
-    let cached: Vec<RoomSummary> = rooms.lock().unwrap().values().cloned().collect();
-    let mut out = Vec::with_capacity(cached.len());
-    for seen in cached {
-        let Some(room) = client.get_room(&seen.id) else { continue };
+    let ids: Vec<OwnedRoomId> = rooms.lock().unwrap().keys().cloned().collect();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        // Read as late as possible: the sync loop may have updated it since the walk began.
+        let Some(seen) = rooms.lock().unwrap().get(&id).cloned() else { continue };
+        let Some(room) = client.get_room(&id) else { continue };
         // An invitation has only the stripped state it came with: its summary was made from that.
         if room.state() == RoomState::Invited {
             out.push(seen);
@@ -2820,23 +2824,15 @@ async fn sync_watched(client: Client, notif: NotificationSettings, dir: PathBuf,
 async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, seal: Seal, rooms: Rooms, ev: mpsc::Sender<Ev>) {
     // A first sign-in brings every invitation ever left unanswered: those are not news.
     let first_run = rooms.lock().unwrap().is_empty();
-    drop_left(&client, &rooms, &ev).await;
-    let cached = refresh_cached(&client, &notif, &rooms).await;
     // Chats whose last message is not known are looked up in the background. A full queue drops
     // the rest; they stay undated and are queued again at the next start.
     let (to_probe, queue) = mpsc::channel(PROBE_QUEUE);
     let prober = tokio::spawn(probe_queue(client.clone(), rooms.clone(), ev.clone(), queue));
     let _stop_prober = AbortOnDrop(prober);
     let _stop_recount = AbortOnDrop(tokio::spawn(recount(client.clone(), notif.clone(), rooms.clone(), ev.clone())));
-    // Top of the list first: those are the rows in view.
-    let mut undated: Vec<&RoomSummary> = cached.iter().filter(|r| !r.dated).collect();
-    undated.sort_unstable_by_key(|r| std::cmp::Reverse(r.ts));
-    for unknown in undated {
-        let _ = to_probe.try_send(unknown.id.clone());
-    }
-    if !cached.is_empty() && ev.send(Ev::Rooms(cached)).await.is_err() {
-        return;
-    }
+    // The cached list is on screen already: new messages need not wait for a request and a walk
+    // over every stored room.
+    let _stop_settle = AbortOnDrop(tokio::spawn(settle_cached(client.clone(), notif.clone(), rooms.clone(), ev.clone(), to_probe.clone())));
     let mut filter = RoomFilter::with_lazy_loading();
     filter.timeline.limit = Some(UInt::from(SYNC_TIMELINE_LIMIT));
     let mut def = FilterDefinition::default();
@@ -2932,7 +2928,10 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
             announce(&client, &dir, &rooms, &summary, prev.as_ref(), &msgs);
-            changed.push(summary);
+            // Typing, receipts and room account data bring a room here without changing its row.
+            if prev.as_ref() != Some(&summary) {
+                changed.push(summary);
+            }
         }
         for id in resp.rooms.invited.keys() {
             let Some(room) = client.get_room(id) else { continue };
@@ -2979,6 +2978,28 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
         if std::fs::remove_file(dir.join("test-sync-panic")).is_ok() {
             panic!("test-sync-panic");
         }
+    }
+}
+
+/// Brings the cached list up to date with the server and the store, next to the first sync.
+async fn settle_cached(client: Client, notif: NotificationSettings, rooms: Rooms, ev: mpsc::Sender<Ev>, to_probe: mpsc::Sender<OwnedRoomId>) {
+    drop_left(&client, &rooms, &ev).await;
+    let cached = refresh_cached(&client, &notif, &rooms).await;
+    // The sync loop writes rooms.json; this marks what changed here for its next save.
+    UNSAVED_PROBES.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Top of the list first: those are the rows in view.
+    let mut undated: Vec<&RoomSummary> = cached.iter().filter(|r| !r.dated).collect();
+    undated.sort_unstable_by_key(|r| std::cmp::Reverse(r.ts));
+    for unknown in undated {
+        let _ = to_probe.try_send(unknown.id.clone());
+    }
+    // Read again: the sync loop may have sent a newer summary of a room while the walk went on.
+    let cached: Vec<RoomSummary> = {
+        let map = rooms.lock().unwrap();
+        cached.iter().filter_map(|r| map.get(&r.id).cloned()).collect()
+    };
+    if !cached.is_empty() {
+        let _ = ev.send(Ev::Rooms(cached)).await;
     }
 }
 
@@ -3592,7 +3613,7 @@ mod features;
 pub use features::Features;
 mod search;
 pub use search::Hit;
-pub(crate) use search::{MAX_HITS, MIN_QUERY};
+pub(crate) use search::{MAX_HITS, MIN_QUERY, save as save_search};
 
 pub(crate) mod rooms;
 

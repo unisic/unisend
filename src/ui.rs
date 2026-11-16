@@ -141,8 +141,14 @@ const TYPING_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
 /// How long a message sent through a bridge may go without the bridge's word before it is taken
 /// as sent: some bridges never give one.
 const BRIDGE_WAIT_MS: u64 = 2 * 60 * 1000;
-/// Inline thumbnails kept decoded; each is at most 2.6 MB of pixels.
-const MAX_THUMBS: usize = 60;
+/// Inline thumbnails kept decoded; each is at most 2.6 MB of pixels, so about 50 MB of heap and as
+/// much GPU memory at most. A screen shows about 6; scrolling back reads the others from disk.
+const MAX_THUMBS: usize = 20;
+/// Room avatars kept, the least recently shown going first: 96 px, about 36 KB decoded each plus
+/// its atlas tile, so about 7 MB of heap and as much GPU memory.
+const MAX_AVATARS: usize = 200;
+/// Images let go of while no frame is drawn (the app in the background) waiting for the next one.
+const MAX_RELEASED: usize = 16;
 /// Sender pictures kept for the open chat; people past that many keep their initials.
 const MAX_FACES: usize = 64;
 /// Messages that can be arriving at once; more in one go is a page of history, not news.
@@ -367,8 +373,13 @@ pub struct BeeperApp {
     /// The pages open under the settings list, deepest last: a category, then a choice in it.
     settings_pages: Vec<panels::Page>,
     page_scroll: ScrollHandle,
-    /// Room avatars; `None` while loading or when the room has none. One entry per room at most.
+    /// Room avatars; `None` while loading or when the room has none. At most `MAX_AVATARS`.
     avatars: HashMap<OwnedRoomId, Option<Arc<Image>>>,
+    /// When each of `avatars` was last on screen, in `avatar_tick`s: list frames.
+    avatar_seen: HashMap<OwnedRoomId, u64>,
+    avatar_tick: u64,
+    /// Images let go of; their GPU atlas tiles are freed with the next frame.
+    released: Released,
     /// Pictures of the people writing in the open chat; `None` while loading or when they have
     /// none. At most `MAX_FACES`, 37 kB of pixels each.
     faces: HashMap<OwnedUserId, Option<Arc<Image>>>,
@@ -485,8 +496,13 @@ impl BeeperApp {
             crate::FOREGROUND.store(active, std::sync::atomic::Ordering::Relaxed);
             if !active {
                 this.drafts.save();
+                crate::backend::save_search();
             }
             if active {
+                // The unlock watch stopped while the app was away; the system's prompt may pass meanwhile.
+                if this.settings.lock.mode != crate::applock::LockMode::Off {
+                    crate::applock::watch(cx);
+                }
                 // The animation setting may have changed while the app was away.
                 motion::follow_system(cx);
                 this.follow_platform_language(window, cx);
@@ -641,6 +657,9 @@ impl BeeperApp {
             drafts,
             place: navigate::Place::default(),
             avatars: HashMap::new(),
+            avatar_seen: HashMap::new(),
+            avatar_tick: 0,
+            released: Released::default(),
             peeked: HashSet::new(),
             share,
             fwd,
@@ -734,8 +753,9 @@ impl BeeperApp {
                 self.busy = false;
             }
             Ev::Avatar(id, bytes) => {
-                if let Some(format) = image_format(&bytes) {
-                    self.avatars.insert(id, Some(Arc::new(Image::from_bytes(format, bytes))));
+                // One evicted while it loaded is asked for again when it is shown.
+                if let (Some(slot), Some(format)) = (self.avatars.get_mut(&id), image_format(&bytes)) {
+                    *slot = Some(Arc::new(Image::from_bytes(format, bytes)));
                 }
             }
             Ev::Face(user, bytes) => {
@@ -759,7 +779,7 @@ impl BeeperApp {
                         // Forgetting the request lets it load again when scrolled back to.
                         self.asked.remove(&old);
                         if let Some(image) = self.thumbs.remove(&old) {
-                            image.remove_asset(cx);
+                            self.released.push(image, cx);
                         }
                     }
                 }
@@ -990,9 +1010,30 @@ impl BeeperApp {
     }
 
     /// Menu of what can be done to a chat; shared by the row's context menu and the chat header.
+    /// Room pictures just asked for; past `MAX_AVATARS` the least recently shown are let go.
+    fn asked_avatars(&mut self, ids: Vec<OwnedRoomId>, cx: &mut App) {
+        for id in ids {
+            self.avatar_seen.insert(id.clone(), self.avatar_tick);
+            self.avatars.insert(id, None);
+        }
+        while self.avatars.len() > MAX_AVATARS {
+            let Some(old) = self.avatars.keys().min_by_key(|id| self.avatar_seen.get(*id).copied().unwrap_or(0)).cloned() else { break };
+            self.avatar_seen.remove(&old);
+            if let Some(Some(image)) = self.avatars.remove(&old) {
+                self.released.push(image, cx);
+            }
+        }
+    }
+
     /// Asks the backend for avatars and previews of rows that just became visible.
     /// Uses at most half the command channel so user actions always fit.
-    fn fetch_rows(&mut self, range: std::ops::Range<usize>) {
+    fn fetch_rows(&mut self, range: std::ops::Range<usize>, cx: &mut App) {
+        self.avatar_tick += 1;
+        for &ix in &self.shown[range.clone()] {
+            if let Some(seen) = self.avatar_seen.get_mut(&self.rooms[ix].id) {
+                *seen = self.avatar_tick;
+            }
+        }
         if self.cmd.capacity() < self.cmd.max_capacity() / 2 {
             return;
         }
@@ -1005,7 +1046,7 @@ impl BeeperApp {
             .map(|r| r.id.clone())
             .collect();
         if !avatars.is_empty() && self.cmd.try_send(Cmd::Avatars(avatars.clone())).is_ok() {
-            self.avatars.extend(avatars.into_iter().map(|id| (id, None)));
+            self.asked_avatars(avatars, cx);
         }
         if !previews.is_empty() && self.cmd.try_send(Cmd::Previews(previews.clone())).is_ok() {
             self.peeked.extend(previews);
@@ -1137,7 +1178,7 @@ impl BeeperApp {
         if let Some(closed) = self.viewer.take()
             && let Some((_, Some(image))) = self.viewer_last.replace(closed)
         {
-            image.remove_asset(cx);
+            self.released.push(image, cx);
         }
         self.drop_near(cx);
         cx.notify();
@@ -1533,7 +1574,7 @@ impl BeeperApp {
         self.thumb_order.clear();
         self.thumb_at.clear();
         for (_, image) in self.thumbs.drain() {
-            image.remove_asset(cx);
+            self.released.push(image, cx);
         }
         self.close_viewer(cx);
         self.fetching.clear();
@@ -1541,10 +1582,8 @@ impl BeeperApp {
         (self.bubble_press, self.status_last, self.tapped) = (None, None, None);
         self.own_read = OwnRead::default();
         self.arrivals.clear();
-        for (_, image) in self.faces.drain() {
-            if let Some(image) = image {
-                image.remove_asset(cx);
-            }
+        for image in self.faces.drain().filter_map(|(_, image)| image) {
+            self.released.push(image, cx);
         }
         (self.menu, self.press, self.chat_sheet) = (None, None, None);
         self.close_people(cx);
@@ -1822,7 +1861,7 @@ impl BeeperApp {
             self.shown.len() + self.message_rows(),
             cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 let chats = this.shown.len();
-                this.fetch_rows(range.start.min(chats)..range.end.min(chats));
+                this.fetch_rows(range.start.min(chats)..range.end.min(chats), cx);
                 range
                     .map(|ix| {
                         if ix >= chats {
@@ -3249,8 +3288,9 @@ impl BeeperApp {
             return None;
         }
         let (v, faint) = (shown.progress, p.faint);
-        // An activity indicator may loop; at 24 frames a second it costs little while it lasts.
-        let pulse = Animation::new(Duration::from_millis(1200)).repeat().with_max_fps(24.);
+        // Each frame of it redraws the whole window (gpui marks every ancestor view dirty), and a
+        // bridge may keep someone typing for minutes: 8 frames a second still reads as a pulse.
+        let pulse = Animation::new(Duration::from_millis(1200)).repeat().with_max_fps(8.);
         let dots = h_flex().gap(px(3.)).with_animation("typing-dots", pulse, move |el, t| {
             el.children((0..3).map(|n| {
                 let phase = (t - n as f32 * 0.2).rem_euclid(1.);
@@ -4074,8 +4114,38 @@ fn keyboard_follows(event: &InputEvent, kind: Keyboard, cx: &mut Context<BeeperA
     }
 }
 
+/// Images let go of since the last frame. `remove_asset` alone frees the decoded copy but leaves
+/// the image's tile in the GPU atlas until the window closes, and the tile can only be freed with
+/// the window at hand, hence the wait for the next frame.
+#[derive(Default)]
+struct Released(Vec<Arc<Image>>);
+
+impl Released {
+    fn push(&mut self, image: Arc<Image>, cx: &mut App) {
+        if self.0.len() < MAX_RELEASED {
+            self.0.push(image);
+        } else {
+            // No frame for a while: the decoded copy goes now, the tile stays with the window.
+            image.remove_asset(cx);
+        }
+    }
+
+    fn free(&mut self, window: &mut Window, cx: &mut App) {
+        for image in self.0.drain(..) {
+            // Asked first: `get_render_image` decodes an image that was never drawn.
+            if image.is_asset_cached(cx)
+                && let Some(render) = image.clone().get_render_image(window, cx)
+            {
+                cx.drop_image(render, Some(window));
+            }
+            image.remove_asset(cx);
+        }
+    }
+}
+
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.released.free(window, cx);
         let locked = self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked();
         // The chat left open behind the lock is read once the lock is passed, as an opening is.
         if crate::LOCKED.swap(locked, std::sync::atomic::Ordering::Relaxed)

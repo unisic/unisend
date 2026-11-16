@@ -92,7 +92,7 @@ impl BeeperApp {
                 let missing: Vec<OwnedRoomId> =
                     hits.iter().map(|h| h.room.clone()).filter(|id| !self.avatars.contains_key(id)).collect::<HashSet<_>>().into_iter().collect();
                 if !missing.is_empty() && self.cmd.try_send(Cmd::Avatars(missing.clone())).is_ok() {
-                    self.avatars.extend(missing.into_iter().map(|id| (id, None)));
+                    self.asked_avatars(missing, cx);
                 }
                 self.find.global = (query, hits);
             }

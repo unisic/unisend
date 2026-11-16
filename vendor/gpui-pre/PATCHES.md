@@ -35,3 +35,9 @@ a mouse wheel. A touch pan is already axis-locked by the gesture recognizer, so 
 the chat list scrolled it down. Change, marked `murmur patch`, in `src/elements/div.rs`: the
 cross-axis mapping applies only when the last input was not touch (`Window::last_input_was_touch`).
 Mouse wheel, shift-wheel and touchpad keep upstream behaviour.
+
+Image release: upstream frees an image's decoded copy with `remove_asset` but leaves its sprite
+atlas tile until the window closes; only `App::drop_image` frees it, and that needs the
+`RenderImage`, which `Image::get_render_image` would decode again if the asset is not loaded.
+Change, marked `murmur patch`: `App::has_asset`, `ImageSource::is_asset_cached` and
+`Image::is_asset_cached` are no longer test-only, so the app asks first and decodes nothing.
