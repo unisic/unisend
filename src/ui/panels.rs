@@ -777,7 +777,7 @@ impl BeeperApp {
             .gap(px(GAP * 2.))
             .child(
                 card(cx)
-                    .child(row(t!("Incognito"), t!("Others do not see that you have read their messages."), cx).child(incognito))
+                    .child(row(t!("Hide reading and typing"), t!("Others will not see that you have read their messages or that you are typing."), cx).child(incognito))
                     .when(android, |el| el.child(row(t!("Incognito keyboard"), t!("The keyboard learns nothing from what you type. Off: better suggestions and voice typing."), cx).child(keyboard))),
             )
             .child(

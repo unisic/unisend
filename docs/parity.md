@@ -101,7 +101,7 @@ is not started.
 | Share into the app (Android) | part | other apps' share sheets: text, pictures, videos, any files (`ACTION_SEND`, `ACTION_SEND_MULTIPLE`). A "Send to" screen lists chats most recent first with search, the shared files and an optional message, sent before the files. Text alone goes into the chosen chat's message box, not sent. At most 20 files and 200 MB per share, 100 MB per file; the rest is left out and the screen says how many. The 4 most recent chats are Direct Share targets. One chat per share; no thumbnails of the shared pictures. Desktop: none |
 | Background connection on Android | part | a foreground service (type `specialUse`, no daily limit) keeps the process connected while the app is in the background; it ends when the app is swiped away, and Android's Doze can delay it. Its quiet notice is posted once per run, so one swiped away stays away. Settings, Notifications, "Stay connected in the background" turns it off (then messages arrive only while the app is open). No push (FCM, UnifiedPush) |
 | Settings | part | theme (dark by default), incognito, chat networks, sign out; kept locally, not in `com.beeper.desktop.prefs`. Beeper's chat list, notification, shortcut and AI settings: todo |
-| Incognito mode | done | on: `m.read.private`; off: `m.read`. On by default |
+| Incognito mode (Hide reading and typing) | done | on: `m.read.private` and no typing notices; off: `m.read`. On by default |
 | Interface language | part | English and Polish, following the system language (Android's locale; on desktop `LC_ALL`, `LC_MESSAGES`, `LANG`). No in-app switch. Glossary and how to add a string: `docs/i18n.md` |
 | Command bar, hotkeys | todo | local |
 | Tray icon, launch at login, deep links | todo | local |
