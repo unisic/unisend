@@ -106,7 +106,9 @@ impl BeeperApp {
         let cap = |text: String| {
             div().min_w(px(24.)).h(px(24.)).px(px(6.)).flex().items_center().justify_center().rounded(px(6.)).bg(p.raised).text_color(p.text).text_size(fs(12.)).font_weight(FontWeight::MEDIUM).child(text)
         };
-        let rows = SHORTCUTS.iter().map(|s| {
+        // One row per action, with every key that does it.
+        let rows = SHORTCUTS.iter().enumerate().filter(|&(i, s)| !SHORTCUTS[..i].iter().any(|e| e.act == s.act)).map(|(_, s)| {
+            let keys = SHORTCUTS.iter().filter(|e| e.act == s.act).map(|e| h_flex().gap(px(4.)).children(caps(e).into_iter().map(&cap)));
             h_flex()
                 .h(px(40.))
                 .px(px(GUTTER + 4.))
@@ -114,7 +116,7 @@ impl BeeperApp {
                 .justify_between()
                 .text_size(fs(15.))
                 .child(div().min_w_0().truncate().child(tr(s.label)))
-                .child(h_flex().flex_none().gap(px(4.)).children(caps(s).into_iter().map(cap)))
+                .child(h_flex().flex_none().gap(px(12.)).children(keys))
         });
         let list = v_flex().id("shortcut-list").max_h(px((f32::from(frame::viewport(window).height) - 160.).max(120.))).overflow_y_scroll().children(rows);
         Some(self.sheet(&self.keys.motion, frame, 0, t!("Keyboard shortcuts").to_owned(), vec![list], |this| &mut this.keys.motion, window, cx))
