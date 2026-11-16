@@ -2944,11 +2944,13 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
             // events, which say nothing about when the chat was last used: it stays at 0, sorts
             // last, and is queued for a look at its history.
             let last_message = msgs.iter().map(|m| m.ts).max();
-            let dated = last_message.is_some() || prev.as_ref().is_some_and(|p| p.dated);
+            // An invitation's time is when it arrived: once taken, the chat goes by its messages.
+            let timed = prev.as_ref().filter(|p| !matches!(p.pending, Some(Pending::Invite { .. })));
+            let dated = last_message.is_some() || timed.is_some_and(|p| p.dated);
             if !dated {
                 let _ = to_probe.try_send(id.clone());
             }
-            let newest = last_message.max(prev.as_ref().map(|p| p.ts));
+            let newest = last_message.max(timed.map(|p| p.ts));
             let peer = other_person(&room).await;
             let dm = peer.is_some();
             let order = msgs.iter().filter(|m| !m.own).map(|m| m.order);
