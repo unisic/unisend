@@ -132,7 +132,8 @@ pub enum Cmd {
     Networks,
     /// Ways to log in to a bridge; starts the bridge when the account does not run it yet.
     Flows(String),
-    LoginStart { bridge: String, flow: String },
+    /// `relogin`: the login signed in again, in place of a new one.
+    LoginStart { bridge: String, flow: String, relogin: Option<String> },
     /// Answers a login step; the values are empty for a step that only waits.
     LoginSubmit(Step, HashMap<String, String>),
     Logout { bridge: String, login: String },
@@ -1457,9 +1458,9 @@ impl State {
                     panel(&ev, api.flows(&bridge).await.map(|flows| Ev::Flows(bridge, flows))).await;
                 });
             }
-            Cmd::LoginStart { bridge, flow } => {
+            Cmd::LoginStart { bridge, flow, relogin } => {
                 let (api, ev) = (self.api()?, self.ev.clone());
-                tokio::spawn(async move { panel(&ev, api.start(&bridge, &flow).await.map(Ev::LoginStep)).await });
+                tokio::spawn(async move { panel(&ev, api.start(&bridge, &flow, relogin.as_deref()).await.map(Ev::LoginStep)).await });
             }
             Cmd::LoginSubmit(step, values) => {
                 let (api, ev) = (self.api()?, self.ev.clone());

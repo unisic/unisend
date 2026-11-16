@@ -38,6 +38,11 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// A cloud bridge takes a while to come up after it is started.
 const START_ATTEMPTS: u32 = 30;
 
+/// A login the user has to sign in to again; the other states pass by themselves.
+pub fn needs_sign_in(state: &str) -> bool {
+    matches!(state, "BAD_CREDENTIALS" | "UNKNOWN_ERROR")
+}
+
 pub fn display_name(bridge: &str) -> &str {
     KNOWN.iter().find(|k| k.0 == bridge).map_or(bridge, |k| k.1)
 }
@@ -148,11 +153,18 @@ impl Api {
     }
 
     async fn bridge(&self, bridge: &str, method: Method, path: &str, body: Option<Value>, timeout: Duration) -> Result<Value> {
-        let base = format!(
-            "{}/_matrix/client/unstable/com.beeper.bridge/{bridge}/_matrix/provision/v3/{path}",
-            self.homeserver.trim_end_matches('/')
-        );
-        let url = matrix_sdk::reqwest::Url::parse_with_params(&base, [("user_id", &self.user_id)])?;
+        self.provision(bridge, method, &format!("v3/{path}"), None, body, timeout).await
+    }
+
+    /// `path` under the bridge's `/_matrix/provision/`, each segment percent-encoded; `login` picks
+    /// one of the user's logins where the call is about one.
+    async fn provision(&self, bridge: &str, method: Method, path: &str, login: Option<&str>, body: Option<Value>, timeout: Duration) -> Result<Value> {
+        let base = format!("{}/_matrix/client/unstable/com.beeper.bridge/{bridge}/_matrix/provision", self.homeserver.trim_end_matches('/'));
+        let mut url = matrix_sdk::reqwest::Url::parse_with_params(&base, [("user_id", &self.user_id)])?;
+        url.path_segments_mut().map_err(|()| anyhow!("bad homeserver URL"))?.extend(path.split('/'));
+        if let Some(login) = login {
+            url.query_pairs_mut().append_pair("login_id", login);
+        }
         self.send(method, url.into(), body, timeout).await
     }
 
@@ -192,8 +204,10 @@ impl Api {
         Err(last)
     }
 
-    pub async fn start(&self, bridge: &str, flow: &str) -> Result<Step> {
-        let json = self.bridge(bridge, Method::POST, &format!("login/start/{flow}"), Some(json!({})), CALL_TIMEOUT).await?;
+    /// `relogin` names an existing login to sign in again in place of adding one
+    /// (`provisioninglogin.go` `PostLoginStart`, the `Override` login).
+    pub async fn start(&self, bridge: &str, flow: &str, relogin: Option<&str>) -> Result<Step> {
+        let json = self.provision(bridge, Method::POST, &format!("v3/login/start/{flow}"), relogin, Some(json!({})), CALL_TIMEOUT).await?;
         let login_id = json.get("login_id").and_then(Value::as_str).context("no login_id")?.to_owned();
         step(bridge, &login_id, &json)
     }

@@ -23,6 +23,8 @@ pub(super) enum Panel {
     Networks,
     /// Choosing which network to add.
     Add,
+    /// One signed-in account of a network: its state, signing in again, signing out.
+    Account,
     Login,
     NewChat,
 }
@@ -98,7 +100,7 @@ impl BeeperApp {
                 self.end_login(cx);
                 Some(Panel::Networks)
             }
-            Some(Panel::Add) => Some(Panel::Networks),
+            Some(Panel::Add | Panel::Account) => Some(Panel::Networks),
             Some(Panel::NewChat) if group => Some(Panel::NewChat),
             _ => None,
         };
@@ -197,14 +199,22 @@ impl BeeperApp {
         cx.notify();
     }
 
-    fn choose_network(&mut self, bridge: &str, cx: &mut Context<Self>) {
+    /// `relogin` signs that login in again in place of adding one.
+    fn choose_network(&mut self, bridge: &str, relogin: Option<String>, cx: &mut Context<Self>) {
         self.end_login(cx);
+        self.relogin = relogin;
         self.panel = Some(Panel::Login);
         self.working = self.send(Cmd::Flows(bridge.to_owned()), cx);
     }
 
     fn start_flow(&mut self, bridge: String, flow: String, cx: &mut Context<Self>) {
-        self.working = self.send(Cmd::LoginStart { bridge, flow }, cx);
+        self.working = self.send(Cmd::LoginStart { bridge, flow, relogin: self.relogin.clone() }, cx);
+    }
+
+    fn open_account(&mut self, bridge: String, login: String, cx: &mut Context<Self>) {
+        self.account = Some((bridge, login));
+        self.panel = Some(Panel::Account);
+        cx.notify();
     }
 
     fn submit(&mut self, values: HashMap<String, String>, cx: &mut Context<Self>) {
@@ -290,11 +300,12 @@ impl BeeperApp {
             },
             Panel::Networks => (t!("Networks"), self.render_networks(cx).into_any_element()),
             Panel::Add => (t!("Add an account"), self.render_add(cx).into_any_element()),
+            Panel::Account => (t!("Account"), self.render_network_account(cx)),
             Panel::Login => (t!("Sign in"), self.render_login_step(window, cx).into_any_element()),
         };
         // The destinations are reached from the navigation; only what lies under them leads back.
         let paged = panel == Panel::Settings && !self.settings_pages.is_empty();
-        let deep = matches!(panel, Panel::Add | Panel::Login) || (panel == Panel::Settings && self.pad_page()) || paged;
+        let deep = matches!(panel, Panel::Add | Panel::Account | Panel::Login) || (panel == Panel::Settings && self.pad_page()) || paged;
         let edge = if narrow { GUTTER } else { GUTTER + 6. };
         // Always the rightmost pane, under the window buttons.
         let end = frame::reserve(window);
@@ -798,26 +809,24 @@ impl BeeperApp {
                 .gap(px(GAP * 2.))
                 .children(networks.iter().map(|network| {
                     let stopped = network.state != "RUNNING";
+                    let bridge = network.bridge.clone();
                     section(&network.name, cx).child(
                         card(cx)
-                            .when(stopped, |el| el.child(row(&t!("Bridge {state}", state = pretty(&network.state).to_lowercase()), "", cx).text_color(p.warning)))
-                            .when(network.logins.is_empty() && !stopped, |el| el.child(row(t!("Not signed in"), "", cx).text_color(p.faint)))
+                            .when(stopped, |el| el.child(row(&plain(&network.state), "", cx).text_color(p.warning)))
+                            .when(network.logins.is_empty() && !stopped, |el| {
+                                el.child(row(t!("Not signed in"), "", cx).text_color(p.faint).child(
+                                    Button::new(SharedString::from(format!("sign-in-{bridge}")))
+                                        .h(px(TAP))
+                                        .px(px(GUTTER))
+                                        .label(t!("Sign in"))
+                                        .on_click(cx.listener(move |this, _, _, cx| this.choose_network(&bridge, None, cx))),
+                                ))
+                            })
                             .children(network.logins.iter().map(|login| {
                                 let (bridge, id) = (network.bridge.clone(), login.id.clone());
-                                let ok = login.state == "CONNECTED";
-                                row(&login.name, &pretty(&login.state), cx).when(!ok, |el| el.text_color(p.negative)).child(
-                                    h_flex()
-                                        .id(SharedString::from(format!("logout-{}-{}", network.bridge, login.id)))
-                                        .h(px(TAP))
-                                        .flex_none()
-                                        .text_size(fs(14.))
-                                        .text_color(p.negative)
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.working = this.send(Cmd::Logout { bridge: bridge.clone(), login: id.clone() }, cx);
-                                        }))
-                                        .child(t!("Sign out")),
-                                )
+                                let ink = if bridges::needs_sign_in(&login.state) { p.negative } else { p.muted };
+                                account_row(SharedString::from(format!("account-{}-{}", network.bridge, login.id)), &login.name, &plain(&login.state), ink, cx)
+                                    .on_click(cx.listener(move |this, _, _, cx| this.open_account(bridge.clone(), id.clone(), cx)))
                             })),
                     )
                 }))
@@ -829,6 +838,60 @@ impl BeeperApp {
                 this.open_panel(Panel::Add, cx);
             }))))
             .child(list)
+            .into_any_element()
+    }
+
+    /// The account chosen on the Networks screen. Signing out is last, in red, and asked about first.
+    fn render_network_account(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = Palette::of(cx);
+        let found = self.account.as_ref().and_then(|(bridge, id)| {
+            let network = self.networks.iter().flatten().find(|n| n.bridge == *bridge)?;
+            Some((network.clone(), network.logins.iter().find(|l| l.id == *id)?.clone()))
+        });
+        let Some((network, login)) = found else {
+            return div().text_size(fs(14.)).text_color(p.faint).child(t!("This account is no longer signed in.")).into_any_element();
+        };
+        let broken = bridges::needs_sign_in(&login.state);
+        let again = {
+            let (bridge, id) = (network.bridge.clone(), login.id.clone());
+            cx.listener(move |this, _, _, cx| this.choose_network(&bridge, Some(id.clone()), cx))
+        };
+        let sign_out = {
+            let (bridge, id, name, network) = (network.bridge.clone(), login.id.clone(), login.name.clone(), network.name.clone());
+            cx.listener(move |this, _, _, cx| this.ask_sign_out(bridge.clone(), id.clone(), name.clone(), network.clone(), cx))
+        };
+        v_flex()
+            .gap(px(GAP * 2.))
+            .child(
+                section(&network.name, cx).child(
+                    card(cx).child(row(&login.name, "", cx).child(div().text_size(fs(14.)).text_color(if broken { p.negative } else { p.muted }).child(plain(&login.state)))),
+                ),
+            )
+            .child(
+                v_flex()
+                    .gap(px(8.))
+                    .map(|el| {
+                        if broken {
+                            el.child(h_flex().child(Button::new("account-sign-in").primary().h(px(TAP)).px(px(GUTTER + 4.)).label(t!("Sign in again")).on_click(again)))
+                        } else {
+                            el.child(card(cx).child(account_row("account-sign-in", t!("Sign in again"), "", p.muted, cx).on_click(again)))
+                        }
+                    })
+                    .child(footnote(t!("Signing in again keeps this account's chats. On Messenger it is also when the bridge asks for the PIN of your encrypted chat history."), cx)),
+            )
+            .child(
+                card(cx).child(
+                    h_flex()
+                        .id("account-sign-out")
+                        .min_h(px(ROW_H))
+                        .text_size(fs(16.))
+                        .text_color(p.negative)
+                        .role(Role::Button)
+                        .cursor_pointer()
+                        .on_click(sign_out)
+                        .child(t!("Sign out")),
+                ),
+            )
             .into_any_element()
     }
 
@@ -844,7 +907,7 @@ impl BeeperApp {
                     .id(bridge)
                     .h(px(ROW_H))
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.choose_network(bridge, cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose_network(bridge, None, cx)))
                     .child(div().flex_1().text_size(fs(16.)).child(name))
                     .child(Icon::new(IconName::ChevronRight).size_4().text_color(p.faint))
             })))
@@ -968,21 +1031,21 @@ impl BeeperApp {
     }
 }
 
-/// "BAD_CREDENTIALS" as "Bad credentials". The known states are mautrix bridgev2's
-/// (`bridgev2/status/bridgestate.go`); a new one shows as its code in words.
-fn pretty(state: &str) -> String {
+/// A bridge or login state in plain words. The known states are mautrix bridgev2's
+/// (`bridgev2/status/bridgestate.go`) and Beeper's `STOPPED`; a new one shows as its code in words.
+fn plain(state: &str) -> String {
     let known = match state {
-        "STARTING" => t!("Starting"),
-        "UNCONFIGURED" => t!("Unconfigured"),
-        "RUNNING" => t!("Running"),
-        "BRIDGE_UNREACHABLE" => t!("Bridge unreachable"),
-        "CONNECTING" => t!("Connecting"),
-        "BACKFILLING" => t!("Backfilling"),
         "CONNECTED" => t!("Connected"),
-        "TRANSIENT_DISCONNECT" => t!("Transient disconnect"),
-        "BAD_CREDENTIALS" => t!("Bad credentials"),
-        "UNKNOWN_ERROR" => t!("Unknown error"),
-        "LOGGED_OUT" => t!("Logged out"),
+        "RUNNING" => t!("Running"),
+        "STARTING" | "CONNECTING" => t!("Connecting…"),
+        "BACKFILLING" => t!("Fetching older chats…"),
+        "TRANSIENT_DISCONNECT" => t!("No connection, retrying…"),
+        "BAD_CREDENTIALS" => t!("Needs a new sign-in"),
+        "LOGGED_OUT" => t!("Not signed in"),
+        "UNKNOWN_ERROR" => t!("Not working"),
+        "BRIDGE_UNREACHABLE" => t!("Beeper cannot reach it"),
+        "UNCONFIGURED" => t!("Not set up yet"),
+        "STOPPED" => t!("Turned off"),
         _ => "",
     };
     if !known.is_empty() {
@@ -991,6 +1054,32 @@ fn pretty(state: &str) -> String {
     let lower = state.replace('_', " ").to_lowercase();
     let mut chars = lower.chars();
     chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+}
+
+/// A row that opens what it names: its label, a line under it in `ink`, and a chevron.
+fn account_row(id: impl Into<ElementId>, label: &str, detail: &str, ink: Hsla, cx: &App) -> Stateful<Div> {
+    let p = Palette::of(cx);
+    h_flex()
+        .id(id)
+        .min_h(px(ROW_H))
+        .py(px(8.))
+        .mx(px(-8.))
+        .px(px(8.))
+        .gap(px(GAP))
+        .rounded(px(12.))
+        .role(Role::Button)
+        .aria_label(label.to_owned())
+        .cursor_pointer()
+        .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.raised)))
+        .active(|el| el.bg(p.raised))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_size(fs(16.)).line_height(fs(22.)).child(label.to_owned()))
+                .when(!detail.is_empty(), |el| el.child(div().text_size(fs(13.)).line_height(fs(18.)).text_color(ink).child(detail.to_owned()))),
+        )
+        .child(Icon::new(IconName::ChevronRight).size_4().flex_none().text_color(p.faint))
 }
 
 /// A titled group of settings.
@@ -1200,7 +1289,7 @@ impl BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{pretty, qr_image};
+    use super::{plain, qr_image};
 
     #[test]
     fn qr_code_is_a_png_with_its_margin() {
@@ -1209,6 +1298,6 @@ mod tests {
         assert_eq!(decoded.width(), decoded.height());
         // White margin, then the finder pattern's dark corner.
         assert_eq!((decoded.get_pixel(0, 0).0, decoded.get_pixel(4 * 8, 4 * 8).0), ([255], [0]));
-        assert_eq!(pretty("BAD_CREDENTIALS"), "Bad credentials");
+        assert_eq!(plain("BAD_CREDENTIALS"), "Needs a new sign-in");
     }
 }

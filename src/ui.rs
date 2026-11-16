@@ -217,6 +217,10 @@ pub struct BeeperApp {
     panel: Option<Panel>,
     /// `None` until loaded.
     networks: Option<Vec<Network>>,
+    /// The login whose details are shown, as (bridge, login ID).
+    account: Option<(String, String)>,
+    /// The login being signed in again, in place of adding one.
+    relogin: Option<String>,
     /// Ways to sign in to the chosen bridge, when it offers more than one.
     flows: Option<(String, Vec<Flow>)>,
     step: Option<Step>,
@@ -525,6 +529,8 @@ impl BeeperApp {
             unencrypted: false,
             panel: None,
             networks: None,
+            account: None,
+            relogin: None,
             flows: None,
             step: None,
             fields: Vec::new(),
@@ -1522,7 +1528,7 @@ impl BeeperApp {
     fn render_login(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let on_code = self.screen == Screen::Code;
         let (title, hint, input, label) = if on_code {
-            (t!("Check your email"), t!("Enter the code Beeper sent you."), &self.code, t!("Sign in"))
+            (t!("Check your email"), t!("Enter the code from the email."), &self.code, t!("Sign in"))
         } else {
             (t!("Sign in to Beeper"), t!("We will email you a sign-in code."), &self.email, t!("Send code"))
         };
@@ -4031,7 +4037,7 @@ impl BeeperApp {
                 let mut banners = in_column.then(|| self.render_banners(window, cx).into_any_element());
                 let panel = self.panel.map(|panel| self.render_panel(panel, narrow, banners.take(), window, cx));
                 let body = if narrow {
-                    let deep_panel = matches!(self.panel, Some(Panel::Add | Panel::Login | Panel::NewChat));
+                    let deep_panel = matches!(self.panel, Some(Panel::Add | Panel::Account | Panel::Login | Panel::NewChat));
                     match self.panel {
                         Some(base @ (Panel::Settings | Panel::Networks)) => self.slide.base = Some(base),
                         None => self.slide.base = None,
