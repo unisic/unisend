@@ -14,7 +14,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow};
 use futures_util::StreamExt as _;
 use matrix_sdk::{
-    Client, Room, RoomMemberships,
+    Client, Room, RoomMemberships, RoomState,
     authentication::matrix::MatrixSession,
     config::{SyncSettings, SyncToken},
     deserialized_responses::{RawAnySyncOrStrippedState, TimelineEvent, TimelineEventKind},
@@ -339,11 +339,26 @@ pub struct RoomSummary {
     /// builds that took any event's time), and the chat is queued for a look.
     #[serde(default)]
     pub dated: bool,
+    /// The chat waits for the user to take it or turn it down.
+    #[serde(default)]
+    pub pending: Option<Pending>,
+    /// The room was upgraded: the room that replaces it.
+    #[serde(default)]
+    pub moved_to: Option<OwnedRoomId>,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub enum Pending {
+    /// An invitation, and who sent it.
+    Invite { by: Option<OwnedUserId>, name: String },
+    /// A bridged network's message request (`com.beeper.message_request` in `m.bridge`): the other
+    /// side learns nothing of the user until it is accepted.
+    Request,
 }
 
 impl RoomSummary {
     pub fn is_unread(&self) -> bool {
-        self.unread > 0 || self.marked_unread
+        self.unread > 0 || self.marked_unread || matches!(self.pending, Some(Pending::Invite { .. }))
     }
 }
 
@@ -1242,6 +1257,11 @@ impl State {
                 self.open = None;
                 crate::clear_notification(room_id.as_str());
                 let room = self.room(&room_id)?;
+                // An invitation has no history to read until it is taken.
+                if room.state() == RoomState::Invited {
+                    let _ = self.ev.send(Ev::Paged { room: room_id, more: false }).await;
+                    return Ok(());
+                }
                 let open = timeline::open(&room, &self.ev, self.incognito.clone()).await?;
                 self.older(&open, true);
                 self.open = Some(open);
@@ -2100,6 +2120,11 @@ fn announce(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, p
     if notes.is_empty() || !waiting(summary) {
         return;
     }
+    show_notes(client, dir, rooms, summary, notes, waiting);
+}
+
+/// Shows the notes as the chat's notification while `waiting` still holds for it.
+fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, notes: Vec<Note>, waiting: impl Fn(&RoomSummary) -> bool + Send + 'static) {
     let (client, dir, rooms, summary) = (client.clone(), dir.to_owned(), rooms.clone(), summary.clone());
     let generation = media_generation();
     // Off the sync loop: the picture may have to be fetched.
@@ -2126,6 +2151,60 @@ fn announce(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, p
             let _ = std::fs::remove_file(file);
         }
     });
+}
+
+/// Notifies of a new invitation once, unless the account's push rules turned invitations off.
+fn announce_invite(client: &Client, dir: &Path, rooms: &Rooms, notif: &NotificationSettings, summary: &RoomSummary) {
+    let Some(Pending::Invite { name, .. }) = &summary.pending else { return };
+    if crate::FOREGROUND.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let text = if summary.dm { t!("Wants to chat with you") } else { t!("Invited you to the group") };
+    let note = Note { sender: name.clone(), text: text.to_owned(), ts: now_ms() as u64, mention: false };
+    let (client, dir, rooms, notif, summary) = (client.clone(), dir.to_owned(), rooms.clone(), notif.clone(), summary.clone());
+    tokio::spawn(async move {
+        use matrix_sdk::ruma::push::{PredefinedOverrideRuleId, RuleKind};
+        if notif.is_push_rule_enabled(RuleKind::Override, PredefinedOverrideRuleId::InviteForMe.as_str()).await.unwrap_or(true) {
+            show_notes(&client, &dir, &rooms, &summary, vec![note], |r| r.pending.is_some());
+        }
+    });
+}
+
+/// A chat the user is invited to, from the stripped state the invitation carries.
+async fn invitation(room: &Room, prev: Option<&RoomSummary>) -> RoomSummary {
+    let details = room.invite_details().await.ok();
+    let by = details.as_ref().map(|d| d.inviter_id.clone());
+    let inviter = match &details {
+        Some(d) => d.inviter.as_ref().map_or_else(|| d.inviter_id.localpart().to_owned(), |m| m.name().to_owned()),
+        None => String::new(),
+    };
+    let dm = room.is_direct().await.unwrap_or(false);
+    let name = match room.name().filter(|n| !n.is_empty()) {
+        Some(name) => name,
+        None if dm && !inviter.is_empty() => inviter.clone(),
+        None => room.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| room.room_id().to_string()),
+    };
+    RoomSummary {
+        id: room.room_id().to_owned(),
+        name,
+        preview: None,
+        preview_id: None,
+        // A stripped invitation carries no time: it is dated when it arrives.
+        ts: prev.map_or(now_ms() as u64, |p| p.ts),
+        network: None,
+        unread: 0,
+        mentions: 0,
+        dm,
+        pinned: false,
+        low_priority: false,
+        muted: false,
+        marked_unread: false,
+        archived: false,
+        order: 0,
+        dated: true,
+        pending: Some(Pending::Invite { by, name: inviter }),
+        moved_to: None,
+    }
 }
 
 /// The chat's picture as a file Android can read, one small file per chat that has notified.
@@ -2226,8 +2305,16 @@ struct Done {
 /// Clears the unread state. A private receipt does that without telling the other side, or the
 /// bridged network, that the message was read. The read marker moves with it, so the chat opens
 /// again without "New messages".
+/// Nothing is sent before the user takes the chat: an invitation or a message request is not
+/// told it was seen.
 async fn mark_read(room: &Room, newest: Option<OwnedEventId>, private: bool) -> Result<()> {
+    if room.state() != RoomState::Joined {
+        return Ok(());
+    }
     room.set_unread_flag(false).await?;
+    if request(room).await {
+        return Ok(());
+    }
     if let Some(id) = newest {
         // `m.fully_read` is the user's own account data, never shown to others, so it suits private receipts too.
         let receipts = matrix_sdk::room::Receipts::new().fully_read_marker(id.clone());
@@ -2394,6 +2481,8 @@ async fn summarize(
         ..seen
     };
     s.archived = is_done(&done, &s, now_ms());
+    s.pending = request(room).await.then_some(Pending::Request);
+    s.moved_to = room.successor_room().map(|next| next.room_id);
     s
 }
 
@@ -2405,7 +2494,8 @@ async fn drop_left(client: &Client, rooms: &Rooms, ev: &mpsc::Sender<Ev>) {
         Ok(response) => response.joined_rooms.into_iter().collect(),
         Err(e) => return log::debug!("joined rooms: {e}"),
     };
-    let left: Vec<OwnedRoomId> = rooms.lock().unwrap().keys().filter(|id| !joined.contains(*id)).cloned().collect();
+    let invited = |id: &OwnedRoomId| client.get_room(id).is_some_and(|r| r.state() == RoomState::Invited);
+    let left: Vec<OwnedRoomId> = rooms.lock().unwrap().keys().filter(|id| !joined.contains(*id) && !invited(id)).cloned().collect();
     for id in left {
         rooms.lock().unwrap().remove(&id);
         let _ = ev.send(Ev::RoomGone(id)).await;
@@ -2419,6 +2509,11 @@ async fn refresh_cached(client: &Client, notif: &NotificationSettings, rooms: &R
     let mut out = Vec::with_capacity(cached.len());
     for seen in cached {
         let Some(room) = client.get_room(&seen.id) else { continue };
+        // An invitation has only the stripped state it came with: its summary was made from that.
+        if room.state() == RoomState::Invited {
+            out.push(seen);
+            continue;
+        }
         let fresh = summarize(&room, notif, other_person(&room).await, seen).await;
         if let Some(r) = rooms.lock().unwrap().get_mut(&fresh.id) {
             // A preview refresh may have updated the entry meanwhile.
@@ -2444,6 +2539,8 @@ async fn forgotten(client: &Client, rooms: &Rooms) -> bool {
 }
 
 async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, seal: Seal, rooms: Rooms, ev: mpsc::Sender<Ev>) {
+    // A first sign-in brings every invitation ever left unanswered: those are not news.
+    let first_run = rooms.lock().unwrap().is_empty();
     drop_left(&client, &rooms, &ev).await;
     let cached = refresh_cached(&client, &notif, &rooms).await;
     // Chats whose last message is not known are looked up in the background. A full queue drops
@@ -2546,11 +2643,26 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 marked_unread: false,
                 archived: false,
                 dated,
+                pending: None,
+                moved_to: None,
             };
             let mut summary = summarize(&room, &notif, peer, seen).await;
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
             announce(&client, &dir, &rooms, &summary, prev.as_ref(), &msgs);
+            changed.push(summary);
+        }
+        for id in resp.rooms.invited.keys() {
+            let Some(room) = client.get_room(id) else { continue };
+            if room.is_space() || rooms::leaving(id) {
+                continue;
+            }
+            let prev = rooms.lock().unwrap().get(id).cloned();
+            let summary = invitation(&room, prev.as_ref()).await;
+            rooms.lock().unwrap().insert(id.clone(), summary.clone());
+            if prev.is_none() && (synced || !first_run) {
+                announce_invite(&client, &dir, &rooms, &notif, &summary);
+            }
             changed.push(summary);
         }
         let mut gone = false;
@@ -2903,6 +3015,17 @@ async fn other_person(room: &Room) -> Option<OwnedUserId> {
     let mut people = ids.into_iter().filter(|u| u != own && !service.contains(u));
     let first = people.next()?;
     people.next().is_none().then_some(first)
+}
+
+/// The bridge holds the chat as a message request: `com.beeper.message_request` in the channel of
+/// its `m.bridge` state (mautrix-go event/state.go).
+pub(crate) async fn request(room: &Room) -> bool {
+    let events = room.get_state_events(StateEventType::from("m.bridge")).await.unwrap_or_default();
+    events.iter().any(|e| {
+        let RawAnySyncOrStrippedState::Sync(raw) = e else { return false };
+        let content: Option<serde_json::Value> = raw.get_field("content").ok().flatten();
+        content.and_then(|c| c.get("channel")?.get("com.beeper.message_request")?.as_bool()).unwrap_or(false)
+    })
 }
 
 async fn network(room: &Room) -> Option<String> {

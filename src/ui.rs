@@ -55,6 +55,7 @@ mod signin;
 mod sharein;
 mod video;
 mod rooms;
+mod pending;
 mod update;
 pub(crate) mod rowswipe;
 mod viewer;
@@ -70,7 +71,7 @@ use receipt::{Mark, Receipt};
 
 use crate::{Keyboard, Palette};
 use crate::bridges::{Flow, Network, Step};
-use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, OwnRead, Quote, QuoteState, RoomSummary};
+use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, OwnRead, Pending, Quote, QuoteState, RoomSummary};
 
 const NARROW: f32 = 720.;
 // Metrics; `docs/design.md` gives the reasons.
@@ -934,7 +935,7 @@ impl BeeperApp {
             if !query.is_empty() {
                 return r.name.to_lowercase().contains(&query);
             }
-            in_view(self.view, r) && (!self.only_unread || r.is_unread())
+            in_view(self.view, r) && (!self.only_unread || r.is_unread()) && !replaced(&self.rooms, r)
         };
         self.shown = self.rooms.iter().enumerate().filter(|(_, r)| passes(r)).map(|(ix, _)| ix).collect();
         cx.notify();
@@ -1791,13 +1792,21 @@ impl BeeperApp {
                                                     .text_size(fs(14.))
                                                     .line_height(fs(20.))
                                                     .text_color(if unread { p.text } else { p.muted })
-                                                    .child(match this.drafts.get(&room.id) {
-                                                        Some(draft) => h_flex()
+                                                    .child(match (&room.pending, this.drafts.get(&room.id)) {
+                                                        (Some(pending), _) => div()
+                                                            .text_color(p.text)
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .child(match pending {
+                                                                Pending::Invite { .. } => t!("Invitation"),
+                                                                Pending::Request => t!("Message request"),
+                                                            })
+                                                            .into_any_element(),
+                                                        (None, Some(draft)) => h_flex()
                                                             .gap(px(4.))
                                                             .child(div().flex_none().text_color(p.faint).child(t!("Draft:")))
                                                             .child(div().flex_1().min_w_0().truncate().child(crate::emoji::styled(draft.replace('\n', " "), Vec::new())))
                                                             .into_any_element(),
-                                                        None => crate::emoji::styled(preview.unwrap_or(t!("Message")).to_owned(), Vec::new()).into_any_element(),
+                                                        (None, None) => crate::emoji::styled(preview.unwrap_or(t!("Message")).to_owned(), Vec::new()).into_any_element(),
                                                     }),
                                             )
                                             .when(room.pinned, |el| el.child(mark(IconName::Pin)))
@@ -1805,7 +1814,7 @@ impl BeeperApp {
                                             .when(room.mentions > 0, |el| {
                                                 el.child(Icon::new(IconName::AtSign).size_4().flex_none().text_color(p.accent_ink))
                                             })
-                                            .when(unread, |el| el.child(count_pill(room.unread, room.muted, cx))),
+                                            .when(unread && room.pending.is_none(), |el| el.child(count_pill(room.unread, room.muted, cx))),
                                     ),
                             )
                             .child(press::long_press(cx.listener({
@@ -1909,7 +1918,7 @@ impl BeeperApp {
                     this.set_searching(true, window, cx);
                 })))
         };
-        let waiting = self.rooms.iter().filter(|r| !r.archived && !r.low_priority && r.is_unread()).count();
+        let waiting = self.rooms.iter().filter(|r| !r.archived && !r.low_priority && r.is_unread() && !replaced(&self.rooms, r)).count();
         let seg = press::Segments::new("filters", window, cx);
         let chips = [
             (t!("All"), View::Inbox, false, 0),
@@ -2367,6 +2376,8 @@ impl BeeperApp {
         let end = self.chat_end(window);
 
         let drop_tint = p.surface;
+        let pending = self.render_pending_bar(cx);
+        let composing = pending.is_none();
         v_flex()
             .size_full()
             .relative()
@@ -2446,7 +2457,8 @@ impl BeeperApp {
                         )
                     }),
             )
-            .child(
+            .when_some(pending, |el, bar| el.child(div().px(px(column)).child(bar)))
+            .when(composing, |el| el.child(
                 v_flex()
                     .px(px(column))
                     .children(self.render_typing(window, cx))
@@ -2526,7 +2538,7 @@ impl BeeperApp {
                             .relative()
                             .children(self.render_recorder(window, cx)),
                     ),
-            )
+            ))
             .children(self.render_emoji_panel(window, cx))
     }
 
@@ -3289,6 +3301,11 @@ fn avatar(name: &str, image: Option<&Option<Arc<Image>>>, size: f32, cx: &App) -
 
 /// What can be done with a chat, each as the opposite of its current state.
 /// Whether a chat belongs to a section of the list, before the unread filter and the search.
+/// An upgraded room leaves the list once the user is in the room that replaced it.
+fn replaced(rooms: &[RoomSummary], r: &RoomSummary) -> bool {
+    r.moved_to.as_ref().is_some_and(|next| rooms.iter().any(|s| &s.id == next && s.pending.is_none()))
+}
+
 fn in_view(view: View, r: &RoomSummary) -> bool {
     match view {
         View::Inbox => !r.archived && !r.low_priority,
@@ -4061,7 +4078,7 @@ impl BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView};
+    use super::{Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced};
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
 
     #[test]
@@ -4075,6 +4092,37 @@ mod tests {
         assert_ne!(saved[0].parent(), saved[1].parent());
         assert_eq!(save_pasted(&dir, vec![image(gpui_kit::ImageFormat::Gif)])[0].file_name().unwrap(), "image.gif");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_upgraded_room_leaves_the_list_once_its_successor_is_joined() {
+        let room = |id: &str, moved_to: Option<&str>, pending| RoomSummary {
+            id: id.try_into().unwrap(),
+            name: String::new(),
+            preview: None,
+            preview_id: None,
+            ts: 0,
+            network: None,
+            unread: 0,
+            mentions: 0,
+            dm: false,
+            pinned: false,
+            low_priority: false,
+            muted: false,
+            marked_unread: false,
+            archived: false,
+            order: 0,
+            dated: true,
+            pending,
+            moved_to: moved_to.map(|m| m.try_into().unwrap()),
+        };
+        let old = room("!old:x", Some("!new:x"), None);
+        assert!(!replaced(std::slice::from_ref(&old), &old));
+        let invited = room("!new:x", None, Some(Pending::Invite { by: None, name: String::new() }));
+        assert!(!replaced(&[old.clone(), invited], &old));
+        let joined = room("!new:x", None, None);
+        assert!(replaced(&[old.clone(), joined.clone()], &old));
+        assert!(!replaced(&[old, joined.clone()], &joined));
     }
 
     #[test]

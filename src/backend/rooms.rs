@@ -101,6 +101,13 @@ pub enum Ask {
     LeaveOptions(OwnedRoomId),
     /// `delete` sends `com.beeper.delete_chat` first.
     Leave { room: OwnedRoomId, delete: bool },
+    /// Takes an invitation (joins) or a message request (`com.beeper.accept_message_request`).
+    Accept(OwnedRoomId),
+    /// Ignores who sent the invitation, or has the bridge block the person behind a message
+    /// request (`com.beeper.block_user`); the chat is left either way.
+    Block(OwnedRoomId),
+    /// Joins the room that replaced this upgraded one.
+    Upgrade(OwnedRoomId),
     /// The network's capabilities, then its contacts when it lists them.
     Open(Target),
     Find { target: Target, query: String },
@@ -112,6 +119,8 @@ pub enum Ask {
 
 pub enum Answer {
     LeaveOptions { room: OwnedRoomId, delete: bool },
+    /// The invitation or message request was taken.
+    Accepted(OwnedRoomId),
     Caps(Target, Caps),
     /// `query` empty: the contact list.
     People { target: Target, query: String, people: Vec<Person> },
@@ -151,6 +160,18 @@ pub(super) fn handle(client: Client, api: Option<Api>, rooms: Rooms, ev: mpsc::S
                 Answer::LeaveOptions { room, delete }
             }
             Ask::Leave { room, delete } => return leave(&client, &rooms, &ev, room, delete).await,
+            Ask::Accept(room) => match accept(&client, &room).await {
+                Ok(()) => Answer::Accepted(room),
+                Err(e) => Answer::Failed(t!("Could not accept: {error}", error = super::plain(&format!("{e:#}")))),
+            },
+            Ask::Block(room) => {
+                if let Err(e) = block(&client, &room).await {
+                    let _ = ev.send(Ev::Error(t!("Could not block: {error}", error = super::plain(&format!("{e:#}"))))).await;
+                    return;
+                }
+                return leave(&client, &rooms, &ev, room, false).await;
+            }
+            Ask::Upgrade(room) => outcome(successor(&client, &room).await),
             Ask::Open(target) => {
                 let caps = match &target {
                     Target::Matrix => Ok(Caps::matrix()),
@@ -228,6 +249,37 @@ async fn leave(client: &Client, rooms: &Rooms, ev: &mpsc::Sender<Ev>, id: OwnedR
         }
         let _ = ev.send(Ev::Error(t!("Could not leave the chat: {error}", error = super::plain(&format!("{e:#}"))))).await;
     }
+}
+
+async fn accept(client: &Client, id: &RoomId) -> Result<()> {
+    let room = client.get_room(id).context(t!("Unknown chat"))?;
+    if room.state() == RoomState::Invited {
+        room.join().await?;
+    } else {
+        room.send_raw("com.beeper.accept_message_request", json!({})).await?;
+    }
+    Ok(())
+}
+
+async fn block(client: &Client, id: &RoomId) -> Result<()> {
+    let room = client.get_room(id).context(t!("Unknown chat"))?;
+    if room.state() == RoomState::Invited {
+        let invite = room.invite_details().await?;
+        client.account().ignore_user(&invite.inviter_id).await?;
+    } else {
+        room.send_raw("com.beeper.block_user", json!({ "block": true })).await?;
+    }
+    Ok(())
+}
+
+/// The room an upgrade replaced this one with, joined.
+async fn successor(client: &Client, id: &RoomId) -> Result<OwnedRoomId> {
+    let room = client.get_room(id).context(t!("Unknown chat"))?;
+    let next = room.successor_room().context(t!("Unknown chat"))?.room_id;
+    if client.get_room(&next).is_none_or(|r| r.state() != RoomState::Joined) {
+        client.join_room_by_id(&next).await?;
+    }
+    Ok(next)
 }
 
 async fn leave_and_forget(room: &Room) -> Result<()> {

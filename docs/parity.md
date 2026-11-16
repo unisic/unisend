@@ -38,7 +38,7 @@ is not started.
 | Avatars, network label, last message, time | done | `m.room.avatar`, `m.bridge`; in a group, each sender's picture from their member event |
 | Network icons (per-network glyph) | todo | text label for now |
 | Labels with schedules, snooze, reminders | todo | `com.beeper.label.*`, `com.beeper.chats.snoozed`, `com.beeper.chats.reminder` |
-| Message requests, invitations | todo | a request is an ordinary chat whose `m.bridge` state has `channel."com.beeper.message_request": true` (read from Beeper Desktop), so it is in the list already, unlabelled; accepting goes through Beeper's SDK and is not known. Matrix invitations are not shown |
+| Message requests, invitations, room upgrades | done | a request is a chat whose `m.bridge` state has `channel."com.beeper.message_request": true`: labelled in the list, and in the chat Block (`com.beeper.block_user`), Delete, Accept (`com.beeper.accept_message_request` `{}`, mautrix-go bridgev2/portal.go) in place of the composer; no receipts or typing until it is accepted. Matrix invitations from the stripped state, with Block (ignore), Decline, Accept. A tombstoned room points to its successor and leaves the list once that is joined. Groups in common not shown |
 | Merged chats | todo | `com.beeper.union` |
 | Drafts synced between devices | todo | `com.beeper.draft` |
 | Multi-select, archive all read | part | local: selection mode in a chat (copy with sender and time, forward, delete for me, delete for everyone when all are yours); archive all read is todo |
@@ -145,13 +145,12 @@ them was taken from its desktop bundle, and the state events were checked agains
 
 ## Next, by what a daily user of these networks would notice
 
-1. Message requests labelled and accepted, Matrix invitations. M.
-2. Typing in the chat list, per-message read state. S.
-3. Inline video playback. M.
-4. Creating and ending polls, sending a location. S each.
-5. Mentions autocomplete; forward; paste and drag and drop attachments. S each.
-7. New chat from a contact, chat info and group admin. L.
-8. Notifications without the app running (needs Google's push, FCM). L.
+1. Typing in the chat list, per-message read state. S.
+2. Inline video playback. M.
+3. Creating and ending polls, sending a location. S each.
+4. Mentions autocomplete; forward; paste and drag and drop attachments. S each.
+6. New chat from a contact, chat info and group admin. L.
+7. Notifications without the app running (needs Google's push, FCM). L.
 
 ## How Beeper stores chat state
 

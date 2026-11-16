@@ -878,6 +878,8 @@ fn archive_rule_matches_beeper() {
         archived: false,
         order,
         dated: true,
+        pending: None,
+        moved_to: None,
     };
     let done = |updated_ts, at_order| Done { updated_ts, at_order };
     let now = 10_000;
