@@ -24,7 +24,7 @@ use matrix_sdk::{
         secret_storage::SecretStorageError,
     },
     notification_settings::{NotificationSettings, RoomNotificationMode},
-    attachment::{AttachmentConfig, AttachmentInfo, BaseImageInfo},
+    attachment::{AttachmentConfig, AttachmentInfo, BaseImageInfo, Thumbnail},
     media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings},
     reqwest,
     room::{
@@ -153,6 +153,8 @@ pub enum Cmd {
     Delete { room: OwnedRoomId, target: String },
     /// Sends again a message that failed to leave.
     Retry { room: OwnedRoomId, target: String },
+    /// Starts the sync again after `Ev::SyncStopped`.
+    Resync,
     /// Sends the user's position as an `m.location` message.
     SendLocation { room: OwnedRoomId, lat: f64, lon: f64, accuracy: Option<f64>, reply_to: Option<String> },
     /// Starts a poll; `answers` are checked again before they go out.
@@ -219,6 +221,8 @@ pub enum Ev {
     Online(bool),
     /// The first sync answered: a list still empty is the account's, not one still loading.
     Synced,
+    /// The sync stopped for good (a panic), not for a lost connection, which it retries itself.
+    SyncStopped,
     /// True while this device lacks the secrets needed to decrypt history.
     NeedRecovery(bool),
     /// The recovery code kept on this device, `None` when none is kept.
@@ -242,7 +246,7 @@ pub enum Ev {
     Viewed(String, Vec<u8>),
     /// The file is in the media cache, or could not be fetched.
     Fetched(String, Option<PathBuf>),
-    /// An attachment finished uploading, or failed.
+    /// An attachment is in the send queue, or failed before it.
     Attached,
     Networks(Vec<Network>),
     Flows(String, Vec<Flow>),
@@ -1074,10 +1078,9 @@ impl State {
         for task in self.tasks.drain(..) {
             task.abort();
         }
-        self.tasks = vec![
-            tokio::spawn(watch_recovery(client.clone(), self.ev.clone())),
-            tokio::spawn(sync_loop(client.clone(), notif.clone(), self.dir.clone(), self.seal.clone(), self.rooms.clone(), self.ev.clone())),
-        ];
+        // Sends left in the queue by the last run go out now, not once their chat is opened.
+        client.send_queue().respawn_tasks_for_rooms_with_unsent_requests().await;
+        self.tasks = vec![tokio::spawn(watch_recovery(client.clone(), self.ev.clone())), self.sync_task(&client, &notif)];
         self.notif = Some(notif);
         self.verify.listen(&client, &self.ev);
         search::start(&self.dir, &client, &self.seal);
@@ -1086,6 +1089,11 @@ impl State {
         if let Some(user) = user {
             self.emit(Ev::Ready { user, beeper: self.beeper, seal: self.seal.clone() }).await;
         }
+    }
+
+    /// The sync loop, last in `tasks` so `Cmd::Resync` finds it.
+    fn sync_task(&self, client: &Client, notif: &NotificationSettings) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(sync_watched(client.clone(), notif.clone(), self.dir.clone(), self.seal.clone(), self.rooms.clone(), self.ev.clone()))
     }
 
     /// A sign-in starts clean: a store left behind belongs to a device that never finished logging
@@ -1474,6 +1482,15 @@ impl State {
                     };
                     panel(&ev, done.await.map(Ev::Networks)).await;
                 });
+            }
+            Cmd::Resync => {
+                if let (Some(client), Some(notif)) = (&self.client, &self.notif)
+                    && self.tasks.last().is_some_and(tokio::task::JoinHandle::is_finished)
+                {
+                    let task = self.sync_task(client, notif);
+                    self.tasks.pop();
+                    self.tasks.push(task);
+                }
             }
             Cmd::SignOut => {
                 // Waited for, so the sync loop cannot write the chat list after the wipe below.
@@ -2006,9 +2023,10 @@ async fn thumbnail(client: &Client, media: &Media) -> Result<Option<Vec<u8>>> {
     Ok(Some(tokio::task::spawn_blocking(move || shrink(&bytes, THUMB_PX)).await??))
 }
 
-/// Uploads a file as the message type its content calls for. A picture goes out scaled down and
-/// without metadata unless `hd`; `caption` becomes the message's body (MSC2530), or a text message
-/// right after it where the network drops captions of that type.
+/// Queues a file as the message type its content calls for: the chat shows it at once, and the
+/// send queue uploads it, keeps it across restarts and offers a retry when it fails. A picture
+/// goes out scaled down and without metadata unless `hd`; `caption` becomes the message's body
+/// (MSC2530), or a text message right after it where the network drops captions of that type.
 async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &str, hd: bool) -> Result<()> {
     let size = tokio::fs::metadata(path).await?.len();
     if size > MAX_UPLOAD {
@@ -2057,6 +2075,28 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &st
         name = format!("{}.{ext}", if filmed { "video" } else { "image" });
     }
     let mut config = AttachmentConfig::new();
+    // Other clients show this until they fetch the file; a video has one only where a still can be read.
+    let (data, thumb) = if pictured {
+        tokio::task::spawn_blocking(move || {
+            let thumb = caption::thumbnail(&data).map_err(|e| log::debug!("thumbnail: {e:#}")).ok().flatten();
+            (data, thumb)
+        })
+        .await?
+    } else if filmed {
+        let source = path.to_owned();
+        (data, tokio::task::spawn_blocking(move || video_thumbnail(&source)).await?)
+    } else {
+        (data, None)
+    };
+    if let Some(thumb) = thumb {
+        config = config.thumbnail(Some(Thumbnail {
+            size: UInt::new(thumb.bytes.len() as u64).unwrap_or_default(),
+            data: thumb.bytes,
+            content_type: thumb.mime,
+            width: thumb.width.into(),
+            height: thumb.height.into(),
+        }));
+    }
     if pictured {
         // Bridges and other clients lay the bubble out from these.
         let known = match dims {
@@ -2085,11 +2125,19 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &st
         };
         config = config.reply(Some(reply));
     }
-    room.send_attachment(name, &mime, data, config).await?;
+    let queue = room.send_queue();
+    queue.send_attachment(name, mime, data, config).await?;
     if apart {
-        room.send(RoomMessageEventContent::text_plain(caption)).await.context(t!("the caption was not sent"))?;
+        queue.send(RoomMessageEventContent::text_plain(caption).into()).await.context(t!("the caption was not sent"))?;
     }
     Ok(())
+}
+
+/// A still from a video for its thumbnail. Only Android can read one.
+fn video_thumbnail(path: &Path) -> Option<caption::Prepared> {
+    let bytes = crate::ui::video_frame(path, caption::THUMB_PX)?;
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?.into_dimensions().ok()?;
+    Some(caption::Prepared { bytes, name: "thumbnail.jpg".to_owned(), mime: mime_guess::mime::IMAGE_JPEG, width, height })
 }
 
 /// One message to put in a chat's notification.
@@ -2563,6 +2611,20 @@ async fn forgotten(client: &Client, rooms: &Rooms) -> bool {
     cache.events().await.is_ok_and(|events| events.is_empty())
 }
 
+/// The sync loop, caught when it panics so the UI can say so and offer a restart. Not a second
+/// task: aborting this one still stops the loop before a sign-out wipes what it writes.
+async fn sync_watched(client: Client, notif: NotificationSettings, dir: PathBuf, seal: Seal, rooms: Rooms, ev: mpsc::Sender<Ev>) {
+    use futures_util::FutureExt as _;
+    // The panic hook has already logged where it happened.
+    if let Err(panic) = std::panic::AssertUnwindSafe(sync_loop(client, notif, dir, seal, rooms.clone(), ev.clone())).catch_unwind().await {
+        let why = panic.downcast_ref::<&str>().copied().or_else(|| panic.downcast_ref::<String>().map(String::as_str)).unwrap_or("panic");
+        log::error!("sync stopped: {why}");
+        // A list the panic left half updated beats one no task can lock again; the next sync rewrites it.
+        rooms.clear_poison();
+        let _ = ev.send(Ev::SyncStopped).await;
+    }
+}
+
 async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, seal: Seal, rooms: Rooms, ev: mpsc::Sender<Ev>) {
     // A first sign-in brings every invitation ever left unanswered: those are not news.
     let first_run = rooms.lock().unwrap().is_empty();
@@ -2716,6 +2778,12 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
         }
         if !std::mem::replace(&mut synced, true) && ev.send(Ev::Synced).await.is_err() {
             return;
+        }
+        // A test of the stopped-sync card: a debug build's sync dies once at the next answer after
+        // this file appears in the data directory.
+        #[cfg(debug_assertions)]
+        if std::fs::remove_file(dir.join("test-sync-panic")).is_ok() {
+            panic!("test-sync-panic");
         }
     }
 }

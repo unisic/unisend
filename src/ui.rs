@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 pub(crate) mod appearance;
 mod camera;
 mod caption;
+pub(crate) use caption::video_frame;
 mod cards;
 mod emojipick;
 mod contacts;
@@ -327,6 +328,8 @@ pub struct BeeperApp {
     list_in: Option<Instant>,
     /// The first sync of this session has answered.
     synced: bool,
+    /// The sync died and waits for the user to start it again.
+    sync_stopped: bool,
     chat_motion: sheet::SheetMotion,
     /// The picture still fading out after the viewer closed.
     viewer_last: Option<(String, Option<Arc<Image>>)>,
@@ -589,6 +592,7 @@ impl BeeperApp {
             to_top: None,
             list_in: None,
             synced: false,
+            sync_stopped: false,
             chat_motion: sheet::SheetMotion::default(),
             viewer_last: None,
             zoom: viewer::Zoom::default(),
@@ -663,6 +667,7 @@ impl BeeperApp {
             ev @ (Ev::Networks(_) | Ev::Flows(..) | Ev::LoginStep(_) | Ev::PanelFailed) => self.on_panel_event(ev, cx),
             Ev::Ready { user, beeper, seal } => {
                 self.beeper = beeper;
+                self.sync_stopped = false;
                 self.unencrypted = cfg!(target_os = "android") && crate::vault::layout(&self.dir) == crate::vault::Layout::Legacy;
                 if seal.sealed() {
                     self.drafts = navigate::Drafts::load(&self.dir, seal);
@@ -852,6 +857,7 @@ impl BeeperApp {
             }
             Ev::Online(online) => self.offline = !online,
             Ev::Synced => self.synced = true,
+            Ev::SyncStopped => self.sync_stopped = true,
             Ev::Exported(id, path, what) => self.exported(id, path, what, cx),
             Ev::Error(e) => {
                 self.row_return(cx);
@@ -2022,6 +2028,7 @@ impl BeeperApp {
                 el.child(filters)
             })
             .children(banners)
+            .when(self.sync_stopped, |el| el.child(self.render_sync_stopped(cx)))
             .child(self.list_touch(cx))
             .child(div().flex_1().min_h_0().child(if state == RoomsView::Skeleton {
                 skeleton(p).into_any_element()
@@ -2034,6 +2041,37 @@ impl BeeperApp {
             } else {
                 list.into_any_element()
             }))
+    }
+
+    fn render_sync_stopped(&self, cx: &mut Context<Self>) -> Div {
+        let p = Palette::of(cx);
+        h_flex()
+            .mx(px(GUTTER))
+            .mt(px(8.))
+            .pl(px(GAP))
+            .pr(px(6.))
+            .py(px(6.))
+            .gap(px(8.))
+            .rounded(px(RADIUS))
+            .bg(p.surface)
+            .text_size(fs(14.))
+            .child(div().flex_1().min_w_0().text_color(p.muted).child(t!("Sync stopped.")))
+            .child(
+                h_flex()
+                    .id("resync")
+                    .h(px(TAP))
+                    .px(px(GAP))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(p.raised)
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.send(Cmd::Resync, cx) {
+                            this.sync_stopped = false;
+                        }
+                    }))
+                    .child(t!("Try again")),
+            )
     }
 
     /// What the window buttons take from the right end of the chat's top row: all they need,

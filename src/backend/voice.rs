@@ -19,7 +19,7 @@ pub const SENT_SAMPLES: usize = 64;
 /// Bars a received waveform is drawn with.
 pub const BARS: usize = 42;
 
-/// Uploads a recording as a voice message, then deletes it. `levels` are 0 to 1, one per tick.
+/// Queues a recording as a voice message, then deletes it: the send queue keeps its own copy. `levels` are 0 to 1, one per tick.
 pub(super) async fn send(room: &Room, path: &Path, duration: Duration, levels: Vec<f32>, reply_to: Option<String>) -> Result<()> {
     let mut data = tokio::fs::read(path).await?;
     // Android records Ogg Opus from 10 on; before that, AAC in MP4, which the WhatsApp bridge
@@ -36,8 +36,8 @@ pub(super) async fn send(room: &Room, path: &Path, duration: Duration, levels: V
         let reply = Reply { event_id: EventId::parse(id)?, enforce_thread: EnforceThread::MaybeThreaded, add_mentions: AddMentions::Yes };
         config = config.reply(Some(reply));
     }
-    room.send_attachment(name, &mime.parse()?, data, config).await?;
-    // Kept when sending failed, so it is not lost; the recorder clears day-old ones.
+    room.send_queue().send_attachment(name, mime.parse()?, data, config).await?;
+    // Kept when queueing failed, so it is not lost; the recorder clears day-old ones.
     if let Err(e) = tokio::fs::remove_file(path).await {
         log::debug!("voice file: {e}");
     }

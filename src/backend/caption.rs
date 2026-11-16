@@ -30,8 +30,15 @@ pub fn recodable(mime: &mime_guess::mime::Mime) -> bool {
     matches!(mime.subtype().as_str(), "jpeg" | "png" | "bmp" | "tiff")
 }
 
+/// Longest side of the thumbnail sent with a picture or a video.
+pub const THUMB_PX: u32 = 800;
+
 fn open(path: &Path) -> Result<DynamicImage> {
-    let mut decoder = ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
+    upright(ImageReader::open(path)?)
+}
+
+fn upright<R: std::io::BufRead + std::io::Seek>(reader: ImageReader<R>) -> Result<DynamicImage> {
+    let mut decoder = reader.with_guessed_format()?.into_decoder()?;
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
     let mut picture = DynamicImage::from_decoder(decoder)?;
     picture.apply_orientation(orientation);
@@ -66,6 +73,24 @@ pub fn downscale(path: &Path) -> Result<Prepared> {
         width: picture.width(),
         height: picture.height(),
     })
+}
+
+/// The thumbnail other clients show before fetching `bytes` (a picture or a video still), upright
+/// and at most `THUMB_PX` on the long side. `None` when the picture is no larger than that.
+pub fn thumbnail(bytes: &[u8]) -> Result<Option<Prepared>> {
+    let picture = upright(ImageReader::new(Cursor::new(bytes)))?;
+    if picture.width().max(picture.height()) <= THUMB_PX {
+        return Ok(None);
+    }
+    let picture = fit(picture, THUMB_PX, FilterType::Triangle);
+    let (bytes, ext) = encode(&picture, 80)?;
+    Ok(Some(Prepared {
+        bytes,
+        name: format!("thumbnail.{ext}"),
+        mime: if ext == "png" { mime_guess::mime::IMAGE_PNG } else { mime_guess::mime::IMAGE_JPEG },
+        width: picture.width(),
+        height: picture.height(),
+    }))
 }
 
 /// A filmstrip thumbnail, and when `large` the picture for the preview: both encoded, from one decode.
@@ -116,6 +141,9 @@ mod tests {
         let large = image::load_from_memory(&large.unwrap()).unwrap();
         assert_eq!((strip.width(), strip.height()), (120, 160));
         assert_eq!(large.height(), PREVIEW_PX);
+        let thumb = thumbnail(&sent.bytes).unwrap().unwrap();
+        assert_eq!((thumb.width, thumb.height), (600, THUMB_PX));
+        assert!(thumbnail(&thumb.bytes).unwrap().is_none());
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -442,6 +442,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Swipe left", "Przesunięcie w lewo"),
     ("Swipe right", "Przesunięcie w prawo"),
     ("Symbols", "Symbole"),
+    ("Sync stopped.", "Synchronizacja została przerwana."),
     ("Syncing chats…", "Synchronizowanie czatów…"),
     ("System", "Systemowy"),
     ("System|emoji", "Systemowe"),
