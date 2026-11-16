@@ -142,7 +142,7 @@ impl BeeperApp {
                 let m = self.msgs.iter().find(|m| m.id == *id && !m.reactions.is_empty())?;
                 let total: usize = m.reactions.iter().map(|r| r.count).sum();
                 let mut tabs = vec![(None, t!("All · {n}", n = total))];
-                tabs.extend(m.reactions.iter().map(|r| (Some(r.key.clone()), format!("{} \u{b7} {}", r.key, r.count))));
+                tabs.extend(m.reactions.iter().map(|r| (Some(r.key.clone()), format!("{} \u{b7} {}", menu::clip_key(&r.key), r.count))));
                 // A tab whose emoji everyone took back shows them all.
                 let key = key.as_ref().filter(|k| m.reactions.iter().any(|r| &r.key == *k));
                 let mut lines = Vec::new();
@@ -150,9 +150,9 @@ impl BeeperApp {
                 for r in m.reactions.iter().filter(|r| key.is_none_or(|k| *k == r.key)) {
                     let mut rows: Vec<Line> = Vec::new();
                     if r.own {
-                        rows.push(Line::Person { user: None, aside: r.key.clone(), emoji: true, remove: Some(r.key.clone()) });
+                        rows.push(Line::Person { user: None, aside: menu::clip_key(&r.key), emoji: true, remove: Some(r.key.clone()) });
                     }
-                    rows.extend(r.by.iter().map(|user| Line::Person { user: Some(user.clone()), aside: r.key.clone(), emoji: true, remove: None }));
+                    rows.extend(r.by.iter().map(|user| Line::Person { user: Some(user.clone()), aside: menu::clip_key(&r.key), emoji: true, remove: None }));
                     hidden += r.count.saturating_sub(rows.len());
                     lines.extend(rows);
                 }

@@ -149,6 +149,8 @@ const MAX_FACES: usize = 64;
 const MAX_ARRIVALS: usize = 3;
 /// Link and quote pictures fading in at once, at most.
 const MAX_THUMB_FADES: usize = 60;
+/// Reaction badges under a message; the rest are behind "+k".
+const MAX_CHIPS: usize = 7;
 /// File sizes learnt by downloading, for the open chat.
 const MAX_SIZES: usize = 256;
 /// Pages of older messages loaded to find a quoted one before giving up.
@@ -2369,8 +2371,12 @@ impl BeeperApp {
                 // Badges pinned over the bubble's lower edge, ringed in the ground's colour: standing
                 // free under it they read as small messages of their own.
                 let reactions = (!m.reactions.is_empty()).then(|| {
+                    // A wall of badges is cut to a row or two; "+k" lists them all, as a tap on one does.
+                    let shown = if m.reactions.len() > MAX_CHIPS + 1 { MAX_CHIPS } else { m.reactions.len() };
+                    let rest = m.reactions.len() - shown;
+                    let all = m.id.clone();
                     // Before the next message of the run, the badges keep a little room under them.
-                    h_flex().flex_wrap().gap(px(2.)).mt(px(-REACTION_LAP)).px(px(8.)).when(!last, |el| el.pb(px(4.))).children(m.reactions.iter().enumerate().map(|(n, reaction)| {
+                    h_flex().flex_wrap().gap(px(2.)).mt(px(-REACTION_LAP)).px(px(8.)).when(!last, |el| el.pb(px(4.))).children(m.reactions.iter().take(shown).enumerate().map(|(n, reaction)| {
                         let (key, count, mine) = (reaction.key.as_str(), reaction.count, reaction.own);
                         let (id, key_owned) = (m.id.clone(), key.to_owned());
                         // The one the user just gave rises into place; others appear as they are.
@@ -2394,9 +2400,29 @@ impl BeeperApp {
                             .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
                                 this.open_people(people::Shown::Reactions(id.clone(), Some(key_owned.clone())), Some(e.position()), cx)
                             }))
-                            .child(crate::emoji::styled(key.to_owned(), Vec::new()))
+                            .child(crate::emoji::styled(menu::clip_key(key), Vec::new()))
                             .when(count > 1, |el| el.child(div().font_features(tabular()).child(count.to_string())))
                     }))
+                    .when(rest > 0, |el| {
+                        el.child(
+                            div()
+                                .id(SharedString::from(format!("{}-reaction-more", m.id)))
+                                .h(px(32.))
+                                .px(px(9.))
+                                .flex()
+                                .items_center()
+                                .rounded_full()
+                                .border_2()
+                                .border_color(p.ground)
+                                .bg(p.lifted)
+                                .text_size(fs(13.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .font_features(tabular())
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| this.open_people(people::Shown::Reactions(all.clone(), None), Some(e.position()), cx)))
+                                .child(format!("+{rest}")),
+                        )
+                    })
                 });
                 // In a group, the sender's picture stands beside the last message of the run.
                 let faces = !dm && !m.own;

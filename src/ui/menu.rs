@@ -209,6 +209,11 @@ fn more_offered(keys: &[String], caps: &Features) -> bool {
     caps.allowed_reactions.as_ref().is_none_or(|list| list.iter().any(|a| !keys.iter().any(|k| same_emoji(k, a))))
 }
 
+/// A reaction key as shown: any emoji whole, someone's long text cut short.
+pub(super) fn clip_key(key: &str) -> String {
+    clip_chars(key, 16)
+}
+
 /// One emoji with or without the emoji presentation selector: clients send "\u{2764}" and
 /// "\u{2764}\u{FE0F}" for the same heart.
 pub(super) fn same_emoji(a: &str, b: &str) -> bool {
@@ -951,7 +956,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, BAR_H, Delivery, Features, Kind, MenuKind, Msg, OVERLAY_GAP, Placement, TAP, acts, bar_keys, ease_out_expo, more_offered, place, same_emoji, slot_at, taken};
+    use super::{Act, BAR_H, Delivery, Features, Kind, MenuKind, Msg, OVERLAY_GAP, Placement, TAP, acts, bar_keys, clip_key, ease_out_expo, more_offered, place, same_emoji, slot_at, taken};
     use gpui_kit::{Bounds, point, size};
 
     #[test]
@@ -1001,6 +1006,15 @@ mod tests {
         let fire = Features { allowed_reactions: Some(vec!["\u{1F525}".to_owned()]), ..Features::ALL };
         assert_eq!(bar_keys(&m, &fire), ["\u{1F525}"]);
         assert!(!more_offered(&bar_keys(&m, &fire), &fire));
+    }
+
+    #[test]
+    fn long_reaction_keys_are_cut_and_emoji_kept_whole() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        assert_eq!(clip_key(family), family);
+        let long = "a".repeat(200);
+        assert_eq!(clip_key(&long).chars().count(), 16);
+        assert!(clip_key(&long).ends_with('\u{2026}'));
     }
 
     #[test]
