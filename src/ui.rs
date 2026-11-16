@@ -2118,7 +2118,7 @@ impl BeeperApp {
                 };
                 let first = prev.is_none_or(|p| !joined(p, m));
                 let last = next.is_none_or(|n| !joined(m, n));
-                let faded = m.deleted || m.body == crate::backend::utd();
+                let faded = m.deleted || crate::backend::undecrypted(&m.body);
                 // Where a run's bubbles meet, their corners on the sender's side are tighter; a picture
                 // keeps its round corners.
                 let joins = !pictured;

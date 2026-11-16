@@ -39,7 +39,7 @@ use matrix_sdk_ui::timeline::{
 use tokio::sync::{broadcast, mpsc};
 
 use super::{
-    AbortOnDrop, act, deleted, utd, Delivery, Ev, Kind, OwnRead, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
+    AbortOnDrop, act, deleted, utd, utd_because, Delivery, Ev, Kind, OwnRead, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
     format, marks, bridge_names, other_person, plain, sticker, disappear, features,
 };
 use crate::i18n::t;
@@ -533,6 +533,7 @@ fn fill(m: &mut Msg, kind: &MsgLikeKind, own: &UserId) {
         MsgLikeKind::Sticker(sent) => m.media = Some(sticker(sent.content())),
         MsgLikeKind::Poll(state) => m.poll = Some(poll(state)),
         MsgLikeKind::Redacted => (m.body, m.deleted) = (deleted().to_owned(), true),
+        MsgLikeKind::UnableToDecrypt(EncryptedMessage::MegolmV1AesSha2 { cause, .. }) => m.body = utd_because(*cause).to_owned(),
         MsgLikeKind::UnableToDecrypt(_) => m.body = utd().to_owned(),
         MsgLikeKind::Other(_) | MsgLikeKind::LiveLocation(_) => m.kind = Kind::Hidden,
     }

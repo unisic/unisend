@@ -134,7 +134,7 @@ impl Forward {
 
 /// A message whose content can be sent again: on the server, readable, and not a poll.
 pub(super) fn forwardable(m: &Msg) -> bool {
-    selectable(m) && !m.deleted && m.poll.is_none() && !m.media.as_ref().is_some_and(|media| media.once) && m.body != crate::backend::utd()
+    selectable(m) && !m.deleted && m.poll.is_none() && !m.media.as_ref().is_some_and(|media| media.once) && !crate::backend::undecrypted(&m.body)
 }
 
 fn selectable(m: &Msg) -> bool {

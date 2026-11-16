@@ -62,6 +62,7 @@ use matrix_sdk::{
     store::RoomLoadSettings,
 };
 use matrix_sdk_crypto::secret_storage::DecodeError;
+use matrix_sdk_crypto::types::events::UtdCause;
 use crate::vault::{self, KeyError, Seal};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -2798,6 +2799,27 @@ pub(crate) fn plain(error: &dyn std::fmt::Display) -> String {
 
 pub(crate) fn utd() -> &'static str {
     t!("Unable to decrypt this message yet")
+}
+
+/// What a message that could not be decrypted says, by what the SDK knows of why: "yet" only
+/// where its keys may still come.
+pub(crate) fn utd_because(cause: UtdCause) -> &'static str {
+    match cause {
+        UtdCause::Unknown => utd(),
+        UtdCause::SentBeforeWeJoined => t!("Sent before you joined this chat"),
+        UtdCause::HistoricalMessageAndBackupIsDisabled => t!("Sent before this device signed in, and the message backup is off"),
+        UtdCause::HistoricalMessageAndDeviceIsUnverified => t!("Verify this device to read this message"),
+        UtdCause::VerificationViolation | UtdCause::UnsignedDevice | UtdCause::UnknownDevice => t!("Sent from a device that is not verified"),
+        UtdCause::WithheldForUnverifiedOrInsecureDevice => t!("The sender does not share messages with unverified devices"),
+        UtdCause::WithheldBySender => t!("The sender's device did not share the key to this message"),
+    }
+}
+
+/// Whether a message's text is that of one that could not be decrypted.
+pub(crate) fn undecrypted(body: &str) -> bool {
+    use UtdCause::*;
+    let causes = [Unknown, SentBeforeWeJoined, HistoricalMessageAndBackupIsDisabled, HistoricalMessageAndDeviceIsUnverified, VerificationViolation, UnsignedDevice, UnknownDevice];
+    causes.into_iter().chain([WithheldForUnverifiedOrInsecureDevice, WithheldBySender]).any(|cause| utd_because(cause) == body)
 }
 pub(crate) fn deleted() -> &'static str {
     t!("Message deleted")

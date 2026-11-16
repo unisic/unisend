@@ -174,7 +174,7 @@ async fn login_sync_decrypt_send_recover() {
         rows.iter().any(|m| m.id == sent.response.event_id.as_str() && m.body == "hello from bob (edited)" && m.edited && !m.own && !m.sender.is_empty())
     })
     .await;
-    assert!(!bodies(&alice_rx.rows).iter().any(|b| b == utd()), "{:?}", bodies(&alice_rx.rows));
+    assert!(!bodies(&alice_rx.rows).iter().any(|b| undecrypted(b)), "{:?}", bodies(&alice_rx.rows));
     assert!(alice_rx.rows.iter().any(|m| m.kind == Kind::Day), "a day row heads the messages");
 
     // Send path: the message shows at once, becomes an event, and Bob receives it decrypted.
@@ -229,7 +229,7 @@ async fn login_sync_decrypt_send_recover() {
 
     // Before recovery the history is locked.
     alice2.handle(Cmd::Open(room_id.clone())).await.unwrap();
-    until(&mut alice2_rx, "locked history", |rows| bodies(rows).iter().any(|b| b == utd())).await;
+    until(&mut alice2_rx, "locked history", |rows| bodies(rows).iter().any(|b| undecrypted(b))).await;
 
     let other = matrix_sdk_crypto::secret_storage::SecretStorageKey::new().to_base58();
     let wrong = alice2.handle(Cmd::Recover(other)).await.unwrap_err().to_string();
@@ -245,7 +245,7 @@ async fn login_sync_decrypt_send_recover() {
     // With the keys' backup unlocked, the open conversation reads itself.
     until(&mut alice2_rx, "history on device 2", |rows| {
         let read = bodies(rows);
-        read.contains(&"hello from bob (edited)".to_owned()) && read.contains(&"hi bob".to_owned()) && !read.iter().any(|b| b == utd())
+        read.contains(&"hello from bob (edited)".to_owned()) && read.contains(&"hi bob".to_owned()) && !read.iter().any(|b| undecrypted(b))
     })
     .await;
 
@@ -434,7 +434,7 @@ async fn login_sync_decrypt_send_recover() {
     alice2.handle(Cmd::Open(room.clone())).await.unwrap();
     until(&mut alice2_rx, "the conversation again", |rows| rows.iter().any(|m| m.id == reply_id)).await;
     assert!(alice2_rx.rows.iter().any(|m| m.id == reply_id && m.deleted));
-    assert!(!bodies(&alice2_rx.rows).iter().any(|b| b == utd()), "{:?}", bodies(&alice2_rx.rows));
+    assert!(!bodies(&alice2_rx.rows).iter().any(|b| undecrypted(b)), "{:?}", bodies(&alice2_rx.rows));
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -833,6 +833,15 @@ fn emotes_name_their_sender_once_in_the_list() {
     m.mentions.push(9..12);
     act(&mut m);
     assert_eq!((preview(&m, false), &m.body[m.mentions[0].clone()]), ("* Ann waves at Bob".to_owned(), "Bob"));
+}
+
+#[test]
+fn locked_messages_tell_why() {
+    use matrix_sdk_crypto::types::events::UtdCause;
+    assert_eq!(utd_because(UtdCause::Unknown), utd());
+    assert_ne!(utd_because(UtdCause::SentBeforeWeJoined), utd());
+    assert!(undecrypted(utd()) && undecrypted(utd_because(UtdCause::WithheldBySender)));
+    assert!(!undecrypted("hello") && !undecrypted(""));
 }
 
 #[test]

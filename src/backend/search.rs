@@ -202,7 +202,7 @@ fn row(room: &RoomId, m: &Msg) -> Option<Change> {
     if m.deleted {
         return Some(Change::Remove(m.id.clone()));
     }
-    if m.body == crate::backend::utd() {
+    if crate::backend::undecrypted(&m.body) {
         return None;
     }
     let file = m.media.as_ref().filter(|media| media.kind == MediaKind::File).map(|media| media.name.as_str());
