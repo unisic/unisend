@@ -43,6 +43,7 @@ mod mentions;
 mod info;
 mod group;
 mod profile;
+mod keys;
 mod menu;
 mod navigate;
 pub(crate) mod motion;
@@ -370,6 +371,7 @@ pub struct BeeperApp {
     /// Attachments waiting for the one uploading now, so a batch keeps its order.
     attach_queue: VecDeque<Cmd>,
     attaching: bool,
+    keys: keys::Keys,
     /// Received contact cards.
     contacts: contacts::State,
     /// The chat whose sheet is still falling after it closed.
@@ -679,6 +681,7 @@ impl BeeperApp {
             voice: voice::Voice::default(),
             attach_queue: VecDeque::new(),
             attaching: false,
+            keys: Default::default(),
             contacts: contacts::State::default(),
             sheet_last: None,
             slide: slide::Slide::default(),
@@ -1214,7 +1217,7 @@ impl BeeperApp {
         } else if self.menu_open() {
             self.close_menu(cx);
         } else if self.close_people(cx) {
-        } else if self.chat_sheet.take().is_some() || std::mem::take(&mut self.gallery.menu) {
+        } else if self.chat_sheet.take().is_some() || std::mem::take(&mut self.gallery.menu) || std::mem::take(&mut self.keys.open) {
             cx.notify();
         } else if self.location.open {
             self.close_location(cx);
@@ -1822,33 +1825,55 @@ impl BeeperApp {
         self.set_view(view, cx);
     }
 
-    /// The keys a desktop chat app answers: Ctrl+K searches, Ctrl+N starts a chat, Alt+Up and
-    /// Alt+Down step through the list, Up in an empty composer edits the last message.
+    /// The keys a desktop chat app answers, as listed in `keys::SHORTCUTS`.
     fn shortcut(&mut self, k: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let m = &k.modifiers;
         let locked = self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked();
         if self.screen != Screen::Main || locked {
             return false;
         }
-        let only_secondary = m.secondary() && !m.alt && !m.shift;
-        let only_alt = m.alt && !m.control && !m.platform && !m.shift;
-        let plain = !(m.control || m.alt || m.platform || m.shift || m.function);
-        match k.key.as_str() {
-            "k" if only_secondary => self.set_searching(true, window, cx),
-            "n" if only_secondary => self.open_new_chat(window, cx),
-            "up" | "down" if only_alt => self.step_chat(k.key == "down", cx),
+        let Some(act) = keys::find(k) else { return false };
+        // The chat the keys act on: the one in view, not one under Settings.
+        let chat = self.open.clone().filter(|_| self.panel.is_none());
+        let room = chat.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id));
+        match act {
+            keys::Act::Search => self.set_searching(true, window, cx),
+            keys::Act::NewChat => self.open_new_chat(window, cx),
+            keys::Act::PrevChat | keys::Act::NextChat => self.step_chat(act == keys::Act::NextChat, false, cx),
+            keys::Act::PrevUnread | keys::Act::NextUnread => self.step_chat(act == keys::Act::NextUnread, true, cx),
+            keys::Act::FindInChat if chat.is_some() => self.open_find(window, cx),
+            keys::Act::Settings => self.set_tab(Tab::Settings, window, cx),
+            keys::Act::Emoji if chat.is_some() && !self.published().is_some_and(|f| !f.post) => {
+                // The picker hangs over the button the pointer pressed; with no pointer it hangs over the composer's middle.
+                let view = window.viewport_size();
+                self.emoji_pick.at = point(view.width * 0.5, view.height - px(40.));
+                self.toggle_emoji_panel(window, cx);
+            }
+            keys::Act::Archive | keys::Act::MarkUnread => {
+                let Some((id, room)) = chat.zip(room) else { return false };
+                let [unread, _, _, archive, _] = chat_actions(room);
+                let action = if act == keys::Act::Archive { archive.2 } else { unread.2 };
+                self.chat_action(id, action, true, cx);
+            }
+            keys::Act::Shortcuts => {
+                self.toggle_keys(cx);
+                return true;
+            }
             // In the composer, or with no text field focused at all (after a click into the chat).
-            "v" if only_secondary
-                && self.open.is_some()
-                && (self.composer.read(cx).focus_handle(cx).is_focused(window) || !window.context_stack().iter().any(|c| c.contains("Input"))) =>
+            keys::Act::Paste
+                if self.open.is_some()
+                    && (self.composer.read(cx).focus_handle(cx).is_focused(window) || !window.context_stack().iter().any(|c| c.contains("Input"))) =>
             {
                 return self.paste_files(cx);
             }
-            "up" if plain && self.composer_idle(window, cx) => match self.last_editable() {
+            keys::Act::EditLast if self.composer_idle(window, cx) => match self.last_editable() {
                 Some(id) => self.start_compose(Compose::Edit(id), window, cx),
                 None => return false,
             },
             _ => return false,
+        }
+        // Whatever the key did, the sheet that lists the keys is done.
+        if std::mem::take(&mut self.keys.open) {
+            cx.notify();
         }
         true
     }
@@ -1859,15 +1884,17 @@ impl BeeperApp {
         self.open.is_some() && matches!(self.compose, Compose::New) && composer.value().is_empty() && composer.focus_handle(cx).is_focused(window)
     }
 
-    /// Opens the chat under (`down`) or above the open one in the list, or the first when none is open.
-    fn step_chat(&mut self, down: bool, cx: &mut Context<Self>) {
+    /// Opens the chat under (`down`) or above the open one in the list, or the first when none is
+    /// open; with `unread`, the nearest one that has unread messages.
+    fn step_chat(&mut self, down: bool, unread: bool, cx: &mut Context<Self>) {
         let at = self.open.as_ref().and_then(|open| self.shown.iter().position(|&ix| &self.rooms[ix].id == open));
-        let next = match at {
-            Some(ix) if down => ix + 1,
-            Some(ix) => ix.wrapping_sub(1),
-            None => 0,
+        let n = self.shown.len();
+        let order: Vec<usize> = match at {
+            Some(ix) if down => (ix + 1..n).collect(),
+            Some(ix) => (0..ix).rev().collect(),
+            None => (0..n).collect(),
         };
-        if let Some(&ix) = self.shown.get(next) {
+        if let Some(ix) = order.into_iter().map(|pos| self.shown[pos]).find(|&ix| !unread || self.rooms[ix].is_unread()) {
             self.open_room(self.rooms[ix].id.clone(), cx);
         }
     }
@@ -2989,6 +3016,7 @@ impl BeeperApp {
         let close = |this: &mut Self, cx: &mut Context<Self>| {
             this.chat_sheet = None;
             this.gallery.menu = false;
+            this.keys.open = false;
             cx.notify();
         };
         if let Some(at) = self.sheet_at.filter(|_| !gpui_kit::is_mobile()) {
@@ -4687,7 +4715,8 @@ impl BeeperApp {
                 // Sampled every frame, so a falling sheet finishes even when a message menu opens.
                 let chat_sheet = self.render_chat_sheet(window, cx);
                 let attach_menu = self.render_attach_menu(window, cx);
-                let sheet = self.render_message_menu(window, cx).or(chat_sheet).or(attach_menu);
+                let keys_sheet = self.render_keys_sheet(window, cx);
+                let sheet = self.render_message_menu(window, cx).or(chat_sheet).or(attach_menu).or(keys_sheet);
                 // Its own layer over the menu's, so it can rise while the menu fades.
                 let emoji_sheet = self.render_emoji_sheet(window, cx);
                 let gallery = self.render_gallery(window, cx);
