@@ -16,7 +16,7 @@ use std::ops::Range;
 
 use gpui_kit::component::RopeExt as _;
 use gpui_kit::component::input::InputState;
-use gpui_kit::{App, ContentMask, Entity, Focusable as _, Hsla, IntoElement, Pixels, Styled as _, Window, canvas, fill, point, px, size};
+use gpui_kit::{App, ContentMask, Entity, Focusable as _, Hsla, IntoElement, MouseDownEvent, Pixels, Styled as _, Window, canvas, fill, point, px, size};
 
 use crate::Palette;
 
@@ -124,6 +124,30 @@ pub(crate) fn marks(input: &Entity<InputState>) -> impl IntoElement + use<> {
     canvas(|_, _, _| (), move |_, _, window, cx| paint_marks(&input, window, cx)).absolute().inset_0()
 }
 
+/// Brings back the Android keyboard the user hid (Back, swipe down) when a press leaves the focused
+/// input focused, as a tap on that input does. Place it once in the window's root; it takes no space.
+/// shortcut: any press that moves no focus counts, also one on a disabled button (it stops the root
+/// from taking focus); check the press hit the input once gpui-kit reports taps on a focused input.
+pub(crate) fn taps() -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        |_, _, window, _| {
+            window.on_mouse_event(|_: &MouseDownEvent, phase, window, cx| {
+                let Some(before) = window.focused(cx).filter(|_| phase.capture()) else {
+                    return;
+                };
+                // The press moves focus in its bubble phase, so the check runs after it.
+                window.defer(cx, move |window, cx| {
+                    if window.focused(cx).as_ref() == Some(&before) {
+                        tapped();
+                    }
+                });
+            });
+        },
+    )
+    .absolute()
+}
+
 fn paint_marks(input: &Entity<InputState>, window: &mut Window, cx: &mut App) {
     let field = input.entity_id().as_u64();
     let (comp, spell) = MARKS.with_borrow(|m| if m.field == field { (m.comp.clone(), m.spell.clone()) } else { (None, Vec::new()) });
@@ -183,7 +207,7 @@ fn dots(x0: Pixels, x1: Pixels, y: Pixels, colour: Hsla) -> impl Iterator<Item =
 }
 
 #[cfg(target_os = "android")]
-pub(crate) use android::{follow, on_picture, set_incognito};
+pub(crate) use android::{follow, on_picture, set_incognito, tapped};
 
 #[cfg(not(target_os = "android"))]
 pub(crate) fn follow<T: 'static>(_: &gpui_kit::Entity<gpui_kit::component::input::InputState>, _: &mut gpui_kit::Window, _: &mut gpui_kit::Context<T>) {}
@@ -191,6 +215,10 @@ pub(crate) fn follow<T: 'static>(_: &gpui_kit::Entity<gpui_kit::component::input
 /// Settings > Privacy > Incognito keyboard; only the Android keyboard has the flag.
 #[cfg(not(target_os = "android"))]
 pub(crate) fn set_incognito(_: bool) {}
+
+/// A press that left the focused input focused; only the Android keyboard can have been hidden by the user.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn tapped() {}
 
 /// Where a picture the Android keyboard inserts goes (its clipboard, stickers); desktop pastes on its own.
 #[cfg(not(target_os = "android"))]
@@ -541,6 +569,19 @@ mod android {
         });
         if let Err(e) = sent {
             log::warn!("ime incognito: {e}");
+        }
+    }
+
+    /// A press that left the focused input focused: brings back a keyboard the user hid (Back, swipe down).
+    pub(crate) fn tapped() {
+        let sent = with_env(|env| {
+            let activity = activity(env)?;
+            let result = env.call_method(&activity, jni::jni_str!("gpuiTapField"), jni::jni_sig!("()V"), &[]);
+            env.exception_clear();
+            result.map(|_| ()).map_err(|e| e.to_string())
+        });
+        if let Err(e) = sent {
+            log::warn!("ime tap: {e}");
         }
     }
 }
