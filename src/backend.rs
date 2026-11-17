@@ -244,6 +244,9 @@ pub enum Cmd {
     /// Android did not install the update, for this reason.
     #[cfg(target_os = "android")]
     UpdateFailed(String),
+    /// Downloads emoji font `emoji::SETS[set]` to `to`, checked against its SHA-256; answered by
+    /// `Ev::EmojiSet`.
+    EmojiSet { set: usize, to: PathBuf },
 }
 
 pub enum Ev {
@@ -339,6 +342,7 @@ pub enum Ev {
     Profile(group::Profile),
     /// What checking for or installing an update did.
     Update(update::Step),
+    EmojiSet(crate::emoji::Fetch),
     /// The people this account ignores: when signed in, and whenever the list changes anywhere.
     Blocked(Vec<block::Blocked>),
     /// The other person of an opened one-to-one chat.
@@ -1899,6 +1903,21 @@ impl State {
             }
             #[cfg(target_os = "android")]
             Cmd::UpdateFailed(why) => self.emit(Ev::Update(update::Step::Failed(why))).await,
+            Cmd::EmojiSet { set, to } => {
+                let Some(set) = crate::emoji::SETS.get(set) else { return Ok(()) };
+                let (http, ev) = (self.http.clone(), self.ev.clone());
+                // One at a time: the settings offer no other while one runs.
+                tokio::spawn(async move {
+                    let progress = |p| {
+                        let _ = ev.try_send(Ev::EmojiSet(crate::emoji::Fetch::Progress(p)));
+                    };
+                    let done = match update::file(&http, set.url, set.sha256, set.size, &to, progress).await {
+                        Ok(()) => crate::emoji::Fetch::Done,
+                        Err(e) => crate::emoji::Fetch::Failed(format!("{e:#}")),
+                    };
+                    let _ = ev.send(Ev::EmojiSet(done)).await;
+                });
+            }
             Cmd::SendGif { room, gif, query, reply_to } => {
                 let network = self.rooms.lock().unwrap().get(&room).and_then(|r| r.network.clone());
                 let room = self.room(&room);

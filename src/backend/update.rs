@@ -2,7 +2,8 @@
 //! (`UNISEND_UPDATE_URL`, https only) names the newest release; without one nothing here runs and
 //! Settings shows no updates. Every request is a plain GET without cookies, identifiers or a user
 //! agent. The APK is streamed to the app's files, checked against the manifest's SHA-256, then
-//! handed to Android's PackageInstaller, which also refuses one signed with another key.
+//! handed to Android's PackageInstaller, which also refuses one signed with another key. The same
+//! checked download fetches the emoji fonts Settings offers (`emoji::SETS`).
 //!
 //! The manifest, e.g. a release asset at
 //! `https://github.com/<owner>/<repo>/releases/latest/download/update.json`, or on any static host:
@@ -148,7 +149,7 @@ fn without_url(e: reqwest::Error) -> reqwest::Error {
 async fn get(http: &reqwest::Client, url: &str) -> Result<reqwest::Response> {
     let response = http.get(url).send().await.map_err(without_url)?.error_for_status().map_err(without_url)?;
     let end = response.url();
-    ensure!(end.scheme() == "https" || end.host_str().is_some_and(super::is_local), "the update was redirected off https");
+    ensure!(end.scheme() == "https" || end.host_str().is_some_and(super::is_local), "the download was redirected off https");
     Ok(response)
 }
 
@@ -166,18 +167,24 @@ pub(super) async fn check(http: &reqwest::Client, url: &str, installed: u64) -> 
 
 /// Streams the APK to `to` and checks its SHA-256; `to` is removed when anything fails.
 pub(super) async fn download(http: &reqwest::Client, release: &Release, to: &Path, progress: impl FnMut(u8)) -> Result<()> {
-    let done = fetch(http, release, to, progress).await;
+    file(http, &release.url, &release.sha256, MAX_APK, to, progress).await
+}
+
+/// Streams `url`, at most `max` bytes, to `to` and checks it against `sha256` (lowercase hex);
+/// `to` is removed when anything fails.
+pub(super) async fn file(http: &reqwest::Client, url: &str, sha256: &str, max: u64, to: &Path, progress: impl FnMut(u8)) -> Result<()> {
+    let done = fetch(http, url, sha256, max, to, progress).await;
     if done.is_err() {
         let _ = std::fs::remove_file(to);
     }
     done
 }
 
-async fn fetch(http: &reqwest::Client, release: &Release, to: &Path, mut progress: impl FnMut(u8)) -> Result<()> {
-    let mut response = tokio::time::timeout(STALL, get(http, &release.url)).await??;
+async fn fetch(http: &reqwest::Client, url: &str, sha256: &str, max: u64, to: &Path, mut progress: impl FnMut(u8)) -> Result<()> {
+    let mut response = tokio::time::timeout(STALL, get(http, url)).await??;
     let total = response.content_length();
-    if total.is_some_and(|n| n > MAX_APK) {
-        bail!("the update is too large");
+    if total.is_some_and(|n| n > max) {
+        bail!("the file is too large");
     }
     // Small blocking writes on the runtime: each is one network chunk into the page cache.
     let mut file = std::fs::File::create(to)?;
@@ -185,7 +192,7 @@ async fn fetch(http: &reqwest::Client, release: &Release, to: &Path, mut progres
     let (mut got, mut shown) = (0u64, None);
     while let Some(chunk) = tokio::time::timeout(STALL, response.chunk()).await?.map_err(without_url)? {
         got += chunk.len() as u64;
-        ensure!(got <= MAX_APK, "the update is too large");
+        ensure!(got <= max, "the file is too large");
         hash.update(&chunk);
         file.write_all(&chunk)?;
         if let Some(total) = total.filter(|&n| n > 0) {
@@ -198,7 +205,7 @@ async fn fetch(http: &reqwest::Client, release: &Release, to: &Path, mut progres
     }
     file.sync_all()?;
     let sum: String = hash.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect();
-    ensure!(sum == release.sha256, "the download does not match its SHA-256");
+    ensure!(sum == sha256, "the download does not match its SHA-256");
     Ok(())
 }
 

@@ -1476,13 +1476,23 @@ fn qr_image(data: &str) -> Option<Arc<Image>> {
     Some(Arc::new(Image::from_bytes(ImageFormat::Png, png.into_inner())))
 }
 
-/// The Emoji setting: a colour emoji font of the user's own, or the system's.
+/// The Emoji setting: a colour emoji font of the user's own (a file, or one of `emoji::SETS`
+/// downloaded), or the system's.
 #[derive(Default)]
 pub(super) struct EmojiChoice {
     /// A font was chosen or dropped since start: fonts cannot be swapped live.
     pending: bool,
     copying: bool,
+    /// The set being downloaded, and how far, in percent.
+    downloading: Option<(usize, u8)>,
     error: Option<String>,
+}
+
+impl EmojiChoice {
+    /// One font at a time: the import and the downloads share the file being written.
+    fn busy(&self) -> bool {
+        self.copying || self.downloading.is_some()
+    }
 }
 
 impl BeeperApp {
@@ -1490,6 +1500,7 @@ impl BeeperApp {
     fn emoji_value(&self) -> String {
         let name = self.settings.emoji_font.as_deref().unwrap_or(t!("System|emoji"));
         match () {
+            _ if let Some((_, percent)) = self.emoji.downloading => t!("Downloading… {percent}%", percent = percent),
             _ if self.emoji.copying => t!("Copying the font…").to_owned(),
             _ if self.emoji.pending => t!("{name}. Applies after restart.", name = name),
             _ => name.to_owned(),
@@ -1499,7 +1510,7 @@ impl BeeperApp {
     fn render_emoji(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         let chosen = self.settings.emoji_font.clone();
-        let free = !self.emoji.copying;
+        let free = !self.emoji.busy();
         let options = card(cx)
             .child(
                 option("emoji-system", t!("System|emoji"), "", chosen.is_none(), cx)
@@ -1513,7 +1524,7 @@ impl BeeperApp {
                     .gap(px(8.))
                     .child(options)
                     .when_some(self.emoji.error.clone(), |el, error| el.child(div().px(px(GAP)).text_size(fs(13.)).text_color(p.negative).child(error)))
-                    .when(self.emoji.copying || self.emoji.pending, |el| el.child(footnote(&self.emoji_value(), cx))),
+                    .when(self.emoji.busy() || self.emoji.pending, |el| el.child(footnote(&self.emoji_value(), cx))),
             )
             .child(
                 card(cx).child(
@@ -1522,7 +1533,70 @@ impl BeeperApp {
                         .when(free, |el| el.on_click(cx.listener(|this, _, _, cx| this.choose_emoji_font(cx)))),
                 ),
             )
+            .child(
+                v_flex()
+                    .gap(px(8.))
+                    .child(card(cx).children(crate::emoji::SETS.iter().enumerate().map(|(n, set)| {
+                        let detail = match self.emoji.downloading {
+                            Some((at, percent)) if at == n => t!("Downloading… {percent}%", percent = percent),
+                            _ => format!("{}, {}", file_size(set.size), set.credit),
+                        };
+                        link(("emoji-set", n), set.name, detail.into(), Some(IconName::Download), None, cx)
+                            .when(!free, |el| el.text_color(p.faint))
+                            .when(free, |el| el.on_click(cx.listener(move |this, _, _, cx| this.download_emoji_set(n, cx))))
+                    })))
+                    .child(footnote(t!("A font is downloaded from GitHub only when tapped: GitHub sees the device's IP address and which font."), cx)),
+            )
             .into_any_element()
+    }
+
+    fn download_emoji_set(&mut self, set: usize, cx: &mut Context<Self>) {
+        if self.emoji.busy() {
+            return;
+        }
+        self.emoji.error = None;
+        let to = crate::emoji::part(&self.dir);
+        if self.send(Cmd::EmojiSet { set, to }, cx) {
+            self.emoji.downloading = Some((set, 0));
+        }
+    }
+
+    /// How the download of an emoji font goes; once it is in, it is taken as a chosen file is.
+    pub(super) fn emoji_fetched(&mut self, step: crate::emoji::Fetch, cx: &mut Context<Self>) {
+        let Some((set, _)) = self.emoji.downloading else { return };
+        match step {
+            crate::emoji::Fetch::Progress(percent) => self.emoji.downloading = Some((set, percent)),
+            crate::emoji::Fetch::Failed(e) => {
+                log::warn!("emoji font download: {e}");
+                self.emoji.downloading = None;
+                self.emoji.error = Some(t!("The font could not be downloaded. Check the connection and try again.").into());
+            }
+            crate::emoji::Fetch::Done => {
+                self.emoji.downloading = None;
+                self.emoji.copying = true;
+                let dir = self.dir.clone();
+                cx.spawn(async move |this, cx| {
+                    let done = cx.background_spawn(async move { crate::emoji::finish(&dir) }).await;
+                    let _ = this.update(cx, |this, cx| this.emoji_taken(done, cx));
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
+    fn emoji_taken(&mut self, done: Result<String, String>, cx: &mut Context<Self>) {
+        self.emoji.copying = false;
+        match done {
+            Ok(family) => {
+                self.settings.emoji_font = Some(family);
+                self.settings.save(&self.dir);
+                self.emoji.pending = true;
+                self.emoji.error = None;
+            }
+            Err(e) => self.emoji.error = Some(e),
+        }
+        cx.notify();
     }
 
     fn choose_emoji_font(&mut self, cx: &mut Context<Self>) {
@@ -1532,7 +1606,7 @@ impl BeeperApp {
             let Some(path) = picked.await else { return };
             // One import at a time: they share the file being written.
             let started = this.update(cx, |this, cx| {
-                let free = !std::mem::replace(&mut this.emoji.copying, true);
+                let free = this.emoji.downloading.is_none() && !std::mem::replace(&mut this.emoji.copying, true);
                 cx.notify();
                 free
             });
@@ -1540,19 +1614,7 @@ impl BeeperApp {
                 return;
             }
             let done = cx.background_spawn(async move { crate::emoji::import(&path, &dir) }).await;
-            let _ = this.update(cx, |this, cx| {
-                this.emoji.copying = false;
-                match done {
-                    Ok(family) => {
-                        this.settings.emoji_font = Some(family);
-                        this.settings.save(&this.dir);
-                        this.emoji.pending = true;
-                        this.emoji.error = None;
-                    }
-                    Err(e) => this.emoji.error = Some(e),
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.emoji_taken(done, cx));
         })
         .detach();
     }

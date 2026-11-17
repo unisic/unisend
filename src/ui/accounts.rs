@@ -189,6 +189,11 @@ impl BeeperApp {
             Ev::Ready { user, .. } => self.accounts.get(slot).is_some_and(|a| a.adding) && self.accounts.others(slot).any(|a| a.user.as_ref() == Some(user)),
             _ => false,
         };
+        // The emoji font is the app's: its download goes on after the window turns to another account.
+        if !shown && let Ev::EmojiSet(step) = ev {
+            self.emoji_fetched(step, cx);
+            return;
+        }
         let Some(a) = self.accounts.get_mut(slot) else { return };
         let mut changed = false;
         match &ev {

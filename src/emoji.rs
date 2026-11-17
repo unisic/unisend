@@ -32,6 +32,62 @@ const NOTO_FAMILY: &str = "Noto Color Emoji Fallback";
 const SYSTEM_NOTO: &str = "/system/fonts/NotoColorEmoji.ttf";
 static BUNDLED: &[u8] = include_bytes!("../assets/fonts/NotoColorEmoji.ttf");
 
+/// An emoji font Settings offers to download: a release pinned by its SHA-256 and size, in a
+/// format GPUI draws (CBDT or COLRv0) with a full-Unicode `cmap`.
+pub(crate) struct Set {
+    pub name: &'static str,
+    /// Who made it and under what licence.
+    pub credit: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+    pub size: u64,
+}
+
+/// Apple's is an unofficial CBDT build: Apple licenses its emoji for no other system.
+pub(crate) const SETS: [Set; 4] = [
+    Set {
+        name: "Apple",
+        credit: "© Apple Inc.",
+        url: "https://github.com/samuelngs/apple-emoji-ttf/releases/download/macos-26-20260722-484daf4e/AppleColorEmoji-Linux.ttf",
+        sha256: "e37c7af6265ac4a0af6d57bc65e86109a776d9966e8343334557f63da482516f",
+        size: 115_969_256,
+    },
+    Set {
+        name: "Twemoji",
+        credit: "Twitter, CC BY 4.0",
+        url: "https://github.com/mozilla/twemoji-colr/releases/download/v0.7.0/Twemoji.Mozilla.ttf",
+        sha256: "6d90152ee0d29e82fe2a87793af5aa4b7ad13e6538360889e141e81ed299ee8e",
+        size: 1_474_284,
+    },
+    Set {
+        name: "OpenMoji",
+        credit: "OpenMoji, CC BY-SA 4.0",
+        url: "https://raw.githubusercontent.com/hfg-gmuend/openmoji/17.0.0/font/OpenMoji-color-cbdt/OpenMoji-color-cbdt.ttf",
+        sha256: "a541ac344a05bf1aa12585790c86bb2a40649940866d317d492f944bbf139795",
+        size: 6_696_312,
+    },
+    Set {
+        name: "Blobmoji",
+        credit: "Google, Apache 2.0",
+        url: "https://github.com/C1710/blobmoji/releases/download/v15.0/Blobmoji.ttf",
+        sha256: "dcc3d6675036ba9b35ef574d2221532770b5bd9886cba23c645ef46947eb78f9",
+        size: 12_877_044,
+    },
+];
+
+/// How the download of a `Set` goes.
+pub(crate) enum Fetch {
+    Progress(u8),
+    /// It is at `part`, for `finish`.
+    Done,
+    Failed(String),
+}
+
+/// Where a downloaded font is written before `finish` takes it.
+pub(crate) fn part(dir: &Path) -> PathBuf {
+    dir.join(PART)
+}
+
 fn path(dir: &Path) -> PathBuf {
     dir.join(FILE)
 }
@@ -386,7 +442,17 @@ pub(crate) fn import(src: &Path, dir: &Path) -> Result<String, String> {
         return Err(t!("The file is larger than 300 MB.").into());
     }
     let part = dir.join(PART);
-    let made = place(src, &part).and_then(|()| prepare(&part, FAMILY));
+    if let Err(e) = place(src, &part) {
+        let _ = fs::remove_file(&part);
+        return Err(e);
+    }
+    finish(dir)
+}
+
+/// Makes the font at `part(dir)` the chosen one, as `import` does with a file of the user's.
+pub(crate) fn finish(dir: &Path) -> Result<String, String> {
+    let part = dir.join(PART);
+    let made = prepare(&part, FAMILY);
     let kept = made.and_then(|family| fs::rename(&part, path(dir)).map(|()| family).map_err(|_| t!("The font cannot be saved.").to_owned()));
     if kept.is_err() {
         let _ = fs::remove_file(&part);
@@ -801,6 +867,23 @@ mod tests {
         assert_eq!(stamped(&data).len(), 1);
         fs::remove_dir_all(fonts).unwrap();
         fs::remove_dir_all(data).unwrap();
+    }
+
+    /// Each set offered for download, when a copy fetched by hand is in /tmp/emoji-sets.
+    #[test]
+    fn the_downloadable_sets_are_taken_when_present() {
+        for set in &SETS {
+            let src = Path::new("/tmp/emoji-sets").join(set.url.rsplit('/').next().unwrap());
+            let Ok(bytes) = fs::read(&src) else { continue };
+            let sum: String = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!((bytes.len() as u64, sum.as_str()), (set.size, set.sha256), "{}", set.name);
+            let data = dir(&format!("set-{}", set.name));
+            fs::write(part(&data), &bytes).unwrap();
+            let family = finish(&data).unwrap_or_else(|e| panic!("{}: {e}", set.name));
+            eprintln!("{}: {family}", set.name);
+            assert!(load(&data).is_some() && !part(&data).exists());
+            fs::remove_dir_all(data).unwrap();
+        }
     }
 
     #[test]

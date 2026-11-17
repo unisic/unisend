@@ -1102,6 +1102,7 @@ impl BeeperApp {
             Ev::MemberIds(user, ids) => self.member_ids(user, ids, cx),
             Ev::Profile(profile) => self.profile_arrived(profile, cx),
             Ev::Update(step) => self.on_update(step),
+            Ev::EmojiSet(step) => self.emoji_fetched(step, cx),
             Ev::Blocked(list) => self.blocked_arrived(list, cx),
             Ev::Peer(room, user) => self.peer_arrived(room, user, cx),
             Ev::PeerIds(room, ids) => {
