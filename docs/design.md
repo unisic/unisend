@@ -123,6 +123,8 @@ The common acts take one gesture, and each also has a slower way that can be fou
   (who reacted, when it has any), Info, each where it applies, and one Delete that asks whether for you or for everyone. The right mouse button, or the dots beside a message
   on a wide window, opens the same acts at the pointer; the heart and arrow there react and
   reply. A tap anywhere else closes it.
+- The + after the reactions opens every emoji (search, categories): a sheet rising from the
+  bottom on a phone, a card over the + on desktop, as the composer's emoji button opens it there.
 - A double tap likes the message (the heart), and a second double tap takes it back.
 - A sideways swipe on a message replies to it.
 - A long press or the right mouse button on a chat in the list, or the dots in a chat's header,

@@ -871,10 +871,12 @@ impl BeeperApp {
             let shown = if still { 1. } else { ease_out_expo(phase(t, 10. * n as f32, 400.)) };
             let grow = (!still && hover == Some(n)) as u8 as f32;
             let grow = transition((("pick", n), "grow"), grow, Transition::new(Duration::from_millis(120)).easing(motion::EASE_OUT), window, cx);
+            // The cell, its ring and its hover stay in the bar; only the emoji rises and grows, so the
+            // ring never leaves the pill and the pointer never loses the cell it lifted.
             div()
                 .id(("picker-reaction", n))
                 .relative()
-                .top(px(24. * (1. - shown) - PICK_RISE * grow))
+                .top(px(24. * (1. - shown)))
                 .opacity(shown)
                 .size(px(PICK))
                 .flex()
@@ -883,8 +885,6 @@ impl BeeperApp {
                 .rounded_full()
                 .cursor_pointer()
                 .when(mine, |el| el.border_2().border_color(p.text))
-                .text_size(px(PICK_EMOJI + (PICK_GROWN - PICK_EMOJI) * grow))
-                .line_height(px(PICK_GROWN))
                 .on_hover(cx.listener(move |this, over: &bool, _, cx| {
                     let next = if *over { Some(n) } else { this.picker_hover.filter(|&h| h != n) };
                     if next != this.picker_hover {
@@ -893,7 +893,14 @@ impl BeeperApp {
                     }
                 }))
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, &key, cx)))
-                .child(label)
+                .child(
+                    div()
+                        .relative()
+                        .top(px(-PICK_RISE * grow))
+                        .text_size(px(PICK_EMOJI + (PICK_GROWN - PICK_EMOJI) * grow))
+                        .line_height(px(PICK_GROWN))
+                        .child(label),
+                )
         }).collect();
         let picker = div().absolute().left(px(x)).top(px(y)).child(
             h_flex()
@@ -958,7 +965,8 @@ impl BeeperApp {
             .cursor_pointer()
             .text_color(p.muted)
             .active(|el| el.bg(p.raised))
-            .on_click(cx.listener(move |this, _, window, cx| {
+            .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                this.emoji_pick.at = e.position();
                 this.close_menu(cx);
                 this.open_emoji(super::emojipick::Target::React(id.clone()), window, cx);
             }))

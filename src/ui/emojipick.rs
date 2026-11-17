@@ -1,6 +1,6 @@
-//! The emoji picker: a panel that stands in for the keyboard under the composer, and a sheet
-//! opened by the + of the reaction bar. Data is the `emojis` crate (Unicode CLDR names and
-//! GitHub shortcodes), drawn in the app's emoji font. The grid is a `uniform_list` of rows, so
+//! The emoji picker: on a phone a panel that stands in for the keyboard under the composer, and a
+//! sheet opened by the + of the reaction bar; on a desktop a card over the button pressed, for
+//! both. Data is the `emojis` crate (Unicode CLDR names and GitHub shortcodes), drawn in the app's emoji font. The grid is a `uniform_list` of rows, so
 //! only the rows on screen are built, whatever the 1900 emoji.
 
 use std::path::Path;
@@ -324,10 +324,12 @@ impl BeeperApp {
         Some(div().id("emoji-panel").relative().w_full().h(px(height)).flex_none().child(probe).child(self.emoji_body(width, false, window, cx)).into_any_element())
     }
 
-    /// The composer's picker on a desktop: a card above the button the pointer pressed, which the
-    /// composer keeps typing beside. A click anywhere else closes it; nothing is dimmed.
+    /// The picker on a desktop, for the composer and for a reaction: a card above the button the
+    /// pointer pressed (under it when there is no room above), which the composer keeps typing
+    /// beside. A click anywhere else closes it; nothing is dimmed.
     pub(super) fn render_emoji_popover(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.emoji_open != Some(Target::Composer) || gpui_kit::is_mobile() {
+        let react = matches!(self.emoji_open.as_ref()?, Target::React(_));
+        if gpui_kit::is_mobile() {
             return None;
         }
         let p = Palette::of(cx);
@@ -339,7 +341,8 @@ impl BeeperApp {
         let at = frame::local(window, self.emoji_pick.at);
         // Its corner over the button, its body rising above the composer.
         let x = (f32::from(at.x) - CELL / 2.).clamp(PAD, (vw - w - PAD).max(PAD));
-        let y = (f32::from(at.y) - CELL / 2. - PAD - h).clamp(top + PAD, (vh - bottom - h - PAD).max(top + PAD));
+        let above = f32::from(at.y) - CELL / 2. - PAD - h;
+        let y = if above >= top + PAD { above } else { (f32::from(at.y) + CELL / 2. + PAD).min((vh - bottom - h - PAD).max(top + PAD)) };
         let card = v_flex()
             .id("emoji-popover")
             .absolute()
@@ -353,7 +356,7 @@ impl BeeperApp {
             .border_1()
             .border_color(p.rule)
             .occlude()
-            .child(self.emoji_body(w, false, window, cx))
+            .child(self.emoji_body(w, react, window, cx))
             .with_animation("emoji-popover-in", Animation::new(motion::ENTER).with_easing(motion::ease_out), move |el, t| el.top(px(y + 4. * (1. - t))).opacity(t));
         Some(
             div()
@@ -368,11 +371,11 @@ impl BeeperApp {
         )
     }
 
-    /// The sheet for a reaction: rises from the bottom over a dimmed screen, falls when an emoji is
+    /// The sheet for a reaction on a phone: rises from the bottom over a dimmed screen, falls when an emoji is
     /// picked. Opened from the long-press menu it rises over the menu's fading dim, its own scrim
     /// already full, so the screen never brightens between the two.
     pub(super) fn render_emoji_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = matches!(self.emoji_open, Some(Target::React(_)));
+        let live = gpui_kit::is_mobile() && matches!(self.emoji_open, Some(Target::React(_)));
         if live && !self.emoji_pick.sheet.is_live() {
             self.emoji_pick.sheet.handoff = self.menu.is_some();
         }
