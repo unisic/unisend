@@ -272,7 +272,7 @@ pub(super) fn stop() {
     TASKS.lock().unwrap_or_else(|e| e.into_inner()).drain(..).for_each(|t| t.abort());
 }
 
-async fn upload(client: &Client, encrypted: bool, mime: &mime_guess::Mime, data: Vec<u8>) -> Result<MediaSource> {
+pub(super) async fn upload(client: &Client, encrypted: bool, mime: &mime_guess::Mime, data: Vec<u8>) -> Result<MediaSource> {
     Ok(if encrypted {
         MediaSource::Encrypted(Box::new(client.upload_encrypted_file(&mut Cursor::new(data)).await?))
     } else {

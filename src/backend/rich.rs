@@ -178,7 +178,7 @@ fn push(out: String, st: &Style, cur: &mut Vec<Run>, b: &mut Builder) {
     }
 }
 
-fn attr(node: &NodeRef, name: &str) -> Option<String> {
+pub(super) fn attr(node: &NodeRef, name: &str) -> Option<String> {
     let el = node.as_element()?;
     let attrs = el.attrs.borrow();
     attrs.iter().find(|a| &*a.name.local == name).map(|a| a.value.to_string())

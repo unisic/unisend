@@ -86,6 +86,8 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         browser: None,
         replaceable: false,
         update: None,
+        link_task: None,
+        link_made: Arc::default(),
     };
     (st, Seat { rx, rows: Vec::new() })
 }
@@ -235,7 +237,7 @@ async fn login_sync_decrypt_send_recover() {
     assert!(alice_rx.rows.iter().any(|m| m.kind == Kind::Day), "a day row heads the messages");
 
     // Send path: the message shows at once, becomes an event, and Bob receives it decrypted.
-    alice.handle(Cmd::Send { room: room_id.clone(), body: "hi bob".into(), reply_to: None, edit: None, mentions: Vec::new() }).await.unwrap();
+    alice.handle(Cmd::Send { room: room_id.clone(), body: "hi bob".into(), reply_to: None, edit: None, mentions: Vec::new(), preview: None }).await.unwrap();
     until(&mut alice_rx, "the sent message as an event", |rows| {
         rows.iter().any(|m| m.body == "hi bob" && m.own && m.id.starts_with('$') && m.delivery == Delivery::Sent)
     })
@@ -366,11 +368,11 @@ async fn login_sync_decrypt_send_recover() {
     until(&mut alice2_rx, "the new message", |rows| rows.iter().any(|m| m.id == ping.as_str())).await;
     alice2.handle(Cmd::React { room: room.clone(), target: ping.to_string(), key: "👍".into() }).await.unwrap();
     until(&mut alice2_rx, "the reaction", reacted).await;
-    alice2.handle(Cmd::Send { room: room.clone(), body: "yes".into(), reply_to: Some(ping.to_string()), edit: None, mentions: Vec::new() }).await.unwrap();
+    alice2.handle(Cmd::Send { room: room.clone(), body: "yes".into(), reply_to: Some(ping.to_string()), edit: None, mentions: Vec::new(), preview: None }).await.unwrap();
     let replied = |m: &&Msg| m.body == "yes" && m.own && m.id.starts_with('$') && m.reply.as_ref().is_some_and(|q| q.id == ping.as_str() && q.text == "are you there?");
     until(&mut alice2_rx, "the reply with its quote", |rows| rows.iter().any(|m| replied(&m))).await;
     let reply_id = alice2_rx.rows.iter().find(replied).unwrap().id.clone();
-    alice2.handle(Cmd::Send { room: room.clone(), body: "yes!".into(), reply_to: None, edit: Some(reply_id.clone()), mentions: Vec::new() }).await.unwrap();
+    alice2.handle(Cmd::Send { room: room.clone(), body: "yes!".into(), reply_to: None, edit: Some(reply_id.clone()), mentions: Vec::new(), preview: None }).await.unwrap();
     until(&mut alice2_rx, "the edit", |rows| rows.iter().any(|m| m.id == reply_id && m.body == "yes!" && m.edited)).await;
     // The chat list's preview follows an edit and a deletion of the message it shows.
     let rooms = alice2.rooms.clone();
@@ -1125,7 +1127,17 @@ fn link_previews_are_read_from_the_message() {
     let link = link_preview(&content).expect("the second preview is usable");
     assert_eq!((link.url.as_str(), link.title.as_str(), link.description.as_str()), ("https://www.example.org/a?b=1", "A title", "About it"));
     assert_eq!(link.site, "example.org", "the host stands in for a missing site name");
-    assert_eq!(link.image.expect("a picture").dims, Some((1200, 630)));
+    assert_eq!((link.colour, link.video), (None, false));
+    let image = link.image.expect("a picture");
+    assert_eq!((image.dims, image.looped), (Some((1200, 630)), false));
+    let moving = serde_json::json!({ "com.beeper.linkpreviews": [{
+        "matched_url": "https://v.example", "og:title": "Clip", "og:type": "video.other", "unisend:theme_color": "#FF0000",
+        "og:image": "mxc://example.org/gif", "og:image:type": "image/gif",
+    }] });
+    let link = link_preview(&moving).unwrap();
+    assert_eq!((link.colour, link.video, link.image.unwrap().looped), (Some(0xff0000), true, true));
+    let odd = serde_json::json!({ "com.beeper.linkpreviews": [{ "matched_url": "https://x.example", "og:title": "X", "unisend:theme_color": "red; x" }] });
+    assert_eq!(link_preview(&odd).unwrap().colour, None);
 
     assert!(link_preview(&serde_json::json!({ "body": "no previews" })).is_none());
     let bare = serde_json::json!({ "com.beeper.linkpreviews": [{ "matched_url": "https://example.org" }] });
@@ -1793,7 +1805,7 @@ async fn members_are_listed_and_a_picked_one_is_mentioned() {
 
     let body = "**hey** @Bob Builder, see `@Bob Builder`".to_owned();
     let mentions = vec![("Bob Builder".to_owned(), bob_id.clone())];
-    alice.handle(Cmd::Send { room: room_id.clone(), body, reply_to: None, edit: None, mentions }).await.unwrap();
+    alice.handle(Cmd::Send { room: room_id.clone(), body, reply_to: None, edit: None, mentions, preview: None }).await.unwrap();
     until(&mut alice_rx, "the sent message as an event", |rows| {
         rows.iter().any(|m| m.own && m.id.starts_with('$') && m.rich.is_some() && !m.mentioned && !m.mentions.is_empty())
     })
@@ -1848,10 +1860,10 @@ async fn a_forward_reuses_the_file_and_drops_the_reply() {
     until(&mut seat, "the picture", |rows| rows.iter().any(|m| m.media.is_some() && m.id.starts_with('$'))).await;
     let (photo_id, photo) = seat.rows.iter().find_map(|m| m.media.clone().map(|media| (m.id.clone(), media))).unwrap();
     assert!(matches!(photo.source, MediaSource::Encrypted(_)));
-    alice.handle(Cmd::Send { room: source.clone(), body: "look".into(), reply_to: Some(photo_id.clone()), edit: None, mentions: Vec::new() }).await.unwrap();
+    alice.handle(Cmd::Send { room: source.clone(), body: "look".into(), reply_to: Some(photo_id.clone()), edit: None, mentions: Vec::new(), preview: None }).await.unwrap();
     until(&mut seat, "the reply", |rows| rows.iter().any(|m| m.body == "look" && m.id.starts_with('$'))).await;
     let reply_id = seat.rows.iter().find(|m| m.body == "look").unwrap().id.clone();
-    alice.handle(Cmd::Send { room: source.clone(), body: "look at this".into(), reply_to: None, edit: Some(reply_id.clone()), mentions: Vec::new() }).await.unwrap();
+    alice.handle(Cmd::Send { room: source.clone(), body: "look at this".into(), reply_to: None, edit: Some(reply_id.clone()), mentions: Vec::new(), preview: None }).await.unwrap();
     until(&mut seat, "the edit", |rows| rows.iter().any(|m| m.id == reply_id && m.body == "look at this")).await;
 
     alice.handle(Cmd::Forward { room: source.clone(), targets: vec![photo_id.clone(), reply_id.clone()], to: vec![plain.clone(), secret_room.clone()] }).await.unwrap();
@@ -2635,7 +2647,7 @@ async fn a_message_is_pinned_and_unpinned_and_others_pins_arrive() {
     bob.sync_once(SyncSettings::default()).await.unwrap();
 
     alice.handle(Cmd::Open(room_id.clone())).await.unwrap();
-    alice.handle(Cmd::Send { room: room_id.clone(), body: "pin me".into(), reply_to: None, edit: None, mentions: Vec::new() }).await.unwrap();
+    alice.handle(Cmd::Send { room: room_id.clone(), body: "pin me".into(), reply_to: None, edit: None, mentions: Vec::new(), preview: None }).await.unwrap();
     until(&mut seat, "the message", |rows| rows.iter().any(|m| m.body == "pin me" && m.id.starts_with('$'))).await;
     let id = seat.rows.iter().find(|m| m.body == "pin me").unwrap().id.clone();
 

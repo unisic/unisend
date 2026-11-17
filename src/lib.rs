@@ -364,6 +364,9 @@ pub(crate) struct Settings {
     /// Android: text fields ask the keyboard not to learn from what is typed. Secrets always do.
     #[serde(default = "Settings::private_by_default")]
     pub incognito_keyboard: bool,
+    /// Links the user sends go with a preview of their page, made on this device.
+    #[serde(default = "Settings::on")]
+    pub link_previews: bool,
     /// How the delivery of the user's own messages is shown.
     #[serde(default)]
     pub receipts: ui::receipt::ReceiptStyle,
@@ -398,13 +401,17 @@ impl Settings {
         true
     }
 
+    fn on() -> bool {
+        true
+    }
+
     fn path(dir: &std::path::Path) -> PathBuf {
         dir.join("settings.json")
     }
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, receipts: Default::default(), incoming: Default::default(), mute_until: Default::default(), mute_until_added: Default::default(), account: 0, notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), mute_until: Default::default(), mute_until_added: Default::default(), account: 0, notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new() })
     }
 
     /// The ends of the timed mutes of the account in `slot`.
@@ -1653,6 +1660,7 @@ mod tests {
     fn incognito_keyboard_defaults_on_and_round_trips() {
         let old = super::Settings::parse(br#"{"theme":"Light"}"#).unwrap();
         assert!(old.incognito_keyboard, "files from before the switch keep the keyboard incognito");
+        assert!(old.link_previews);
         let mut changed = old.clone();
         changed.incognito_keyboard = false;
         assert_eq!(super::Settings::parse(&serde_json::to_vec(&changed).unwrap()).unwrap(), changed);

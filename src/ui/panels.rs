@@ -209,6 +209,15 @@ impl BeeperApp {
         cx.notify();
     }
 
+    fn set_link_previews(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.link_previews = on;
+        self.settings.save(&self.dir);
+        if !on {
+            self.close_link(false, cx);
+        }
+        cx.notify();
+    }
+
     fn set_stay_connected(&mut self, on: bool, cx: &mut Context<Self>) {
         self.settings.stay_connected = on;
         self.settings.save(&self.dir);
@@ -811,6 +820,10 @@ impl BeeperApp {
             let _ = weak.update(cx, |this, cx| this.set_incognito_keyboard(*on, cx));
         });
         let weak = cx.entity().downgrade();
+        let previews = Switch::new("link-previews").checked(self.settings.link_previews).on_click(move |on, _, cx| {
+            let _ = weak.update(cx, |this, cx| this.set_link_previews(*on, cx));
+        });
+        let weak = cx.entity().downgrade();
         let secure = Switch::new("screen-security").checked(lock.secure).on_click(move |on, _, cx| {
             let _ = weak.update(cx, |this, cx| this.set_lock(None, None, Some(*on), cx));
         });
@@ -823,7 +836,8 @@ impl BeeperApp {
             .child(
                 card(cx)
                     .child(row(t!("Hide reading and typing"), t!("Others will not see that you have read their messages or that you are typing."), cx).child(incognito))
-                    .when(android, |el| el.child(row(t!("Incognito keyboard"), t!("The keyboard learns nothing from what you type. Off: better suggestions and voice typing."), cx).child(keyboard))),
+                    .when(android, |el| el.child(row(t!("Incognito keyboard"), t!("The keyboard learns nothing from what you type. Off: better suggestions and voice typing."), cx).child(keyboard)))
+                    .child(row(t!("Link previews"), t!("Links you send show their page's title and picture. The site sees your device when the preview is made; those who read it fetch nothing."), cx).child(previews)),
             )
             .child(card(cx).child(
                 link(Page::Blocked.id(), Page::Blocked.title(), blocked, None, Some(IconName::ChevronRight), cx).on_click(cx.listener(|this, _, _, cx| this.open_page(Page::Blocked, cx))),

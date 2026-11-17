@@ -45,6 +45,7 @@ mod info;
 mod group;
 mod profile;
 mod keys;
+mod linkdraft;
 mod block;
 mod menu;
 mod navigate;
@@ -75,6 +76,7 @@ mod verify;
 use std::path::PathBuf;
 
 use menu::{MenuKind, QUICK_REACTIONS};
+use linkdraft::{LinkCard, Made};
 use appearance::fs;
 use panels::Panel;
 use receipt::{Mark, Receipt};
@@ -118,6 +120,11 @@ const THREAD_W: f32 = 920.;
 /// Widest a link's preview grows inside a message, and the tallest its picture is shown.
 const LINK_W: f32 = 300.;
 const LINK_PICTURE_H: f32 = 240.;
+/// A link card's side bar and padding, around its picture.
+const LINK_INSET: f32 = 24.;
+/// Moving GIFs of link previews held at once, each at most `linkprev::MAX_MOVING` (16 MB)
+/// decoded; past them a GIF shows still.
+const MAX_MOVING_THUMBS: usize = 4;
 /// On a phone, the share of the row a message may take.
 const BUBBLE_SHARE: f32 = 0.8;
 /// What the hover buttons beside a wide bubble take: three of `menu.rs`'s 28px buttons, their gaps and the row's.
@@ -309,6 +316,8 @@ pub struct BeeperApp {
     tail: Option<usize>,
     /// Inline thumbnails by event ID, oldest first in `thumb_order`.
     thumbs: HashMap<String, Arc<Image>>,
+    /// Link previews whose GIF came past `MAX_MOVING_THUMBS`: asked for as stills.
+    stills: HashSet<String>,
     thumb_order: VecDeque<String>,
     /// When a link's or a quote's picture landed, while it fades in; at most `MAX_THUMB_FADES`.
     thumb_at: HashMap<String, Instant>,
@@ -350,6 +359,12 @@ pub struct BeeperApp {
     strip_epoch: usize,
     /// The strip closes because its message was sent: it shrinks on the new message's clock.
     strip_sent: bool,
+    /// The preview of the first link in the composer, which goes with the message.
+    link: Option<LinkCard>,
+    /// The link whose preview the user closed: not made again while it stays in the text.
+    link_closed: Option<String>,
+    /// Waits for typing to pause before the link's page is read.
+    link_wait: Option<Task<()>>,
     /// The chat whose actions are showing.
     chat_sheet: Option<OwnedRoomId>,
     /// The chat's sheet lists how long to mute instead of the chat's actions.
@@ -523,6 +538,7 @@ impl BeeperApp {
                 this.typed(cx);
                 this.mention_typed(cx);
                 this.voice_typed(cx);
+                this.link_typed(cx);
             }
         }));
         subs.push(cx.subscribe_in(&emoji_search, window, |_, _, ev: &InputEvent, _, cx| match ev {
@@ -660,6 +676,7 @@ impl BeeperApp {
             typing_sent: None,
             tail: None,
             thumbs: HashMap::new(),
+            stills: HashSet::new(),
             thumb_at: HashMap::new(),
             thumb_order: VecDeque::new(),
             asked: HashSet::new(),
@@ -679,6 +696,9 @@ impl BeeperApp {
             fresh_reaction: None,
             strip_last: None,
             strip_sent: false,
+            link: None,
+            link_closed: None,
+            link_wait: None,
             bubble_press: None,
             status_last: None,
             strip_epoch: 0,
@@ -849,6 +869,15 @@ impl BeeperApp {
             Ev::Thumb(id, bytes) => {
                 // Late answers for a chat that was closed meanwhile are dropped.
                 if let (true, Some(format)) = (self.asked.contains(&id), image_format(&bytes)) {
+                    if format == ImageFormat::Gif && self.thumbs.values().filter(|i| i.format == ImageFormat::Gif).count() >= MAX_MOVING_THUMBS {
+                        // Asked again, as a still.
+                        self.asked.remove(&id);
+                        if self.stills.len() >= MAX_THUMBS * 4 {
+                            self.stills.clear();
+                        }
+                        self.stills.insert(id);
+                        return;
+                    }
                     self.thumbs.insert(id.clone(), Arc::new(Image::from_bytes(format, bytes)));
                     // A fade is over in `ENTER`; only those still running are kept.
                     self.thumb_at.retain(|_, at| at.elapsed() < motion::ENTER);
@@ -889,6 +918,19 @@ impl BeeperApp {
                 self.uploads = self.uploads.saturating_sub(1);
                 self.attaching = false;
                 self.next_attach(cx);
+            }
+            Ev::LinkPreview(url, draft) => {
+                if let Some(link) = self.link.as_mut().filter(|l| l.url == url && matches!(l.made, Made::Reading)) {
+                    link.made = match draft {
+                        Some(d) => Made::Shown {
+                            title: if d.title.is_empty() { d.site.clone().into() } else { d.title.into() },
+                            site: d.site.into(),
+                            picture: d.picture.and_then(|bytes| image_format(&bytes).map(|format| Arc::new(Image::from_bytes(format, bytes)))),
+                        },
+                        None => Made::Nothing,
+                    };
+                    cx.notify();
+                }
             }
             Ev::Rooms(changed) => {
                 let calm = !slide::Fly::quiet(changed.len()) && !cx.reduce_motion() && !self.rooms.is_empty() && self.list_at_top() && !self.finger_down();
@@ -1037,7 +1079,7 @@ impl BeeperApp {
             Ev::People(answer) => self.on_people(answer, cx),
             Ev::Gifs { query, page, found } => self.on_gifs(query, page, found),
             Ev::GifPreview(url, bytes) => self.on_gif_preview(url, bytes),
-            Ev::GifSent => self.uploads = self.uploads.saturating_sub(1),
+            Ev::Uploaded => self.uploads = self.uploads.saturating_sub(1),
             Ev::Members { room, list } => self.members_arrived(room, list, cx),
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
             ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_) | Ev::RecoveryCode(_)) => self.on_verify_event(ev, cx),
@@ -1206,7 +1248,12 @@ impl BeeperApp {
             Compose::Edit(id) => (None, Some(id)),
         };
         let mentions = self.picked_mentions(cx);
-        if self.send(Cmd::Send { room: room.clone(), body, reply_to, edit, mentions }, cx) {
+        let preview = self.link.as_ref().filter(|l| l.room == room && edit.is_none() && matches!(l.made, Made::Shown { .. }) && body.contains(&l.url)).map(|l| l.url.clone());
+        let with_preview = preview.is_some();
+        if self.send(Cmd::Send { room: room.clone(), body, reply_to, edit, mentions, preview }, cx) {
+            self.uploads += usize::from(with_preview);
+            self.close_link(false, cx);
+            self.link_closed = None;
             self.strip_sent = matches!(self.compose, Compose::Reply(_));
             self.compose = Compose::New;
             self.jump_to_newest(cx);
@@ -1318,7 +1365,12 @@ impl BeeperApp {
         let wanted: Vec<(String, Media)> = pictured
             .map(|media| (m.id.clone(), media.clone()))
             .into_iter()
-            .chain(linked.map(|image| (link_key(&m.id), image.clone())))
+            .chain(linked.map(|image| {
+                let key = link_key(&m.id);
+                let mut image = image.clone();
+                image.looped &= !self.stills.contains(&key);
+                (key, image)
+            }))
             .chain(quoted.map(|media| (quote_key(&m.id), media.clone())))
             .collect();
         for (key, media) in wanted {
@@ -1714,6 +1766,8 @@ impl BeeperApp {
         self.close_gallery(cx);
         self.close_gifs(cx);
         self.mention = mentions::Mentions::default();
+        self.close_link(false, cx);
+        self.link_closed = None;
         self.stop_voice(cx);
         self.end_info();
         if let Some(room) = self.open.take() {
@@ -1725,6 +1779,7 @@ impl BeeperApp {
         self.msgs.clear();
         self.typing.clear();
         self.asked.clear();
+        self.stills.clear();
         self.thumb_order.clear();
         self.thumb_at.clear();
         for (_, image) in self.thumbs.drain() {
@@ -2483,45 +2538,65 @@ impl BeeperApp {
                 let found: Vec<_> = urls(&m.body).into_iter().filter(apart).collect();
                 marks.extend(found.iter().map(|r| (r.clone(), underline)));
                 marks.sort_by_key(|(r, _)| r.start);
-                // The preview its sender attached to a link; a touch opens the link.
+                // The preview its sender attached to a link, drawn as Discord draws an embed: the
+                // page's colour down the side, its picture under the text. A touch opens the link.
                 let link_card = m.link.as_ref().filter(|_| !m.deleted).map(|link| {
                     let link_shown = link_fade.unwrap_or(1.);
                     let url = link.url.clone();
                     let width = room.min(LINK_W);
+                    let bar: Hsla = link.colour.map_or(inside.text.opacity(0.25), |c| rgb(c).into());
                     let picture = link.image.as_ref().map(|image| {
                         let (w, h) = image.dims.unwrap_or((1200, 630));
                         // The picture's own shape; one taller than the limit is cut to it, since a
                         // picture drawn to cover its box is not clipped by it.
-                        let height = (width * h.max(1) as f32 / w.max(1) as f32).clamp(60., LINK_PICTURE_H);
-                        div().w_full().h(px(height)).overflow_hidden().map(|el| match this.thumbs.get(&link_key(&m.id)) {
-                            Some(thumb) => el.child(img(thumb.clone()).size_full().rounded_t(px(12.)).object_fit(ObjectFit::Cover).opacity(link_shown)),
-                            None => el,
-                        })
+                        let height = ((width - LINK_INSET) * h.max(1) as f32 / w.max(1) as f32).clamp(60., LINK_PICTURE_H);
+                        div()
+                            .relative()
+                            .w_full()
+                            .h(px(height))
+                            .mt(px(6.))
+                            .overflow_hidden()
+                            .rounded(px(8.))
+                            .bg(inside.text.opacity(0.07))
+                            .when_some(this.thumbs.get(&link_key(&m.id)), |el, thumb| {
+                                el.child(img(thumb.clone()).size_full().rounded(px(8.)).object_fit(ObjectFit::Cover).opacity(link_shown))
+                            })
+                            .when(link.video, |el| {
+                                el.child(
+                                    div().absolute().inset_0().flex().items_center().justify_center().child(
+                                        div().size(px(44.)).flex().items_center().justify_center().rounded_full().bg(gpui_kit::black().opacity(0.55)).text_color(gpui_kit::white()).child(Icon::new(IconName::Play).size_5()),
+                                    ),
+                                )
+                            })
                     });
                     let line = |size: f32, height: f32| div().text_size(fs(size)).line_height(fs(height));
-                    v_flex()
+                    h_flex()
                         .id(SharedString::from(format!("{}-link", m.id)))
                         .w(px(width))
-                        .rounded(px(12.))
+                        .items_stretch()
+                        .rounded(px(10.))
                         .bg(inside.text.opacity(0.07))
                         .cursor_pointer()
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.stop_propagation();
                             crate::open_link(cx, &url);
                         }))
-                        .children(picture)
+                        .child(div().flex_none().w(px(4.)).rounded_l(px(10.)).bg(bar))
                         .child(
                             v_flex()
+                                .flex_1()
+                                .min_w_0()
                                 .px(px(10.))
                                 .py(px(8.))
                                 .gap(px(2.))
                                 .child(line(12., 16.).text_color(inside.faint).truncate().child(link.site.clone()))
                                 .when(!link.title.is_empty(), |el| {
-                                    el.child(line(14., 19.).font_weight(FontWeight::SEMIBOLD).line_clamp(2).text_ellipsis().child(link.title.clone()))
+                                    el.child(line(14., 19.).font_weight(FontWeight::SEMIBOLD).text_color(inside.accent_ink).line_clamp(2).text_ellipsis().child(link.title.clone()))
                                 })
                                 .when(!link.description.is_empty(), |el| {
                                     el.child(line(13., 18.).text_color(inside.muted).line_clamp(3).text_ellipsis().child(link.description.clone()))
-                                }),
+                                })
+                                .children(picture),
                         )
                 });
                 let poll_card = m.poll.as_ref().filter(|_| !m.deleted).map(|poll| cards::poll(m, poll, this.user.as_ref(), room, inside, pressed.and_then(|(part, level)| Some((part?, level))), window, cx));
@@ -2891,6 +2966,7 @@ impl BeeperApp {
                     .children(self.render_unlock_hint(cx))
                     .children(self.render_typing(window, cx))
                     .children(self.render_compose_strip(window, cx))
+                    .children(self.render_link_card(window, cx))
                     .children(self.render_mentions(cx))
                     .when_some(limit.filter(|&(len, max)| len * 5 >= max * 4), |el, (len, max)| {
                         el.child(

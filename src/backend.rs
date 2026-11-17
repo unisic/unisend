@@ -160,8 +160,11 @@ pub enum Cmd {
     /// The interface language changed: previews and the open chat's rows are built again in it.
     Relabel,
     /// `reply_to` and `edit` are event IDs; an edit replaces that message's text. `mentions` are
-    /// the people picked from the mention list, as (name, user).
-    Send { room: OwnedRoomId, body: String, reply_to: Option<String>, edit: Option<String>, mentions: Vec<(String, OwnedUserId)> },
+    /// the people picked from the mention list, as (name, user). `preview` is the link whose
+    /// preview, made by `LinkPreview`, goes with a new message.
+    Send { room: OwnedRoomId, body: String, reply_to: Option<String>, edit: Option<String>, mentions: Vec<(String, OwnedUserId)>, preview: Option<String> },
+    /// Makes the preview of a link being typed, or with `None` drops it.
+    LinkPreview(Option<String>),
     React { room: OwnedRoomId, target: String, key: String },
     /// Sets the user's vote on a poll to `answers`; empty withdraws it.
     Vote { room: OwnedRoomId, target: String, unstable: bool, answers: Vec<String> },
@@ -278,8 +281,10 @@ pub enum Ev {
     /// Thumbnail bytes as served (PNG, JPEG, ...).
     Avatar(OwnedRoomId, Vec<u8>),
     Face(OwnedUserId, Vec<u8>),
-    /// JPEG or PNG, at most `THUMB_PX` on its longest side.
+    /// JPEG or PNG, at most `THUMB_PX` on its longest side, or a moving GIF.
     Thumb(String, Vec<u8>),
+    /// The preview of the link being typed; `None` when the page gave none.
+    LinkPreview(String, Option<LinkDraft>),
     /// JPEG or PNG, at most `VIEW_PX`.
     Viewed(String, Vec<u8>),
     /// The file is in the media cache, or could not be fetched.
@@ -305,8 +310,8 @@ pub enum Ev {
     Gifs { query: String, page: u32, found: Option<gifs::Found> },
     /// A GIF's preview (JPEG) by its URL.
     GifPreview(String, Vec<u8>),
-    /// A GIF finished sending, or failed.
-    GifSent,
+    /// A GIF, or a message with a link's preview, finished sending or failed.
+    Uploaded,
     /// Joined members of a chat other than the user, as (user, name), at most `MAX_MEMBERS`.
     Members { room: OwnedRoomId, list: Vec<(OwnedUserId, String)> },
     /// A forward was queued in this many chats.
@@ -601,7 +606,12 @@ pub struct Link {
     pub description: String,
     /// The site's name, or its host.
     pub site: String,
+    /// For a GIF, `looped`: it may move.
     pub image: Option<Media>,
+    /// The page's colour as `0xrrggbb`, which the card's bar takes.
+    pub colour: Option<u32>,
+    /// A video page: its picture gets a play mark.
+    pub video: bool,
 }
 
 impl Msg {
@@ -792,6 +802,11 @@ async fn test_notice(client: Client, dir: PathBuf) {
     }
 }
 
+/// Whether a link typed into the composer may get a preview: see `linkprev::allowed`.
+pub(crate) fn link_previewable(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| linkprev::allowed(&u))
+}
+
 /// Sends a message from a notification's reply box, through the account `chat`'s key names.
 /// False when that account is not signed in.
 pub(crate) fn reply(chat: &str, body: &str) -> bool {
@@ -802,7 +817,7 @@ pub(crate) fn reply(chat: &str, body: &str) -> bool {
         return !body.trim().is_empty();
     }
     let (body, Ok(room)) = (body.trim(), OwnedRoomId::try_from(chat)) else { return false };
-    !body.is_empty() && commands(slot).is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None, mentions: Vec::new() }).is_ok())
+    !body.is_empty() && commands(slot).is_some_and(|tx| tx.try_send(Cmd::Send { room, body: body.to_owned(), reply_to: None, edit: None, mentions: Vec::new(), preview: None }).is_ok())
 }
 
 /// Android's answer when it did not install an update: shown by the account on screen.
@@ -878,6 +893,10 @@ pub fn start(dir: PathBuf) -> Backend {
 }
 
 fn http_client() -> Result<reqwest::Client> {
+    Ok(http_builder().build()?)
+}
+
+fn http_builder() -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(15));
     // shortcut: bundled Mozilla roots on Android (ignores user-installed CAs); switch to
     // rustls-platform-verifier's Android init once its Kotlin component is packaged.
@@ -887,7 +906,7 @@ fn http_client() -> Result<reqwest::Client> {
             .iter()
             .filter_map(|der| reqwest::Certificate::from_der(der).ok()),
     );
-    Ok(builder.build()?)
+    builder
 }
 
 struct State {
@@ -928,6 +947,16 @@ struct State {
     replaceable: bool,
     /// The update being downloaded and installed.
     update: Option<AbortOnDrop>,
+    /// The preview of the link being typed: in the making, then made. One at a time.
+    link_task: Option<AbortOnDrop>,
+    link_made: Arc<Mutex<Option<linkprev::Preview>>>,
+}
+
+/// What the composer shows of a link's preview before it is sent.
+pub struct LinkDraft {
+    pub title: String,
+    pub site: String,
+    pub picture: Option<Vec<u8>>,
 }
 
 /// Room summaries, shared by the sync loop and preview refreshes. Never held across an await.
@@ -948,7 +977,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     let _ = std::fs::remove_file(dir.join("klipy-id"));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
         rooms: Rooms::default(), blocked: Arc::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), previews: Arc::new(tokio::sync::Semaphore::new(PROBES)), notif: None,
-        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, browser: None, replaceable: false, update: None };
+        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, browser: None, replaceable: false, update: None, link_task: None, link_made: Arc::default() };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
     // One service shows every account's notifications; the first account's backend, which runs
     // as long as the app, keeps it.
@@ -1700,8 +1729,44 @@ impl State {
                     self.emit(Ev::Rooms(changed)).await;
                 }
             }
-            Cmd::Send { room, body, reply_to, edit, mentions } => {
+            Cmd::Send { room, body, reply_to, edit, mentions, preview } => {
                 let text = mentions::content(&body, &mentions);
+                // The interface counts a message sent with a preview as an upload until `Uploaded`.
+                let asked = preview.is_some();
+                let made = preview.filter(|_| edit.is_none()).and_then(|url| {
+                    self.link_task = None;
+                    self.link_made.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take().filter(|p| p.url == url)
+                });
+                if let Some(made) = made {
+                    let (room, ev) = (self.room(&room)?, self.ev.clone());
+                    // shortcut: a message sent while this picture uploads can arrive before it; upload
+                    // as the preview is made if users hit that, at the cost of unsent pictures on the server.
+                    tokio::spawn(async move {
+                        let sent = async {
+                            let content = match reply_to {
+                                Some(id) => {
+                                    let reply = matrix_sdk::room::reply::Reply { event_id: EventId::parse(id)?, enforce_thread: matrix_sdk::room::reply::EnforceThread::MaybeThreaded, add_mentions: matrix_sdk::ruma::events::room::message::AddMentions::Yes };
+                                    room.make_reply_event(text, reply).await?
+                                }
+                                None => RoomMessageEventContent::from(text),
+                            };
+                            let mut content = serde_json::to_value(content)?;
+                            content["com.beeper.linkpreviews"] = serde_json::json!([linkprev::entry(&room, &made).await]);
+                            let raw: Raw<matrix_sdk::ruma::events::AnyMessageLikeEventContent> = Raw::new(&content)?.cast_unchecked();
+                            room.send_queue().send_raw(raw, "m.room.message".to_owned()).await?;
+                            anyhow::Ok(())
+                        };
+                        if let Err(e) = sent.await {
+                            log::warn!("{e:#}");
+                            let _ = ev.send(Ev::Error(format!("{e:#}"))).await;
+                        }
+                        let _ = ev.send(Ev::Uploaded).await;
+                    });
+                    return Ok(());
+                }
+                if asked {
+                    self.emit(Ev::Uploaded).await;
+                }
                 match self.open.as_ref().filter(|open| open.room == room) {
                     // The timeline shows the message at once and keeps trying to send it.
                     Some(open) => match (edit, reply_to) {
@@ -1807,6 +1872,22 @@ impl State {
             }
             Cmd::GifSearch { query, page } => gifs::search(self.http.clone(), self.ev.clone(), query, page),
             Cmd::GifStop => gifs::stop(),
+            Cmd::LinkPreview(url) => {
+                *self.link_made.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                self.link_task = url.map(|url| {
+                    let (ev, made) = (self.ev.clone(), self.link_made.clone());
+                    AbortOnDrop(tokio::spawn(async move {
+                        let preview = linkprev::fetch(&url).await.inspect_err(|e| log::debug!("link preview: {e:#}")).ok();
+                        let draft = preview.as_ref().map(|p| LinkDraft {
+                            title: if p.meta.title.is_empty() { p.meta.description.clone() } else { p.meta.title.clone() },
+                            site: p.meta.site.clone(),
+                            picture: p.picture.as_ref().map(|pic| pic.bytes.clone()),
+                        });
+                        *made.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = preview;
+                        let _ = ev.send(Ev::LinkPreview(url, draft)).await;
+                    }))
+                });
+            }
             Cmd::UpdateCheck => {
                 tokio::spawn(update::run_check(self.http.clone(), self.ev.clone()));
             }
@@ -1827,7 +1908,7 @@ impl State {
                     if let Err(e) = sent {
                         let _ = ev.send(Ev::Error(t!("GIF not sent: {error}", error = format!("{e:#}")))).await;
                     }
-                    let _ = ev.send(Ev::GifSent).await;
+                    let _ = ev.send(Ev::Uploaded).await;
                 });
             }
             Cmd::Members(room_id) => {
@@ -2239,12 +2320,14 @@ fn shrink(bytes: &[u8], max: u32) -> Result<Vec<u8>> {
 }
 
 /// An inline thumbnail: the sender's own thumbnail when there is one, else the server's for a
-/// plain image, else the image itself. `None` when there is nothing reasonable to fetch.
+/// plain image, else the image itself. A moving GIF a link's preview shows (`looped`) stays
+/// moving within `linkprev::MAX_MOVING`. `None` when there is nothing reasonable to fetch.
 async fn thumbnail(client: &Client, media: &Media) -> Result<Option<Vec<u8>>> {
     let pictured = matches!(media.kind, MediaKind::Image | MediaKind::Sticker);
+    let moving = pictured && media.looped && media.thumb.is_none();
     let request = match (&media.thumb, &media.source) {
         (Some(thumb), _) => MediaRequestParameters { source: thumb.clone(), format: MediaFormat::File },
-        (None, MediaSource::Plain(_)) if pictured => MediaRequestParameters {
+        (None, MediaSource::Plain(_)) if pictured && !moving => MediaRequestParameters {
             source: media.source.clone(),
             format: MediaFormat::Thumbnail(MediaThumbnailSettings::new(THUMB_PX.into(), THUMB_PX.into())),
         },
@@ -2254,6 +2337,9 @@ async fn thumbnail(client: &Client, media: &Media) -> Result<Option<Vec<u8>>> {
         _ => return Ok(None),
     };
     let bytes = client.media().get_media_content(&request, true).await?;
+    if moving && linkprev::gif_frames(&bytes).is_some_and(|(w, h, frames)| frames > 1 && u64::from(w) * u64::from(h) * 4 * frames as u64 <= linkprev::MAX_MOVING) {
+        return Ok(Some(bytes));
+    }
     Ok(Some(tokio::task::spawn_blocking(move || shrink(&bytes, THUMB_PX)).await??))
 }
 
@@ -3428,20 +3514,23 @@ fn link_preview(content: &serde_json::Value) -> Option<Link> {
         }
         let host = url.split("://").nth(1).and_then(|rest| rest.split(['/', '?', '#']).next()).unwrap_or_default();
         let site = Some(text("og:site_name")).filter(|s| !s.is_empty()).unwrap_or_else(|| host.trim_start_matches("www.").to_owned());
+        let mime = Some(text("og:image:type")).filter(|m| !m.is_empty());
         let image = source.map(|source| Media {
             kind: MediaKind::Image,
             name: String::new(),
             size: None,
-            mime: Some(text("og:image:type")).filter(|m| !m.is_empty()),
+            looped: mime.as_deref() == Some("image/gif"),
+            mime,
             dims: number("og:image:width").zip(number("og:image:height")),
             duration: None,
             source,
             thumb: None,
-            looped: false,
             once: false,
             waveform: Vec::new(),
         });
-        Some(Link { url, title, description, site, image })
+        let colour = p.get(linkprev::COLOUR_KEY).and_then(Value::as_str).and_then(linkprev::colour).and_then(|hex| u32::from_str_radix(&hex[1..], 16).ok());
+        let video = text("og:type").starts_with("video") || ["og:video", "og:video:url", "og:video:secure_url"].iter().any(|k| !text(k).is_empty());
+        Some(Link { url, title, description, site, image, colour, video })
     })
 }
 
@@ -3863,6 +3952,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
 mod location;
 mod contact;
 mod gifs;
+mod linkprev;
 pub(crate) mod update;
 pub(crate) use gifs::{Found as GifPage, Gif, enabled as gifs_enabled, wants_gif_file};
 pub(crate) mod caption;
