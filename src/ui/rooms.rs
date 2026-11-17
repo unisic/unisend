@@ -92,11 +92,14 @@ impl NewChat {
     }
 
     /// What is typed reads as something the network can look up: a phone number, a username, an
-    /// address, or a Matrix ID.
+    /// address, or a Matrix ID (shown as the ID when a link to it is pasted).
     fn identifier(&self, cx: &App) -> Option<String> {
         let q = self.query(cx);
+        if self.target == Target::Matrix {
+            return crate::backend::rooms::matrix_id(&q).map(|u| u.to_string());
+        }
         let caps = self.caps.as_ref()?;
-        looks_like_identifier(&q, &self.target, caps).then_some(q)
+        looks_like_identifier(&q, caps).then_some(q)
     }
 
     fn placeholder(&self) -> &'static str {
@@ -110,12 +113,10 @@ impl NewChat {
     }
 }
 
-fn looks_like_identifier(q: &str, target: &Target, caps: &Caps) -> bool {
+/// For a network's bridge; a Matrix ID is `matrix_id`'s.
+fn looks_like_identifier(q: &str, caps: &Caps) -> bool {
     if q.is_empty() {
         return false;
-    }
-    if *target == Target::Matrix {
-        return q.starts_with('@') && q.contains(':') && !q.contains(char::is_whitespace);
     }
     let digits = q.chars().filter(char::is_ascii_digit).count();
     let phone = digits >= 5 && q.chars().all(|c| c.is_ascii_digit() || " +-().".contains(c));
@@ -870,19 +871,16 @@ fn ready_to_create(new: &NewChat, group: &crate::backend::rooms::GroupCaps, cx: 
 #[cfg(test)]
 mod tests {
     use super::{Confirm, Confirming, looks_like_identifier, media_mark, wording};
-    use crate::backend::rooms::{Caps, Target};
+    use crate::backend::rooms::Caps;
 
     #[test]
     fn only_what_the_network_looks_up_is_offered_as_an_identifier() {
         let wa = Caps { phone: true, ..Default::default() };
-        let bridge = Target::Bridge { bridge: "whatsapp".into(), login: "1".into() };
-        assert!(looks_like_identifier("+49 151 1234567", &bridge, &wa));
-        assert!(!looks_like_identifier("Ann", &bridge, &wa), "a name is searched, not looked up");
-        assert!(!looks_like_identifier("12", &bridge, &wa), "too short for a number");
+        assert!(looks_like_identifier("+49 151 1234567", &wa));
+        assert!(!looks_like_identifier("Ann", &wa), "a name is searched, not looked up");
+        assert!(!looks_like_identifier("12", &wa), "too short for a number");
         let signal = Caps { phone: true, username: true, ..Default::default() };
-        assert!(looks_like_identifier("ann.42", &bridge, &signal));
-        assert!(looks_like_identifier("@ann:matrix.org", &Target::Matrix, &Caps::matrix()));
-        assert!(!looks_like_identifier("ann", &Target::Matrix, &Caps::matrix()));
+        assert!(looks_like_identifier("ann.42", &signal));
     }
 
     #[test]

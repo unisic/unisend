@@ -293,9 +293,8 @@ impl BeeperApp {
                     .take(SHOWN)
                     .cloned()
                     .collect();
-                // A full Matrix ID typed in is offered as it is, unless it is listed or already in.
-                let typed_id = OwnedUserId::try_from(typed.as_str())
-                    .ok()
+                // A full Matrix ID typed or pasted as a link is offered as it is, unless it is listed or already in.
+                let typed_id = crate::backend::rooms::matrix_id(&typed)
                     .filter(|u| room.network.is_none() && !found.iter().any(|(id, _)| id == u) && !d.members.iter().any(|m| &m.id == u));
                 let note = match people {
                     None => Some(t!("Loading…")),

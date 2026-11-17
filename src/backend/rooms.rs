@@ -13,7 +13,8 @@ use matrix_sdk::{
     deserialized_responses::RawAnySyncOrStrippedState,
     reqwest::{Method, Url},
     ruma::{
-        OwnedRoomId, OwnedUserId, RoomId, UserId,
+        MatrixToUri, MatrixUri, OwnedRoomId, OwnedUserId, RoomId, UserId,
+        matrix_uri::MatrixId,
         serde::Raw,
         api::client::room::create_room,
         events::{InitialStateEvent, StateEventType, room::encryption::RoomEncryptionEventContent},
@@ -438,8 +439,22 @@ async fn find(client: &Client, api: Option<&Api>, target: &Target, query: &str) 
     }
 }
 
+/// A person on any Matrix server, as people pass their ID on: `@name:server`, a matrix.to link or
+/// a `matrix:u/` URI.
+pub(crate) fn matrix_id(text: &str) -> Option<OwnedUserId> {
+    let text = text.trim();
+    if let Ok(user) = UserId::parse(text) {
+        return Some(user);
+    }
+    let id = MatrixToUri::parse(text).map(|u| u.id().clone()).or_else(|_| MatrixUri::parse(text).map(|u| u.id().clone())).ok()?;
+    match id {
+        MatrixId::User(user) => Some(user),
+        _ => None,
+    }
+}
+
 fn matrix_user(who: &str) -> Result<OwnedUserId> {
-    UserId::parse(who.trim()).map_err(|_| anyhow!(t!("Enter a full Matrix ID, like @name:matrix.org")))
+    matrix_id(who).ok_or_else(|| anyhow!(t!("Enter a full Matrix ID, like @name:matrix.org")))
 }
 
 async fn resolve(api: Option<&Api>, target: &Target, who: &str) -> Result<Person> {
@@ -558,6 +573,17 @@ mod tests {
         let g = c.group.unwrap();
         assert_eq!((g.kind.as_str(), g.name, g.name_required, g.name_max, g.min_people, g.max_people), ("group", true, false, 100, 1, 0));
         assert_eq!(caps(&json!({})), Caps::default(), "an old bridge without the endpoint offers nothing");
+    }
+
+    #[test]
+    fn a_matrix_id_is_taken_as_typed_or_from_a_link() {
+        let ann = Some(UserId::parse("@ann:matrix.org").unwrap());
+        for typed in [" @ann:matrix.org ", "https://matrix.to/#/@ann:matrix.org", "https://matrix.to/#/%40ann%3Amatrix.org?via=matrix.org", "matrix:u/ann:matrix.org"] {
+            assert_eq!(matrix_id(typed), ann, "{typed}");
+        }
+        for other in ["ann", "ann:matrix.org", "@ann", "https://matrix.to/#/#room:matrix.org", "https://example.org/@ann:matrix.org"] {
+            assert_eq!(matrix_id(other), None, "{other}");
+        }
     }
 
     #[test]
