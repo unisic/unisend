@@ -2,6 +2,10 @@
 //! a way to drop one, an HD switch and Send. Everything bound for a chat as a photo or video comes
 //! through `queue_attach`, which hands it here; documents skip it.
 //!
+//! Desktop has the tray instead, as Discord does: every file attached, documents too, waits as a
+//! thumbnail over the composer, and the composer's Enter sends them with what it holds as the
+//! first one's caption.
+//!
 //! Memory: one full picture is decoded at a time, on a background thread. A 160 px thumbnail is
 //! kept per item (at most `MAX_SELECTED`, 0.1 MB each); the 1280 px picture only for the item
 //! shown and its neighbours (at most 3, 6 MB each decoded).
@@ -54,7 +58,9 @@ impl Preview {
         let field = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 4).submit_on_enter(true).placeholder(t!("Add a caption")));
         crate::ime::follow(&field, window, cx);
         let subs = vec![cx.subscribe_in(&field, window, |this, _, ev: &InputEvent, window, cx| match ev {
-            InputEvent::PressEnter { shift: false, .. } => this.send_preview(window, cx),
+            InputEvent::PressEnter { shift: false, .. } => {
+                this.send_preview(window, cx);
+            }
             InputEvent::Change => {
                 let text = this.preview.field.read(cx).value().to_string();
                 if let Some(entry) = this.preview.entries.get_mut(this.preview.cur) {
@@ -83,6 +89,14 @@ impl Preview {
         self.open
     }
 }
+
+/// Files wait in the tray over the composer instead of the full preview: a pointer and a
+/// keyboard, as on desktop.
+pub(super) fn tray() -> bool {
+    !gpui_kit::is_mobile()
+}
+
+const TRAY_CELL: f32 = 88.;
 
 fn is_media(path: &Path) -> Option<bool> {
     let mime = mime_guess::from_path(path).first()?;
@@ -148,7 +162,7 @@ impl BeeperApp {
     /// Photos and videos among `paths` wait in the preview; the rest is left for the caller to queue.
     /// The callers counted each as an upload already, so those are given back until Send.
     pub(super) fn preview_media(&mut self, room: &OwnedRoomId, paths: Vec<PathBuf>, reply_to: &mut Option<String>, cx: &mut Context<Self>) -> Vec<PathBuf> {
-        let (media, rest): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| is_media(p).is_some());
+        let (media, rest): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| tray() || is_media(p).is_some());
         if media.is_empty() {
             return rest;
         }
@@ -165,13 +179,20 @@ impl BeeperApp {
             return rest;
         }
         if !p.open {
-            (p.room, p.reply_to, p.cur, p.hd) = (Some(room.clone()), reply_to.take(), 0, false);
+            (p.room, p.cur, p.hd) = (Some(room.clone()), 0, false);
             p.open = true;
+            // The tray leaves the reply in the composer, which sends it.
+            match reply_to.take() {
+                Some(id) if tray() => self.compose = Compose::Reply(id),
+                reply => p.reply_to = reply,
+            }
         }
         for path in media {
             p.next_id += 1;
             let video = is_media(&path) == Some(true);
-            p.entries.push(Entry { id: p.next_id, path, video, caption: String::new(), strip: None, big: None, failed: false });
+            // A document has no picture to draw; its name stands in.
+            let failed = is_media(&path).is_none();
+            p.entries.push(Entry { id: p.next_id, path, video, caption: String::new(), strip: None, big: None, failed });
         }
         self.pump_preview(cx);
         cx.notify();
@@ -184,7 +205,7 @@ impl BeeperApp {
         if p.loading || !p.open {
             return;
         }
-        let near = |ix: usize| ix.abs_diff(p.cur) <= 1;
+        let near = |ix: usize| !tray() && ix.abs_diff(p.cur) <= 1;
         let order = std::iter::once(p.cur).chain(p.cur.checked_add(1)).chain(p.cur.checked_sub(1)).chain(0..p.entries.len());
         let Some(ix) = order.into_iter().find(|&ix| p.entries.get(ix).is_some_and(|e| !e.failed && (e.strip.is_none() || near(ix) && e.big.is_none()))) else {
             return;
@@ -333,12 +354,38 @@ impl BeeperApp {
         cx.notify();
     }
 
-    fn send_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The tray's room when it holds files.
+    pub(super) fn tray_room(&self) -> Option<&OwnedRoomId> {
+        self.preview.room.as_ref().filter(|_| tray() && self.preview.open && !self.preview.entries.is_empty())
+    }
+
+    /// Sends the tray, `caption` with its first file; false when nothing left.
+    pub(super) fn send_tray(&mut self, caption: String, reply_to: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let p = &mut self.preview;
-        let Some(room) = p.room.clone().filter(|_| p.open && !p.entries.is_empty()) else { return };
+        for (ix, entry) in p.entries.iter_mut().enumerate() {
+            entry.caption = if ix == 0 { caption.clone() } else { String::new() };
+        }
+        p.reply_to = reply_to;
+        let sent = self.send_preview(window, cx);
+        if !sent {
+            self.preview.reply_to = None;
+        }
+        sent
+    }
+
+    fn tray_remove(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview.cur = ix;
+        self.remove_item(window, cx);
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
+    }
+
+    fn send_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let p = &mut self.preview;
+        let Some(room) = p.room.clone().filter(|_| p.open && !p.entries.is_empty()) else { return false };
         if self.attach_queue.len() + p.entries.len() > MAX_QUEUED {
             self.error = Some(t!("Too many attachments waiting, try again when these are sent").into());
-            return cx.notify();
+            cx.notify();
+            return false;
         }
         let (hd, mut reply_to) = (p.hd, p.reply_to.take());
         let cmds: Vec<Cmd> = p
@@ -350,10 +397,11 @@ impl BeeperApp {
         self.attach_queue.extend(cmds);
         self.close_preview(false, window, cx);
         self.next_attach(cx);
+        true
     }
 
     pub(super) fn render_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = self.preview.open;
+        let live = self.preview.open && !tray();
         let shown = Presence::new("preview", live).transition(motion::enter()).sample(window, cx);
         if !live {
             return None;
@@ -473,7 +521,9 @@ impl BeeperApp {
                     .cursor_pointer()
                     .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
                     .active(|el| el.bg(p.muted))
-                    .on_click(cx.listener(|this, _, window, cx| this.send_preview(window, cx)))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.send_preview(window, cx);
+                    }))
                     .child(Icon::new(IconName::ArrowUp).size_5()),
             );
 
@@ -491,6 +541,122 @@ impl BeeperApp {
                 .child(stage)
                 .children(strip)
                 .child(compose)
+                .into_any_element(),
+        )
+    }
+
+    /// The tray over the composer: a thumbnail per file with its X, and HD while a photo waits.
+    pub(super) fn render_tray(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let room = self.tray_room().filter(|r| self.open.as_ref() == Some(*r))?;
+        let v = Presence::new(format!("tray-{room}"), true).transition(motion::enter()).sample(window, cx).progress;
+        let p = Palette::of(cx);
+        let pv = &self.preview;
+        let photo = pv.entries.iter().any(|e| is_media(&e.path) == Some(false));
+        let hd = pv.hd;
+        let cells = pv.entries.iter().enumerate().map(|(ix, e)| {
+            let name = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            div()
+                .id(("tray-cell", e.id))
+                .relative()
+                .size(px(TRAY_CELL))
+                .flex_none()
+                .rounded(px(14.))
+                .overflow_hidden()
+                .bg(p.text.opacity(0.07))
+                .map(|el| match e.strip.clone() {
+                    // The cell's overflow clips square; the picture rounds its own corners.
+                    Some(image) => el.child(img(image).size_full().rounded(px(14.)).object_fit(ObjectFit::Cover)),
+                    None => el.child(
+                        v_flex()
+                            .size_full()
+                            .p(px(8.))
+                            .gap(px(4.))
+                            .items_center()
+                            .justify_center()
+                            .text_color(p.faint)
+                            .child(Icon::new(if e.video { IconName::Video } else { IconName::File }).size_6())
+                            .when(e.failed, |el| el.child(div().w_full().text_size(fs(12.)).line_height(fs(16.)).text_center().truncate().child(name))),
+                    ),
+                })
+                .when(e.video && e.strip.is_some(), |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(div().size(px(32.)).flex().items_center().justify_center().rounded_full().bg(gpui_kit::black().opacity(0.5)).text_color(gpui_kit::white()).child(Icon::new(IconName::Play).size_4())),
+                    )
+                })
+                .child(
+                    // A 36 target round a 24 disc, in the corner.
+                    div()
+                        .id(("tray-remove", e.id))
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .size(px(36.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, window, cx| this.tray_remove(ix, window, cx)))
+                        .child(
+                            div()
+                                .size(px(24.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_full()
+                                .bg(gpui_kit::black().opacity(0.6))
+                                .text_color(gpui_kit::white())
+                                .hover(|el| el.bg(gpui_kit::black().opacity(0.8)))
+                                .child(Icon::new(IconName::X).size_3p5()),
+                        ),
+                )
+        });
+        Some(
+            div()
+                .flex_none()
+                .overflow_hidden()
+                .max_h(px((TRAY_CELL + 24.) * v))
+                .opacity(v)
+                .child(
+                    h_flex()
+                        .id("tray")
+                        .mx(px(GUTTER))
+                        .mt(px(8.))
+                        .p(px(8.))
+                        .gap(px(8.))
+                        .items_center()
+                        .rounded(px(RADIUS))
+                        .bg(p.surface)
+                        .overflow_x_scroll()
+                        .children(cells)
+                        .when(photo, |el| {
+                            el.child(
+                                div()
+                                    .id("tray-hd")
+                                    .flex_none()
+                                    .h(px(36.))
+                                    .px(px(14.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded_full()
+                                    .text_size(fs(14.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .cursor_pointer()
+                                    .when(hd, |el| el.bg(p.text).text_color(p.ground))
+                                    .when(!hd, |el| el.bg(p.raised).text_color(p.muted).hover(|el| el.text_color(p.text)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.preview.hd = !this.preview.hd;
+                                        cx.notify();
+                                    }))
+                                    .child("HD"),
+                            )
+                        }),
+                )
                 .into_any_element(),
         )
     }

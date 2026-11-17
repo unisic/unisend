@@ -130,3 +130,5 @@ The common acts take one gesture, and each also has a slower way that can be fou
   under it, where the thumb is, a row of labelled round buttons (52, on `raised`) for File, GIF,
   Location, Contact and Poll, each shown only where it works. Choosing photos puts Send in that
   row's place. Without the sheet (desktop) the paperclip opens a sheet of the same entries as rows.
+- On desktop attached files wait in a tray over the composer (88 thumbnails on `surface`, an X in
+  each corner), not a full-screen preview; Enter sends them with the text.

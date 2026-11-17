@@ -1267,19 +1267,29 @@ impl BeeperApp {
         }
         let body = self.composer.read(cx).value().trim().to_string();
         let Some(room) = self.open.clone() else { return };
-        if body.is_empty() || self.text_limit(cx).is_some_and(|(len, max)| len > max) {
-            return;
-        }
         let (reply_to, edit) = match self.compose.clone() {
             Compose::New => (None, None),
             Compose::Reply(id) => (Some(id), None),
             Compose::Edit(id) => (None, Some(id)),
         };
-        let mentions = self.picked_mentions(cx);
-        let preview = self.link.as_ref().filter(|l| l.room == room && edit.is_none() && matches!(l.made, Made::Shown { .. }) && body.contains(&l.url)).map(|l| l.url.clone());
-        let with_preview = preview.is_some();
-        if self.send(Cmd::Send { room: room.clone(), body, reply_to, edit, mentions, preview }, cx) {
-            self.uploads += usize::from(with_preview);
+        // Files waiting in the tray go with what is typed, even nothing; an edit is sent on its own.
+        let tray = edit.is_none() && self.tray_room() == Some(&room);
+        if (body.is_empty() && !tray) || self.text_limit(cx).is_some_and(|(len, max)| len > max) {
+            return;
+        }
+        let sent = if tray {
+            self.send_tray(body, reply_to, window, cx)
+        } else {
+            let mentions = self.picked_mentions(cx);
+            let preview = self.link.as_ref().filter(|l| l.room == room && edit.is_none() && matches!(l.made, Made::Shown { .. }) && body.contains(&l.url)).map(|l| l.url.clone());
+            let with_preview = preview.is_some();
+            let sent = self.send(Cmd::Send { room: room.clone(), body, reply_to, edit, mentions, preview }, cx);
+            if sent {
+                self.uploads += usize::from(with_preview);
+            }
+            sent
+        };
+        if sent {
             self.close_link(false, cx);
             self.link_closed = None;
             self.strip_sent = matches!(self.compose, Compose::Reply(_));
@@ -1318,7 +1328,7 @@ impl BeeperApp {
             // Android's back is a gesture and animates; a desktop's Escape is a key and does not.
             self.dismiss_viewer(gpui_kit::is_mobile(), cx);
         } else if self.close_confirm(cx) || self.close_delete(cx) {
-        } else if self.preview.open() {
+        } else if self.preview.open() && !caption::tray() {
             self.close_preview(true, window, cx);
         } else if self.menu_open() {
             self.close_menu(cx);
@@ -2969,7 +2979,7 @@ impl BeeperApp {
         let read_only = self.published().is_some_and(|f| !f.post);
         let limit = self.text_limit(cx);
         let over = limit.is_some_and(|(len, max)| len > max);
-        let idle = !mic && self.composer.read(cx).value().trim().is_empty();
+        let idle = !mic && self.composer.read(cx).value().trim().is_empty() && self.tray_room().is_none_or(|r| self.open.as_ref() != Some(r));
         let send_mode = transition(("send", "mode"), if mic { 0. } else { 1. }, motion::exit(), window, cx);
         let own_frame = frame::reserve(window) > 0.;
         let end = self.chat_end(window);
@@ -3064,6 +3074,7 @@ impl BeeperApp {
                     .children(self.render_unlock_hint(cx))
                     .children(self.render_typing(window, cx))
                     .children(self.render_compose_strip(window, cx))
+                    .children(self.render_tray(window, cx))
                     .children(self.render_link_card(window, cx))
                     .children(self.render_mentions(cx))
                     .when_some(limit.filter(|&(len, max)| len * 5 >= max * 4), |el, (len, max)| {
