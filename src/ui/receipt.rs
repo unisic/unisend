@@ -48,7 +48,8 @@ impl IncomingStatus {
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Always => t!("Under the newest"),
-            Self::OnTap => t!("On tap"),
+            Self::OnTap if gpui_kit::is_mobile() => t!("On tap"),
+            Self::OnTap => t!("On click"),
         }
     }
 }
