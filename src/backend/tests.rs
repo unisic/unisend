@@ -1080,6 +1080,9 @@ fn errors_lose_their_urls_and_retries_slow_down() {
     assert_eq!(plain(&error), "Message not sent: error sending request: connection reset");
     assert_eq!(plain(&"no address here"), "no address here");
     assert_eq!(plain(&"cut off for url (https://example.org"), "cut off");
+    assert_eq!(told(error), "Message not sent: No connection to the server");
+    assert_eq!(told("error sending request: client error (Connect): tcp connect error: Connection refused (os error 111)"), "No connection to the server");
+    assert_eq!(told("Could not load messages: M_FORBIDDEN"), "Could not load messages: M_FORBIDDEN");
     let waits: Vec<u64> = (1..=7).map(|failed| retry_wait(failed).as_secs()).collect();
     assert_eq!(waits, [5, 10, 20, 40, 60, 60, 60]);
 }

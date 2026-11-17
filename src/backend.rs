@@ -3242,6 +3242,17 @@ pub(crate) fn plain(error: &dyn std::fmt::Display) -> String {
     text
 }
 
+/// What a person is told of an error: a request that never reached the server says only that.
+pub(crate) fn told(error: &str) -> String {
+    match error.find(UNREACHABLE) {
+        Some(at) => format!("{}{}", &error[..at], t!("No connection to the server")),
+        None => plain(&error),
+    }
+}
+
+/// How the HTTP client words a request that never reached the server (refused, no DNS, timed out).
+pub(crate) const UNREACHABLE: &str = "error sending request";
+
 pub(crate) fn utd() -> &'static str {
     t!("Unable to decrypt this message yet")
 }

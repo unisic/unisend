@@ -287,6 +287,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("This is your Beeper account's name and picture. WhatsApp, Signal, Messenger and the other networks keep the name and picture you have there; change them in those apps.", "To nazwa i zdjęcie Twojego konta Beeper. WhatsApp, Signal, Messenger i inne sieci zachowują nazwę i zdjęcie, które masz u nich; zmienisz je w tamtych aplikacjach."),
     ("Type a full Matrix ID, like @name:matrix.org.", "Wpisz pełny identyfikator Matrix, np. @nazwa:matrix.org."),
     ("Needs a new sign-in", "Wymaga ponownego zalogowania"),
+    ("No connection to the server", "Brak połączenia z serwerem"),
     ("No connection, retrying…", "Brak połączenia, ponawianie…"),
     ("Not set up yet", "Jeszcze nieskonfigurowana"),
     ("Not working", "Nie działa"),

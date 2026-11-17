@@ -1022,7 +1022,9 @@ impl BeeperApp {
             Ev::Exported(id, path, what) => self.exported(id, path, what, cx),
             Ev::Error(e) => {
                 self.row_return(cx);
-                let e = Some(crate::backend::plain(&e).into());
+                // While offline the banner already says the server cannot be reached.
+                let quiet = self.offline && !self.recovering && e.contains(crate::backend::UNREACHABLE);
+                let e = (!quiet).then(|| crate::backend::told(&e).into());
                 if std::mem::take(&mut self.recovering) { self.recovery_error = e } else { self.error = e }
                 self.busy = false;
                 self.loading = false;
