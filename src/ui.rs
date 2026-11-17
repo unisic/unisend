@@ -1820,7 +1820,8 @@ impl BeeperApp {
     }
 
     fn set_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
-        if tab == self.tab() {
+        // Chats is the new chat's tab too, yet pressing it there goes back to the list.
+        if tab == self.tab() && self.panel != Some(Panel::NewChat) {
             if tab == Tab::Settings && !self.settings_pages.is_empty() {
                 self.settings_pages.clear();
                 cx.notify();
@@ -4613,7 +4614,9 @@ impl BeeperApp {
                 // A wide desktop window keeps them to the column they are about, not its full width.
                 let in_column = !narrow && !gpui_kit::is_mobile();
                 let mut banners = in_column.then(|| self.render_banners(window, cx).into_any_element());
-                let panel = self.panel.map(|panel| self.render_panel(panel, narrow, banners.take(), window, cx));
+                // A new chat and the networks stand in the list's column on a wide window: laid out as narrow.
+                let column = matches!(self.panel, Some(Panel::NewChat | Panel::Networks));
+                let panel = self.panel.map(|panel| self.render_panel(panel, narrow || column, banners.take(), window, cx));
                 let body = if narrow {
                     let deep_panel = matches!(self.panel, Some(Panel::Add | Panel::Account | Panel::Login | Panel::NewChat));
                     match self.panel {
@@ -4706,17 +4709,18 @@ impl BeeperApp {
                 } else {
                     self.slide.jump = false;
                     let beside = Self::info_beside(window);
-                    // A new chat is picked in the list's column, as in Signal, beside the chat still open.
+                    // A new chat is picked, and the networks are listed, in the list's column, as Settings
+                    // are; the chat stays open beside them.
                     let main = match panel {
-                        Some(panel) if self.panel != Some(Panel::NewChat) => div().flex_1().min_w_0().h_full().child(panel).into_any_element(),
-                        column => {
-                            let column = column.unwrap_or_else(|| self.render_rooms(banners.take(), window, cx).into_any_element());
+                        Some(panel) if !column => div().flex_1().min_w_0().h_full().child(panel).into_any_element(),
+                        in_list => {
+                            let list = in_list.unwrap_or_else(|| self.render_rooms(banners.take(), window, cx).into_any_element());
                             h_flex()
                             .flex_1()
                             .min_w_0()
                             .h_full()
                             // The one line between the panes, so the list and the conversation read as two.
-                            .child(div().w(px(LIST_W)).flex_none().h_full().border_r_1().border_color(p.rule).child(column))
+                            .child(div().w(px(LIST_W)).flex_none().h_full().border_r_1().border_color(p.rule).child(list))
                             .child(div().flex_1().min_w_0().h_full().child(if self.info_open() && !beside {
                                 self.render_info(false, window, cx)
                             } else if self.open.is_some() {
