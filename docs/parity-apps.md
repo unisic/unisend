@@ -25,7 +25,7 @@ N impossible over Matrix or bridges.
 | Polls | Y | Y | N | P | `ui/pollnew.rs`, `backend/polls.rs` | B |
 | Location, send | P (no live) | Y + live | N | Y + live | `ui/location.rs`, `backend/location.rs` | B; live N |
 | Contact cards | Y | Y | N | N | `src/vcard.rs`, `ui/contacts.rs` | B |
-| Link previews (generated) | Y (sender side) | Y | Y | Y | shown only when the message carries one | B |
+| Link previews (generated) | Y (sender side) | Y | Y | Y | `backend/linkprev.rs`, `ui/linkdraft.rs`, made by the sender | B |
 | Disappearing messages | Y | Y | Y (vanish) | Y | `backend/disappear.rs`, `ui/disappear.rs` | B |
 | View-once media | Y | Y | Y | Y | missing; forward refuses it | N (no standard event) |
 | Calls (voice, video) | Y | Y | Y | Y | missing | N over bridges; Matrix-native calls only |
