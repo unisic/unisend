@@ -137,11 +137,23 @@ pub(super) fn linked(id: String, styled: StyledText, links: Vec<Range<usize>>, t
     if links.is_empty() {
         return styled.into_any_element();
     }
-    InteractiveText::new(SharedString::from(id), styled)
-        .on_click(links, move |at, _, cx| {
+    let layout = styled.layout().clone();
+    let (ranges, urls) = (links.clone(), targets.clone());
+    div()
+        .id(SharedString::from(format!("{id}-tap")))
+        // InteractiveText hears a release only a frame after the press; a tap on Android brings both at once.
+        .on_click(move |e, _, cx| {
+            if let Ok(ix) = layout.index_for_position(e.position())
+                && let Some(at) = ranges.iter().position(|r| r.contains(&ix))
+            {
+                cx.stop_propagation();
+                crate::open_link(cx, &urls[at]);
+            }
+        })
+        .child(InteractiveText::new(SharedString::from(id), styled).on_click(links, move |at, _, cx| {
             // The bubble under the text opens the message's menu on a click; a link does not.
             cx.stop_propagation();
             crate::open_link(cx, &targets[at]);
-        })
+        }))
         .into_any_element()
 }
