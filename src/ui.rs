@@ -1870,9 +1870,8 @@ impl BeeperApp {
             keys::Act::FindInChat if chat.is_some() => self.open_find(window, cx),
             keys::Act::Settings => self.set_tab(Tab::Settings, window, cx),
             keys::Act::Emoji if chat.is_some() && !self.published().is_some_and(|f| !f.post) => {
-                // The picker hangs over the button the pointer pressed; with no pointer it hangs over the composer's middle.
-                let view = window.viewport_size();
-                self.emoji_pick.at = point(view.width * 0.5, view.height - px(40.));
+                // The picker hangs over the button the pointer would have pressed.
+                self.emoji_pick.at = self.emoji_pick.button.get();
                 self.toggle_emoji_panel(window, cx);
             }
             keys::Act::Archive | keys::Act::MarkUnread => {
@@ -1932,6 +1931,10 @@ impl BeeperApp {
             self.search.update(cx, |input, cx| input.focus(window, cx));
         } else {
             self.search.update(cx, |input, cx| input.set_value("", window, cx));
+            // A hidden field keeping the focus would take Escape and every key from the root.
+            if self.search.read(cx).focus_handle(cx).is_focused(window) {
+                window.focus(&self.focus, cx);
+            }
         }
         self.refilter(cx);
     }
@@ -2925,6 +2928,11 @@ impl BeeperApp {
                             .child(round_button("attach", IconName::Paperclip, cx).text_color(p.muted).on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.attach(e.position(), cx))))
                             .child(
                                 round_button("emoji", IconName::FaceSlightlySmiling, cx)
+                                    .relative()
+                                    .child({
+                                        let button = self.emoji_pick.button.clone();
+                                        canvas(|_, _, _| {}, move |bounds, _, _, _| button.set(bounds.center())).absolute().inset_0()
+                                    })
                                     .text_color(if self.emoji_open == Some(emojipick::Target::Composer) { p.text } else { p.muted })
                                     .on_click(cx.listener(|this, e: &ClickEvent, window, cx| {
                                         this.emoji_pick.at = e.position();

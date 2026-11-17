@@ -210,6 +210,8 @@ pub(super) struct Picker {
     tones: bool,
     /// Where the pointer opened the composer's picker: on a desktop it opens there, over the chat.
     pub at: Point<Pixels>,
+    /// The composer's emoji button as last painted: the keyboard shortcut opens the picker there too.
+    pub button: Rc<Cell<Point<Pixels>>>,
 }
 
 impl Picker {
@@ -228,6 +230,7 @@ impl Picker {
             built: None,
             sheet: SheetMotion::default(),
             at: Point::default(),
+            button: Rc::default(),
             width: Rc::default(),
             tones: false,
         }
