@@ -1030,6 +1030,26 @@ fn notifications_follow_the_push_rules() {
 }
 
 #[test]
+fn a_notification_holds_only_what_was_not_read() {
+    use matrix_sdk::ruma::{event_id, room_id};
+    let from = matrix_sdk::ruma::user_id!("@a:example.org").to_owned();
+    let msgs: Vec<Msg> = ["$1", "$2", "$3"].map(|id| Msg::bare(id.into(), Kind::Message, from.clone())).into();
+    let ids = |part: &[Msg]| part.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+    // Read on the phone up to the second, and the third came in the same sync.
+    assert_eq!(ids(after_read(&msgs, Some(event_id!("$2")))), ["$3"]);
+    assert_eq!(ids(after_read(&msgs, Some(event_id!("$0")))), ["$1", "$2", "$3"], "read further back: all are new");
+    assert_eq!(ids(after_read(&msgs, None)).len(), 3);
+    let (room, mut marks) = (room_id!("!r:example.org"), ReadMarks::new());
+    let (one, two, three) = (Some(event_id!("$1")), Some(event_id!("$2")), Some(event_id!("$3")));
+    assert!(!read_moved(&mut marks.clone(), room, one, None), "nothing to compare with: the notification stays");
+    assert!(!read_moved(&mut marks.clone(), room, one, one), "a full sync at start repeats the kept receipt");
+    assert!(read_moved(&mut marks, room, two, one), "read elsewhere while the app was away");
+    assert!(!read_moved(&mut marks, room, two, one), "the same receipt again");
+    assert!(read_moved(&mut marks, room, three, one), "read since: the old lines go");
+    assert!(!read_moved(&mut marks, room, None, three), "no receipt in this sync");
+}
+
+#[test]
 fn mentions_are_found_in_the_body() {
     let html = r#"Liquid chc\u{119} <a href="https://matrix.to/#/@facebookgo_1:beeper.local">Adam Nowak</a> i <a href="https://matrix.to/#/%40me%3Abeeper.com?via=beeper.com"><b>Ala &amp; Ola</b></a>, <a href="https://example.org">link</a>"#;
     let linked = linked_users(html);

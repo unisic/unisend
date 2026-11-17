@@ -44,7 +44,7 @@ use matrix_sdk::{
             error::ErrorKind,
         },
         events::{
-            AnySyncMessageLikeEvent, AnySyncTimelineEvent, Mentions, StateEventType, SyncMessageLikeEvent,
+            AnySyncEphemeralRoomEvent, AnySyncMessageLikeEvent, AnySyncTimelineEvent, Mentions, StateEventType, SyncMessageLikeEvent,
             room::{
                 EncryptedFile, MediaSource,
                 message::{
@@ -2516,10 +2516,53 @@ fn on_screen(dir: &Path) -> bool {
     crate::FOREGROUND.load(std::sync::atomic::Ordering::Relaxed) && crate::accounts::slot_of(dir) == crate::accounts::active()
 }
 
+/// Where the user's own read receipt in a chat stands, the last time each chat came by.
+type ReadMarks = HashMap<OwnedRoomId, OwnedEventId>;
+
+/// Whether the user read the chat somewhere since it last came by: this sync brings their receipt
+/// (`fresh`; a reply moves it too) and it differs from the last one seen, or at a chat's first
+/// sync from the one the SDK kept (`stored`). A chat with neither has nothing to compare, so a
+/// full sync at start leaves the notifications standing.
+fn read_moved(marks: &mut ReadMarks, room: &RoomId, fresh: Option<&EventId>, stored: Option<&EventId>) -> bool {
+    let Some(fresh) = fresh else { return false };
+    let before = marks.insert(room.to_owned(), fresh.to_owned());
+    before.as_deref().or(stored).is_some_and(|before| before != fresh)
+}
+
+/// The user's own read receipt that a sync brings for a chat, from any of their devices: public or
+/// private, on the main timeline, the newest when there are several. Read here and not from the
+/// SDK's room, whose receipt the event cache moves only after the sync loop has seen the chat.
+fn own_receipt(ephemeral: &[Raw<AnySyncEphemeralRoomEvent>], own: &UserId) -> Option<OwnedEventId> {
+    use matrix_sdk::ruma::events::receipt::{ReceiptThread, ReceiptType};
+    let receipts = ephemeral.iter().filter_map(|raw| match raw.deserialize().ok()? {
+        AnySyncEphemeralRoomEvent::Receipt(ev) => Some(ev.content.0),
+        _ => None,
+    });
+    let mine = receipts.flatten().flat_map(|(event, kinds)| {
+        kinds
+            .into_iter()
+            .filter(|(kind, _)| matches!(kind, ReceiptType::Read | ReceiptType::ReadPrivate))
+            .filter_map(|(_, users)| users.get(own).filter(|r| matches!(r.thread, ReceiptThread::Unthreaded | ReceiptThread::Main)).map(|r| r.ts))
+            .map(move |ts| (ts, event.clone()))
+            .collect::<Vec<_>>()
+    });
+    mine.max_by_key(|(ts, _)| *ts).map(|(_, event)| event)
+}
+
+/// The messages after the one the user has read up to, when it is among them.
+fn after_read<'a>(msgs: &'a [Msg], read: Option<&EventId>) -> &'a [Msg] {
+    match read.and_then(|read| msgs.iter().position(|m| m.id == read.as_str())) {
+        Some(at) => &msgs[at + 1..],
+        None => msgs,
+    }
+}
+
 /// Notifies while the window does not show the account; clears the chat's notification once it
-/// has been read somewhere.
-fn announce(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, prev: Option<&RoomSummary>, msgs: &[Msg]) {
-    if summary.unread == 0 && prev.is_some_and(|p| p.unread > 0) {
+/// has been read somewhere, so a notification holds only messages not read yet.
+/// `msgs`: those after the user's read receipt.
+fn announce(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, prev: Option<&RoomSummary>, msgs: &[Msg], moved: bool) {
+    // The count alone misses a read that came with a newer message in one sync.
+    if moved || summary.unread == 0 && prev.is_some_and(|p| p.unread > 0) {
         crate::clear_notification(&crate::accounts::key(crate::accounts::slot_of(dir), summary.id.as_str()));
     }
     let theirs = msgs.iter().filter(|m| !m.own).count();
@@ -3173,6 +3216,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
     // Requests failed in a row.
     let mut failed = 0u32;
     let mut synced = false;
+    // Bounded by the account's chats.
+    let mut read_marks = ReadMarks::new();
     while let Some(resp) = stream.next().await {
         let resp = match resp {
             Ok(r) => r,
@@ -3255,7 +3300,11 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
             let mut summary = summarize(&room, &notif, peer, seen).await;
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
-            announce(&client, &dir, &rooms, &summary, prev.as_ref(), &msgs);
+            // The SDK's receipt is the last sync's: its event cache takes this one after the loop.
+            let (fresh, stored) = (own_receipt(&update.ephemeral, room.own_user_id()), room.read_receipts().latest_active.map(|r| r.event_id));
+            let read = fresh.clone().or_else(|| read_marks.get(id).cloned()).or_else(|| stored.clone());
+            let moved = read_moved(&mut read_marks, id, fresh.as_deref(), stored.as_deref());
+            announce(&client, &dir, &rooms, &summary, prev.as_ref(), after_read(&msgs, read.as_deref()), moved);
             amend_notes(&dir, &summary, &amends);
             // Typing, receipts and room account data bring a room here without changing its row.
             if prev.as_ref() != Some(&summary) {
