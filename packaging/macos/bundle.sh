@@ -12,7 +12,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 sed "s/@VERSION@/$version/g" "$here/Info.plist" > "$app/Contents/Info.plist"
 printf 'APPL????' > "$app/Contents/PkgInfo"
 cp "$bin" "$app/Contents/MacOS/beeper-gpui"
-cp "$here/Unisend.icns" "$app/Contents/Resources/Unisend.icns"
+cp "$here/Unisend.icns" "$here/Assets.car" "$app/Contents/Resources/"
 chmod 755 "$app/Contents/MacOS/beeper-gpui"
 # Ad hoc: no identity, so Gatekeeper still blocks a downloaded copy until the user allows it.
 codesign --force --deep --sign - "$app"
