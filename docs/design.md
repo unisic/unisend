@@ -58,6 +58,10 @@ Rows 72 tall, avatar 48. Line one: the name, then the network and the time on th
 `faint`. Line two: the preview in `muted`, then what needs you: an accent count, an accent `@`
 when you were mentioned. Unread rows have a white bold name and a white preview.
 
+A Telegram forum is one row: its picture and name, the newest topic before the preview, the
+topics' unread added up. Touching it puts its topics in the list's place under a back arrow and
+the forum's name, as rows of their own with the topic's initials; a topic opens as a chat.
+
 ## Conversation
 
 Incoming messages sit left on `surface`, own messages right on `raised`. In a group, each run of

@@ -966,6 +966,7 @@ fn archive_rule_matches_beeper() {
         ts,
         network: None,
         parent: None,
+        forum: None,
         unread,
         mentions: 0,
         dm: false,

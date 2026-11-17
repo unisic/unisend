@@ -382,6 +382,9 @@ pub struct RoomSummary {
     /// The server, workspace, forum or community the chat belongs to, from `m.bridge` `network`.
     #[serde(default)]
     pub parent: Option<String>,
+    /// A Telegram forum topic: the forum's id from `m.bridge` `network` (`forum::forum_id`).
+    #[serde(default)]
+    pub forum: Option<String>,
     #[serde(default)]
     pub unread: u64,
     /// Unread messages that mention the user.
@@ -2630,6 +2633,7 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>, live: bool) -> Room
         ts: prev.map_or(if live { now_ms() as u64 } else { 0 }, |p| p.ts),
         network: None,
         parent: None,
+        forum: None,
         unread: 0,
         mentions: 0,
         dm,
@@ -2959,11 +2963,12 @@ async fn summarize(
         _ if room.name().is_none() && room.canonical_alias().is_none() && let Some(title) = unnamed_group(room).await => title,
         _ => room.display_name().await.map(|n| n.to_string()).unwrap_or_else(|_| seen.id.to_string()),
     };
-    let (network, parent) = match (seen.network, seen.parent) {
-        (Some(n), Some(p)) => (Some(n), Some(p)),
-        (n, p) => {
-            let (found, parent) = bridge_names(room).await;
-            (n.or(found), p.or(parent))
+    // A chat with a parent and no forum is read again: a cache from before forums lacks `forum`.
+    let (network, parent, forum) = match (seen.network, seen.parent, seen.forum) {
+        (Some(n), Some(p), Some(f)) => (Some(n), Some(p), Some(f)),
+        (n, p, f) => {
+            let (found, parent, forum) = bridge_names(room).await;
+            (n.or(found), p.or(parent), f.or(forum))
         }
     };
     let mode = notif.get_user_defined_room_notification_mode(room.room_id()).await;
@@ -2979,6 +2984,7 @@ async fn summarize(
         name,
         network,
         parent,
+        forum,
         dm: peer.is_some() || note,
         note,
         preview: current(seen.preview),
@@ -3212,6 +3218,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 ts: newest.unwrap_or(0),
                 network: prev.as_ref().and_then(|p| p.network.clone()),
                 parent: prev.as_ref().and_then(|p| p.parent.clone()),
+                forum: prev.as_ref().and_then(|p| p.forum.clone()),
                 order: order.max().max(prev.as_ref().map(|p| p.order)).unwrap_or(0),
                 unread: 0,
                 dm,
@@ -3770,24 +3777,27 @@ async fn protocol_id(room: &Room) -> Option<String> {
     })
 }
 
-/// The bridge's name for the network, and the name of the chat's parent (a Discord server, a
-/// Slack workspace, a Telegram forum, a WhatsApp community) when `m.bridge` has one.
-async fn bridge_names(room: &Room) -> (Option<String>, Option<String>) {
+/// The bridge's name for the network, the name of the chat's parent (a Discord server, a Slack
+/// workspace, a Telegram forum, a WhatsApp community) when `m.bridge` has one, and the forum's id
+/// when the chat is a Telegram forum topic.
+async fn bridge_names(room: &Room) -> (Option<String>, Option<String>, Option<String>) {
     #[derive(Deserialize)]
     struct Section {
         id: Option<String>,
         displayname: Option<String>,
     }
-    let Ok(events) = room.get_state_events(StateEventType::from("m.bridge")).await else { return (None, None) };
+    let Ok(events) = room.get_state_events(StateEventType::from("m.bridge")).await else { return (None, None, None) };
     let found = events.iter().find_map(|e| {
         let RawAnySyncOrStrippedState::Sync(raw) = e else { return None };
         let content: serde_json::Value = raw.get_field("content").ok()??;
         let section = |key: &str| content.get(key).and_then(|v| serde_json::from_value::<Section>(v.clone()).ok());
         let protocol = section("protocol")?;
-        let parent = section("network").and_then(|n| n.displayname).filter(|n| !n.trim().is_empty());
-        Some((protocol.displayname.or(protocol.id), parent))
+        let network = section("network");
+        let forum = forum::forum_id(protocol.id.as_deref(), network.as_ref().and_then(|n| n.id.as_deref()));
+        let parent = network.and_then(|n| n.displayname).filter(|n| !n.trim().is_empty());
+        Some((protocol.displayname.or(protocol.id), parent, forum))
     });
-    found.unwrap_or((None, None))
+    found.unwrap_or((None, None, None))
 }
 
 /// Room avatar, or for a one-to-one chat the other person's, as a small thumbnail.
@@ -3984,6 +3994,7 @@ pub use search::Hit;
 pub(crate) use search::{MAX_HITS, MIN_QUERY, save as save_search};
 
 pub(crate) mod rooms;
+pub(crate) mod forum;
 
 mod export;
 pub use export::Export;
