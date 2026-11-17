@@ -741,6 +741,7 @@ impl BeeperApp {
                         .child(choice(Page::SwipeRight, right, cx)),
                 ),
             )
+            .children(self.render_shared_inbox(cx))
             .when(!gpui_kit::is_mobile(), |el| {
                 let keys = link("keyboard-shortcuts", t!("Keyboard shortcuts"), "".into(), None, Some(IconName::ChevronRight), cx).on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx)));
                 el.child(card(cx).child(keys))

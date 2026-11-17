@@ -19,7 +19,7 @@ is not started.
 | Device verification by another device (QR, emoji) | todo | `m.key.verification.*` |
 | Chat networks: list, sign in, sign out | part | cloud bridges only: `api.beeper.com/whoami`, `POST /bridge/{name}/start`, then the bridge's mautrix provisioning API (`/v3/whoami`, `login/flows`, `login/start`, `login/step`, `logout`) proxied at `matrix.beeper.com/_matrix/client/unstable/com.beeper.bridge/{name}/`. Steps: form fields, QR or code, browser cookies (in-app browser on Android and Linux, paste on Windows and macOS, and on Linux when its browser cannot open). Not yet: cookie sources other than cookies, re-login of a broken account, Beeper's browser-session import |
 | On-device bridges | todo | Beeper runs local mautrix bridges inside the client |
-| Multiple accounts, account filter, spaces bar | todo | `m.space`, `com.beeper.chat_list_rules` |
+| Multiple accounts, account filter, spaces bar | part | up to three accounts side by side, each with its own backend, switched in Settings (`src/accounts.rs`). A shared inbox, opt-in per account on this device (`Settings::shared_inbox`), lists their chats together, each marked with its account's picture; opening one turns the window to its account. Todo: spaces bar (`m.space`), Beeper's chat list rules (`com.beeper.chat_list_rules`) |
 | Connection state (offline, syncing, reconnect) | part | one quiet line while the connection is lost and retried (5 s doubling to 60 s); no syncing indicator |
 
 ## Chat list

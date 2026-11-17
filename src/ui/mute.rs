@@ -23,10 +23,11 @@ fn now_ms() -> u64 {
 impl BeeperApp {
     /// Sets how the chat notifies; `for_ms` ends a mute after that long, `None` keeps it.
     pub(super) fn set_mute(&mut self, room: OwnedRoomId, mode: RoomNotificationMode, for_ms: Option<u64>, cx: &mut Context<Self>) -> bool {
-        if !self.send(Cmd::Chat(room.clone(), ChatAction::Mute(mode)), cx) {
+        if !self.send_for(&room, Cmd::Chat(room.clone(), ChatAction::Mute(mode)), cx) {
             return false;
         }
-        let ends = self.settings.mute_ends(self.accounts.active());
+        let slot = self.slot_of_room(&room);
+        let ends = self.settings.mute_ends(slot);
         match for_ms {
             Some(ms) => remember(ends, room, now_ms() + ms),
             None if ends.remove(&room).is_none() => return true,
@@ -136,7 +137,7 @@ impl BeeperApp {
                 true
             }
             ChatAction::Mute(mode) => self.set_mute(room, mode, None, cx),
-            action => self.send(Cmd::Chat(room, action), cx),
+            action => self.send_for(&room, Cmd::Chat(room.clone(), action), cx),
         }
     }
 }

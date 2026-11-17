@@ -384,6 +384,9 @@ pub(crate) struct Settings {
     /// The account the window showed last, by slot.
     #[serde(default)]
     pub account: usize,
+    /// The accounts, by slot, whose chats share one list while one of them is shown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_inbox: Vec<usize>,
     /// What a message's notification shows.
     #[serde(default)]
     pub notify_shows: NotifyShows,
@@ -413,7 +416,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), mute_until: Default::default(), mute_until_added: Default::default(), account: 0, notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new() })
     }
 
     /// The ends of the timed mutes of the account in `slot`.

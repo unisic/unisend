@@ -1,10 +1,13 @@
 //! The accounts signed in side by side, as Telegram keeps them: each has its own backend, which
 //! syncs and notifies whether or not the window shows it. Turning the window to another account
 //! builds the screen afresh for it; what the switcher shows of the others is kept here, and an
-//! account the window does not show never repaints it.
+//! account the window does not show never repaints it. The shared inbox, opt-in per account,
+//! puts the chats of the others in it into the shown account's list: opening one turns the window
+//! to its account, which takes the list over as it was.
 
 use super::panels::card;
 use super::*;
+use gpui_kit::component::switch::Switch;
 use crate::accounts::MAX;
 use crate::backend::Backend;
 
@@ -153,6 +156,22 @@ impl Accounts {
     }
 }
 
+/// Whether the list takes chat `id` from the account in `slot`, not the one shown: it is new to
+/// the list, or that account's already. A chat two accounts are in stays with the first.
+fn joinable(id: &OwnedRoomId, listed: &HashSet<&OwnedRoomId>, elsewhere: &HashMap<OwnedRoomId, usize>, slot: usize) -> bool {
+    elsewhere.get(id).map_or(!listed.contains(id), |&s| s == slot)
+}
+
+/// Whose the chats of the list are once the window turns from account `leaving` to `next`: those
+/// of `leaving` become another account's, and those of `next` its own.
+fn handed_over<'a>(listed: impl Iterator<Item = &'a OwnedRoomId>, mut elsewhere: HashMap<OwnedRoomId, usize>, leaving: usize, next: usize) -> HashMap<OwnedRoomId, usize> {
+    for id in listed {
+        elsewhere.entry(id.clone()).or_insert(leaving);
+    }
+    elsewhere.retain(|_, s| *s != next);
+    elsewhere
+}
+
 /// A chat that counts as waiting in the chat list's header.
 pub(super) fn waiting(r: &RoomSummary) -> bool {
     !r.archived && !r.low_priority && r.is_unread()
@@ -179,7 +198,95 @@ impl BeeperApp {
 
     /// What a notification or share target names the chat by.
     pub(super) fn chat_key(&self, room: &matrix_sdk::ruma::RoomId) -> String {
-        crate::accounts::key(self.accounts.active, room.as_str())
+        crate::accounts::key(self.slot_of_room(room), room.as_str())
+    }
+
+    /// Whether the account in `slot`, not the one shown, has its chats in the list: the shared
+    /// inbox holds both, and it is signed in.
+    pub(super) fn shares(&self, slot: usize) -> bool {
+        let (shared, active) = (&self.settings.shared_inbox, self.accounts.active);
+        shared.contains(&active) && shared.contains(&slot) && self.accounts.others(active).any(|a| a.slot == slot)
+    }
+
+    /// The list holds the chats of more than one account.
+    pub(super) fn merged(&self) -> bool {
+        self.accounts.others(self.accounts.active).any(|a| self.shares(a.slot))
+    }
+
+    /// The account a chat in the list belongs to.
+    pub(super) fn slot_of_room(&self, room: &matrix_sdk::ruma::RoomId) -> usize {
+        self.elsewhere.get(room).copied().unwrap_or(self.accounts.active)
+    }
+
+    /// `send` to the backend of the account a chat in the list belongs to.
+    pub(super) fn send_for(&mut self, room: &matrix_sdk::ruma::RoomId, cmd: Cmd, cx: &mut Context<Self>) -> bool {
+        match self.elsewhere.get(room).and_then(|slot| self.accounts.get(*slot)).map(|a| a.cmd.clone()) {
+            Some(sender) => {
+                let ok = sender.try_send(cmd).is_ok();
+                if !ok {
+                    self.error = Some(t!("Still working on the previous request, try again").into());
+                }
+                cx.notify();
+                ok
+            }
+            None => self.send(cmd, cx),
+        }
+    }
+
+    /// `ids` split by the backend of the account each chat belongs to.
+    pub(super) fn by_account(&self, ids: Vec<OwnedRoomId>) -> Vec<(mpsc::Sender<Cmd>, Vec<OwnedRoomId>)> {
+        let mut out: Vec<(usize, mpsc::Sender<Cmd>, Vec<OwnedRoomId>)> = Vec::new();
+        for id in ids {
+            let slot = self.slot_of_room(&id);
+            if let Some((.., list)) = out.iter_mut().find(|(s, ..)| *s == slot) {
+                list.push(id);
+            } else if let Some(sender) = if slot == self.accounts.active { Some(self.cmd.clone()) } else { self.accounts.get(slot).map(|a| a.cmd.clone()) } {
+                out.push((slot, sender, vec![id]));
+            }
+        }
+        out.into_iter().map(|(_, sender, list)| (sender, list)).collect()
+    }
+
+    /// What another account of the shared inbox says of its chats, into the list.
+    fn joined_event(&mut self, slot: usize, ev: Ev, cx: &mut Context<Self>) {
+        match ev {
+            // Its chats from before it was signed in were not taken: they come again.
+            Ev::Ready { .. } => {
+                if let Some(a) = self.accounts.get(slot) {
+                    let _ = a.cmd.try_send(Cmd::Replay);
+                }
+            }
+            Ev::Rooms(rooms) => {
+                // A chat the list has from another account stays that one's.
+                let listed: HashSet<&OwnedRoomId> = self.rooms.iter().map(|r| &r.id).collect();
+                let theirs: Vec<RoomSummary> = rooms.into_iter().filter(|r| joinable(&r.id, &listed, &self.elsewhere, slot)).collect();
+                for r in &theirs {
+                    self.elsewhere.insert(r.id.clone(), slot);
+                }
+                if !theirs.is_empty() {
+                    self.read_their_drafts(slot);
+                    self.merge_rooms(theirs, cx);
+                }
+            }
+            Ev::RoomGone(id) if self.elsewhere.get(&id) == Some(&slot) => {
+                self.elsewhere.remove(&id);
+                self.rooms.retain(|r| r.id != id);
+                self.refilter(cx);
+            }
+            ev @ Ev::Avatar(..) => self.on_event(ev, cx),
+            _ => {}
+        }
+    }
+
+    /// Takes the chats of the account in `slot` out of the list.
+    fn part_rooms(&mut self, slot: usize, cx: &mut Context<Self>) {
+        let gone: HashSet<OwnedRoomId> = self.elsewhere.iter().filter(|&(_, &s)| s == slot).map(|(id, _)| id.clone()).collect();
+        self.their_drafts.remove(&slot);
+        if !gone.is_empty() {
+            self.elsewhere.retain(|id, _| !gone.contains(id));
+            self.rooms.retain(|r| !gone.contains(&r.id));
+            self.refilter(cx);
+        }
     }
 
     fn account_event(&mut self, slot: usize, ev: Ev, cx: &mut Context<Self>) {
@@ -264,8 +371,15 @@ impl BeeperApp {
             if ready && let Some(id) = self.accounts.opening.take() {
                 self.show_chat(id, cx);
             }
-        } else if changed && self.accounts.open && self.panel == Some(Panel::Settings) {
-            cx.notify();
+        } else {
+            if changed && self.accounts.open && self.panel == Some(Panel::Settings) {
+                cx.notify();
+            }
+            if self.shares(slot) {
+                self.joined_event(slot, ev, cx);
+            } else if matches!(ev, Ev::NeedLogin) {
+                self.part_rooms(slot, cx);
+            }
         }
     }
 
@@ -274,6 +388,12 @@ impl BeeperApp {
     /// runs on, signed out, as it holds the device's settings. The window turns to another account.
     fn drop_account(&mut self, slot: usize, cx: &mut Context<Self>) {
         crate::clear_account_notifications(slot);
+        self.part_rooms(slot, cx);
+        // An account signed in later in its place starts outside the shared inbox.
+        if self.settings.shared_inbox.contains(&slot) {
+            self.settings.shared_inbox.retain(|&s| s != slot);
+            self.settings.save(&self.dir);
+        }
         if self.settings.mute_ends_of(slot).is_some_and(|ends| !ends.is_empty()) {
             self.settings.mute_ends(slot).clear();
             self.settings.mute_until_added.remove(&slot);
@@ -346,7 +466,8 @@ impl BeeperApp {
         if self.open.is_some() {
             let _ = self.cmd.try_send(Cmd::Close);
         }
-        let unread: HashSet<OwnedRoomId> = self.rooms.iter().filter(|r| waiting(r)).map(|r| r.id.clone()).collect();
+        let unread: HashSet<OwnedRoomId> = self.rooms.iter().filter(|r| waiting(r) && !self.elsewhere.contains_key(&r.id)).map(|r| r.id.clone()).collect();
+        let carried = self.carried(slot);
         let (name, picture) = self.profile.take();
         let leaving = self.accounts.active;
         if let Some(a) = self.accounts.get_mut(leaving) {
@@ -374,8 +495,71 @@ impl BeeperApp {
         self.profile.show(name, picture);
         // The old screen's focus went with it; keys reach the app again through the new one's.
         window.focus(&self.focus, cx);
+        let joined = carried.is_some();
+        if let Some((rooms, elsewhere, scroll)) = carried {
+            (self.rooms, self.elsewhere, self.rooms_scroll) = (rooms, elsewhere, scroll);
+            let slots: HashSet<usize> = self.elsewhere.values().copied().collect();
+            for slot in slots {
+                self.read_their_drafts(slot);
+            }
+            self.refilter(cx);
+        }
         self.replay(open, cx);
+        if !joined {
+            self.rejoin();
+        }
         self.error = notice;
+        cx.notify();
+    }
+
+    /// The list the screen of the account in `next` starts with, when the shared inbox holds both:
+    /// the same chats in the same place, those of `next` now its own.
+    fn carried(&mut self, next: usize) -> Option<(Vec<RoomSummary>, HashMap<OwnedRoomId, usize>, UniformListScrollHandle)> {
+        if !self.shares(next) {
+            return None;
+        }
+        let elsewhere = handed_over(self.rooms.iter().map(|r| &r.id), std::mem::take(&mut self.elsewhere), self.accounts.active, next);
+        Some((std::mem::take(&mut self.rooms), elsewhere, self.rooms_scroll.clone()))
+    }
+
+    /// Reads the drafts of another account of the shared inbox once per screen: they change only
+    /// while that account is shown, and a switch builds the screen anew. At most 800 kB each.
+    fn read_their_drafts(&mut self, slot: usize) {
+        if let Some(a) = self.accounts.get(slot)
+            && !self.their_drafts.contains_key(&slot)
+        {
+            let drafts = navigate::Drafts::load(&crate::accounts::dir(&self.dir, slot), a.seal.clone());
+            self.their_drafts.insert(slot, drafts);
+        }
+    }
+
+    /// The unsent text of a chat in the list, whichever account it is of.
+    pub(super) fn draft_of(&self, id: &OwnedRoomId) -> Option<&str> {
+        match self.elsewhere.get(id) {
+            Some(slot) => self.their_drafts.get(slot)?.get(id),
+            None => self.drafts.get(id),
+        }
+    }
+
+    /// Asks each other account of the shared inbox for its chats again.
+    fn rejoin(&self) {
+        for a in self.accounts.others(self.accounts.active).filter(|a| self.shares(a.slot)) {
+            let _ = a.cmd.try_send(Cmd::Replay);
+        }
+    }
+
+    /// Puts the account in `slot` in the shared inbox or takes it out.
+    pub(super) fn set_shared(&mut self, slot: usize, on: bool, cx: &mut Context<Self>) {
+        self.settings.shared_inbox.retain(|&s| s != slot);
+        if on {
+            self.settings.shared_inbox.push(slot);
+        }
+        self.settings.save(&self.dir);
+        let gone: HashSet<usize> = self.elsewhere.values().copied().filter(|&s| !self.shares(s)).collect();
+        for slot in gone {
+            self.part_rooms(slot, cx);
+        }
+        self.rejoin();
         cx.notify();
     }
 
@@ -494,6 +678,38 @@ impl BeeperApp {
         })))
     }
 
+    /// The name and picture of the account in `slot`, for the shared inbox's rows.
+    pub(super) fn account_face(&self, slot: usize) -> (String, Option<Arc<Image>>) {
+        if slot == self.accounts.active {
+            (self.profile_name(), self.profile.picture())
+        } else {
+            self.accounts.get(slot).map(|a| (a.label(), a.picture.clone())).unwrap_or_default()
+        }
+    }
+
+    /// Settings, Chats: a switch per account for the shared inbox, once two are signed in.
+    pub(super) fn render_shared_inbox(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.accounts.signed_in() < 2 {
+            return None;
+        }
+        let mut accounts = card(cx);
+        for a in self.accounts.list.iter().filter(|a| a.user.is_some() && !a.duplicate) {
+            let slot = a.slot;
+            let name = self.account_face(slot).0;
+            let user = a.user.as_ref().map(ToString::to_string).unwrap_or_default();
+            let weak = cx.entity().downgrade();
+            let switch = Switch::new(("shared-inbox", slot)).checked(self.settings.shared_inbox.contains(&slot)).on_click(move |on, _, cx| {
+                let _ = weak.update(cx, |this, cx| this.set_shared(slot, *on, cx));
+            });
+            accounts = accounts.child(super::panels::row(&name, &user, cx).child(switch));
+        }
+        Some(
+            super::panels::section(t!("Shared inbox"), cx)
+                .child(accounts)
+                .child(super::panels::footnote(t!("The chats of the accounts switched on share one list. Opening a chat turns to its account."), cx)),
+        )
+    }
+
     /// The account switcher, under the profile card: every account with its unread chats, and
     /// adding one.
     pub(super) fn render_accounts(&mut self, cx: &mut Context<Self>) -> Div {
@@ -503,7 +719,7 @@ impl BeeperApp {
         for a in self.accounts.list.iter().filter(|a| a.user.is_some() && !a.duplicate) {
             let current = a.slot == active;
             let (name, picture, unread) = if current {
-                (self.profile_name(), self.profile.picture(), self.rooms.iter().filter(|r| waiting(r)).count())
+                (self.profile_name(), self.profile.picture(), self.rooms.iter().filter(|r| waiting(r) && !self.elsewhere.contains_key(&r.id)).count())
             } else {
                 (a.label(), a.picture.clone(), a.unread.len())
             };
@@ -597,3 +813,31 @@ impl BeeperApp {
 const ACCOUNT_FACE: f32 = 40.;
 /// As Settings' rows.
 const ROW_H: f32 = 52.;
+
+#[cfg(test)]
+mod tests {
+    use super::{HashMap, HashSet, OwnedRoomId, handed_over, joinable};
+
+    fn id(s: &str) -> OwnedRoomId {
+        OwnedRoomId::try_from(format!("!{s}:x")).unwrap()
+    }
+
+    #[test]
+    fn the_shared_inbox_keeps_each_chat_with_one_account() {
+        // Account 0 shown with a and b; c came from account 2.
+        let (a, b, c, e) = (id("a"), id("b"), id("c"), id("e"));
+        let elsewhere: HashMap<_, _> = [(c.clone(), 2)].into();
+        let listed: HashSet<&OwnedRoomId> = [&a, &b, &c].into();
+        let takes = |room: &OwnedRoomId, slot| joinable(room, &listed, &elsewhere, slot);
+        assert!(!takes(&a, 2), "a chat both are in stays the shown account's");
+        assert!(takes(&c, 2) && takes(&e, 2));
+        assert!(!takes(&c, 1), "and another's stays with it");
+
+        // Turning to account 2: c is its own now, a and b account 0's.
+        let after = handed_over([&a, &b, &c].into_iter(), elsewhere.clone(), 0, 2);
+        assert_eq!(after, [(a.clone(), 0), (b.clone(), 0)].into());
+        // A third account's chat stays its.
+        let after = handed_over([&a, &e].into_iter(), [(e.clone(), 1)].into(), 0, 2);
+        assert_eq!(after, [(a, 0), (e, 1)].into());
+    }
+}

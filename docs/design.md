@@ -63,6 +63,12 @@ A Telegram forum is one row: its picture and name, the newest topic before the p
 topics' unread added up. Touching it puts its topics in the list's place under a back arrow and
 the forum's name, as rows of their own with the topic's initials; a topic opens as a chat.
 
+In the shared inbox (Settings, Chats, for two accounts or more) the chats of the accounts switched
+on share one list, and each row's avatar carries its account's picture, 16 across in a 2 ring of
+`ground`, at the bottom right. Opening a chat turns the window to its account; the list
+stays as it was. A row of another account offers only what its sheet can do from here (read,
+pin, mute, archive, low priority, folders); leaving or blocking happens once the chat is open.
+
 ## Conversation
 
 Incoming messages sit left on `surface`, own messages right on `raised`. In a group, each run of

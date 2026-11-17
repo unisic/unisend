@@ -261,7 +261,7 @@ impl BeeperApp {
             .map(|r| {
                 // The picture a notification of the chat left, when one did; see `notification_icon`.
                 let file: String = r.id.as_str().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-                let icon = Some(self.account_dir().join("notify").join(file)).filter(|p| p.is_file());
+                let icon = Some(crate::accounts::dir(&self.dir, self.slot_of_room(&r.id)).join("notify").join(file)).filter(|p| p.is_file());
                 (self.chat_key(&r.id), r.name.clone(), icon)
             })
             .collect();

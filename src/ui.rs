@@ -90,6 +90,8 @@ const NARROW: f32 = if gpui_kit::is_mobile() { 840. } else { 720. };
 // Metrics; `docs/design.md` gives the reasons.
 const ROOM_ROW_H: f32 = 72.;
 const AVATAR: f32 = 48.;
+/// The account's picture on a row's avatar in the shared inbox.
+const ACCOUNT_BADGE: f32 = 16.;
 /// From the screen edge to content.
 const GUTTER: f32 = 16.;
 /// Between neighbouring things.
@@ -297,6 +299,11 @@ pub struct BeeperApp {
     forum_rows: HashMap<String, forum::Totals>,
     /// Pinned first, then newest first.
     rooms: Vec<RoomSummary>,
+    /// The chats in `rooms` of another account of the shared inbox, by its slot; the rest are the
+    /// shown account's.
+    elsewhere: HashMap<OwnedRoomId, usize>,
+    /// The drafts of those accounts, by slot, for their rows.
+    their_drafts: HashMap<usize, navigate::Drafts>,
     /// Indices into `rooms` that pass the current view, filter and search.
     shown: Vec<usize>,
     open: Option<OwnedRoomId>,
@@ -670,6 +677,8 @@ impl BeeperApp {
             forum: None,
             forum_rows: HashMap::new(),
             rooms: Vec::new(),
+            elsewhere: HashMap::new(),
+            their_drafts: HashMap::new(),
             shown: Vec::new(),
             open: None,
             msgs: Vec::new(),
@@ -939,25 +948,13 @@ impl BeeperApp {
                 }
             }
             Ev::Rooms(changed) => {
-                let calm = !slide::Fly::quiet(changed.len()) && !cx.reduce_motion() && !self.rooms.is_empty() && self.list_at_top() && !self.finger_down();
-                let before = calm.then(|| slide::snapshot(&self.shown, &self.rooms));
-                let first = self.rooms.is_empty();
-                let mut by_id: HashMap<_, _> = self.rooms.drain(..).map(|r| (r.id.clone(), r)).collect();
-                by_id.extend(changed.into_iter().map(|r| (r.id.clone(), r)));
-                self.rooms = by_id.into_values().collect();
-                self.rooms.sort_unstable_by_key(|r| (!r.pinned, std::cmp::Reverse(r.ts)));
-                self.refilter(cx);
-                if first && !self.rooms.is_empty() {
-                    self.list_in = Some(Instant::now());
+                // A chat both accounts are in is the shown one's.
+                for r in &changed {
+                    self.elsewhere.remove(&r.id);
                 }
-                if let Some(change) = before.and_then(|b| slide::reorder(&b, &slide::snapshot(&self.shown, &self.rooms))) {
-                    self.fly.start(change, ROOM_ROW_H);
-                }
-                self.publish_share_targets();
-                if self.settings.mute_ends_of(self.accounts.active()).is_some_and(|ends| !ends.is_empty()) {
-                    self.unmute_due(false, cx);
-                }
+                self.merge_rooms(changed, cx);
             }
+            Ev::RoomGone(id) if self.elsewhere.contains_key(&id) => {}
             Ev::RoomGone(id) => {
                 self.list_typing.remove(&id);
                 self.rooms.retain(|r| r.id != id);
@@ -1163,6 +1160,28 @@ impl BeeperApp {
         self.finger.is_some_and(|at| at.elapsed() < Duration::from_secs(3))
     }
 
+    /// Takes chats new or changed into the list, which moves its rows into their new places.
+    fn merge_rooms(&mut self, changed: Vec<RoomSummary>, cx: &mut Context<Self>) {
+        let calm = !slide::Fly::quiet(changed.len()) && !cx.reduce_motion() && !self.rooms.is_empty() && self.list_at_top() && !self.finger_down();
+        let before = calm.then(|| slide::snapshot(&self.shown, &self.rooms));
+        let first = self.rooms.is_empty();
+        let mut by_id: HashMap<_, _> = self.rooms.drain(..).map(|r| (r.id.clone(), r)).collect();
+        by_id.extend(changed.into_iter().map(|r| (r.id.clone(), r)));
+        self.rooms = by_id.into_values().collect();
+        self.rooms.sort_unstable_by_key(|r| (!r.pinned, std::cmp::Reverse(r.ts)));
+        self.refilter(cx);
+        if first && !self.rooms.is_empty() {
+            self.list_in = Some(Instant::now());
+        }
+        if let Some(change) = before.and_then(|b| slide::reorder(&b, &slide::snapshot(&self.shown, &self.rooms))) {
+            self.fly.start(change, ROOM_ROW_H);
+        }
+        self.publish_share_targets();
+        if self.settings.mute_ends_of(self.accounts.active()).is_some_and(|ends| !ends.is_empty()) {
+            self.unmute_due(false, cx);
+        }
+    }
+
     fn refilter(&mut self, cx: &mut Context<Self>) {
         let query = self.search.read(cx).value().trim().to_lowercase();
         // The archive is its own tab and ignores the chips; elsewhere the chip says which section and filter.
@@ -1239,11 +1258,15 @@ impl BeeperApp {
             .filter(|r| r.preview.as_deref().is_none_or(|p| !self.need_recovery && p.ends_with(crate::backend::utd())))
             .map(|r| r.id.clone())
             .collect();
-        if !avatars.is_empty() && self.cmd.try_send(Cmd::Avatars(avatars.clone())).is_ok() {
-            self.asked_avatars(avatars, cx);
+        for (sender, avatars) in self.by_account(avatars) {
+            if sender.try_send(Cmd::Avatars(avatars.clone())).is_ok() {
+                self.asked_avatars(avatars, cx);
+            }
         }
-        if !previews.is_empty() && self.cmd.try_send(Cmd::Previews(previews.clone())).is_ok() {
-            self.peeked.extend(previews);
+        for (sender, previews) in self.by_account(previews) {
+            if sender.try_send(Cmd::Previews(previews.clone())).is_ok() {
+                self.peeked.extend(previews);
+            }
         }
     }
 
@@ -1789,6 +1812,9 @@ impl BeeperApp {
     }
 
     fn open_room(&mut self, id: OwnedRoomId, cx: &mut Context<Self>) {
+        if let Some(&slot) = self.elsewhere.get(&id) {
+            return self.open_account_chat(slot, id, cx);
+        }
         self.slide.leaving = None;
         if self.open.as_ref() == Some(&id) {
             return;
@@ -2172,6 +2198,12 @@ impl BeeperApp {
             cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 let chats = this.shown.len();
                 this.fetch_rows(range.start.min(chats)..range.end.min(chats), cx);
+                // In the shared inbox each row carries its account's picture.
+                let faces: HashMap<usize, (String, Option<Arc<Image>>)> = if this.merged() {
+                    this.settings.shared_inbox.iter().map(|&slot| (slot, this.account_face(slot))).collect()
+                } else {
+                    HashMap::new()
+                };
                 range
                     .map(|ix| {
                         if ix >= chats {
@@ -2244,7 +2276,11 @@ impl BeeperApp {
                                 (_, Some(topic)) => avatar(topic, None, AVATAR, cx),
                                 (Some(_), None) => avatar(room.parent.as_deref().unwrap_or(&room.name), this.avatars.get(&room.id), AVATAR, cx),
                                 (None, None) => room_avatar(room, &this.avatars, AVATAR, cx),
-                            })
+                            }.when_some(faces.get(&this.slot_of_room(&room.id)), |el, (name, picture)| {
+                                el.relative().child(
+                                    div().absolute().right(px(-3.)).bottom(px(-3.)).p(px(2.)).rounded_full().bg(p.ground).child(avatar(name, Some(picture), ACCOUNT_BADGE, cx)),
+                                )
+                            }))
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -2280,7 +2316,7 @@ impl BeeperApp {
                                                     .text_size(fs(14.))
                                                     .line_height(fs(20.))
                                                     .text_color(if unread { p.text } else { p.muted })
-                                                    .child(match (&room.pending, this.drafts.get(&room.id).filter(|_| forum_row.is_none())) {
+                                                    .child(match (&room.pending, this.draft_of(&room.id).filter(|_| forum_row.is_none())) {
                                                         (Some(pending), _) => div()
                                                             .text_color(p.text)
                                                             .font_weight(FontWeight::MEDIUM)
@@ -3664,7 +3700,7 @@ impl BeeperApp {
         self.chat_sheet_inside = inside;
         let network = self.rooms.iter().find(|r| r.id == id).and_then(|r| r.network.as_deref());
         // One profile lookup at the homeserver, which already holds it, so the row shows only when it leads somewhere.
-        if self.peer_link.as_ref().is_none_or(|(room, ..)| *room != id) && crate::backend::links_profiles(network) {
+        if self.peer_link.as_ref().is_none_or(|(room, ..)| *room != id) && crate::backend::links_profiles(network) && !self.elsewhere.contains_key(&id) {
             self.peer_link = None;
             self.send(Cmd::PeerIds(id.clone()), cx);
         }
@@ -3740,9 +3776,15 @@ impl BeeperApp {
                 row
             });
         }
-        rows.extend(self.disappear_entry(&id, live, cx));
+        // Another account's chat in the shared inbox: what takes its backend's answers waits for the chat to be open.
+        let foreign = self.elsewhere.contains_key(&id);
+        if !foreign {
+            rows.extend(self.disappear_entry(&id, live, cx));
+        }
         rows.push(self.folder_entry(live, window, cx));
-        rows.push(self.leave_row(id, live, window, cx));
+        if !foreign {
+            rows.push(self.leave_row(id, live, window, cx));
+        }
         Some(self.sheet(&self.chat_motion, frame, 0, title, rows, |this| &mut this.chat_motion, window, cx))
     }
 
