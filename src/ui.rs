@@ -2478,7 +2478,8 @@ impl BeeperApp {
                 let bold = HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
                 let mut marks: Vec<_> = m.mentions.iter().map(|r| (r.clone(), if m.mentioned && m.to_me.contains(r) { ink } else { bold })).collect();
                 let apart = |u: &std::ops::Range<usize>| m.mentions.iter().all(|r| r.end <= u.start || u.end <= r.start);
-                marks.extend(urls(&m.body).into_iter().filter(apart).map(|r| (r, underline)));
+                let found: Vec<_> = urls(&m.body).into_iter().filter(apart).collect();
+                marks.extend(found.iter().map(|r| (r.clone(), underline)));
                 marks.sort_by_key(|(r, _)| r.start);
                 // The preview its sender attached to a link; a touch opens the link.
                 let link_card = m.link.as_ref().filter(|_| !m.deleted).map(|link| {
@@ -2562,11 +2563,13 @@ impl BeeperApp {
                                 .when(collapsed, |el| el.max_h(fs(22.) * SHORT_LINES as f32).overflow_hidden())
                                 .child(match m.rich.as_ref().filter(|_| !faded) {
                                     Some(rich) => rich::body(m, rich, inside, ink),
-                                    None if collapsed => {
-                                        let cut = m.body.char_indices().nth(SHORT_CHARS).map_or(m.body.len(), |(at, _)| at);
-                                        crate::emoji::styled(m.body[..cut].to_owned(), marks.into_iter().filter(|(r, _)| r.end <= cut).collect()).into_any_element()
+                                    None => {
+                                        let cut = if collapsed { m.body.char_indices().nth(SHORT_CHARS).map_or(m.body.len(), |(at, _)| at) } else { m.body.len() };
+                                        let styled = crate::emoji::styled(m.body[..cut].to_owned(), marks.into_iter().filter(|(r, _)| r.end <= cut).collect());
+                                        let links: Vec<_> = found.into_iter().filter(|r| r.end <= cut).collect();
+                                        let targets = links.iter().map(|r| m.body[r.clone()].to_owned()).collect();
+                                        rich::linked(format!("{}-text", m.id), styled, links, targets)
                                     }
-                                    None => crate::emoji::styled(m.body.clone(), marks).into_any_element(),
                                 }),
                         )
                     })

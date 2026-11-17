@@ -119,6 +119,9 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
         if let Some(href) = &run.href {
             links.push(seg.clone());
             targets.push(href.clone());
+        } else if let Some(url) = bare.iter().find(|r| r.start <= seg.start && seg.end <= r.end) {
+            links.push(seg.clone());
+            targets.push(text[url.clone()].to_owned());
         }
         if style != HighlightStyle::default() {
             marks.push((seg, style));
@@ -126,16 +129,19 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
     }
 
     let styled = crate::emoji::styled(text, marks);
+    div().min_w_0().child(linked(format!("{}-rich-{n}", m.id), styled, links, targets)).into_any_element()
+}
+
+/// Text whose `links` ranges open the matching `targets` on a click.
+pub(super) fn linked(id: String, styled: StyledText, links: Vec<Range<usize>>, targets: Vec<String>) -> AnyElement {
     if links.is_empty() {
-        return div().min_w_0().child(styled).into_any_element();
+        return styled.into_any_element();
     }
-    let id = SharedString::from(format!("{}-rich-{n}", m.id));
-    div()
-        .min_w_0()
-        .child(InteractiveText::new(id, styled).on_click(links, move |at, _, cx| {
+    InteractiveText::new(SharedString::from(id), styled)
+        .on_click(links, move |at, _, cx| {
             // The bubble under the text opens the message's menu on a click; a link does not.
             cx.stop_propagation();
             crate::open_link(cx, &targets[at]);
-        }))
+        })
         .into_any_element()
 }
