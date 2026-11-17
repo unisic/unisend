@@ -2559,7 +2559,8 @@ impl BeeperApp {
                             .rounded(px(8.))
                             .bg(inside.text.opacity(0.07))
                             .when_some(this.thumbs.get(&link_key(&m.id)), |el, thumb| {
-                                el.child(img(thumb.clone()).size_full().rounded(px(8.)).object_fit(ObjectFit::Cover).opacity(link_shown))
+                                // The id keeps a GIF's frame from one draw to the next: without it, it stays on its first.
+                                el.child(img(thumb.clone()).size_full().rounded(px(8.)).object_fit(ObjectFit::Cover).opacity(link_shown).id(SharedString::from(format!("{}-link-picture", m.id))))
                             })
                             .when(link.video, |el| {
                                 el.child(
