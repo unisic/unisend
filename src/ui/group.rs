@@ -94,12 +94,16 @@ impl BeeperApp {
             None if details.bridge.is_some() => String::new(),
             None => m.id.to_string(),
         };
+        let shown = live && self.faces.get(&m.id).is_some_and(Option::is_some);
+        let (user, name) = (m.id.clone(), m.name.clone());
+        let opened = room.clone();
+        let face = viewable(avatar(&m.name, self.faces.get(&m.id), FACE, cx), "member-picture", shown, move |this, cx| this.open_picture(opened.clone(), Some(user.clone()), name.clone(), cx), cx);
         let head = h_flex()
             .id("member-head")
             .px(px(GUTTER + 4.))
             .py(px(8.))
             .gap(px(GAP))
-            .child(avatar(&m.name, self.faces.get(&m.id), FACE, cx))
+            .child(face)
             .child(
                 v_flex()
                     .flex_1()

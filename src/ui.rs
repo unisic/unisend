@@ -2899,7 +2899,18 @@ impl BeeperApp {
                             .gap(px(8.))
                             .when(m.own, |el| el.flex_row_reverse())
                             .when(faces, |el| {
-                                el.child(if last { avatar(&m.sender, this.faces.get(&m.from), SENDER, cx) } else { div().w(px(SENDER)).flex_none() })
+                                el.child(if last {
+                                    let shown = this.faces.get(&m.from).is_some_and(Option::is_some);
+                                    let (room, from, name) = (this.open.clone(), m.from.clone(), m.sender.clone());
+                                    let face = avatar(&m.sender, this.faces.get(&m.from), SENDER, cx);
+                                    viewable(face, SharedString::from(format!("face-{}", m.id)), shown && room.is_some(), move |this, cx| {
+                                        if let Some(room) = room.clone() {
+                                            this.open_picture(room, Some(from.clone()), name.clone(), cx);
+                                        }
+                                    }, cx)
+                                } else {
+                                    div().w(px(SENDER)).flex_none().into_any_element()
+                                })
                             })
                             .child(
                                 h_flex()
@@ -4076,6 +4087,21 @@ fn round_button(id: impl Into<ElementId>, icon: IconName, cx: &App) -> Stateful<
         .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.surface)))
         .active(|el| el.bg(p.raised))
         .child(Icon::new(icon).size_5())
+}
+
+/// A profile picture the user can open full-screen, when there is one to open.
+fn viewable(avatar: Div, id: impl Into<ElementId>, shown: bool, open: impl Fn(&mut BeeperApp, &mut Context<BeeperApp>) + 'static, cx: &mut Context<BeeperApp>) -> AnyElement {
+    if !shown {
+        return avatar.into_any_element();
+    }
+    avatar
+        .id(id)
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            cx.stop_propagation();
+            open(this, cx);
+        }))
+        .into_any_element()
 }
 
 /// A chat's or a person's picture; until there is one, initials on a neutral disc.

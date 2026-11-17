@@ -4,6 +4,9 @@
 //!
 //! A fitted picture follows a finger: sideways to the chat's previous or next picture, up or down
 //! to close. A tap shows or hides the bars with the sender and the actions.
+//!
+//! A chat's or a person's profile picture opens here too, on its own: named after them, without
+//! paging or actions.
 
 use std::collections::VecDeque;
 use std::io::Cursor;
@@ -274,6 +277,16 @@ pub(super) struct Zoom {
     older_from: Option<String>,
     /// Counts openings, so springs and fades start afresh with each picture opened.
     serial: u64,
+    /// The name over a profile picture, in place of a message's sender.
+    title: Option<String>,
+}
+
+/// The viewer's id for a profile picture: a person's (`@user`) or a chat's (`!room`). Never an
+/// event's (`$`) or a message on its way out's.
+const PICTURE: &str = "picture ";
+
+fn is_picture(id: &str) -> bool {
+    id.starts_with(PICTURE)
 }
 
 /// A finger on a fitted picture. The axis is the first one it moved along; GPUI locks a touch pan
@@ -436,6 +449,26 @@ fn dimensions(image: &Image) -> Option<(f32, f32)> {
 }
 
 impl BeeperApp {
+    /// Opens a profile picture full-screen: `user`'s as this chat shows them, or with `None` the
+    /// chat's. The small picture stands in until the large one arrives.
+    pub(super) fn open_picture(&mut self, room: OwnedRoomId, user: Option<OwnedUserId>, name: String, cx: &mut Context<Self>) {
+        let id = format!("{PICTURE}{}", user.as_ref().map_or(room.as_str(), |u| u.as_str()));
+        if self.send(Cmd::ViewPicture { id: id.clone(), room, user }, cx) {
+            self.viewer = Some((id, None));
+            self.open_zoom(cx);
+            self.zoom.title = Some(name);
+        }
+    }
+
+    /// The small profile picture behind a picture id, already loaded for its row.
+    fn stand_in(&self, id: &str) -> Option<Arc<Image>> {
+        let key = id.strip_prefix(PICTURE)?;
+        match OwnedUserId::try_from(key) {
+            Ok(user) => self.faces.get(&user).cloned().flatten(),
+            Err(_) => self.avatars.get(&OwnedRoomId::try_from(key).ok()?).cloned().flatten(),
+        }
+    }
+
     pub(super) fn open_zoom(&mut self, cx: &mut Context<Self>) {
         self.drop_near(cx);
         let (frame, home) = (self.zoom.frame, self.zoom.home.take());
@@ -533,6 +566,9 @@ impl BeeperApp {
 
     fn reached_oldest(&mut self, cx: &mut Context<Self>) {
         let Some((id, _)) = &self.viewer else { return };
+        if is_picture(id) {
+            return;
+        }
         if self.neighbours().0.is_none() && self.zoom.older_from.as_ref() != Some(id) {
             self.zoom.older_from = Some(id.clone());
             self.load_older(cx);
@@ -1014,7 +1050,7 @@ impl BeeperApp {
 
         let palette = Palette::of(cx);
         let (top, bottom) = crate::insets();
-        let thumb = self.thumbs.get(&id).cloned();
+        let thumb = self.thumbs.get(&id).cloned().or_else(|| self.stand_in(&id));
         // The thumbnail stands in until the full picture arrives.
         let picture = full.clone().or_else(|| thumb.clone());
         if live && !self.focus.is_focused(window) {
@@ -1105,11 +1141,13 @@ impl BeeperApp {
         let sides: Vec<AnyElement> = if fitted_now && x.abs() > 0.5 { [side(&older, -page), side(&newer, page)].into_iter().flatten().collect() } else { Vec::new() };
 
         let m = self.msgs.iter().find(|m| m.id == id);
-        let who = m.map(|m| if m.own { t!("You").to_owned() } else { m.sender.clone() });
+        let who = m.map(|m| if m.own { t!("You").to_owned() } else { m.sender.clone() }).or_else(|| self.zoom.title.clone());
         let when = m.map(|m| format!("{}, {}", day_label(m.ts), clock(m.ts)));
         let caption = m.map(|m| m.body.trim()).filter(|body| !body.is_empty()).map(str::to_owned);
         let replies = m.is_some_and(|m| m.id.starts_with('$') && !m.deleted);
         let once = m.and_then(|m| m.media.as_ref()).is_some_and(|media| media.once);
+        // A profile picture is no message's file: nothing to save or share.
+        let file = m.is_some() && !once;
         let forwards = !once && m.is_some_and(forward::forwardable);
 
         let shade = gpui_kit::white().opacity(0.12);
@@ -1188,7 +1226,7 @@ impl BeeperApp {
                     }))
                 }))
             })
-            .when(crate::can_save() && !once, |el| {
+            .when(crate::can_save() && file, |el| {
                 el.child(action("viewer-save", IconName::Download, t!("Save"), working).when(interactive, |el| {
                     el.on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
@@ -1196,7 +1234,7 @@ impl BeeperApp {
                     }))
                 }))
             })
-            .when(crate::can_share() && !once, |el| {
+            .when(crate::can_share() && file, |el| {
                 el.child(action("viewer-share", IconName::Share2, t!("Share"), working).when(interactive, |el| {
                     el.on_click(cx.listener(|this, _, _, cx| {
                         cx.stop_propagation();
@@ -1223,16 +1261,19 @@ impl BeeperApp {
                         .child(self.zoom.note_text.clone()),
                 ))
             })
-            .child(
-                v_flex()
-                    .pt(px(8.))
-                    .pb(px(bottom + 4.))
-                    .gap(px(4.))
-                    .bg(scrim)
-                    .opacity(chrome)
-                    .children(caption.map(|caption| div().px(px(GUTTER)).py(px(4.)).line_clamp(4).text_ellipsis().text_size(fs(15.)).line_height(fs(21.)).child(caption)))
-                    .child(actions),
-            );
+            // A profile picture has no caption and no actions: no empty bar under it.
+            .when(m.is_some(), |el| {
+                el.child(
+                    v_flex()
+                        .pt(px(8.))
+                        .pb(px(bottom + 4.))
+                        .gap(px(4.))
+                        .bg(scrim)
+                        .opacity(chrome)
+                        .children(caption.map(|caption| div().px(px(GUTTER)).py(px(4.)).line_clamp(4).text_ellipsis().text_size(fs(15.)).line_height(fs(21.)).child(caption)))
+                        .child(actions),
+                )
+            });
 
         // A sticker keeps its own shape; a photo's box has its shape once it lands, and in between
         // `Cover` crops it as the bubble does.

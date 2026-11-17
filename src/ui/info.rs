@@ -440,6 +440,9 @@ impl BeeperApp {
                 }
                 // A group's size heads its member list.
                 let sub = network.unwrap_or_default();
+                let shown = self.avatars.get(&room.id).is_some_and(Option::is_some);
+                let (id, name) = (room.id.clone(), room.name.clone());
+                let picture = viewable(room_avatar(&room, &self.avatars, BIG_AVATAR, cx), "info-picture", shown, move |this, cx| this.open_picture(id.clone(), None, name.clone(), cx), cx);
                 v_flex()
                     .w_full()
                     .items_center()
@@ -447,7 +450,7 @@ impl BeeperApp {
                     .pt(px(8.))
                     .pb(px(GAP + 4.))
                     .gap(px(4.))
-                    .child(room_avatar(&room, &self.avatars, BIG_AVATAR, cx).mb(px(8.)))
+                    .child(div().mb(px(8.)).child(picture))
                     .child(div().max_w_full().text_center().text_size(fs(22.)).line_height(fs(28.)).font_weight(FontWeight::SEMIBOLD).child(room.name.clone()))
                     .children(lines.into_iter().map(|line| div().max_w_full().text_size(fs(16.)).text_color(p.muted).truncate().child(line)))
                     .when(!sub.is_empty(), |el| el.child(div().text_size(fs(14.)).text_color(p.faint).child(sub)))

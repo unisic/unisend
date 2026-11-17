@@ -132,6 +132,8 @@ pub enum Cmd {
     Thumbs(Vec<(String, Media)>),
     /// The image at viewing size.
     View(String, Media),
+    /// A chat's picture (`user: None`) or a member's, at viewing size, as `Ev::Viewed(id, ..)`.
+    ViewPicture { id: String, room: OwnedRoomId, user: Option<OwnedUserId> },
     /// The user opened view-once media (the event of the open chat): the bridge is told.
     ViewedOnce(OwnedRoomId, String),
     /// Download to the media cache so the system can open it.
@@ -1572,6 +1574,27 @@ impl State {
                     };
                     let _ = match bytes.await {
                         Ok(bytes) => ev.send(Ev::Viewed(id, bytes)).await,
+                        Err(e) => ev.send(Ev::Error(t!("Could not load the image: {error}", error = format!("{e:#}")))).await,
+                    };
+                });
+            }
+            Cmd::ViewPicture { id, room, user } => {
+                let client = self.client()?.clone();
+                let ev = self.ev.clone();
+                tokio::spawn(async move {
+                    let bytes = async {
+                        let url = match &user {
+                            Some(user) => face_url(&client, &room, user).await?,
+                            None => avatar_url(&client, &room).await?,
+                        };
+                        let Some(url) = url else { return Ok(None) };
+                        let request = MediaRequestParameters { source: MediaSource::Plain(url), format: MediaFormat::File };
+                        let bytes = client.media().get_media_content(&request, true).await?;
+                        anyhow::Ok(Some(tokio::task::spawn_blocking(move || shrink(&bytes, VIEW_PX)).await??))
+                    };
+                    let _ = match bytes.await {
+                        Ok(Some(bytes)) => ev.send(Ev::Viewed(id, bytes)).await,
+                        Ok(None) => Ok(()),
                         Err(e) => ev.send(Ev::Error(t!("Could not load the image: {error}", error = format!("{e:#}")))).await,
                     };
                 });
@@ -3888,6 +3911,11 @@ async fn bridge_names(room: &Room) -> (Option<String>, Option<String>, Option<St
 
 /// Room avatar, or for a one-to-one chat the other person's, as a small thumbnail.
 async fn avatar(client: &Client, room_id: &RoomId) -> Result<Option<Vec<u8>>> {
+    let Some(url) = avatar_url(client, room_id).await? else { return Ok(None) };
+    Ok(Some(picture(client, url).await?))
+}
+
+async fn avatar_url(client: &Client, room_id: &RoomId) -> Result<Option<matrix_sdk::ruma::OwnedMxcUri>> {
     let Some(room) = client.get_room(room_id) else { return Ok(None) };
     let own = if is_note(&room).await { client.account().get_avatar_url().await.ok().flatten() } else { None };
     let url = match own.or_else(|| room.avatar_url()) {
@@ -3903,15 +3931,19 @@ async fn avatar(client: &Client, room_id: &RoomId) -> Result<Option<Vec<u8>>> {
             url
         }
     };
-    Ok(Some(picture(client, url).await?))
+    Ok(Some(url))
 }
 
 /// A member's picture in a chat; bridges set it per chat, so the member event is asked, not the
 /// profile.
 async fn face(client: &Client, room_id: &RoomId, user: &UserId) -> Result<Option<Vec<u8>>> {
-    let Some(room) = client.get_room(room_id) else { return Ok(None) };
-    let Some(url) = room.get_member_no_sync(user).await?.and_then(|m| m.avatar_url().map(ToOwned::to_owned)) else { return Ok(None) };
+    let Some(url) = face_url(client, room_id, user).await? else { return Ok(None) };
     Ok(Some(picture(client, url).await?))
+}
+
+async fn face_url(client: &Client, room_id: &RoomId, user: &UserId) -> Result<Option<matrix_sdk::ruma::OwnedMxcUri>> {
+    let Some(room) = client.get_room(room_id) else { return Ok(None) };
+    Ok(room.get_member_no_sync(user).await?.and_then(|m| m.avatar_url().map(ToOwned::to_owned)))
 }
 
 /// A small square thumbnail of an avatar, from the media cache when it is there.
