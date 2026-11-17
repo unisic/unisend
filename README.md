@@ -87,7 +87,8 @@ What leaves the device, and who sees it:
   `matrix.beeper.com`, and the bridges. A bridge has to read a message to pass it between Matrix and
   the other network, so Beeper's bridges see the content of bridged chats, and the other network
   (WhatsApp, Messenger and so on) sees what it always sees. Signing in to some networks opens that
-  network's own login page.
+  network's own login page; on Android and Linux it opens in the app's own browser window, which
+  keeps its cookies and storage in memory only and hands them to the bridge, nothing else.
 - **KLIPY**, only in builds with a KLIPY key and only when you open the GIF picker: your IP
   address, what you search for, the GIF you send and a random ID made once per app start.
 - **The update host**, only in Android builds made with `UNISEND_UPDATE_URL`: a plain request for

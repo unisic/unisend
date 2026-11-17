@@ -22,6 +22,8 @@ mod share;
 mod ui;
 mod vault;
 mod vcard;
+#[cfg(target_os = "linux")]
+pub mod weblogin;
 
 use std::path::PathBuf;
 
@@ -1042,10 +1044,25 @@ pub(crate) fn clear_notification(chat: &str) {
 
 /// Signs in to a chat network in a browser and returns what it found as a JSON object: the
 /// cookies by name, local storage by key, and the `extract_js` result by field ID.
-/// Desktop has no embedded browser: it opens the page in the system's, and the user pastes the
-/// cookies; so it returns nothing.
+/// Linux shows the page in its own browser process (`weblogin`). Windows and macOS have no
+/// embedded browser: they open the page in the system's, and the user pastes the cookies; so they
+/// return nothing, as Linux does when its browser cannot open.
 pub(crate) fn web_login(cx: &mut gpui_kit::App, wanted: &bridges::Cookies) -> gpui_kit::Task<Option<String>> {
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "linux")]
+    {
+        let (request, url) = (weblogin::request(wanted), wanted.url.clone());
+        // Blocks until the browser closes, so off the UI thread.
+        let found = cx.background_spawn(async move { weblogin::run(&request) });
+        cx.spawn(async move |cx| match found.await {
+            Ok(found) => found,
+            Err(e) => {
+                log::warn!("web login: {e}");
+                cx.update(|cx| cx.open_url(&url));
+                None
+            }
+        })
+    }
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
     {
         cx.open_url(&wanted.url);
         gpui_kit::Task::ready(None)
