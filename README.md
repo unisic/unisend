@@ -95,11 +95,13 @@ What leaves the device, and who sees it:
   `update.json` with no identifier, once a day or when you tap Check now.
 - **Maps**: a received location opens in your maps app on Android, or on openstreetmap.org in the
   browser on desktop, only when you tap it. The app loads no map tiles itself.
+- **A linked site**, when you type a link with link previews on (Settings, Privacy): this device
+  reads the page once for its preview, so the site sees your IP address. Those who receive the
+  message fetch nothing.
 - **GitHub**, only when you tap an emoji font to download (Settings, Emoji, on Android and Linux):
   your IP address and which font.
 
-There are no Google services, no telemetry, no crash reporting and no push service. Unisend does
-not generate link previews.
+There are no Google services, no telemetry, no crash reporting and no push service.
 
 ## Status
 
