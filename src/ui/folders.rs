@@ -257,7 +257,9 @@ impl BeeperApp {
     pub(super) fn render_chips(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = Palette::of(cx);
         let current = self.effective_pick();
-        let waiting = self.rooms.iter().filter(|r| !r.archived && !r.low_priority && r.is_unread() && !replaced(&self.rooms, r)).count();
+        // A forum is one row in the list, so one in the count however many of its topics wait.
+        let mut forums = HashSet::new();
+        let waiting = self.rooms.iter().filter(|r| !r.archived && !r.low_priority && r.is_unread() && !replaced(&self.rooms, r)).filter(|r| r.forum.as_ref().is_none_or(|f| forums.insert(f))).count();
         let picks = chips(&self.settings, &self.rooms);
         let seg = press::Segments::new("filters", window, cx);
         let chosen = picks.iter().position(|pick| *pick == current);
@@ -521,6 +523,7 @@ mod tests {
             ts: 0,
             network: network.map(str::to_owned),
             parent: None,
+            forum: None,
             unread: 0,
             mentions: 0,
             dm,

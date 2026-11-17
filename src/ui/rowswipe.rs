@@ -188,7 +188,9 @@ impl BeeperApp {
 
     pub(super) fn row_pan(&mut self, id: &OwnedRoomId, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(room) = self.rooms.iter().find(|r| r.id == *id) else { return };
-        if self.rows.away.is_some() && event.touch_phase == TouchPhase::Started {
+        // A forum's row stands for many topics; a swipe acts on one chat.
+        let forum_row = room.forum.as_ref().is_some_and(|f| self.forum_rows.contains_key(f));
+        if forum_row || self.rows.away.is_some() && event.touch_phase == TouchPhase::Started {
             return;
         }
         let allowed = (resolve(self.settings.swipe_left, room).is_some(), resolve(self.settings.swipe_right, room).is_some());

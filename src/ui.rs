@@ -83,7 +83,7 @@ use receipt::{Mark, Receipt};
 
 use crate::{Keyboard, Palette};
 use crate::bridges::{Flow, Guild, Network, Step};
-use crate::backend::{ChatAction, Cmd, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, OwnRead, Pending, Quote, QuoteState, RoomSummary};
+use crate::backend::{ChatAction, Cmd, forum, Delivery, Diff, Ev, Kind, Media, MediaKind, Msg, OwnRead, Pending, Quote, QuoteState, RoomSummary};
 
 /// A tablet held upright keeps one pane: beside a list, its conversation would be phone-narrow.
 const NARROW: f32 = if gpui_kit::is_mobile() { 840. } else { 720. };
@@ -291,6 +291,10 @@ pub struct BeeperApp {
     searching: bool,
     view: View,
     only_unread: bool,
+    /// The Telegram forum whose topics the list shows, by its id (`RoomSummary::forum`).
+    forum: Option<String>,
+    /// Each forum's row in the list, its shown topics added up; empty while topics are listed apart.
+    forum_rows: HashMap<String, forum::Totals>,
     /// Pinned first, then newest first.
     rooms: Vec<RoomSummary>,
     /// Indices into `rooms` that pass the current view, filter and search.
@@ -663,6 +667,8 @@ impl BeeperApp {
             searching: false,
             view: View::Inbox,
             only_unread: false,
+            forum: None,
+            forum_rows: HashMap::new(),
             rooms: Vec::new(),
             shown: Vec::new(),
             open: None,
@@ -1163,14 +1169,36 @@ impl BeeperApp {
         if self.view != View::Archive {
             (self.view, self.only_unread) = (if pick == folders::Pick::LowPriority { View::LowPriority } else { View::Inbox }, pick == folders::Pick::Unread);
         }
+        // A forum whose last topic is gone closes.
+        if self.forum.as_ref().is_some_and(|f| !self.rooms.iter().any(|r| r.forum.as_ref() == Some(f))) {
+            self.forum = None;
+        }
         let passes = |r: &RoomSummary| {
             // A search looks through every section.
             if !query.is_empty() {
                 return r.name.to_lowercase().contains(&query);
             }
+            // An open forum lists all its topics, whatever the section and the chip.
+            if let Some(forum) = &self.forum {
+                return r.forum.as_ref() == Some(forum) && !replaced(&self.rooms, r);
+            }
             in_view(self.view, r) && (!self.only_unread || r.is_unread()) && self.in_folder(&pick, r) && !replaced(&self.rooms, r)
         };
-        self.shown = self.rooms.iter().enumerate().filter(|(_, r)| passes(r)).map(|(ix, _)| ix).collect();
+        // Outside a forum and a search, a forum is one row: its newest topic, standing for them all.
+        let grouped = query.is_empty() && self.forum.is_none();
+        let mut forum_rows: HashMap<String, forum::Totals> = HashMap::new();
+        let mut shown = Vec::new();
+        for (ix, r) in self.rooms.iter().enumerate().filter(|(_, r)| passes(r)) {
+            if grouped && let Some(f) = &r.forum {
+                if let Some(totals) = forum_rows.get_mut(f) {
+                    totals.add(r);
+                    continue;
+                }
+                forum_rows.insert(f.clone(), forum::Totals::of(r));
+            }
+            shown.push(ix);
+        }
+        (self.shown, self.forum_rows) = (shown, forum_rows);
         cx.notify();
     }
 
@@ -1337,6 +1365,8 @@ impl BeeperApp {
                 self.close_room(cx);
                 cx.notify();
             }
+        } else if self.forum.is_some() {
+            self.close_forum(cx);
         } else if self.screen == Screen::Email && self.leave_sign_in(window, cx) {
         } else {
             return false;
@@ -1754,10 +1784,27 @@ impl BeeperApp {
         }
         self.close_room(cx);
         self.panel = None;
+        // A topic opened from elsewhere (a notification, a search) leads back to its forum.
+        let forum = self.rooms.iter().find(|r| r.id == id).and_then(|r| r.forum.clone());
+        if forum.is_some() && forum != self.forum {
+            self.forum = forum;
+            self.refilter(cx);
+        }
         self.open = Some(id.clone());
         self.opened_at = Some(Instant::now());
         self.show_draft(Some(&id));
         self.loading = self.send(Cmd::Open(id), cx);
+    }
+
+    fn open_forum(&mut self, forum: String, cx: &mut Context<Self>) {
+        self.forum = Some(forum);
+        self.rooms_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.refilter(cx);
+    }
+
+    fn close_forum(&mut self, cx: &mut Context<Self>) {
+        self.forum = None;
+        self.refilter(cx);
     }
 
     fn close_room(&mut self, cx: &mut Context<Self>) {
@@ -1883,6 +1930,10 @@ impl BeeperApp {
                 self.settings_pages.clear();
                 cx.notify();
             }
+            if tab == Tab::Chats && self.forum.is_some() {
+                self.close_forum(cx);
+                return;
+            }
             if tab == Tab::Chats && !self.searching {
                 self.to_top = Some((Instant::now(), f32::from(self.rooms_scroll.0.borrow().base_handle.offset().y)));
                 cx.notify();
@@ -1897,6 +1948,7 @@ impl BeeperApp {
                 self.cancel_login(cx);
                 self.panel = None;
                 self.only_unread = false;
+                self.forum = None;
                 self.set_view(if tab == Tab::Archive { View::Archive } else { View::Inbox }, cx);
             }
             Tab::Networks => self.open_panel(Panel::Networks, cx),
@@ -2115,22 +2167,37 @@ impl BeeperApp {
                         let id = this.rooms[this.shown[ix]].id.clone();
                         let (dy, alpha) = this.fly.of(&id, window);
                         let key: ElementId = SharedString::from(id.to_string()).into();
+                        let room = &this.rooms[this.shown[ix]];
+                        // A forum's row stands for all its topics; inside the forum a topic goes by its own name.
+                        let forum_row = room.forum.as_ref().and_then(|f| this.forum_rows.get(f).map(|totals| (f.clone(), *totals)));
+                        let topic = this.forum.is_some().then(|| forum::topic_title(&room.name, room.parent.as_deref()).to_owned());
+                        let open_in_forum = forum_row.as_ref().is_some_and(|(f, _)| {
+                            this.open.as_ref().and_then(|open| this.rooms.iter().find(|r| &r.id == open)).is_some_and(|r| r.forum.as_ref() == Some(f))
+                        });
                         // Lit while open, or while its sheet is; it fades back once it is neither.
-                        let lit = this.open.as_ref() == Some(&id) || this.chat_sheet.as_ref() == Some(&id);
+                        let lit = this.open.as_ref() == Some(&id) || this.chat_sheet.as_ref() == Some(&id) || open_in_forum;
                         let lit_fade = if lit { Transition::new(Duration::ZERO) } else { Transition::new(motion::ROW_FADE).easing(motion::EASE_OUT) };
                         let lit_alpha = transition(ElementId::NamedChild(Arc::new(key.clone()), "lit".into()), if lit { 1.0f32 } else { 0. }, lit_fade, window, cx);
                         let press = press::area(key.clone(), ROW_PRESS_DELAY, p.raised, window, cx);
                         let (sx, armed) = this.row_offset(&id, window);
                         let backdrop = (sx != 0.).then(|| this.row_backdrop(&this.rooms[this.shown[ix]], sx, armed, window, cx)).flatten();
                         let room = &this.rooms[this.shown[ix]];
-                        let selected = this.open.as_ref() == Some(&id);
-                        let unread = room.is_unread();
+                        let selected = this.open.as_ref() == Some(&id) || open_in_forum;
+                        let totals = forum_row.as_ref().map_or(forum::Totals::of(room), |(_, totals)| *totals);
+                        let unread = if forum_row.is_some() { totals.is_unread() } else { room.is_unread() };
                         let mark = |icon: IconName| Icon::new(icon).size_3p5().flex_none().text_color(p.faint);
                         // Nothing readable to preview: an undecrypted message says no more than "Message".
                         let preview = room.preview.as_deref().filter(|p| !p.ends_with(crate::backend::utd()));
-                        let meta = match (room.network.as_deref().map(short_network), short_time(room.ts)) {
+                        // A forum's row says which topic its newest message is in.
+                        let forum_preview = forum_row.is_some().then(|| {
+                            let title = forum::topic_title(&room.name, room.parent.as_deref());
+                            preview.map_or_else(|| title.to_owned(), |p| format!("{title} · {p}"))
+                        });
+                        let preview = forum_preview.as_deref().or(preview);
+                        let network = room.network.as_deref().map(short_network).filter(|_| topic.is_none());
+                        let meta = match (network, short_time(room.ts)) {
                             (Some(network), time) => {
-                                let network = match room.parent.as_deref() {
+                                let network = match room.parent.as_deref().filter(|_| forum_row.is_none()) {
                                     Some(parent) => format!("{network} · {}", clip_chars(parent, PARENT_CHARS)),
                                     None => network.to_owned(),
                                 };
@@ -2150,10 +2217,21 @@ impl BeeperApp {
                             .when(backdrop.is_some(), |el| el.bg(p.ground))
                             .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(if selected { p.raised } else { p.surface })).active(|el| el.bg(p.raised)))
                             .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| this.open_room(id.clone(), cx)))
+                            .on_click(cx.listener({
+                                let forum = forum_row.as_ref().map(|(f, _)| f.clone());
+                                move |this, _, _, cx| match &forum {
+                                    Some(f) => this.open_forum(f.clone(), cx),
+                                    None => this.open_room(id.clone(), cx),
+                                }
+                            }))
                             .child(div().absolute().inset_0().bg(p.raised).opacity(lit_alpha))
                             .child(press)
-                            .child(room_avatar(room, &this.avatars, AVATAR, cx))
+                            .child(match (&forum_row, &topic) {
+                                // The bridge carries no topic icons: a topic shows its initials, the forum its picture.
+                                (_, Some(topic)) => avatar(topic, None, AVATAR, cx),
+                                (Some(_), None) => avatar(room.parent.as_deref().unwrap_or(&room.name), this.avatars.get(&room.id), AVATAR, cx),
+                                (None, None) => room_avatar(room, &this.avatars, AVATAR, cx),
+                            })
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -2170,7 +2248,11 @@ impl BeeperApp {
                                                     .text_size(fs(16.))
                                                     .line_height(fs(22.))
                                                     .when(unread, |el| el.font_weight(FontWeight::SEMIBOLD))
-                                                    .child(room.name.clone()),
+                                                    .child(match (&forum_row, topic) {
+                                                        (Some(_), _) => room.parent.clone().unwrap_or_else(|| room.name.clone()),
+                                                        (None, Some(topic)) => topic,
+                                                        (None, None) => room.name.clone(),
+                                                    }),
                                             )
                                             .child(div().flex_none().text_size(fs(12.)).font_features(tabular()).text_color(p.faint).child(meta)),
                                     )
@@ -2185,7 +2267,7 @@ impl BeeperApp {
                                                     .text_size(fs(14.))
                                                     .line_height(fs(20.))
                                                     .text_color(if unread { p.text } else { p.muted })
-                                                    .child(match (&room.pending, this.drafts.get(&room.id)) {
+                                                    .child(match (&room.pending, this.drafts.get(&room.id).filter(|_| forum_row.is_none())) {
                                                         (Some(pending), _) => div()
                                                             .text_color(p.text)
                                                             .font_weight(FontWeight::MEDIUM)
@@ -2203,14 +2285,15 @@ impl BeeperApp {
                                                     }),
                                             )
                                             .when(room.pinned, |el| el.child(mark(IconName::Pin)))
-                                            .when(room.muted, |el| el.child(mark(IconName::BellOff)))
-                                            .when(room.mentions > 0, |el| {
+                                            .when(totals.muted, |el| el.child(mark(IconName::BellOff)))
+                                            .when(totals.mentions > 0, |el| {
                                                 el.child(Icon::new(IconName::AtSign).size_4().flex_none().text_color(p.accent_ink))
                                             })
-                                            .when(unread && room.pending.is_none(), |el| el.child(count_pill(room.unread, room.muted, cx))),
+                                            .when(unread && room.pending.is_none(), |el| el.child(count_pill(totals.unread, totals.muted, cx))),
                                     ),
                             )
-                            .child(press::long_press(cx.listener({
+                            // A forum's row has no sheet: what it offers belongs to each topic.
+                            .when(forum_row.is_none(), |el| el.child(press::long_press(cx.listener({
                                 let id = room.id.clone();
                                 move |this, e: &LongPressEvent, _, cx| {
                                     #[cfg(target_os = "android")]
@@ -2218,16 +2301,16 @@ impl BeeperApp {
                                     // A held mouse button: the list opens where it is, as for the right button.
                                     this.open_chat_sheet(id.clone(), Some(e.start_position), false, cx);
                                 }
-                            })))
+                            }))))
                             // The right button of a mouse.
-                            .on_aux_click(cx.listener({
+                            .when(forum_row.is_none(), |el| el.on_aux_click(cx.listener({
                                 let id = room.id.clone();
                                 move |this, event: &ClickEvent, _, cx| {
                                     if event.is_secondary() {
                                         this.open_chat_sheet(id.clone(), Some(event.position()), false, cx);
                                     }
                                 }
-                            }));
+                            })));
                         // Clipped only while swiped: a row settling after a reorder travels past its slot.
                         div()
                             .id(key)
@@ -2300,7 +2383,20 @@ impl BeeperApp {
         });
         // Alone on a narrow window, the list's top row ends under the window buttons.
         let end = if frame::viewport(window).width < px(NARROW) { frame::reserve(window) } else { 0. };
-        let top = if self.searching {
+        let forum_name = self.forum.as_ref().and_then(|f| self.rooms.iter().find(|r| r.forum.as_ref() == Some(f))).and_then(|r| r.parent.clone());
+        let in_forum = self.forum.is_some();
+        let top = if let Some(name) = forum_name.filter(|_| !self.searching) {
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(4.))
+                .child(round_button("leave-forum", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.close_forum(cx))))
+                .child(frame::drag(
+                    div().flex_1().min_w_0().when(!gpui_kit::is_mobile(), |el| el.h_full().flex().items_center()).child(screen_title(name).min_w_0().truncate()),
+                    window,
+                    cx,
+                ))
+        } else if self.searching {
             h_flex()
                 .flex_1()
                 .h(px(TAP))
@@ -2329,8 +2425,8 @@ impl BeeperApp {
         let filters = self.render_chips(window, cx);
         v_flex()
             .size_full()
-            .child(h_flex().flex_none().h(px(BAR_H)).pl(px(GUTTER)).pr(px(if self.searching { GUTTER } else { GUTTER - 10. } + end)).child(top))
-            .when(!archive && !self.searching, |el| {
+            .child(h_flex().flex_none().h(px(BAR_H)).pl(px(if in_forum && !self.searching { GUTTER - 10. } else { GUTTER })).pr(px(if self.searching { GUTTER } else { GUTTER - 10. } + end)).child(top))
+            .when(!archive && !self.searching && !in_forum, |el| {
                 el.child(filters)
             })
             .children(banners)
@@ -2409,7 +2505,8 @@ impl BeeperApp {
             self.load_older(cx);
         }
         let room = self.open.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id));
-        let name = room.map(|r| r.name.clone()).unwrap_or_default();
+        // A topic goes by its own name; the forum's stands under it with the network.
+        let name = room.map(|r| if r.forum.is_some() { forum::topic_title(&r.name, r.parent.as_deref()).to_owned() } else { r.name.clone() }).unwrap_or_default();
         let network = room.and_then(|r| match (&r.network, &r.parent) {
             (Some(network), Some(parent)) => Some(format!("{network} · {parent}")),
             (network, _) => network.clone(),
@@ -3946,8 +4043,8 @@ fn sign_in_screen(id: &'static str, card: impl IntoElement) -> Stateful<Div> {
     div().id(id).size_full().overflow_y_scroll().child(v_flex().w_full().min_h_full().items_center().justify_center().p(px(GUTTER + 8.)).child(card))
 }
 
-fn screen_title(title: &'static str) -> Div {
-    div().text_size(fs(22.)).line_height(fs(28.)).font_weight(FontWeight::SEMIBOLD).child(title)
+fn screen_title(title: impl Into<SharedString>) -> Div {
+    div().text_size(fs(22.)).line_height(fs(28.)).font_weight(FontWeight::SEMIBOLD).child(title.into())
 }
 
 /// An icon to tap, with a finger-sized target.
@@ -4920,6 +5017,7 @@ mod tests {
             ts: 0,
             network: None,
             parent: None,
+            forum: None,
             unread: 0,
             mentions: 0,
             dm: false,
