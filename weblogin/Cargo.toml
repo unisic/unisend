@@ -1,0 +1,16 @@
+[package]
+name = "beeper-gpui-weblogin"
+version = "0.1.0"
+edition = "2024"
+description = "Unisend's browser for a chat network's sign-in on Linux"
+publish = false
+
+# WebKitGTK 4.1 (2.40 or later) in a GTK 3 window, the bindings wry would bring, without its window
+# layer. Here and not in Unisend: only this program needs the libraries to start.
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
+gtk = "0.18"
+# The bridge's address pattern is Go syntax, which this shares.
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

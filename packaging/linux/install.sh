@@ -12,6 +12,12 @@ dest=$HOME/.local/bin/beeper-gpui
 # A new file renamed over the old one: overwriting the binary of a running copy in place fails.
 install -Dm755 "$bin" "$dest.new"
 mv -f "$dest.new" "$dest"
+# The sign-in browser goes beside it when it was built; without it the system's browser opens.
+helper=$(dirname "$bin")/beeper-gpui-weblogin
+if [ -x "$helper" ]; then
+    install -Dm755 "$helper" "$dest-weblogin.new"
+    mv -f "$dest-weblogin.new" "$dest-weblogin"
+fi
 mkdir -p "$data/applications"
 # The launcher names the binary by its full path: ~/.local/bin is not on every session's PATH.
 sed "s|^Exec=.*|Exec=$dest|" "$here/dev.gpui.beeper.desktop" > "$data/applications/dev.gpui.beeper.desktop"

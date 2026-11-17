@@ -12,6 +12,12 @@ crate-type = ["rlib", "cdylib"]
 name = "beeper-gpui"
 path = "src/main.rs"
 
+# The browser for a network's sign-in on Linux (weblogin/): a program of its own, so that only it
+# links WebKitGTK and GTK 3 and Unisend starts without them.
+[workspace]
+members = ["weblogin"]
+default-members = [".", "weblogin"]
+
 [dependencies]
 anyhow = "1"
 log = "0.4"
@@ -62,13 +68,6 @@ zbus = { version = "5.19", default-features = false, features = ["async-io"] }
 gpui-pre-linux = { version = "0.3.6", default-features = false }
 # Voice messages: plays and records through the system's GStreamer, linked at build time.
 gstreamer = "0.25"
-# Signing in to a chat network in an embedded browser (src/weblogin.rs): the system's WebKitGTK
-# 4.1 (2.40 or later) in a GTK 3 window, the bindings wry would bring, without its window layer.
-# New to the tree: the owner asked for an embedded browser on Linux.
-webkit2gtk = { version = "2.0", features = ["v2_40"] }
-gtk = "0.18"
-# Already in the tree (rust-i18n's build): the bridge's address pattern is Go syntax, which this shares.
-regex = "1"
 
 # Toasts; the versions GPUI already builds on Windows.
 [target.'cfg(target_os = "windows")'.dependencies]

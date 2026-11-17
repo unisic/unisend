@@ -1,0 +1,9 @@
+{
+  "url": "https://www.messenger.com/",
+  "user_agent": "UA",
+  "wait_for": "^https://www\\.messenger\\.com/.*$",
+  "domains": ["facebook.com", "messenger.com"],
+  "required": [["c:c_user@messenger.com", "c:c_user@facebook.com"], ["c:xs@messenger.com", "s:xs_key"]],
+  "storage": ["xs_key"],
+  "script": ""
+}

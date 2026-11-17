@@ -3,14 +3,6 @@
 
 #[cfg(not(target_os = "android"))]
 fn main() {
-    // The app starts itself again as the browser for a chat network's sign-in.
-    #[cfg(target_os = "linux")]
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|a| a == beeper_gpui::weblogin::ARG)
-    {
-        std::process::exit(beeper_gpui::weblogin::browser());
-    }
     beeper_gpui::run_desktop();
 }
 

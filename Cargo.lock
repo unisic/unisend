@@ -846,7 +846,6 @@ dependencies = [
  "gpui-mobile",
  "gpui-pre-linux",
  "gstreamer",
- "gtk",
  "hmac 0.12.1",
  "image",
  "jni",
@@ -859,7 +858,6 @@ dependencies = [
  "memmap2",
  "mime_guess",
  "qrcode",
- "regex",
  "rusqlite",
  "serde",
  "serde_json",
@@ -867,12 +865,22 @@ dependencies = [
  "sha2 0.10.9",
  "tokio",
  "ttf-parser",
- "webkit2gtk",
  "webpki-root-certs",
  "windows 0.62.2",
  "windows-registry 0.6.1",
  "zbus 5.19.0",
  "zeroize",
+]
+
+[[package]]
+name = "beeper-gpui-weblogin"
+version = "0.1.0"
+dependencies = [
+ "gtk",
+ "regex",
+ "serde",
+ "serde_json",
+ "webkit2gtk",
 ]
 
 [[package]]

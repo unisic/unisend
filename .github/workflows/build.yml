@@ -37,8 +37,8 @@ jobs:
             target
           key: linux-${{ hashFiles('Cargo.lock') }}
           restore-keys: linux-
-      - run: cargo build --release --locked --bin beeper-gpui
-      - run: tar -C target/release -czf beeper-gpui-linux-x64.tar.gz beeper-gpui
+      - run: cargo build --release --locked --bin beeper-gpui --bin beeper-gpui-weblogin
+      - run: tar -C target/release -czf beeper-gpui-linux-x64.tar.gz beeper-gpui beeper-gpui-weblogin
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: beeper-gpui-linux-x64
