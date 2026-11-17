@@ -51,6 +51,31 @@ threads (streaming and the sound server's), a recorder about 3 MB and three, all
 GLib's thread pool keeps an idle one for a while. Decoding or encoding a voice note takes under 1%
 of one core.
 
+## Signing in to a network in a browser (WebKitGTK)
+
+Networks whose bridge signs in with cookies (Messenger, Instagram and others) open their login page
+in a window of the app's own, as Android does: `web_login` in `src/lib.rs` starts the app's binary
+again with `--web-login` and the request on stdin, and that process shows a WebKitGTK 4.1 view in a
+GTK 3 window (`src/weblogin.rs`), so GTK's main loop never meets GPUI's. It closes once the address
+matches the bridge's pattern and every required cookie, local storage key or script result has a
+value, and prints them as one JSON line; closed early, it prints nothing and the step waits for a
+paste. The profile is ephemeral: cookies, storage and cache live in that process's memory and end
+with it. Location, camera, microphone and notification requests are refused; windows a page opens
+load in the same view. When the window cannot open (no display, the process fails), the page opens
+in the system's browser and the user pastes, as on Windows and macOS.
+
+Building needs WebKitGTK 4.1, 2.40 or later, and GTK 3 development files (`webkit2gtk4.1-devel`
+and `gtk3-devel` on Fedora, `libwebkit2gtk-4.1-dev` and `libgtk-3-dev` on Debian and Ubuntu).
+The binary links them, so it needs `libwebkit2gtk-4.1.so.0` to start at all, from `webkit2gtk4.1`
+(Fedora) or `libwebkit2gtk-4.1-0` (Debian, Ubuntu).
+
+Cost: linking WebKitGTK brings the binary from 31 to 163 shared libraries, about 2 ms more in the
+dynamic loader at every start (`LD_DEBUG=statistics`, debug build). The browser runs only while
+the window is open, as three processes (the app's binary, WebKit's web and network processes):
+about 300 MB PSS together on a test page in the GUI sandbox, debug build with software
+rendering. While open it reads local storage and the script's result every 500 ms, and the
+cookie jar after each probe once the address matches. Nothing is written to disk.
+
 ## Where things live
 
 | Need | Place |
@@ -59,6 +84,7 @@ of one core.
 | Tray icon, running on with the window closed | `src/desktop/tray.rs` (StatusNotifierItem over zbus), `src/desktop.rs` |
 | Notifications with reply, mark as read, mute | `src/notify/linux.rs` (`org.freedesktop.Notifications`; the reply box is KDE's) |
 | One copy per data directory, raise on a second launch | `src/instance.rs` |
+| Signing in to a network in a browser window | `src/weblogin.rs`, started by `web_login` in `src/lib.rs` |
 | Launcher and icons | `packaging/linux/`; the window's `app_id` in `src/lib.rs` must stay the `.desktop` file's name, or the shell shows no icon |
 | Fixes to GPUI's Wayland layer (raise from a notification, pasting files) | `vendor/gpui-pre-linux/PATCHES.md` |
 
