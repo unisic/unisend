@@ -783,9 +783,9 @@ impl BeeperApp {
         }
         let title = t!("Note to self");
         if !new.group && new.target == Target::Matrix && title.to_lowercase().contains(&query.to_lowercase()) {
-            let face = self.rooms.iter().find(|r| r.note).map(|r| avatar(&r.name, self.avatars.get(&r.id), AVATAR, cx));
+            let face = self.rooms.iter().find(|r| r.note).map(|r| room_avatar(r, &self.avatars, AVATAR, cx));
             rows.push(
-                row("note-to-self".into(), title.into(), String::new(), face.map_or_else(|| icon_disc(IconName::User), |f| f.into_any_element()), None)
+                row("note-to-self".into(), title.into(), String::new(), face.map_or_else(|| icon_disc(IconName::NotebookPen), |f| f.into_any_element()), None)
                     .on_click(cx.listener(|this, _, _, cx| this.ask_new(Ask::Note, cx)))
                     .into_any_element(),
             );

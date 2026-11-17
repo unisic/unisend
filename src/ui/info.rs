@@ -447,7 +447,7 @@ impl BeeperApp {
                     .pt(px(8.))
                     .pb(px(GAP + 4.))
                     .gap(px(4.))
-                    .child(avatar(&room.name, self.avatars.get(&room.id), BIG_AVATAR, cx).mb(px(8.)))
+                    .child(room_avatar(&room, &self.avatars, BIG_AVATAR, cx).mb(px(8.)))
                     .child(div().max_w_full().text_center().text_size(fs(22.)).line_height(fs(28.)).font_weight(FontWeight::SEMIBOLD).child(room.name.clone()))
                     .children(lines.into_iter().map(|line| div().max_w_full().text_size(fs(16.)).text_color(p.muted).truncate().child(line)))
                     .when(!sub.is_empty(), |el| el.child(div().text_size(fs(14.)).text_color(p.faint).child(sub)))

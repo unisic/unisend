@@ -53,6 +53,7 @@ gpui_kit::assets::icon_assets!(
         Lock,
         LockOpen,
         MonitorSmartphone,
+        NotebookPen,
         Shield,
         MapPin,
         Mail,

@@ -536,7 +536,7 @@ impl BeeperApp {
                     .flex_none()
                     .when(!open && !on, |el| el.opacity(0.4))
                     .when(open, |el| el.cursor_pointer().active(|el| el.bg(p.raised)))
-                    .child(avatar(&r.name, self.avatars.get(&r.id), 40., cx))
+                    .child(room_avatar(r, &self.avatars, 40., cx))
                     .child(
                         v_flex()
                             .flex_1()

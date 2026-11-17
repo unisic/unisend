@@ -371,7 +371,7 @@ impl BeeperApp {
                             .when(chosen, |el| el.bg(p.raised))
                             .active(|el| el.bg(p.raised))
                             .on_click(cx.listener(move |this, _, _, cx| this.share_pick(id.clone(), cx)))
-                            .child(avatar(&room.name, this.avatars.get(&room.id), ROW_AVATAR, cx))
+                            .child(room_avatar(room, &this.avatars, ROW_AVATAR, cx))
                             .child(
                                 v_flex()
                                     .flex_1()

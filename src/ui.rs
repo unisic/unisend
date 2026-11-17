@@ -2095,7 +2095,7 @@ impl BeeperApp {
                             .on_click(cx.listener(move |this, _, _, cx| this.open_room(id.clone(), cx)))
                             .child(div().absolute().inset_0().bg(p.raised).opacity(lit_alpha))
                             .child(press)
-                            .child(avatar(&room.name, this.avatars.get(&room.id), AVATAR, cx))
+                            .child(room_avatar(room, &this.avatars, AVATAR, cx))
                             .child(
                                 v_flex()
                                     .flex_1()
@@ -2356,7 +2356,7 @@ impl BeeperApp {
             (Some(network), Some(parent)) => Some(format!("{network} · {parent}")),
             (network, _) => network.clone(),
         });
-        let header_avatar = room.map(|r| avatar(&r.name, self.avatars.get(&r.id), 36., cx));
+        let header_avatar = room.map(|r| room_avatar(r, &self.avatars, 36., cx));
         let dm = room.is_some_and(|r| r.dm);
         // The newest message: the user's tells its way to the others, someone else's what its sender sees.
         self.tail = self.msgs.iter().rposition(|m| m.kind == Kind::Message && !self.is_hidden(&m.id));
@@ -3905,6 +3905,16 @@ fn avatar(name: &str, image: Option<&Option<Arc<Image>>>, size: f32, cx: &App) -
     }
 }
 
+/// A chat's picture: its own; the note to self's notebook; else the name's initials.
+fn room_avatar(r: &RoomSummary, avatars: &HashMap<OwnedRoomId, Option<Arc<Image>>>, size: f32, cx: &App) -> Div {
+    let image = avatars.get(&r.id);
+    if r.note && image.is_none_or(Option::is_none) {
+        let p = Palette::of(cx);
+        return div().size(px(size)).flex_none().flex().items_center().justify_center().rounded_full().bg(p.raised).text_color(p.muted).child(Icon::new(IconName::NotebookPen).size(px(size * 0.45)));
+    }
+    avatar(&r.name, image, size, cx)
+}
+
 /// What can be done with a chat, each as the opposite of its current state.
 /// Whether a chat belongs to a section of the list, before the unread filter and the search.
 /// An upgraded room leaves the list once the user is in the room that replaced it.
@@ -4696,15 +4706,17 @@ impl BeeperApp {
                 } else {
                     self.slide.jump = false;
                     let beside = Self::info_beside(window);
-                    let main = if let Some(panel) = panel {
-                        div().flex_1().min_w_0().h_full().child(panel).into_any_element()
-                    } else {
-                        h_flex()
+                    // A new chat is picked in the list's column, as in Signal, beside the chat still open.
+                    let main = match panel {
+                        Some(panel) if self.panel != Some(Panel::NewChat) => div().flex_1().min_w_0().h_full().child(panel).into_any_element(),
+                        column => {
+                            let column = column.unwrap_or_else(|| self.render_rooms(banners.take(), window, cx).into_any_element());
+                            h_flex()
                             .flex_1()
                             .min_w_0()
                             .h_full()
                             // The one line between the panes, so the list and the conversation read as two.
-                            .child(div().w(px(LIST_W)).flex_none().h_full().border_r_1().border_color(p.rule).child(self.render_rooms(banners.take(), window, cx)))
+                            .child(div().w(px(LIST_W)).flex_none().h_full().border_r_1().border_color(p.rule).child(column))
                             .child(div().flex_1().min_w_0().h_full().child(if self.info_open() && !beside {
                                 self.render_info(false, window, cx)
                             } else if self.open.is_some() {
@@ -4727,6 +4739,7 @@ impl BeeperApp {
                             }))
                             .when(self.info_open() && beside, |el| el.child(div().w(px(info::INFO_W)).flex_none().h_full().child(self.render_info(true, window, cx))))
                             .into_any_element()
+                        }
                     };
                     h_flex().size_full().child(self.render_nav(false, window, cx)).child(main).into_any_element()
                 };

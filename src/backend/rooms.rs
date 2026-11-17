@@ -90,6 +90,7 @@ impl Caps {
         Caps {
             username: true,
             search: true,
+            contacts: true,
             create_dm: true,
             group: Some(GroupCaps { name: true, name_max: 255, min_people: 1, ..Default::default() }),
             ..Default::default()
@@ -388,9 +389,30 @@ fn bridge_api(api: Option<&Api>) -> Result<&Api> {
     api.ok_or_else(|| anyhow!(t!("Networks are a Beeper feature")))
 }
 
+/// Matrix keeps no contact list: the people of the user's one-to-one Matrix chats stand in for one.
+/// Bridged chats are left out: their people are on their network's chip. Reads the store once per
+/// joined chat, and the members of the one-to-one ones, at most `MAX_PEOPLE` people.
+async fn dm_people(client: &Client) -> Vec<Person> {
+    let mut out: Vec<Person> = Vec::new();
+    for room in client.joined_rooms() {
+        if out.len() >= MAX_PEOPLE {
+            break;
+        }
+        if !room.is_direct().await.unwrap_or(false) || super::bridge_kind(&room).await.is_some() {
+            continue;
+        }
+        let Some(user) = super::other_person(&room).await else { continue };
+        if !out.iter().any(|p| p.id == user.as_str()) {
+            out.push(Person { name: super::display_name(&room, &user).await, detail: user.to_string(), id: user.to_string() });
+        }
+    }
+    out
+}
+
 /// `query` empty: the contact list.
 async fn find(client: &Client, api: Option<&Api>, target: &Target, query: &str) -> Result<Vec<Person>> {
     match target {
+        Target::Matrix if query.is_empty() => Ok(dm_people(client).await),
         Target::Matrix => {
             let found = client.search_users(query, DIRECTORY_LIMIT).await?;
             let own = client.user_id();
