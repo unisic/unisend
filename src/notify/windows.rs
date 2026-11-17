@@ -71,6 +71,8 @@ impl Sink {
         // A later toast with the same tag and group takes this one's place.
         toast.SetTag(&HSTRING::from(tag(&entry.chat)))?;
         toast.SetGroup(&HSTRING::from(GROUP))?;
+        // A quiet change (an edit, the app's own line) updates the Action Center without a popup.
+        toast.SetSuppressPopup(!alert)?;
         let chat = entry.chat.clone();
         toast.Activated(&TypedEventHandler::<ToastNotification, IInspectable>::new(move |_, args| {
             let Some(args) = args.as_ref().and_then(|a| a.cast::<ToastActivatedEventArgs>().ok()) else { return Ok(()) };

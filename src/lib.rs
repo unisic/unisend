@@ -952,11 +952,11 @@ impl NotifyShows {
         match self {
             Self::NameAndText => f(notice),
             Self::NameOnly => {
-                let note = backend::Note { sender: notice.note.sender.clone(), text, ts: notice.note.ts, mention: notice.note.mention };
+                let note = backend::Note { id: notice.note.id.clone(), sender: notice.note.sender.clone(), text, ts: notice.note.ts, mention: notice.note.mention };
                 f(&Notice { note: &note, ..*notice });
             }
             Self::Nothing => {
-                let note = backend::Note { sender: "Unisend".into(), text, ts: notice.note.ts, mention: notice.note.mention };
+                let note = backend::Note { id: notice.note.id.clone(), sender: "Unisend".into(), text, ts: notice.note.ts, mention: notice.note.mention };
                 f(&Notice { name: "Unisend", group: false, icon: "", note: &note, ..*notice });
             }
         }
@@ -984,6 +984,24 @@ fn notify_as_shown(notice: &Notice) {
     }
     #[cfg(not(any(target_os = "android", test)))]
     notify::show(notice);
+}
+
+/// Shows the edit of a message a chat's notification holds, or with `gone` takes the message out;
+/// a notification left without messages goes. Nothing happens to one that does not hold it.
+pub(crate) fn amend_notification(notice: &Notice, gone: bool) {
+    NotifyShows::current().redact(notice, |notice| {
+        #[cfg(all(target_os = "android", not(test)))]
+        if let Err(e) = android_files::notify("amend", &[notice.chat, &notice.note.id, if gone { "" } else { notice.note.text.as_str() }]) {
+            log::warn!("notification: {e}");
+        }
+        #[cfg(not(any(target_os = "android", test)))]
+        notify::amend(notice, gone);
+        #[cfg(test)]
+        let _ = (notice, gone);
+        // Tests keep the desktop path compiled without reaching the session bus.
+        #[cfg(all(test, not(target_os = "android")))]
+        let _ = notify::amend;
+    });
 }
 
 /// The chat a tapped notification asked to open, once.
@@ -1296,17 +1314,25 @@ mod android_files {
             let activity = helpers::activity(env)?;
             let class = helpers::find_app_class(env, "dev.gpui.beeper.Notify")?;
             let mut text = |s: &str| env.new_string(s).map_err(|e| e.to_string());
-            let (chat, name, sender, body, icon, initials) =
-                (text(notice.chat)?, text(notice.name)?, text(&notice.note.sender)?, text(&notice.note.text)?, text(notice.icon)?, text(&crate::initials(notice.name))?);
+            let (chat, id, name, sender, body, icon, initials) = (
+                text(notice.chat)?,
+                text(&notice.note.id)?,
+                text(notice.name)?,
+                text(&notice.note.sender)?,
+                text(&notice.note.text)?,
+                text(notice.icon)?,
+                text(&crate::initials(notice.name))?,
+            );
             env.call_static_method(
                 &class,
                 jni::jni_str!("message"),
                 jni::jni_sig!(
-                    "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;Ljava/lang/String;JZLjava/lang/String;Ljava/lang/String;ZI)V"
+                    "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;Ljava/lang/String;JZLjava/lang/String;Ljava/lang/String;ZI)V"
                 ),
                 &[
                     JValue::Object(&activity),
                     JValue::Object(&chat),
+                    JValue::Object(&id),
                     JValue::Object(&name),
                     JValue::Bool(notice.group),
                     JValue::Object(&sender),
@@ -1535,7 +1561,7 @@ mod tests {
     #[test]
     fn a_notification_shows_only_what_the_setting_lets_it() {
         use super::{Notice, NotifyShows, backend::Note};
-        let note = Note { sender: "Ann".into(), text: "secret".into(), ts: 1, mention: true };
+        let note = Note { id: "$e".into(), sender: "Ann".into(), text: "secret".into(), ts: 1, mention: true };
         let notice = Notice { chat: "!a:x", name: "Book club", group: true, icon: "/pic.png", note: &note, alert: true };
         let seen = |shows: NotifyShows| {
             let mut out = None;

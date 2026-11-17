@@ -50,6 +50,8 @@ public final class Notify {
     static final String MENTIONS = "mentions";
     static final String CONNECTION = "connection";
     static final String EXTRA_CHAT = "chat";
+    /** A message line's event ID, in its extras, by which an edit or deletion finds it. */
+    private static final String EXTRA_ID = "id";
     static final String ACTION_REPLY = "dev.gpui.beeper.REPLY";
     static final String ACTION_READ = "dev.gpui.beeper.READ";
     static final String ACTION_MUTE = "dev.gpui.beeper.MUTE";
@@ -262,7 +264,7 @@ public final class Notify {
      * of the chat's picture, or empty; without one the chat's {@code initials} stand in. {@code show}
      * is what Settings let it show; the native side has already put "New message" for the text.
      */
-    public static void message(Context any, String chat, String name, boolean group, String sender,
+    public static void message(Context any, String chat, String id, String name, boolean group, String sender,
             String text, long time, boolean mention, String icon, String initials, boolean alert, int show) {
         Context context = any.getApplicationContext();
         channels(context);
@@ -292,8 +294,9 @@ public final class Notify {
             person = new Person.Builder().setName(sender).setKey(sender).setIcon(IconCompat.createWithBitmap(picture)).build();
         }
         NotificationCompat.MessagingStyle old = conversation(manager, chat);
-        NotificationCompat.MessagingStyle style = extend(context, old, group ? name : null, group,
-                new NotificationCompat.MessagingStyle.Message(text, time, person));
+        NotificationCompat.MessagingStyle.Message line = new NotificationCompat.MessagingStyle.Message(text, time, person);
+        line.getExtras().putString(EXTRA_ID, id);
+        NotificationCompat.MessagingStyle style = extend(context, old, group ? name : null, group, line);
         // Once a chat has been mentioned in, its notification stays on the mentions channel until
         // it is read, so the sound of a later message is the mention's.
         boolean mentioned = mention || (active(manager, chat) != null
@@ -309,6 +312,51 @@ public final class Notify {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         manager.cancel(chat, 0);
         summarize(context, manager, chat, false);
+    }
+
+    /**
+     * Message {@code id} was edited to {@code text}, or deleted when {@code text} is empty: its line
+     * in the chat's notification changes or leaves, quietly. A notification left with none of the
+     * chat's messages, only the app's own lines, goes.
+     */
+    public static void amend(Activity activity, String chat, String id, String text) {
+        Context context = activity.getApplicationContext();
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        NotificationCompat.MessagingStyle old = conversation(manager, chat);
+        StatusBarNotification shown = active(manager, chat);
+        if (old == null || shown == null || id.isEmpty()) {
+            return;
+        }
+        NotificationCompat.MessagingStyle style = new NotificationCompat.MessagingStyle(old.getUser());
+        style.setConversationTitle(old.getConversationTitle()).setGroupConversation(old.isGroupConversation());
+        boolean found = false;
+        boolean theirs = false;
+        for (NotificationCompat.MessagingStyle.Message line : old.getMessages()) {
+            if (id.equals(line.getExtras().getString(EXTRA_ID))) {
+                found = true;
+                if (text.isEmpty()) {
+                    continue;
+                }
+                line = new NotificationCompat.MessagingStyle.Message(text, line.getTimestamp(), line.getPerson());
+                line.getExtras().putString(EXTRA_ID, id);
+            }
+            theirs |= line.getExtras().getString(EXTRA_ID) != null;
+            style.addMessage(line);
+        }
+        if (!found) {
+            return;
+        }
+        if (!theirs) {
+            manager.cancel(chat, 0);
+            summarize(context, manager, chat, false);
+            return;
+        }
+        Notification n = shown.getNotification();
+        boolean bare = n.getShortcutId() == null;
+        List<NotificationCompat.MessagingStyle.Message> lines = style.getMessages();
+        NotificationCompat.MessagingStyle.Message last = lines.get(lines.size() - 1);
+        post(context, manager, chat, text(n, Notification.EXTRA_TITLE), n.getChannelId(), bare ? null : cached(chat), style,
+                last.getText() == null ? "" : last.getText().toString(), n.when, false, bare);
     }
 
     /** A reply typed into a notification. */

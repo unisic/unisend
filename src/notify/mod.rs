@@ -1,6 +1,7 @@
 //! Desktop notifications: one per chat, replaced in place as messages arrive, closed once the chat
-//! is read anywhere, with Mark as read, Mute and a reply box where the platform has one. Only the
-//! system's own notification service on this machine is used: no push service, no registration.
+//! is read anywhere, with Mark as read, Mute and a reply box where the platform has one. A message
+//! edited or deleted after it was shown is changed or taken out there too. Only the system's own
+//! notification service on this machine is used: no push service, no registration.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -50,7 +51,9 @@ const RETRY_SOON: Duration = Duration::from_secs(5);
 const APP_ID: &str = "dev.gpui.beeper";
 
 enum Req {
-    Show { chat: String, name: String, icon: String, line: String, alert: bool },
+    Show { chat: String, name: String, icon: String, id: String, line: String, alert: bool },
+    /// Message `id` was edited to `line`, or deleted (`None`).
+    Amend { chat: String, id: String, line: Option<String> },
     Close(String),
     /// Closes the chats of the account in this slot, signed out.
     CloseAccount(usize),
@@ -115,9 +118,17 @@ fn to_ui(msg: ToUi) {
 }
 
 pub(crate) fn show(notice: &crate::Notice) {
-    // A direct chat's title already names the sender, as Signal and Android show it.
-    let line = if notice.group { format!("{}: {}", notice.note.sender, notice.note.text) } else { notice.note.text.clone() };
-    request(Req::Show { chat: notice.chat.into(), name: notice.name.into(), icon: notice.icon.into(), line, alert: notice.alert });
+    request(Req::Show { chat: notice.chat.into(), name: notice.name.into(), icon: notice.icon.into(), id: notice.note.id.clone(), line: line(notice), alert: notice.alert });
+}
+
+/// The notice's message as its notification shows it again, edited, or with `gone` deleted.
+pub(crate) fn amend(notice: &crate::Notice, gone: bool) {
+    request(Req::Amend { chat: notice.chat.into(), id: notice.note.id.clone(), line: (!gone).then(|| line(notice)) });
+}
+
+/// A message's line. A direct chat's title already names the sender, as Signal and Android show it.
+fn line(notice: &crate::Notice) -> String {
+    if notice.group { format!("{}: {}", notice.note.sender, notice.note.text) } else { notice.note.text.clone() }
 }
 
 pub(crate) fn close(chat: &str) {
@@ -189,17 +200,18 @@ struct Entry {
     name: String,
     /// The server's number for it (Linux); 0 until it answered, and elsewhere.
     id: u32,
-    lines: VecDeque<String>,
+    /// Each line with its message's event ID; the app's own lines (a reply, "Not sent") have none.
+    lines: VecDeque<(String, String)>,
     /// The chat's picture on disk, removed with the notification.
     icon: String,
 }
 
 impl Entry {
-    fn push(&mut self, line: &str) {
+    fn push(&mut self, id: &str, line: &str) {
         if self.lines.len() == KEPT {
             self.lines.pop_front();
         }
-        self.lines.push_back(kept(line));
+        self.lines.push_back((id.into(), kept(line)));
     }
 
     /// The notification's text: the last `SHOWN` messages, or only that there is one while locked.
@@ -207,7 +219,7 @@ impl Entry {
         if locked {
             return t!("New message").to_owned();
         }
-        body(self.lines.iter().skip(self.lines.len().saturating_sub(SHOWN)), markup)
+        body(self.lines.iter().skip(self.lines.len().saturating_sub(SHOWN)).map(|(_, line)| line), markup)
     }
 }
 
@@ -229,10 +241,10 @@ struct Shown(VecDeque<Entry>);
 impl Shown {
     /// Adds a line to the chat's notification and moves it to the back. Returns the entry dropped
     /// to stay within `MAX_CHATS`.
-    fn add(&mut self, chat: &str, name: &str, line: &str, icon: String) -> Option<Entry> {
+    fn add(&mut self, chat: &str, name: &str, id: &str, line: &str, icon: String) -> Option<Entry> {
         let mut entry = self.remove(chat).unwrap_or_else(|| Entry { chat: chat.into(), name: String::new(), id: 0, lines: VecDeque::new(), icon: String::new() });
         entry.name = kept(name);
-        entry.push(line);
+        entry.push(id, line);
         if !icon.is_empty() {
             entry.icon = icon;
         }
@@ -248,6 +260,21 @@ impl Shown {
     fn remove(&mut self, chat: &str) -> Option<Entry> {
         let at = self.0.iter().position(|e| e.chat == chat)?;
         self.0.remove(at)
+    }
+
+    /// Puts message `id`'s new line in its chat's notification, or with `None` takes it out. A
+    /// notification left with only the app's own lines goes.
+    fn amend(&mut self, chat: &str, id: &str, line: Option<&str>) -> Amended {
+        let Some(entry) = self.get(chat) else { return Amended::No };
+        let Some(at) = entry.lines.iter().position(|(i, _)| !id.is_empty() && i == id) else { return Amended::No };
+        match line {
+            Some(line) => entry.lines[at].1 = kept(line),
+            None => drop(entry.lines.remove(at)),
+        }
+        if entry.lines.iter().any(|(i, _)| !i.is_empty()) {
+            return Amended::Changed;
+        }
+        self.remove(chat).map_or(Amended::No, Amended::Gone)
     }
 
     /// A server that started again (Plasma's shell restarts) numbers from 1 anew: another chat's
@@ -266,6 +293,15 @@ impl Shown {
             Target::Chat(chat) => Some(chat),
         }
     }
+}
+
+/// What an edit or deletion did to the notifications.
+enum Amended {
+    /// The message is not in one.
+    No,
+    Changed,
+    /// Its notification had no other message, and is to be closed.
+    Gone(Entry),
 }
 
 /// The notification's text: one line per message, escaped when the server reads markup.
@@ -343,22 +379,24 @@ pub(crate) async fn serve(dir: PathBuf) {
             }
             () = tokio::time::sleep_until((service.tried + service.wait).into()), if service.sink.is_none() => service.open().await,
             req = requests.recv() => match req {
-                Some(Req::Show { chat, name, icon, line, alert }) => {
-                    if let Some(old) = shown.add(&chat, &name, &line, icon) {
+                Some(Req::Show { chat, name, icon, id, line, alert }) => {
+                    if let Some(old) = shown.add(&chat, &name, &id, &line, icon) {
                         drop_entry(service.sink.as_mut(), old).await;
                     }
                     // Earlier messages of one sync only add their lines: the last one posts them all.
-                    if alert
-                        && let Some(sink) = service.sink().await
-                        && let Some(entry) = shown.get(&chat)
-                    {
-                        // Showing nothing reads as the lock does: "New message" under the app's name, no buttons.
-                        let locked = locked() || crate::NotifyShows::current() == crate::NotifyShows::Nothing;
-                        let text = entry.text(sink.markup(), locked);
-                        sink.post(entry, &text, alert, !locked).await;
-                        shown.renumbered(&chat);
+                    if alert && let Some(sink) = service.sink().await {
+                        post(sink, &mut shown, &chat, true).await;
                     }
                 }
+                Some(Req::Amend { chat, id, line }) => match shown.amend(&chat, &id, line.as_deref()) {
+                    Amended::No => {}
+                    Amended::Changed => {
+                        if let Some(sink) = service.sink.as_mut() {
+                            post(sink, &mut shown, &chat, false).await;
+                        }
+                    }
+                    Amended::Gone(old) => drop_entry(service.sink.as_mut(), old).await,
+                },
                 Some(Req::Close(chat)) => {
                     if let Some(old) = shown.remove(&chat) {
                         drop_entry(service.sink.as_mut(), old).await;
@@ -470,7 +508,7 @@ async fn on_event(sink: &mut Sink, shown: &mut Shown, ev: Event) {
             if crate::backend::reply(&chat, &text) {
                 // The next message's notification shows the answer above it, as Android's does.
                 if let Some(entry) = shown.get(&chat) {
-                    entry.push(&format!("{}: {}", t!("You"), text.trim()));
+                    entry.push("", &format!("{}: {}", t!("You"), text.trim()));
                 }
             } else {
                 quiet_line(sink, shown, &chat, format!("Unisend: {}", t!("Not sent"))).await;
@@ -487,10 +525,20 @@ async fn on_event(sink: &mut Sink, shown: &mut Shown, ev: Event) {
     }
 }
 
+/// Posts the chat's notification as it now reads.
+async fn post(sink: &mut Sink, shown: &mut Shown, chat: &str, alert: bool) {
+    let Some(entry) = shown.get(chat) else { return };
+    // Showing nothing reads as the lock does: "New message" under the app's name, no buttons.
+    let locked = locked() || crate::NotifyShows::current() == crate::NotifyShows::Nothing;
+    let text = entry.text(sink.markup(), locked);
+    sink.post(entry, &text, alert, !locked).await;
+    shown.renumbered(chat);
+}
+
 /// Adds the app's own line to a chat's notification without a sound.
 async fn quiet_line(sink: &mut Sink, shown: &mut Shown, chat: &str, line: String) {
     let Some(entry) = shown.get(chat) else { return };
-    entry.push(&line);
+    entry.push("", &line);
     let text = entry.text(sink.markup(), false);
     sink.post(entry, &text, false, true).await;
     shown.renumbered(chat);
@@ -504,7 +552,7 @@ mod tests {
     fn a_body_keeps_the_last_messages_on_one_line_each_and_escapes_markup() {
         let mut shown = Shown::default();
         for n in 0..KEPT + 2 {
-            shown.add("!a:x", "Ann", &format!("Ann: {n}"), String::new());
+            shown.add("!a:x", "Ann", &format!("$e{n}"), &format!("Ann: {n}"), String::new());
         }
         let entry = shown.get("!a:x").unwrap();
         assert_eq!(entry.lines.len(), KEPT);
@@ -518,9 +566,9 @@ mod tests {
     #[test]
     fn lines_are_kept_without_control_characters_and_cut() {
         let mut shown = Shown::default();
-        shown.add("!a:x", "A\0nn\u{1b}", "Ann: a\0b\u{7f}c\td\r\ne\u{1f}", String::new());
+        shown.add("!a:x", "A\0nn\u{1b}", "$e", "Ann: a\0b\u{7f}c\td\r\ne\u{1f}", String::new());
         let entry = shown.get("!a:x").unwrap();
-        assert_eq!((entry.name.as_str(), entry.lines[0].as_str()), ("Ann", "Ann: abcd\ne"));
+        assert_eq!((entry.name.as_str(), entry.lines[0].1.as_str()), ("Ann", "Ann: abcd\ne"));
         let long = kept(&"é".repeat(MAX_LINE + 5));
         assert_eq!(long.chars().count(), MAX_LINE + 1);
         assert!(long.ends_with('…'));
@@ -537,17 +585,17 @@ mod tests {
     #[test]
     fn one_notification_per_chat_and_the_oldest_goes_past_the_cap() {
         let mut shown = Shown::default();
-        assert!(shown.add("!a:x", "A", "1", "/p/a".into()).is_none());
+        assert!(shown.add("!a:x", "A", "$1", "1", "/p/a".into()).is_none());
         shown.get("!a:x").unwrap().id = 7;
-        shown.add("!a:x", "A2", "2", String::new());
+        shown.add("!a:x", "A2", "$2", "2", String::new());
         let entry = shown.get("!a:x").unwrap();
         assert_eq!((entry.id, entry.icon.as_str(), entry.name.as_str()), (7, "/p/a", "A2"), "the next message replaces the chat's notification");
         assert_eq!(shown.chat_of(Target::Id(7)).as_deref(), Some("!a:x"));
         assert_eq!(shown.chat_of(Target::Id(0)), None);
         for n in 1..MAX_CHATS {
-            assert!(shown.add(&format!("!{n}:x"), "n", "m", String::new()).is_none());
+            assert!(shown.add(&format!("!{n}:x"), "n", "$m", "m", String::new()).is_none());
         }
-        let dropped = shown.add("!new:x", "n", "m", String::new());
+        let dropped = shown.add("!new:x", "n", "$m", "m", String::new());
         assert_eq!(dropped.map(|e| e.chat).as_deref(), Some("!a:x"), "the least recently updated chat goes");
         assert_eq!(shown.0.len(), MAX_CHATS);
         assert_eq!(shown.remove("!new:x").map(|e| e.lines.len()), Some(1));
@@ -557,13 +605,30 @@ mod tests {
     #[test]
     fn a_number_given_again_after_a_server_restart_belongs_to_the_newer_notification() {
         let mut shown = Shown::default();
-        shown.add("!old:x", "Old", "1", String::new());
+        shown.add("!old:x", "Old", "$1", "1", String::new());
         shown.get("!old:x").unwrap().id = 1;
-        shown.add("!new:x", "New", "2", String::new());
+        shown.add("!new:x", "New", "$2", "2", String::new());
         shown.get("!new:x").unwrap().id = 1;
         shown.renumbered("!new:x");
         assert_eq!(shown.chat_of(Target::Id(1)).as_deref(), Some("!new:x"));
         assert_eq!(shown.get("!old:x").unwrap().id, 0, "the old one is not closed by number");
+    }
+
+    #[test]
+    fn an_edited_message_changes_its_line_and_a_deleted_one_leaves() {
+        let mut shown = Shown::default();
+        shown.add("!a:x", "Ann", "$1", "Ann: hi", String::new());
+        shown.add("!a:x", "Ann", "$2", "Ann: my pin is 1234", String::new());
+        shown.get("!a:x").unwrap().push("", "You: ok");
+        assert!(matches!(shown.amend("!a:x", "$9", None), Amended::No), "a message not shown");
+        assert!(matches!(shown.amend("!b:x", "$1", None), Amended::No), "a chat not shown");
+        assert!(matches!(shown.amend("!a:x", "", None), Amended::No), "the app's own lines are not messages");
+        assert!(matches!(shown.amend("!a:x", "$1", Some("Ann: hello")), Amended::Changed));
+        assert!(matches!(shown.amend("!a:x", "$2", None), Amended::Changed));
+        assert_eq!(shown.get("!a:x").unwrap().text(false, false), "Ann: hello\nYou: ok");
+        let Amended::Gone(gone) = shown.amend("!a:x", "$1", None) else { panic!("only the reply is left") };
+        assert_eq!(gone.chat, "!a:x");
+        assert!(shown.get("!a:x").is_none());
     }
 
     #[test]

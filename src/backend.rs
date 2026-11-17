@@ -794,7 +794,7 @@ async fn test_notice(client: Client, dir: PathBuf) {
     };
     let file = tokio::time::timeout(ICON_WAIT, face).await.ok().flatten();
     let icon = file.as_deref().and_then(Path::to_str).unwrap_or_default();
-    let note = Note { sender: "Unisend".into(), text: t!("Test notification. Reply, mark as read or mute to try the buttons: nothing is sent.").into(), ts: now_ms().max(0) as u64, mention: false };
+    let note = Note { id: String::new(), sender: "Unisend".into(), text: t!("Test notification. Reply, mark as read or mute to try the buttons: nothing is sent.").into(), ts: now_ms().max(0) as u64, mention: false };
     let chat = crate::accounts::key(crate::accounts::slot_of(&dir), TEST_CHAT);
     crate::notify(&crate::Notice { chat: &chat, name: "Unisend", group: false, icon, note: &note, alert: true });
     // Android has decoded the picture by now; desktop removes it with the notification.
@@ -2465,6 +2465,8 @@ fn video_thumbnail(path: &Path) -> Option<caption::Prepared> {
 
 /// One message to put in a chat's notification.
 pub(crate) struct Note {
+    /// The message's event ID, by which its edit or deletion finds it; empty where there is none.
+    pub id: String,
     pub sender: String,
     pub text: String,
     pub ts: u64,
@@ -2482,16 +2484,31 @@ const COUNT_WAIT: Duration = Duration::from_secs(3);
 /// that the account's push rules ask to be notified of (they cover mutes and mentions-only chats).
 /// Old messages do not count: a bridge bringing in history sends them through sync too.
 fn notes(msgs: &[Msg], now_ms: i64) -> Vec<Note> {
-    let recent = |m: &Msg| now_ms - (m.ts as i64) < NOTIFY_WINDOW.as_millis() as i64;
     let mut found: Vec<Note> = msgs
         .iter()
         .rev()
-        .filter(|m| m.notify && !m.own && recent(m))
-        .map(|m| Note { sender: m.sender.clone(), text: m.summary(), ts: m.ts, mention: m.mentioned })
+        .filter(|m| m.notify && !m.own && recent(m, now_ms))
+        // A message not decrypted yet says only that it came, as one the settings hide does.
+        .map(|m| Note { id: m.id.clone(), sender: m.sender.clone(), text: if undecrypted(&m.body) { t!("New message").into() } else { m.summary() }, ts: m.ts, mention: m.mentioned })
         .take(MAX_NOTES)
         .collect();
     found.reverse();
     found
+}
+
+fn recent(m: &Msg, now_ms: i64) -> bool {
+    now_ms - (m.ts as i64) < NOTIFY_WINDOW.as_millis() as i64
+}
+
+/// Edits and deletions of messages the chat's notification may show, made there too: a deleted
+/// message leaves it, as in Signal. Older ones are history a bridge brings in.
+fn amend_notes(dir: &Path, summary: &RoomSummary, amends: &[Msg]) {
+    let now = now_ms();
+    for m in amends.iter().filter(|m| recent(m, now)) {
+        let chat = crate::accounts::key(crate::accounts::slot_of(dir), summary.id.as_str());
+        let note = Note { id: m.id.clone(), sender: m.sender.clone(), text: m.summary(), ts: m.ts, mention: false };
+        crate::amend_notification(&crate::Notice { chat: &chat, name: &summary.name, group: !summary.dm, icon: "", note: &note, alert: false }, m.deleted);
+    }
 }
 
 /// Whether the window shows this account's chats now, so it needs no notification of them.
@@ -2598,7 +2615,7 @@ fn announce_invite(client: &Client, dir: &Path, rooms: &Rooms, notif: &Notificat
         return;
     }
     let text = if summary.dm { t!("Wants to chat with you") } else { t!("Invited you to the group") };
-    let note = Note { sender: name.clone(), text: text.to_owned(), ts: now_ms() as u64, mention: false };
+    let note = Note { id: String::new(), sender: name.clone(), text: text.to_owned(), ts: now_ms() as u64, mention: false };
     let (client, dir, rooms, notif, summary) = (client.clone(), dir.to_owned(), rooms.clone(), notif.clone(), summary.clone());
     tokio::spawn(async move {
         use matrix_sdk::ruma::push::{PredefinedOverrideRuleId, RuleKind};
@@ -3239,6 +3256,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);
             rooms.lock().unwrap().insert(id.clone(), summary.clone());
             announce(&client, &dir, &rooms, &summary, prev.as_ref(), &msgs);
+            amend_notes(&dir, &summary, &amends);
             // Typing, receipts and room account data bring a room here without changing its row.
             if prev.as_ref() != Some(&summary) {
                 changed.push(summary);
