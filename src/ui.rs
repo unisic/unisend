@@ -2079,7 +2079,9 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let current = self.tab();
         let rail = !narrow && Self::rail(window);
-        let items = TABS.map(|(tab, label, icon)| {
+        // Networks are Beeper's bridges; a plain Matrix account has none.
+        let tabs = TABS.into_iter().filter(|&(tab, ..)| tab != Tab::Networks || self.beeper);
+        let items: Vec<_> = tabs.map(|(tab, label, icon)| {
             let ink = if tab == current { p.text } else { p.faint };
             let press = press::area(label, Duration::ZERO, p.surface, window, cx).when(!narrow, |el| el.rounded(px(RADIUS)));
             div()
@@ -2111,7 +2113,7 @@ impl BeeperApp {
                     el.child(Icon::new(icon).size_5())
                 })
                 .map(|el| if rail { el.aria_label(tr(label)).tooltip(move |window, cx| Tooltip::new(tr(label)).build(window, cx)) } else { el.child(tr(label)) })
-        });
+        }).collect();
         if narrow {
             h_flex().flex_none().h(px(NAV_H)).bg(p.ground).border_t_1().border_color(p.rule).children(items)
         } else {

@@ -41,7 +41,8 @@ the message's sheet offers at full size.
 
 ## Navigation
 
-Four destinations with icon and label: Chats, Archive, Networks, Settings. On a phone they are a
+Four destinations with icon and label: Chats, Archive, Networks, Settings; an account on another
+Matrix server has no Networks. On a phone they are a
 bar at the bottom; on a wide window, a column on the left. The active one is white, the rest
 `faint`; no pill, no accent (a pointer hovering gets a `surface` row). Settings and Networks are
 screens, not menus; their content keeps to a 560 column.
