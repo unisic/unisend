@@ -218,9 +218,10 @@ fn more_offered(keys: &[String], caps: &Features) -> bool {
     caps.allowed_reactions.as_ref().is_none_or(|list| list.iter().any(|a| !keys.iter().any(|k| same_emoji(k, a))))
 }
 
-/// A reaction key as shown: any emoji whole, someone's long text cut short.
+/// A reaction key as shown: any emoji whole and in its emoji form ("\u{2764}" is a white text
+/// heart in Inter 4), someone's long text cut short.
 pub(super) fn clip_key(key: &str) -> String {
-    clip_chars(key, 16)
+    emojis::get(key).map_or_else(|| clip_chars(key, 16), |e| e.as_str().to_owned())
 }
 
 /// One emoji with or without the emoji presentation selector: clients send "\u{2764}" and
@@ -782,7 +783,8 @@ impl BeeperApp {
                     .justify_center()
                     .rounded_full()
                     .cursor_pointer()
-                    .when(mine[n], |el| el.border_2().border_color(p.text.opacity(menu.reveal(now, 0., 400., decelerate))))
+                    // The ring gives way to the grown emoji, which would cut through it.
+                    .when(mine[n], |el| el.border_2().border_color(p.text.opacity(menu.reveal(now, 0., 400., decelerate) * (1. - grown))))
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&id, &key, cx)))
                     .child(
                         div()
@@ -791,7 +793,7 @@ impl BeeperApp {
                             .opacity(menu.reveal(now, 100. + 10. * n as f32, 200., decelerate))
                             .text_size(px((EMOJI + (EMOJI_GROWN - EMOJI) * grown).round()))
                             .line_height(px(EMOJI_GROWN))
-                            .child(label),
+                            .child(crate::emoji::styled(clip_key(&label), Vec::new())),
                     )
             });
             deferred(
@@ -884,7 +886,7 @@ impl BeeperApp {
                 .justify_center()
                 .rounded_full()
                 .cursor_pointer()
-                .when(mine, |el| el.border_2().border_color(p.text))
+                .when(mine, |el| el.border_2().border_color(p.text.opacity(1. - grow)))
                 .on_hover(cx.listener(move |this, over: &bool, _, cx| {
                     let next = if *over { Some(n) } else { this.picker_hover.filter(|&h| h != n) };
                     if next != this.picker_hover {
@@ -899,7 +901,7 @@ impl BeeperApp {
                         .top(px(-PICK_RISE * grow))
                         .text_size(px(PICK_EMOJI + (PICK_GROWN - PICK_EMOJI) * grow))
                         .line_height(px(PICK_GROWN))
-                        .child(label),
+                        .child(crate::emoji::styled(clip_key(&label), Vec::new())),
                 )
         }).collect();
         let picker = div().absolute().left(px(x)).top(px(y)).child(
@@ -1048,6 +1050,7 @@ mod tests {
     fn long_reaction_keys_are_cut_and_emoji_kept_whole() {
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
         assert_eq!(clip_key(family), family);
+        assert_eq!(clip_key("\u{2764}"), "\u{2764}\u{FE0F}");
         let long = "a".repeat(200);
         assert_eq!(clip_key(&long).chars().count(), 16);
         assert!(clip_key(&long).ends_with('\u{2026}'));

@@ -95,7 +95,8 @@ the bubble's ink, white or near-black (orange), chosen for 4.5:1. Blue is Beeper
 to #2E6EF0 to reach that. The lime accent keeps its meaning.
 
 Reactions are badges pinned over the lower edge of their message, on `lifted` (`#3d3d3d`, one
-step above `raised`) with a ring in the ground's colour; your own reaction has a white ring.
+step above `raised`) with a ring in the ground's colour; your own reaction has a white ring. In
+the reaction bar the emoji under the pointer grows and rises, and its ring fades meanwhile.
 Standing free under a message they read as small messages of their own.
 
 A link is underlined. When its sender attached a preview, the message carries a card: the
