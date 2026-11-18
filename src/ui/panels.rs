@@ -741,12 +741,60 @@ impl BeeperApp {
                         .child(choice(Page::SwipeRight, right, cx)),
                 ),
             )
+            .child(self.render_quick_reactions(cx))
             .children(self.render_shared_inbox(cx))
             .when(!gpui_kit::is_mobile(), |el| {
                 let keys = link("keyboard-shortcuts", t!("Keyboard shortcuts"), "".into(), None, Some(IconName::ChevronRight), cx).on_click(cx.listener(|this, _, _, cx| this.toggle_keys(cx)));
                 el.child(card(cx).child(keys))
             })
             .into_any_element()
+    }
+
+    /// The reaction bar's six and the double tap's reaction, each a tap away from the emoji picker.
+    fn render_quick_reactions(&self, cx: &mut Context<Self>) -> Div {
+        let p = Palette::of(cx);
+        let pick = |n: usize| {
+            move |this: &mut Self, e: &ClickEvent, window: &mut Window, cx: &mut Context<Self>| {
+                this.emoji_pick.at = e.position();
+                this.open_emoji(super::emojipick::Target::Quick(n), window, cx);
+            }
+        };
+        let glyph = |key: String| div().text_size(fs(24.)).line_height(fs(32.)).child(crate::emoji::styled(key, Vec::new()));
+        let six = super::menu::quick(&self.settings);
+        let count = six.len();
+        let slots = h_flex().py(px(6.)).justify_between().children(six.into_iter().enumerate().map(|(n, key)| {
+            div()
+                .id(("quick-reaction", n))
+                .size(px(TAP))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .role(Role::Button)
+                .aria_label(SharedString::from(key.clone()))
+                .cursor_pointer()
+                .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.raised)))
+                .active(|el| el.bg(p.raised))
+                .on_click(cx.listener(pick(n)))
+                .child(glyph(key))
+        }));
+        let like = self.settings.double_tap.clone().unwrap_or_else(|| LIKE.to_owned());
+        let double = row(t!("Double tap"), t!("On a message: gives this reaction, or takes it back."), cx)
+            .id("double-tap")
+            .mx(px(-8.))
+            .px(px(8.))
+            .rounded(px(12.))
+            .role(Role::Button)
+            .aria_label(t!("Double tap"))
+            .aria_value(SharedString::from(like.clone()))
+            .cursor_pointer()
+            .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.raised)))
+            .active(|el| el.bg(p.raised))
+            .on_click(cx.listener(pick(count)))
+            .child(glyph(like));
+        section(t!("Reactions"), cx)
+            .child(card(cx).child(slots).child(double))
+            .child(footnote(t!("The reaction bar shows these six in this order. Tap one to choose another."), cx))
     }
 
     fn render_notifications(&mut self, cx: &mut Context<Self>) -> AnyElement {

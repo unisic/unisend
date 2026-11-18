@@ -204,13 +204,36 @@ fn more_acts(m: &Msg) -> Vec<Act> {
 /// The reactions in the bar: the six the chat takes (where it takes none of them, the first six
 /// it takes), then the user's own reaction when it is none of them, as Signal puts an applied
 /// reaction that is not in its strip in the last place.
-fn bar_keys(m: &Msg, caps: &Features) -> Vec<String> {
-    let mut keys: Vec<String> = QUICK_REACTIONS.iter().filter(|k| caps.reacts_with(k)).map(|k| (*k).to_owned()).collect();
+fn bar_keys(m: &Msg, caps: &Features, quick: &[String]) -> Vec<String> {
+    let mut keys: Vec<String> = quick.iter().filter(|k| caps.reacts_with(k)).cloned().collect();
     if keys.is_empty() {
         keys = caps.allowed_reactions.iter().flatten().take(QUICK_REACTIONS.len()).cloned().collect();
     }
     keys.extend(m.reactions.iter().find(|r| r.own && !keys.iter().any(|k| same_emoji(k, &r.key))).map(|r| r.key.clone()));
     keys
+}
+
+/// The bar's six as the user set them in Settings, else Signal's.
+pub(super) fn quick(settings: &crate::Settings) -> Vec<String> {
+    if settings.reactions.len() == QUICK_REACTIONS.len() { settings.reactions.clone() } else { QUICK_REACTIONS.map(str::to_owned).to_vec() }
+}
+
+/// Sets slot `n` of the bar's six to `emoji`, or the double tap's at `n` 6. An emoji already in
+/// the six trades places with the one it replaces, so none shows twice.
+pub(super) fn set_quick(settings: &mut crate::Settings, n: usize, emoji: &str) {
+    if n == QUICK_REACTIONS.len() {
+        settings.double_tap = (!same_emoji(emoji, super::LIKE)).then(|| emoji.to_owned());
+        return;
+    }
+    let mut six = quick(settings);
+    if n >= six.len() {
+        return;
+    }
+    match six.iter().position(|k| same_emoji(k, emoji)) {
+        Some(j) => six.swap(j, n),
+        None => six[n] = emoji.to_owned(),
+    }
+    settings.reactions = if six == QUICK_REACTIONS { Vec::new() } else { six };
 }
 
 /// The bar ends with a + for every other emoji, unless the chat takes only what the bar shows.
@@ -471,7 +494,7 @@ impl BeeperApp {
             return;
         }
         let (scrub, menu_id) = (m.scrub, m.id.clone());
-        let chosen = scrub.zip(self.msgs.iter().find(|msg| msg.id == menu_id)).map(|(n, msg)| (msg.id.clone(), bar_keys(msg, self.caps()).get(n).cloned()));
+        let chosen = scrub.zip(self.msgs.iter().find(|msg| msg.id == menu_id)).map(|(n, msg)| (msg.id.clone(), bar_keys(msg, self.caps(), &quick(&self.settings)).get(n).cloned()));
         match chosen {
             Some((id, Some(key))) => self.toggle_reaction(&id, &key, cx),
             Some((id, None)) => {
@@ -746,7 +769,7 @@ impl BeeperApp {
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
         let id = m.id.clone();
         let caps = self.caps();
-        let keys = bar_keys(m, caps);
+        let keys = bar_keys(m, caps, &quick(&self.settings));
         let more = more_offered(&keys, caps);
         let reacts = id.starts_with('$') && caps.reaction >= 1;
         let acts = self.with_pin(taken(acts(m, MenuKind::Touch, false), m, caps), m);
@@ -855,7 +878,7 @@ impl BeeperApp {
         let view = frame::viewport(window);
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
-        let (id, keys) = (m.id.clone(), bar_keys(m, self.caps()));
+        let (id, keys) = (m.id.clone(), bar_keys(m, self.caps(), &quick(&self.settings)));
         let more = more_offered(&keys, self.caps());
         let w = (keys.len() + more as usize) as f32 * PICK + 2. * PICK_PAD_X;
         let h = PICK + 2. * PICK_PAD_Y;
@@ -990,7 +1013,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, BAR_H, Delivery, Features, Kind, MenuKind, Msg, OVERLAY_GAP, Placement, TAP, acts, bar_keys, clip_key, ease_out_expo, more_offered, place, same_emoji, slot_at, taken};
+    use super::{Act, BAR_H, Delivery, Features, Kind, MenuKind, Msg, OVERLAY_GAP, Placement, QUICK_REACTIONS, TAP, acts, bar_keys, clip_key, ease_out_expo, more_offered, place, quick, same_emoji, set_quick, slot_at, taken};
     use gpui_kit::{Bounds, point, size};
 
     #[test]
@@ -1036,14 +1059,33 @@ mod tests {
     #[test]
     fn the_bar_offers_only_allowed_reactions() {
         let m = Msg::bare("$1".to_owned(), Kind::Message, "@me:x".try_into().unwrap());
-        assert_eq!(bar_keys(&m, &Features::ALL).len(), 6);
-        assert!(more_offered(&bar_keys(&m, &Features::ALL), &Features::ALL));
+        let six = QUICK_REACTIONS.map(str::to_owned);
+        assert_eq!(bar_keys(&m, &Features::ALL, &six).len(), 6);
+        assert!(more_offered(&bar_keys(&m, &Features::ALL, &six), &Features::ALL));
         let two = Features { allowed_reactions: Some(vec!["\u{1F44D}".to_owned(), "\u{1F525}".to_owned()]), ..Features::ALL };
-        assert_eq!(bar_keys(&m, &two), ["\u{1F44D}"]);
-        assert!(more_offered(&bar_keys(&m, &two), &two), "the fire is only behind the +");
+        assert_eq!(bar_keys(&m, &two, &six), ["\u{1F44D}"]);
+        assert!(more_offered(&bar_keys(&m, &two, &six), &two), "the fire is only behind the +");
         let fire = Features { allowed_reactions: Some(vec!["\u{1F525}".to_owned()]), ..Features::ALL };
-        assert_eq!(bar_keys(&m, &fire), ["\u{1F525}"]);
-        assert!(!more_offered(&bar_keys(&m, &fire), &fire));
+        assert_eq!(bar_keys(&m, &fire, &six), ["\u{1F525}"]);
+        assert!(!more_offered(&bar_keys(&m, &fire, &six), &fire));
+    }
+
+    #[test]
+    fn a_chosen_reaction_takes_its_slot_and_trades_places_with_a_twin() {
+        let mut s = crate::Settings::load(std::path::Path::new("/nonexistent"));
+        set_quick(&mut s, 1, "\u{1F525}");
+        assert_eq!(quick(&s)[1], "\u{1F525}");
+        set_quick(&mut s, 0, "\u{1F525}");
+        assert_eq!(quick(&s)[..2], ["\u{1F525}", "\u{2764}\u{FE0F}"]);
+        set_quick(&mut s, 1, "\u{1F525}");
+        set_quick(&mut s, 1, "\u{1F44D}");
+        assert!(s.reactions.is_empty(), "back to Signal's six, nothing kept");
+        set_quick(&mut s, 6, "\u{1F525}");
+        assert_eq!(s.double_tap.as_deref(), Some("\u{1F525}"));
+        set_quick(&mut s, 6, "\u{2764}");
+        assert_eq!(s.double_tap, None);
+        set_quick(&mut s, 9, "\u{1F525}");
+        assert!(s.reactions.is_empty());
     }
 
     #[test]

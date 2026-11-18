@@ -41,6 +41,8 @@ pub(super) enum Target {
     Composer,
     /// A reaction to the message with this ID; the sheet closes.
     React(String),
+    /// Settings' slot in the reaction bar, or the double tap's at 6 (`menu::set_quick`).
+    Quick(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -302,6 +304,11 @@ impl BeeperApp {
                 self.emoji_open = None;
                 self.toggle_reaction(&id, emoji, cx);
             }
+            Some(Target::Quick(n)) => {
+                self.emoji_open = None;
+                menu::set_quick(&mut self.settings, n, emoji);
+                self.settings.save(&self.dir);
+            }
             Some(Target::Composer) => self.composer.update(cx, |c, cx| c.insert(emoji, window, cx)),
             None => {}
         }
@@ -375,7 +382,7 @@ impl BeeperApp {
     /// picked. Opened from the long-press menu it rises over the menu's fading dim, its own scrim
     /// already full, so the screen never brightens between the two.
     pub(super) fn render_emoji_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let live = gpui_kit::is_mobile() && matches!(self.emoji_open, Some(Target::React(_)));
+        let live = gpui_kit::is_mobile() && matches!(self.emoji_open, Some(Target::React(_) | Target::Quick(_)));
         if live && !self.emoji_pick.sheet.is_live() {
             self.emoji_pick.sheet.handoff = self.menu.is_some();
         }
@@ -400,7 +407,8 @@ impl BeeperApp {
             .child(sheet::handle(p.faint).id("emoji-sheet-handle").when(live, |el| {
                 el.child(sheet::grip(cx, |this: &mut Self| &mut this.emoji_pick.sheet, |this, cx| this.close_emoji(cx)))
             }))
-            .child(self.emoji_body(width, true, window, cx));
+            // shortcut: a falling sheet from Settings is limited to the open chat's reactions, which shows only for a chat with a list; keep the target while falling if it matters.
+            .child(self.emoji_body(width, !matches!(self.emoji_open, Some(Target::Quick(_))), window, cx));
         Some(
             sheet::scrim("emoji-sheet-barrier", frame)
                 .when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.close_emoji(cx))))

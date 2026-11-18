@@ -399,6 +399,12 @@ pub(crate) struct Settings {
     /// Built-in chips the user switched off.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub folders_hidden: Vec<ui::folders::Builtin>,
+    /// The reaction bar's six, in order; empty for Signal's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<String>,
+    /// What a double tap on a message reacts with; `None` for the heart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub double_tap: Option<String>,
 }
 
 impl Settings {
@@ -416,7 +422,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new(), reactions: Vec::new(), double_tap: None })
     }
 
     /// The ends of the timed mutes of the account in `slot`.
