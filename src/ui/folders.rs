@@ -21,6 +21,9 @@ pub(crate) const MAX_FOLDER_CHATS: usize = 600;
 /// Characters of a folder's name; a chip wider than this is more than a phone's row can show.
 pub(crate) const NAME_MAX: usize = 24;
 
+/// How wide a chip cut by the row's edge fades into the list.
+const EDGE_FADE: f32 = 24.;
+
 /// What the list is narrowed to. Archive is a tab of its own and not one of these.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Pick {
@@ -209,8 +212,11 @@ pub(super) struct Ui {
     with: Option<OwnedRoomId>,
     /// The chat sheet shows the folders to put the chat in.
     pub(super) picking: bool,
-    /// The chosen chip is brought into view once the row has been measured (after a restart).
-    reveal: bool,
+    /// The chosen chip is to be brought into view once the row has been measured: gliding after a
+    /// tap (`Some(true)`), at once after a restart.
+    reveal: Option<bool>,
+    /// The row gliding to bring the chosen chip in: since when, from and to which offset.
+    glide: Option<(Instant, Pixels, Pixels)>,
     scroll: ScrollHandle,
 }
 
@@ -222,7 +228,7 @@ impl Ui {
             InputEvent::PressEnter { shift: false, .. } => this.save_folder(cx),
             other => keyboard_follows(other, Keyboard::Text, cx),
         }));
-        Self { pick, field, edit: None, with: None, picking: false, reveal: true, scroll: ScrollHandle::new() }
+        Self { pick, field, edit: None, with: None, picking: false, reveal: Some(false), glide: None, scroll: ScrollHandle::new() }
     }
 }
 
@@ -239,7 +245,7 @@ impl BeeperApp {
     pub(super) fn set_pick(&mut self, pick: Pick, cx: &mut Context<Self>) {
         self.folders.pick = pick.clone();
         // A chip only half in view is brought fully in.
-        self.folders.reveal = true;
+        self.folders.reveal = Some(true);
         if self.settings.folder != pick {
             self.settings.folder = pick;
             self.settings.save(&self.dir);
@@ -265,18 +271,48 @@ impl BeeperApp {
         let chosen = picks.iter().position(|pick| *pick == current);
         let slider = chosen.and_then(|ix| seg.pill("filters-pill", ix, p.raised, window, cx));
         let measured = slider.is_some();
-        if self.folders.reveal && let Some(at) = chosen.and_then(|ix| seg.item(ix)) {
+        if let Some(glide) = self.folders.reveal
+            && let Some(at) = chosen.and_then(|ix| seg.item(ix))
+        {
             let view = self.folders.scroll.bounds();
             if view.size.width > px(0.) {
                 let (offset, most) = (self.folders.scroll.offset(), self.folders.scroll.max_offset());
                 let past = at.right() - view.right();
                 let before = view.left() - at.left();
                 let x = if past > px(0.) { offset.x - past - px(GUTTER) } else if before > px(0.) { offset.x + before + px(GUTTER) } else { offset.x };
-                self.folders.scroll.set_offset(point(x.clamp(-most.x, px(0.)), offset.y));
-                self.folders.reveal = false;
+                let x = x.clamp(-most.x, px(0.));
+                // A tap glides, so the row does not jump under the pointer.
+                if glide && x != offset.x && !cx.reduce_motion() {
+                    self.folders.glide = Some((Instant::now(), offset.x, x));
+                } else {
+                    self.folders.scroll.set_offset(point(x, offset.y));
+                }
+                self.folders.reveal = None;
                 window.request_animation_frame();
             }
         }
+        if let Some((at, from, to)) = self.folders.glide {
+            let t = (at.elapsed().as_secs_f32() / motion::ENTER.as_secs_f32()).min(1.);
+            let x = from + (to - from) * motion::ease_out(t);
+            self.folders.scroll.set_offset(point(x, self.folders.scroll.offset().y));
+            if t < 1. {
+                window.request_animation_frame();
+            } else {
+                self.folders.glide = None;
+            }
+        }
+        // A chip cut by an edge fades into the list there: the cut reads as more chips that way.
+        let (offset, most) = (self.folders.scroll.offset().x, self.folders.scroll.max_offset().x);
+        let fade = |left: bool| {
+            let stops = (linear_color_stop(p.ground, 0.), linear_color_stop(p.ground.opacity(0.), 1.));
+            div()
+                .absolute()
+                .top_0()
+                .bottom(px(4.))
+                .w(px(EDGE_FADE))
+                .map(|el| if left { el.left_0() } else { el.right_0() })
+                .bg(linear_gradient(if left { 90. } else { 270. }, stops.0, stops.1))
+        };
         let chips = picks.into_iter().enumerate().map(|(ix, pick)| {
             let on = chosen == Some(ix);
             let name = label(&pick, &self.settings.folders);
@@ -300,9 +336,8 @@ impl BeeperApp {
                     .when(count > 0, |el| el.child(div().text_color(p.faint).font_features(tabular()).child(count.to_string()))),
             )
         });
-        h_flex()
+        let row = h_flex()
             .id("filter-row")
-            .flex_none()
             .relative()
             .px(px(GUTTER))
             .pb(px(4.))
@@ -311,7 +346,15 @@ impl BeeperApp {
             .track_scroll(&self.folders.scroll)
             .child(seg.container())
             .children(slider)
-            .children(chips)
+            .children(chips);
+        // The fades sit outside the scrolled row, which would carry them along.
+        div()
+            .id("filter-chips")
+            .flex_none()
+            .relative()
+            .child(row)
+            .when(offset < px(-0.5), |el| el.child(fade(true)))
+            .when(offset > -most + px(0.5), |el| el.child(fade(false)))
     }
 
     /// The chip in force is a custom folder, whose empty list says how to fill it.
