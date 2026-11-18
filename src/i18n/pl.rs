@@ -251,7 +251,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Its channels are removed from your chats in every Beeper app. Turning it on again brings them back.", "Jego kanały znikną z Twoich czatów we wszystkich aplikacjach Beepera. Ponowne włączenie je przywróci."),
     ("Keyboard shortcuts", "Skróty klawiszowe"),
     ("Later", "Później"),
-    ("Mark the chat as unread or read", "Oznacz czat jako nieprzeczytany lub przeczytany"),
+    ("Mark the chat as unread or read", "Oznacz czat jako (nie)przeczytany"),
     ("Message request", "Prośba o wiadomość"),
     ("Message request from {name}", "Prośba o wiadomość od {name}"),
     ("New folder", "Nowy folder"),
