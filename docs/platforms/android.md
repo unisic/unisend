@@ -15,7 +15,8 @@ Status: the main target, built and tested on a phone. No store listing.
   proves Android code compiles, and only a phone proves it works.
 - Test installs are the developer build: `UNISEND_DEV=1` on both `cargo ndk` and `gradlew` makes
   "Unisend Dev" (`dev.gpui.beeper.dev`), which sits beside the release app with its own data and
-  offers no updates.
+  offers no updates. Build them with `--profile fast` in place of `--release`: no LTO and
+  incremental, so a change recompiles only the app's crate. Releases keep `--release`.
 - `KLIPY_API_KEY` and `UNISEND_UPDATE_URL` are read at build time: see
   [development.md](../development.md). A signed release: `scripts/release.sh`, whose header lists
   its environment.

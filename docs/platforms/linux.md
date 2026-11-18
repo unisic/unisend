@@ -9,6 +9,11 @@ X11 is compiled in too.
     cargo build --release
     packaging/linux/install.sh    # binary to ~/.local/bin, launcher and icons to ~/.local/share
 
+A test install takes `cargo build --profile fast` and `packaging/linux/install.sh
+target/fast/beeper-gpui`: as optimised, but without LTO and incremental, so after a change only
+the app's own crate compiles again, in parallel (`Cargo.toml` says how). Shipped builds use
+`--release`.
+
 Needs a stable Rust toolchain and the development packages for xcb, xkbcommon (with x11),
 fontconfig, freetype, wayland and GStreamer (voice messages, below). A second copy on the same
 data directory hands over to the first and ends (`src/instance.rs`): run a test copy with

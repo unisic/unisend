@@ -87,6 +87,14 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# Test builds (`--profile fast`): optimised like release, but a change recompiles this crate
+# incrementally on every core and links without LTO. Shipped builds keep `release`.
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true
+
 [dev-dependencies]
 base64 = "0.22"
 hmac = "0.12"
