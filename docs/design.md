@@ -39,6 +39,10 @@ things; 16 from the screen edge. Anything tapped is at least 44 tall; a control 
 inside that (a filter chip is a 36 pill in a 44 target). Reaction chips are 32: they repeat what
 the message's sheet offers at full size.
 
+What is still loading stands as a skeleton of its own shape in `surface`, still (no shimmer): the
+chat list's rows, a chat's bubbles (after 300 ms, so a quick open shows none), a group's members.
+A row of chips or text cut by a scrolled edge fades into the ground over 24.
+
 ## Navigation
 
 Four destinations with icon and label: Chats, Archive, Networks, Settings; an account on another

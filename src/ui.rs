@@ -3099,16 +3099,13 @@ impl BeeperApp {
                     .children(self.find_results(cx))
                     .when(self.loading && self.msgs.is_empty(), |el| {
                         el.child(
-                            div()
+                            timeline_skeleton(p, column)
+                                .id("timeline-loading")
                                 .absolute()
                                 .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(fs(14.))
-                                .text_color(self.on_wallpaper(p.faint, cx))
-                                .child(t!("Loading messages…"))
-                                // Said only when the wait is long enough to notice.
+                                .role(Role::ProgressIndicator)
+                                .aria_label(t!("Loading messages…"))
+                                // Shown only when the wait is long enough to notice.
                                 .with_animations(
                                     "loading",
                                     vec![Animation::new(Duration::from_millis(300)), Animation::new(motion::ENTER).with_easing(motion::ease_out)],
@@ -4608,6 +4605,20 @@ fn skeleton(p: Palette) -> Div {
             .gap(px(GAP))
             .child(div().size(px(AVATAR)).flex_none().rounded_full().bg(p.surface))
             .child(v_flex().flex_1().gap(px(10.)).child(bar(0.45, 14.)).child(bar(0.75, 12.)))
+    }))
+}
+
+/// A chat's first messages loading: bubbles where they will stand, others' on the left and the
+/// user's on the right, newest at the bottom. Still, as the chat list's skeleton is: a wait costs no
+/// frames.
+fn timeline_skeleton(p: Palette, column: f32) -> Div {
+    // Whose, share of the row's width, lines of text; oldest first.
+    const SHAPES: [(bool, f32, u8); 7] = [(false, 0.55, 1), (false, 0.4, 2), (true, 0.5, 1), (false, 0.65, 1), (true, 0.35, 1), (true, 0.6, 2), (false, 0.45, 1)];
+    v_flex().size_full().justify_end().gap(px(8.)).px(px(column + GUTTER)).pb(px(GUTTER)).children(SHAPES.map(|(mine, share, lines)| {
+        h_flex()
+            .w_full()
+            .when(mine, |el| el.justify_end())
+            .child(div().w(relative(share)).max_w(px(BUBBLE_W * share)).h(px(18. + 22. * f32::from(lines))).rounded(px(RADIUS)).bg(p.surface))
     }))
 }
 

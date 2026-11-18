@@ -41,6 +41,8 @@ enum Row {
     /// Adding people, for whoever may.
     Add,
     Member(usize),
+    /// A member still loading, drawn as a skeleton.
+    MemberLoading,
     AllMembers,
     Shelves,
     /// A row of the media grid.
@@ -168,6 +170,11 @@ fn hrefs(blocks: &[Block], out: &mut Vec<String>) {
 
 fn rows(info: &Info, group: bool) -> Vec<Row> {
     let mut out = vec![Row::Head, Row::Actions, Row::Facts];
+    // Before the details come, the members stand as a skeleton, so the shelves do not jump down.
+    if group && info.details.is_none() {
+        out.push(Row::Members);
+        out.extend([Row::MemberLoading; 3]);
+    }
     if group && let Some(d) = &info.details {
         out.push(Row::Members);
         if d.can.invite {
@@ -175,6 +182,9 @@ fn rows(info: &Info, group: bool) -> Vec<Row> {
         }
         let shown = if info.all_members { d.members.len() } else { d.members.len().min(MEMBERS_SHOWN) };
         out.extend((0..shown).map(Row::Member));
+        if !d.members_loaded && d.members.is_empty() {
+            out.extend([Row::MemberLoading; 3]);
+        }
         if d.members.len() > shown || (info.all_members && d.joined > d.members.len() as u64) {
             out.push(Row::AllMembers);
         }
@@ -582,6 +592,14 @@ impl BeeperApp {
                     .children(role_label(m.role).map(|r| div().flex_none().text_size(fs(12.)).text_color(p.faint).child(r)))
                     .into_any_element()
             }
+            Row::MemberLoading => h_flex()
+                .w_full()
+                .h(px(ROW_H))
+                .px(px(GUTTER))
+                .gap(px(12.))
+                .child(div().size(px(MEMBER_AVATAR)).flex_none().rounded_full().bg(p.surface))
+                .child(div().w(relative(0.4)).h(px(14.)).rounded_full().bg(p.surface))
+                .into_any_element(),
             Row::AllMembers => {
                 let Some(d) = details else { return div().into_any_element() };
                 if self.info.all_members {
@@ -803,9 +821,13 @@ mod tests {
     #[test]
     fn group_rows_show_a_few_members_then_all() {
         let mut info = Info::default();
+        let loading = |r: &[Row]| r.iter().filter(|r| **r == Row::MemberLoading).count();
+        assert_eq!(loading(&rows(&info, true)), 3, "a skeleton until the details come");
+        assert_eq!(loading(&rows(&info, false)), 0);
         let member = |n: usize| crate::backend::Member { id: format!("@u{n}:x").try_into().unwrap(), name: format!("u{n}"), role: Role::Member, removable: false };
         info.details = Some(Details { members: (0..12).map(member).collect(), joined: 300, members_loaded: true, ..Details::default() });
         let r = rows(&info, true);
+        assert_eq!(loading(&r), 0);
         assert_eq!(r.iter().filter(|r| matches!(r, Row::Member(_))).count(), MEMBERS_SHOWN);
         assert!(r.contains(&Row::AllMembers));
         info.all_members = true;
