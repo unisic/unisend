@@ -2612,7 +2612,7 @@ fn announce(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, p
     let theirs = msgs.iter().filter(|m| !m.own).count();
     if on_screen(dir) {
         if theirs > 0 {
-            log::debug!(target: "notify", "{theirs} new: the window shows the account");
+            log::info!(target: "notify", "{theirs} new: the window shows the account");
         }
         return;
     }
@@ -2620,8 +2620,7 @@ fn announce(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, p
     if notes.is_empty() {
         if theirs > 0 {
             let flagged = msgs.iter().filter(|m| !m.own && m.notify).count();
-            let locked = msgs.iter().filter(|m| !m.own && m.undecryptable).count();
-            log::debug!(target: "notify", "{theirs} new, {flagged} notify by push rules, {locked} undecryptable, none recent");
+            log::info!(target: "notify", "{theirs} new, {flagged} notify by push rules, none of them from the last {} s", NOTIFY_WINDOW.as_secs());
         }
         return;
     }
@@ -2653,10 +2652,10 @@ fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary,
             // The chat may have been read while the picture was on its way.
             let still = unread();
             if !still {
-                log::debug!(target: "notify", "not shown: read already ({})", counts(&client, &summary.id));
+                log::info!(target: "notify", "not shown: read already ({})", counts(&client, &summary.id));
             }
             if *current == generation && still {
-                log::debug!(target: "notify", "shown ({})", counts(&client, &summary.id));
+                log::info!(target: "notify", "shown ({})", counts(&client, &summary.id));
                 let chat = crate::accounts::key(crate::accounts::slot_of(&dir), summary.id.as_str());
                 for (n, note) in notes.iter().enumerate() {
                     let alert = n + 1 == notes.len();

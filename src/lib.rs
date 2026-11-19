@@ -657,7 +657,8 @@ fn private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// Libraries log only warnings: matrix-sdk's info lines name rooms, users and servers.
-const LOG_FILTER: &str = "warn,beeper_gpui=info";
+// `notify`: why a message did or did not notify, by counts only (`backend::announce`).
+const LOG_FILTER: &str = "warn,beeper_gpui=info,notify=info";
 
 #[cfg(not(target_os = "android"))]
 pub fn run_desktop() {
