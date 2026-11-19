@@ -291,6 +291,8 @@ mod android {
         Spell(u64, Vec<Range<usize>>),
         /// A picture the keyboard inserted, already copied into the cache.
         Picture(PathBuf),
+        /// A hardware keyboard's Enter without Shift in this field: a submit, as on a desktop.
+        Enter(u64),
     }
 
     /// Edits waiting for the GPUI thread; Java resyncs if one does not fit.
@@ -371,6 +373,12 @@ mod android {
     }
 
     fn handle(msg: Msg, window: &mut Window, cx: &mut App) {
+        if let Msg::Enter(field) = msg {
+            if let Some(target) = find(field) {
+                each!(target, e => e.update(cx, |_, cx| cx.emit(InputEvent::PressEnter { secondary: false, shift: false })));
+            }
+            return;
+        }
         if let Msg::Picture(path) = msg {
             match ON_PICTURE.take() {
                 Some(f) => {
@@ -573,6 +581,13 @@ mod android {
             comp: (comp_start >= 0 && comp_end > comp_start).then(|| range(comp_start, comp_end)),
         };
         u8::from(sender().try_send(Msg::Edit(edit)).is_ok())
+    }
+
+    /// # Safety
+    /// Called by the JVM.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiInputActivity_nativeImeEnter(_env: *mut c_void, _class: *mut c_void, field: i64) {
+        let _ = sender().try_send(Msg::Enter(field as u64));
     }
 
     /// # Safety

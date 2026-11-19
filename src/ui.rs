@@ -3048,13 +3048,12 @@ impl BeeperApp {
             }),
         )
         .size_full();
-        // The send button turns between a microphone (nothing typed) and an arrow; Windows and macOS have no microphone.
+        // Windows and macOS have no microphone.
         let mic = self.mic_shown(cx);
         let read_only = self.published().is_some_and(|f| !f.post);
         let limit = self.text_limit(cx);
         let over = limit.is_some_and(|(len, max)| len > max);
-        let idle = !mic && self.composer.read(cx).value().trim().is_empty() && self.tray_room().is_none_or(|r| self.open.as_ref() != Some(r));
-        let send_mode = transition(("send", "mode"), if mic { 0. } else { 1. }, motion::exit(), window, cx);
+        let typed = !self.composer.read(cx).value().trim().is_empty() || self.tray_room().is_some_and(|r| self.open.as_ref() == Some(r));
         let own_frame = frame::reserve(window) > 0.;
         let end = self.chat_end(window);
 
@@ -3180,89 +3179,83 @@ impl BeeperApp {
                         )
                     })
                     .when(!read_only, |el| el.child(
+                        // As Signal lays it out: the emoji button inside the field on the left; on its right the
+                        // camera and the microphone while nothing is typed, a + once something is; beside the
+                        // field the + to attach, which turns into Send.
                         h_flex()
                             .items_end()
                             .gap(px(6.))
-                            // The paperclip's own padding stands in for the rest of the left margin.
-                            .pl(px(GUTTER - 10.))
-                            .pr(px(GUTTER))
+                            .px(px(GUTTER))
                             .py(px(8.))
-                            .child(round_button("attach", IconName::Paperclip, cx).text_color(p.muted).on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.attach(e.position(), cx))))
                             .child(
-                                round_button("emoji", IconName::FaceSlightlySmiling, cx)
-                                    .relative()
-                                    .child({
-                                        let button = self.emoji_pick.button.clone();
-                                        canvas(|_, _, _| {}, move |bounds, _, _, _| button.set(bounds.center())).absolute().inset_0()
-                                    })
-                                    .text_color(if self.emoji_open == Some(emojipick::Target::Composer) { p.text } else { p.muted })
-                                    .on_click(cx.listener(|this, e: &ClickEvent, window, cx| {
-                                        this.emoji_pick.at = e.position();
-                                        this.toggle_emoji_panel(window, cx);
-                                    })),
-                            )
-                            .child(
-                                div()
+                                h_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .min_h(px(TAP))
-                                    .px(px(6.))
-                                    .flex()
-                                    .items_center()
+                                    .items_end()
                                     .rounded(px(TAP / 2.))
                                     // A scrolled field's top line is cut at the pill, not drawn over the chat.
                                     .overflow_hidden()
                                     .bg(p.surface)
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                                        // The field is already focused, so only a press tells that the keyboard is wanted back.
-                                        if this.emoji_open == Some(emojipick::Target::Composer) {
-                                            this.close_emoji(cx);
-                                            crate::show_keyboard(Keyboard::Text);
-                                        }
-                                    }))
-                                    .text_size(fs(16.))
-                                    .map(|el| self.mention_keys(el, cx))
-                                    .child(Textarea::new(&self.composer).appearance(false).text_size(fs(16.)).token(|t, _, cx| mentions::token(t, cx)))
-                                    .child(crate::ime::marks(&self.composer)),
-                            )
-                            .child(
-                                div()
-                                    .id("send")
-                                    .size(px(TAP))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_full()
-                                    // Lit only when there is something to send.
-                                    .map(|el| {
-                                        if idle {
-                                            el.bg(p.raised).text_color(p.faint)
-                                        } else {
-                                            el.bg(p.text).text_color(p.ground).when(over, |el| el.opacity(0.4)).cursor_pointer().when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted))).active(|el| el.bg(p.muted))
-                                        }
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        if cfg!(not(target_os = "android")) && this.mic_shown(cx) {
-                                            this.mic_click(cx);
-                                        } else {
-                                            this.send_message(window, cx);
-                                        }
-                                    }))
-                                    .relative()
-                                    .children([(IconName::ArrowUp, send_mode), (IconName::Mic, 1. - send_mode)].into_iter().filter(|(_, v)| *v > 0.).map(|(icon, v)| {
-                                        let scale = 0.5 + 0.5 * v;
+                                    .child(
+                                        round_button("emoji", IconName::FaceSlightlySmiling, cx)
+                                            .relative()
+                                            .child({
+                                                let button = self.emoji_pick.button.clone();
+                                                canvas(|_, _, _| {}, move |bounds, _, _, _| button.set(bounds.center())).absolute().inset_0()
+                                            })
+                                            .text_color(if self.emoji_open == Some(emojipick::Target::Composer) { p.text } else { p.muted })
+                                            .on_click(cx.listener(|this, e: &ClickEvent, window, cx| {
+                                                this.emoji_pick.at = e.position();
+                                                this.toggle_emoji_panel(window, cx);
+                                            })),
+                                    )
+                                    .child(
                                         div()
-                                            .absolute()
-                                            .inset_0()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .min_h(px(TAP))
                                             .flex()
                                             .items_center()
-                                            .justify_center()
-                                            .opacity(v)
-                                            .child(Icon::new(icon).size_5().transform(Transformation::scale(size(scale, scale))))
-                                    }))
-                                    .when(mic && send_mode < 0.5, |el| el.child(self.mic_touch(cx))),
+                                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                                                // The field is already focused, so only a press tells that the keyboard is wanted back.
+                                                if this.emoji_open == Some(emojipick::Target::Composer) {
+                                                    this.close_emoji(cx);
+                                                    crate::show_keyboard(Keyboard::Text);
+                                                }
+                                            }))
+                                            .text_size(fs(16.))
+                                            .map(|el| self.mention_keys(el, cx))
+                                            .child(Textarea::new(&self.composer).appearance(false).text_size(fs(16.)).token(|t, _, cx| mentions::token(t, cx)))
+                                            .child(crate::ime::marks(&self.composer)),
+                                    )
+                                    .map(|el| {
+                                        if typed {
+                                            el.child(round_button("attach-in", IconName::Plus, cx).text_color(p.muted).on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.attach(e.position(), cx))))
+                                        } else {
+                                            el.when(cfg!(target_os = "android") && self.open.is_some(), |el| {
+                                                el.child(round_button("camera", IconName::Camera, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| this.capture(false, cx))))
+                                            })
+                                            .when(mic, |el| {
+                                                el.child(
+                                                    round_button("mic", IconName::Mic, cx)
+                                                        .relative()
+                                                        .text_color(p.muted)
+                                                        .when(cfg!(not(target_os = "android")), |el| el.on_click(cx.listener(|this, _, _, cx| this.mic_click(cx))))
+                                                        .when(cfg!(target_os = "android"), |el| el.child(self.mic_touch(cx))),
+                                                )
+                                            })
+                                        }
+                                    }),
                             )
+                            .child(if typed {
+                                voice::send_button("send", p)
+                                    .child(Icon::new(IconName::ArrowUp).size_5())
+                                    .when(over, |el| el.opacity(0.4))
+                                    .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
+                                    .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
+                            } else {
+                                round_button("attach", IconName::Plus, cx).bg(p.raised).on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.attach(e.position(), cx)))
+                            })
                             .relative()
                             .children(self.render_recorder(window, cx)),
                     ))

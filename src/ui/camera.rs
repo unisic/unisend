@@ -11,7 +11,7 @@ pub(super) const TILES: usize = if cfg!(target_os = "android") { 2 } else { 0 };
 impl BeeperApp {
     /// Closes the sheet, runs the camera off the UI thread and queues the shot. A cancelled
     /// capture changes nothing: the reply being composed stays.
-    fn capture(&mut self, video: bool, cx: &mut Context<Self>) {
+    pub(super) fn capture(&mut self, video: bool, cx: &mut Context<Self>) {
         let Some(room) = self.open.clone() else { return };
         self.close_gallery(cx);
         cx.spawn(async move |this, cx| {

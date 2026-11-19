@@ -458,6 +458,16 @@ public class GpuiInputActivity extends NativeActivity {
             if (code == KeyEvent.KEYCODE_BACK && event.getAction() == KeyEvent.ACTION_UP) {
                 nativeIme(session, 4, "", 0, 0);
             }
+            // A hardware keyboard's Enter sends, Shift+Enter adds a line, as on a desktop; left to the
+            // IME it came back as a typed newline. The on-screen keyboard's Enter never comes here.
+            boolean enter = code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER;
+            if (enter && shown && isFocused() && (event.getFlags() & KeyEvent.FLAG_SOFT_KEYBOARD) == 0) {
+                if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                    if (event.isShiftPressed()) type("\n");
+                    else nativeImeEnter(field);
+                }
+                return true;
+            }
             // A hardware keyboard's characters reach the native queue only after the IME, where
             // gpui-mobile turns them into key presses without inserting their text: type them here.
             // shortcut: the IME never sees them, so one that composes from hardware keys (CJK) does
@@ -619,6 +629,8 @@ public class GpuiInputActivity extends NativeActivity {
     // src/ime.rs: one proxy edit in field offsets (start -1: no text change, selStart -1: keep it, c0 -1: nothing composed).
     private static native boolean nativeImeEdit(long field, long seq, int start, int end, String text,
             int selStart, int selEnd, int c0, int c1);
+    // src/ime.rs: a hardware keyboard's Enter without Shift in the field.
+    private static native void nativeImeEnter(long field);
     // src/ime.rs: publish the focused followed field again.
     private static native void nativeImeResync();
     // src/ime.rs: every misspelled range of the field as start, end pairs; false if Rust's queue is full.

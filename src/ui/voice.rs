@@ -862,7 +862,7 @@ fn clock(elapsed: Duration, p: Palette) -> Div {
     h_flex().gap(px(8.)).pl(px(10.)).flex_none().text_size(fs(16.)).font_features(tabular()).child(dot).child(length(elapsed))
 }
 
-fn send_button(id: &'static str, p: Palette) -> Stateful<Div> {
+pub(super) fn send_button(id: &'static str, p: Palette) -> Stateful<Div> {
     div()
         .id(id)
         .size(px(TAP))
