@@ -77,8 +77,10 @@ pub(crate) fn haptic(feedback: gpui_mobile::packages::vibration::HapticFeedback)
     }
 }
 
-/// Follows Android's "Remove animations" (animator duration scale 0). gpui-kit follows the desktops.
+/// Follows Android's "Remove animations" (animator duration scale 0), and on the desktops re-reads
+/// the system's setting through gpui-kit, which leaves a value the app set itself alone.
 pub(crate) fn follow_system(cx: &mut App) {
+    gpui_kit::base::apply_system_reduce_motion(cx);
     #[cfg(target_os = "android")]
     match animations_off() {
         Ok(off) => cx.set_reduce_motion(off),

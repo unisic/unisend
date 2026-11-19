@@ -198,10 +198,25 @@ impl BeeperApp {
     fn set_incognito(&mut self, on: bool, cx: &mut Context<Self>) {
         self.settings.incognito = on;
         self.settings.save(&self.dir);
+        if on
+            && let (Some(room), Some(_)) = (self.open.clone(), self.typing_sent.take())
+        {
+            let _ = self.cmd.try_send(Cmd::Typing(room, false));
+        }
         self.accounts.tell_all(|| Cmd::Incognito(on));
         cx.notify();
     }
 
+    fn set_send_typing(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.send_typing = on;
+        self.settings.save(&self.dir);
+        if !on
+            && let (Some(room), Some(_)) = (self.open.clone(), self.typing_sent.take())
+        {
+            let _ = self.cmd.try_send(Cmd::Typing(room, false));
+        }
+        cx.notify();
+    }
     fn set_incognito_keyboard(&mut self, on: bool, cx: &mut Context<Self>) {
         self.settings.incognito_keyboard = on;
         self.settings.save(&self.dir);
@@ -705,6 +720,18 @@ impl BeeperApp {
             )
             .child(card(cx).child(row(t!("Chat colour"), &t!("{colour}. Your own messages, on this device.", colour = self.settings.chat_colour.label()), cx)).child(swatches))
             .child(card(cx).children(self.render_look(cx)))
+            .child({
+                let weak = cx.entity().downgrade();
+                card(cx).child(row(t!("Large emoji"), t!("Messages made only of emoji use larger type."), cx).child(
+                    Switch::new("large-emoji").checked(self.settings.large_emoji).on_click(move |on, _, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.settings.large_emoji = *on;
+                            this.settings.save(&this.dir);
+                            cx.notify();
+                        });
+                    }),
+                ))
+            })
             .when(crate::emoji::SUPPORTED, |el| {
                 el.child(card(cx).child(
                     link("emoji", "Emoji", self.emoji_value().into(), None, Some(IconName::ChevronRight), cx).on_click(cx.listener(|this, _, _, cx| this.open_page(Page::Emoji, cx))),
@@ -722,11 +749,45 @@ impl BeeperApp {
             this.settings.save(&this.dir);
             cx.notify();
         }, window, cx);
+        let weak = cx.entity().downgrade();
+        let enter = Switch::new("enter-sends").checked(self.settings.enter_sends).on_click(move |on, _, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.settings.enter_sends = *on;
+                this.settings.save(&this.dir);
+                this.composer.update(cx, |composer, cx| composer.set_submit_on_enter(*on, cx));
+                cx.notify();
+            });
+        });
+        let weak = cx.entity().downgrade();
+        let motion = Switch::new("reduce-motion").checked(self.settings.reduce_motion).on_click(move |on, _, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                this.settings.reduce_motion = *on;
+                this.settings.save(&this.dir);
+                if *on {
+                    this.system_reduce_motion = cx.reduce_motion();
+                    cx.set_reduce_motion(true);
+                } else {
+                    cx.set_reduce_motion(this.system_reduce_motion);
+                    motion::follow_system(cx);
+                    this.system_reduce_motion = cx.reduce_motion();
+                }
+                cx.notify();
+            });
+        });
         let choice = |page: Page, value: &'static str, cx: &mut Context<Self>| {
             link(page.id(), page.title(), value.into(), None, Some(IconName::ChevronRight), cx).on_click(cx.listener(move |this, _, _, cx| this.open_page(page, cx)))
         };
         v_flex()
             .gap(px(GAP * 2.))
+            .child(
+                card(cx)
+                    // A phone's keyboard Enter always types a newline, as in Signal.
+                    .when(!gpui_kit::is_mobile(), |el| {
+                        let hint = if cfg!(target_os = "macos") { t!("Off: Enter adds a line and Command+Enter sends.") } else { t!("Off: Enter adds a line and Ctrl+Enter sends.") };
+                        el.child(row(t!("Enter sends"), hint, cx).child(enter))
+                    })
+                    .child(row(t!("Reduce motion"), t!("Use fewer animations, regardless of the system setting."), cx).child(motion)),
+            )
             .child(
                 card(cx)
                     .child(choice(Page::Receipts, receipts, cx))
@@ -873,6 +934,10 @@ impl BeeperApp {
             let _ = weak.update(cx, |this, cx| this.set_link_previews(*on, cx));
         });
         let weak = cx.entity().downgrade();
+        let typing = Switch::new("send-typing").checked(self.settings.send_typing).on_click(move |on, _, cx| {
+            let _ = weak.update(cx, |this, cx| this.set_send_typing(*on, cx));
+        });
+        let weak = cx.entity().downgrade();
         let secure = Switch::new("screen-security").checked(lock.secure).on_click(move |on, _, cx| {
             let _ = weak.update(cx, |this, cx| this.set_lock(None, None, Some(*on), cx));
         });
@@ -885,6 +950,7 @@ impl BeeperApp {
             .child(
                 card(cx)
                     .child(row(t!("Hide reading and typing"), t!("Others will not see that you have read their messages or that you are typing."), cx).child(incognito))
+                    .child(row(t!("Send typing notifications"), t!("When on, people in a chat can see that you are typing. Hide reading and typing also turns this off."), cx).child(typing))
                     .when(android, |el| el.child(row(t!("Incognito keyboard"), t!("The keyboard learns nothing from what you type. Off: better suggestions and voice typing."), cx).child(keyboard)))
                     .child(row(t!("Link previews"), t!("Links you send show their page's title and picture. The site sees your device when the preview is made; those who read it fetch nothing."), cx).child(previews)),
             )

@@ -485,7 +485,7 @@ impl BeeperApp {
             a.unread.clear();
         }
         let notice = accounts.notice.take();
-        let fresh = Self::new(accounts, self.dir.clone(), self.settings.clone(), window, cx);
+        let fresh = Self::new(accounts, self.dir.clone(), self.settings.clone(), self.system_reduce_motion, window, cx);
         let mut old = std::mem::replace(self, fresh);
         // What the old screen held is freed with its atlas tiles, as `Released` does.
         let gone = old.let_go();

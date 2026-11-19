@@ -1,3 +1,5 @@
+//! One GPUI view: chat layout, composer, timeline, account and navigation state.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -256,6 +258,7 @@ pub struct BeeperApp {
     focus: FocusHandle,
     dir: PathBuf,
     settings: crate::Settings,
+    system_reduce_motion: bool,
     emoji: panels::EmojiChoice,
     look: appearance::Look,
     user: Option<OwnedUserId>,
@@ -488,6 +491,7 @@ impl BeeperApp {
         mut accounts: accounts::Accounts,
         dir: PathBuf,
         settings: crate::Settings,
+        system_reduce_motion: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -497,7 +501,7 @@ impl BeeperApp {
         let code = cx.new(|cx| InputState::new(window, cx).placeholder("123456"));
         let recovery = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Recovery code")));
         // Enter sends and Shift+Enter breaks the line; the Android keyboard's Enter types a newline, as in Signal.
-        let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).submit_on_enter(true).placeholder(t!("Message")));
+        let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 6).submit_on_enter(settings.enter_sends || gpui_kit::is_mobile()).placeholder(t!("Message")));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search chats")));
         let emoji_search = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Search emoji")));
         let emoji_pick = emojipick::Picker::new(emoji_search.clone(), &dir);
@@ -531,7 +535,7 @@ impl BeeperApp {
             }));
         }
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, window, cx| match ev {
-            InputEvent::PressEnter { shift: false, .. } => this.send_message(window, cx),
+            InputEvent::PressEnter { shift: false, .. } if this.settings.enter_sends || gpui_kit::is_mobile() => this.send_message(window, cx),
             // The emoji icon focuses the composer for its caret; the panel, not the keyboard, takes the keyboard's place.
             InputEvent::Focus if this.emoji_open == Some(emojipick::Target::Composer) => {}
             other => keyboard_follows(other, Keyboard::Text, cx),
@@ -567,7 +571,22 @@ impl BeeperApp {
         // Ahead of the focused field, which binds Up to its caret and would never let it reach the app.
         let me = cx.weak_entity();
         subs.push(cx.intercept_keystrokes(move |e, window, cx| {
-            if !gpui_kit::is_mobile() && me.update(cx, |this, cx| this.shortcut(&e.keystroke, window, cx)).unwrap_or(false) {
+            if gpui_kit::is_mobile() {
+                return;
+            }
+            let key = &e.keystroke;
+            let modifiers = &key.modifiers;
+            // Ctrl+Enter (Command+Enter on macOS) sends when Enter is set to add a line.
+            let send_with_modifier = key.key == "enter" && modifiers.secondary() && modifiers.number_of_modifiers() == 1;
+            let handled = me.update(cx, |this, cx| {
+                if send_with_modifier && !this.settings.enter_sends && this.composer.read(cx).focus_handle(cx).is_focused(window) {
+                    this.send_message(window, cx);
+                    true
+                } else {
+                    this.shortcut(key, window, cx)
+                }
+            }).unwrap_or(false);
+            if handled {
                 cx.stop_propagation();
             }
         }));
@@ -585,7 +604,11 @@ impl BeeperApp {
                     crate::applock::watch(cx);
                 }
                 // The animation setting may have changed while the app was away.
-                motion::follow_system(cx);
+                if this.settings.reduce_motion {
+                    cx.set_reduce_motion(true);
+                } else {
+                    motion::follow_system(cx);
+                }
                 this.follow_platform_language(window, cx);
                 let was_open = this.open.clone();
                 this.open_from_notification(cx);
@@ -649,6 +672,7 @@ impl BeeperApp {
             offline: false,
             focus: cx.focus_handle(),
             dir,
+            system_reduce_motion,
             emoji: Default::default(),
             look,
             settings,
@@ -1274,7 +1298,7 @@ impl BeeperApp {
     /// they stop.
     fn typed(&mut self, cx: &mut Context<Self>) {
         let Some(room) = self.open.clone() else { return };
-        let writing = !self.composer.read(cx).value().is_empty();
+        let writing = !self.composer.read(cx).value().is_empty() && self.settings.send_typing && !self.settings.incognito;
         let fresh = self.typing_sent.is_some_and(|at| at.elapsed() < TYPING_EVERY);
         if writing != self.typing_sent.is_some() || writing && !fresh {
             self.typing_sent = writing.then(std::time::Instant::now);
@@ -2593,7 +2617,7 @@ impl BeeperApp {
                 // A picture sits in its bubble with a thin margin, concentric with it; alone, it is the bubble.
                 let pictured = !m.deleted && m.media.as_ref().is_some_and(drawn_as_picture);
                 // A few emoji on their own are drawn large and free, as the phones do.
-                let jumbo = m.media.is_none() && m.reply.is_none() && m.link.is_none() && m.poll.is_none() && m.place.is_none() && emoji_only(&m.body);
+                let jumbo = this.settings.large_emoji && m.media.is_none() && m.reply.is_none() && m.link.is_none() && m.poll.is_none() && m.place.is_none() && emoji_only(&m.body);
                 let bare = jumbo || (pictured && m.body.is_empty() && m.reply.is_none() && m.link.is_none());
                 // A place alone fills its bubble, its card concentric with it.
                 let place_only = !m.deleted && m.place.is_some() && m.body.is_empty() && m.reply.is_none();

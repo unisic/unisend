@@ -1454,8 +1454,10 @@ impl State {
                 }
             }
             Cmd::Typing(room_id, on) => {
-                // Not telling who reads includes not telling who is about to answer.
-                if !self.incognito.load(Ordering::Relaxed) {
+                // Do not announce typing while private; allow stop to clear an earlier notice.
+                // A stop notice is allowed even after the privacy switch changes, so an already
+                // visible typing notice can be cleared immediately.
+                if !on || !self.incognito.load(Ordering::Relaxed) {
                     let room = self.room(&room_id)?;
                     tokio::spawn(async move {
                         if is_note(&room).await {

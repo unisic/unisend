@@ -122,6 +122,10 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     gpui_kit::init(cx);
     ui::motion::follow_system(cx);
     let mut settings = Settings::load(&dir);
+    let system_reduce_motion = cx.reduce_motion();
+    if settings.reduce_motion {
+        cx.set_reduce_motion(true);
+    }
     settings.notify_shows.apply();
     apply_language(&mut settings, &dir);
     let own = emoji::apply(&mut settings, &dir, cx);
@@ -145,7 +149,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     let accounts = ui::accounts::Accounts::new(backends, settings.account, &dir);
     #[cfg(not(target_os = "android"))]
     desktop::keep_running(settings.stay_connected);
-    let (window, app) = gpui_kit::open_window(window_options(window_bounds), cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(accounts, dir, settings, window, cx)))
+    let (window, app) = gpui_kit::open_window(window_options(window_bounds), cx, |window, cx| cx.new(|cx| ui::BeeperApp::new(accounts, dir, settings, system_reduce_motion, window, cx)))
         .expect("open main window");
     #[cfg(not(target_os = "android"))]
     {
@@ -369,6 +373,18 @@ pub(crate) struct Settings {
     /// Links the user sends go with a preview of their page, made on this device.
     #[serde(default = "Settings::on")]
     pub link_previews: bool,
+    /// Whether other people see the user's typing, separately from read receipts.
+    #[serde(default = "Settings::on")]
+    pub send_typing: bool,
+    /// Whether Enter sends a message; Shift+Enter always inserts a newline.
+    #[serde(default = "Settings::on")]
+    pub enter_sends: bool,
+    /// Forces reduced motion, independently of the system preference.
+    #[serde(default)]
+    pub reduce_motion: bool,
+    /// Whether messages made only of emoji use large type.
+    #[serde(default = "Settings::on")]
+    pub large_emoji: bool,
     /// How the delivery of the user's own messages is shown.
     #[serde(default)]
     pub receipts: ui::receipt::ReceiptStyle,
@@ -422,7 +438,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new(), reactions: Vec::new(), double_tap: None })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), send_typing: true, enter_sends: true, reduce_motion: false, large_emoji: true, mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new(), reactions: Vec::new(), double_tap: None })
     }
 
     /// The ends of the timed mutes of the account in `slot`.
@@ -1678,6 +1694,13 @@ mod tests {
         let old = super::Settings::parse(br#"{"theme":"Light","incognito":false}"#).unwrap();
         assert_eq!((old.theme, old.incognito, old.chat_colour), (super::ThemeChoice::Light, false, super::ChatColour::Default));
         assert!(old.stay_connected, "files from before the switch keep the background connection");
+        assert!(old.send_typing, "files from before the switch keep sending typing notices");
+        assert!(old.enter_sends);
+        assert!(old.large_emoji);
+        assert!(!old.reduce_motion);
+        assert!(!super::Settings::parse(br#"{"send_typing":false,"enter_sends":false,"large_emoji":false,"reduce_motion":true}"#).unwrap().enter_sends);
+        assert!(!super::Settings::parse(br#"{"send_typing":false,"enter_sends":false,"large_emoji":false,"reduce_motion":true}"#).unwrap().large_emoji);
+        assert!(super::Settings::parse(br#"{"send_typing":false,"enter_sends":false,"large_emoji":false,"reduce_motion":true}"#).unwrap().reduce_motion);
         assert!(!super::Settings::parse(br#"{"stay_connected":false}"#).unwrap().stay_connected);
         let new = super::Settings::parse(br#"{"chat_colour":"Teal"}"#).unwrap();
         assert_eq!(new.chat_colour, super::ChatColour::Teal);

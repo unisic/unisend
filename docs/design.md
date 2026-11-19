@@ -118,10 +118,15 @@ arrived since the chat was last read.
 Under the newest message, when it is the user's, one `faint` line after the time says where it
 is: Sending, Sent, Delivered, Seen. A message that failed says so in `negative` wherever it is,
 and its panel offers to try again. A message that has not reached the server is drawn at 60%.
-Who is typing is one `faint` line above the composer.
+Who is typing is one `faint` line above the composer. Settings, Privacy has separate switches for sending the user's typing notice and for hiding reading and typing.
 
 A lost connection is a state, not an error: one quiet line at the top while it is retried, gone
 when it is back.
+
+Settings, Chats includes Enter behavior, reduced motion and large-emoji display. On desktop, Enter
+sends by default; Shift+Enter adds a line. With Enter-send off, Enter adds a line and Ctrl+Enter on
+Linux and Windows, Command+Enter on macOS sends. Reduce motion forces GPUI motion off for the app;
+when turned off, the app follows the system preference again.
 
 ## Acting on things
 
