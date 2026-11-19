@@ -883,9 +883,16 @@ fn named_groups_of_two_are_not_one_to_one() {
 
 #[test]
 fn encrypted_chats_count_unread_on_the_device() {
-    assert_eq!(unread(true, (9, 0), Some((2, 1))), (2, 1));
-    assert_eq!(unread(true, (9, 0), None), (9, 0), "no read receipt found yet: the server's count");
-    assert_eq!(unread(false, (3, 1), Some((5, 0))), (3, 1));
+    assert_eq!(unread(true, false, (9, 0), Some((4, 2, 1))), (2, 1));
+    assert_eq!(unread(true, false, (9, 0), None), (9, 0), "no read receipt found yet: the server's count");
+    assert_eq!(unread(false, false, (3, 1), Some((7, 5, 0))), (3, 1));
+}
+
+#[test]
+fn a_muted_chat_counts_every_unread_message() {
+    assert_eq!(unread(false, true, (0, 0), Some((4, 0, 0))), (4, 0), "push rules count nothing in a muted chat");
+    assert_eq!(unread(true, true, (9, 1), Some((4, 1, 1))), (4, 1));
+    assert_eq!(unread(false, true, (0, 0), None), (0, 0), "no read receipt found yet");
 }
 
 #[test]

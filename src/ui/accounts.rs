@@ -172,9 +172,10 @@ fn handed_over<'a>(listed: impl Iterator<Item = &'a OwnedRoomId>, mut elsewhere:
     elsewhere
 }
 
-/// A chat that counts as waiting in the chat list's header.
+/// A chat that counts as waiting in the chat list's header. A muted one shows its count on its
+/// own row only.
 pub(super) fn waiting(r: &RoomSummary) -> bool {
-    !r.archived && !r.low_priority && r.is_unread()
+    !r.archived && !r.low_priority && !r.muted && r.is_unread()
 }
 
 impl BeeperApp {

@@ -61,7 +61,9 @@ The folders and the chip last chosen are kept on this device only, in `settings.
 
 Rows 72 tall, avatar 48. Line one: the name, then the network and the time on the right in
 `faint`. Line two: the preview in `muted`, then what needs you: an accent count, an accent `@`
-when you were mentioned. Unread rows have a white bold name and a white preview.
+when you were mentioned. Unread rows have a white bold name and a white preview. A muted chat
+counts every unread message (push rules count none there) in a grey `raised` pill, and stays out
+of the counts over the list.
 
 A Telegram forum is one row: its picture and name, the newest topic before the preview, the
 topics' unread added up. Touching it puts its topics in the list's place under a back arrow and

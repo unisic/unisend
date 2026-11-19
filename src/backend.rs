@@ -3007,10 +3007,12 @@ async fn recount(client: Client, notif: NotificationSettings, rooms: Rooms, ev: 
         };
         let Some(room) = client.get_room(&id) else { continue };
         let receipts = room.read_receipts();
-        if !room.encryption_state().is_encrypted() || receipts.latest_active.is_none() {
+        if receipts.latest_active.is_none() {
             continue;
         }
-        let Some(seen) = rooms.lock().unwrap().get(&id).cloned().filter(|s| s.unread != receipts.num_notifications) else { continue };
+        let encrypted = room.encryption_state().is_encrypted();
+        let counted = |s: &RoomSummary| if s.muted { receipts.num_unread } else { receipts.num_notifications };
+        let Some(seen) = rooms.lock().unwrap().get(&id).cloned().filter(|s| (encrypted || s.muted) && s.unread != counted(s)) else { continue };
         let fresh = summarize(&room, &notif, other_person(&room).await, seen).await;
         let changed = rooms.lock().unwrap().get_mut(&id).map(|r| {
             (r.unread, r.mentions, r.archived) = (fresh.unread, fresh.mentions, fresh.archived);
@@ -3081,8 +3083,9 @@ async fn summarize(
     };
     let server = room.unread_notification_counts();
     let receipts = room.read_receipts();
-    let client = receipts.latest_active.is_some().then_some((receipts.num_notifications, receipts.num_mentions));
-    let (unread, highlights) = unread(room.encryption_state().is_encrypted(), (server.notification_count, server.highlight_count), client);
+    let client = receipts.latest_active.is_some().then_some((receipts.num_unread, receipts.num_notifications, receipts.num_mentions));
+    let muted = matches!(mode, Some(RoomNotificationMode::Mute | RoomNotificationMode::MentionsAndKeywordsOnly));
+    let (unread, highlights) = unread(room.encryption_state().is_encrypted(), muted, (server.notification_count, server.highlight_count), client);
     let mut s = RoomSummary {
         name,
         network,
@@ -3097,7 +3100,7 @@ async fn summarize(
         mentions: seen.mentions.max(highlights).min(unread),
         pinned: room.is_favourite(),
         low_priority: room.is_low_priority(),
-        muted: matches!(mode, Some(RoomNotificationMode::Mute | RoomNotificationMode::MentionsAndKeywordsOnly)),
+        muted,
         marked_unread: room.is_marked_unread(),
         ..seen
     };
@@ -3152,11 +3155,17 @@ fn list_typing(client: &Client, ev: &mpsc::Sender<Ev>) {
 /// A chat's unread messages that notify, and its mentions among them. In an encrypted chat the
 /// server counts every event it cannot read, reactions and edits too, and cannot see mentions or
 /// mutes; the SDK's own count from the decrypted events is used once it has found the user's read
-/// receipt among them.
-fn unread(encrypted: bool, server: (u64, u64), client: Option<(u64, u64)>) -> (u64, u64) {
-    match client {
-        Some(counts) if encrypted => counts,
+/// receipt among them. A muted chat notifies of nothing, so it counts every unread message
+/// instead, from the SDK's count, as Signal shows it: still there, but grey.
+/// `client`: the SDK's (messages, notifying, mentions).
+fn unread(encrypted: bool, muted: bool, server: (u64, u64), client: Option<(u64, u64, u64)>) -> (u64, u64) {
+    let (notifying, mentions) = match client {
+        Some((_, n, h)) if encrypted => (n, h),
         _ => server,
+    };
+    match client {
+        Some((all, ..)) if muted => (all.max(notifying), mentions),
+        _ => (notifying, mentions),
     }
 }
 

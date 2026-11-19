@@ -265,7 +265,7 @@ impl BeeperApp {
         let current = self.effective_pick();
         // A forum is one row in the list, so one in the count however many of its topics wait.
         let mut forums = HashSet::new();
-        let waiting = self.rooms.iter().filter(|r| !r.archived && !r.low_priority && r.is_unread() && !replaced(&self.rooms, r)).filter(|r| r.forum.as_ref().is_none_or(|f| forums.insert(f))).count();
+        let waiting = self.rooms.iter().filter(|r| super::accounts::waiting(r) && !replaced(&self.rooms, r)).filter(|r| r.forum.as_ref().is_none_or(|f| forums.insert(f))).count();
         let picks = chips(&self.settings, &self.rooms);
         let seg = press::Segments::new("filters", window, cx);
         let chosen = picks.iter().position(|pick| *pick == current);
