@@ -13,6 +13,11 @@ candidate below, same idea and colours:
   grid, arms 3 px, a 1 px gap on a whole pixel column (2 px at 32, 3 px at 48), and a one-point tail,
   so the two halves stay apart where the fine gap would blur shut.
 - The Android adaptive layers and the splash are vector drawables instead of bitmaps.
+- Recoloured after the macOS Icon Composer version: a near-black violet tile (`#2a1840` to
+  `#120a1c`) instead of flat `#8006da`, the left half a violet gradient (`#a874ff` to `#7446d0`)
+  instead of lilac, the right half white to `#c9c6d0`. The desktop tile adds a soft shadow under the
+  mark and a faint light rim so its edge shows on a dark desktop; Android layers carry the gradients
+  but no shadow, since vector drawables have no filters.
 
 `candidate-*/` and `make.py` below are the record of the choice and still draw the original B.
 

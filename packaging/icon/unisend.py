@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Generates the Unisend icon: a U made of two speech-bubble halves on violet #8006da. The left
-half is lilac and ends in a bubble tail at its outer corner, the right half is white and round,
-and a narrow gap keeps them two pieces.
+"""Generates the Unisend icon: a U made of two speech-bubble halves on a near-black violet tile, as
+the macOS Icon Composer document draws it. The left half is violet and ends in a bubble tail at its
+outer corner, the right half is white and round, each lit from above by a vertical gradient, and a
+narrow gap keeps them two pieces.
 
 Usage: unisend.py OUTDIR
 Writes the masters render.sh rasterises and copies, all on the 108-unit Android adaptive canvas:
@@ -10,7 +11,7 @@ Writes the masters render.sh rasterises and copies, all on the 108-unit Android 
                     one-point tail, so the two halves stay apart once the fine gap would blur shut
   foreground.svg    Android adaptive foreground: the mark inside the 66-unit safe circle
   monochrome.svg    Android themed-icon layer: the same mark in one colour
-  splash.svg        Android splash: violet disc (the 72-unit circle the splash shows) and the mark
+  splash.svg        Android splash: dark violet disc (the 72-unit circle the splash shows) and the mark
   ic_launcher_background.xml, ic_launcher_foreground.xml, ic_launcher_monochrome.xml,
   splash_icon.xml   the same layers as Android vector drawables, for res/drawable
   Unisend.icon/     macOS 26+ Icon Composer document: each half a Liquid Glass layer on a 1024
@@ -21,7 +22,8 @@ import json
 import os
 import sys
 
-VIOLET, LILAC, WHITE = "#8006da", "#d9b3ff", "#ffffff"
+# Each fill is a vertical gradient, top colour first, over the mark's height (the tile's for TILE).
+TILE, LEFT, RIGHT, WHITE = ("#2a1840", "#120a1c"), ("#a874ff", "#7446d0"), ("#ffffff", "#c9c6d0"), "#ffffff"
 HEAD = '<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">'
 TILE_RX = 24
 # The tail corner lies on the diagonal, the first point a circle mask reaches: the mark is drawn at
@@ -31,7 +33,7 @@ LAYER = dict(scale=0.84, dx=1.0, dy=-0.5)
 TILE_SCALE = 1.4  # a desktop tile has no launcher mask eating its edges, so the mark is drawn larger
 SMALL_PX = 108 / 16  # icon-small is drawn on a 16 px grid so its edges land on whole pixels at 16, 32, 48
 MAC_K = 1024 / 108 * 1.15  # the mark spans about 55% of the Icon Composer canvas
-MAC_LEFT, MAC_FILL = "#b066ff", ("#2a1840", "#120a1c")
+MAC_LEFT, MAC_FILL = "#b066ff", TILE  # the system's glass lightens the layer, so it starts lighter
 
 
 def num(v):
@@ -93,16 +95,53 @@ def around_centre(scale, dx=0.0, dy=0.0):
     return (lambda x, y: (54 + scale * (x - 54) + dx, 54 + scale * (y - 54) + dy), scale)
 
 
-def svg_paths(paths, colours):
-    return "".join(f'<path d="{d}" fill="{c}"/>' for d, c in zip(paths, colours))
+def span(tf, top=28.5, bottom=81.5):
+    """The mark's top (arm caps) and bottom (tail tip) on the canvas, where its gradients run."""
+    return tf[0](54, top)[1], tf[0](54, bottom)[1]
 
 
-def vector(paths, colours):
-    body = "".join(f'\n    <path android:fillColor="#FF{c[1:].upper()}" android:pathData="{d}" />'
-                   for d, c in zip(paths, colours))
+def lit(paths, ys):
+    """The two halves' fills as (top colour, bottom colour, y0, y1) gradients."""
+    return list(zip(paths, [(*LEFT, *ys), (*RIGHT, *ys)]))
+
+
+def svg_paths(fills, shadow=False):
+    """Paths from (data, fill) pairs; a fill is a colour or a (top, bottom, y0, y1) gradient."""
+    defs, body = [], []
+    for i, (d, f) in enumerate(fills):
+        if isinstance(f, tuple):
+            defs.append(f'<linearGradient id="g{i}" gradientUnits="userSpaceOnUse" x1="0" y1="{num(f[2])}" '
+                        f'x2="0" y2="{num(f[3])}"><stop offset="0" stop-color="{f[0]}"/>'
+                        f'<stop offset="1" stop-color="{f[1]}"/></linearGradient>')
+            f = f"url(#g{i})"
+        body.append(f'<path d="{d}" fill="{f}"/>')
+    if shadow:
+        # A soft drop shadow lifts the mark off the dark tile; Android layers cannot draw one.
+        defs.append('<filter id="lift" x="-20%" y="-20%" width="140%" height="150%">'
+                    '<feDropShadow dx="0" dy="1.5" stdDeviation="1.6" flood-color="#000000" flood-opacity="0.55"/></filter>')
+        body = ['<g filter="url(#lift)">', *body, "</g>"]
+    return (f"<defs>{''.join(defs)}</defs>" if defs else "") + "".join(body)
+
+
+def argb(c):
+    return f"#FF{c[1:].upper()}"
+
+
+def vector(fills):
+    body = ""
+    for d, f in fills:
+        if isinstance(f, tuple):
+            body += (f'\n    <path android:pathData="{d}">\n        <aapt:attr name="android:fillColor">\n'
+                     f'            <gradient android:type="linear" android:startX="0" android:startY="{num(f[2])}"'
+                     f' android:endX="0" android:endY="{num(f[3])}"\n'
+                     f'                android:startColor="{argb(f[0])}" android:endColor="{argb(f[1])}" />\n'
+                     '        </aapt:attr>\n    </path>')
+        else:
+            body += f'\n    <path android:fillColor="{argb(f)}" android:pathData="{d}" />'
     return ('<?xml version="1.0" encoding="utf-8"?>\n'
             '<!-- Generated by packaging/icon/unisend.py; edit that and run packaging/icon/render.sh. -->\n'
             '<vector xmlns:android="http://schemas.android.com/apk/res/android"\n'
+            '    xmlns:aapt="http://schemas.android.com/aapt"\n'
             '    android:width="108dp"\n    android:height="108dp"\n'
             f'    android:viewportWidth="108"\n    android:viewportHeight="108">{body}\n</vector>\n')
 
@@ -130,25 +169,35 @@ def mac_icon():
 
 def files():
     s = LAYER["scale"]
-    layer = mark(around_centre(s, LAYER["dx"], LAYER["dy"]))
-    tile = mark(around_centre(s * TILE_SCALE, LAYER["dx"] * TILE_SCALE, LAYER["dy"] * TILE_SCALE))
+    layer_tf = around_centre(s, LAYER["dx"], LAYER["dy"])
+    tile_tf = around_centre(s * TILE_SCALE, LAYER["dx"] * TILE_SCALE, LAYER["dy"] * TILE_SCALE)
+    layer = lit(mark(layer_tf), span(layer_tf))
+    tile = lit(mark(tile_tf), span(tile_tf))
+    small = lit(mark_small(), (3 * SMALL_PX, 14.25 * SMALL_PX))
+    mono = [(d, WHITE) for d, _ in layer]
     square, disc = "M0,0H108V108H0Z", "M18,54A36,36 0 1 0 90,54A36,36 0 1 0 18,54Z"
-    two, mono = (LILAC, WHITE), (WHITE, WHITE)
+    ground = (square, (*TILE, 0, 108))
+    splash_ground = (disc, (*TILE, 18, 90))
 
-    def tile_svg(paths):
-        return (f'{HEAD}<defs><clipPath id="tile"><rect width="108" height="108" rx="{TILE_RX}"/></clipPath></defs>'
-                f'<g clip-path="url(#tile)"><rect width="108" height="108" fill="{VIOLET}"/>{svg_paths(paths, two)}</g></svg>\n')
+    def tile_svg(fills, shadow):
+        # A faint light rim keeps the dark tile's edge visible on a dark desktop.
+        return (f'{HEAD}<defs><clipPath id="tile"><rect width="108" height="108" rx="{TILE_RX}"/></clipPath>'
+                f'<linearGradient id="ground" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{TILE[0]}"/>'
+                f'<stop offset="1" stop-color="{TILE[1]}"/></linearGradient></defs>'
+                f'<g clip-path="url(#tile)"><rect width="108" height="108" fill="url(#ground)"/>{svg_paths(fills, shadow)}</g>'
+                f'<rect x="0.5" y="0.5" width="107" height="107" rx="{TILE_RX - 0.5}" fill="none" stroke="#ffffff" '
+                f'stroke-opacity="0.14"/></svg>\n')
 
     return {
-        "icon.svg": tile_svg(tile),
-        "icon-small.svg": tile_svg(mark_small()),
-        "foreground.svg": f"{HEAD}{svg_paths(layer, two)}</svg>\n",
-        "monochrome.svg": f"{HEAD}{svg_paths(layer, mono)}</svg>\n",
-        "splash.svg": f'{HEAD}<path d="{disc}" fill="{VIOLET}"/>{svg_paths(layer, two)}</svg>\n',
-        "ic_launcher_background.xml": vector([square], [VIOLET]),
-        "ic_launcher_foreground.xml": vector(layer, two),
-        "ic_launcher_monochrome.xml": vector(layer, mono),
-        "splash_icon.xml": vector((disc, *layer), (VIOLET, *two)),
+        "icon.svg": tile_svg(tile, True),
+        "icon-small.svg": tile_svg(small, False),
+        "foreground.svg": f"{HEAD}{svg_paths(layer)}</svg>\n",
+        "monochrome.svg": f"{HEAD}{svg_paths(mono)}</svg>\n",
+        "splash.svg": f"{HEAD}{svg_paths([splash_ground, *layer])}</svg>\n",
+        "ic_launcher_background.xml": vector([ground]),
+        "ic_launcher_foreground.xml": vector(layer),
+        "ic_launcher_monochrome.xml": vector(mono),
+        "splash_icon.xml": vector([splash_ground, *layer]),
         **mac_icon(),
     }
 

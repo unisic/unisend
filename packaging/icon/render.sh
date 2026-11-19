@@ -39,6 +39,8 @@ open(out, "wb").write(head + b"".join(data))
 PY
 
 # macOS 26 and later read the Liquid Glass icon from Assets.car, compiled from the Icon Composer document.
+# Without Xcode (any non-Mac) the macOS files are left as they are and the rest is still written.
+if command -v xcrun >/dev/null; then
 mkdir "$tmp/car"
 xcrun actool "$svg/Unisend.icon" --compile "$tmp/car" --app-icon Unisend --platform macosx \
     --target-device mac --minimum-deployment-target 11.0 --output-partial-info-plist "$tmp/car/info.plist" >/dev/null
@@ -63,6 +65,9 @@ for ostype, size in types:
     body += ostype.encode() + struct.pack(">I", 8 + len(data)) + data
 open(out, "wb").write(b"icns" + struct.pack(">I", 8 + len(body)) + body)
 PY
+else
+    echo "render.sh: no xcrun, macOS icon not rebuilt" >&2
+fi
 
 # The adaptive layers and the splash are vector drawables: sharp at every density and launcher size.
 cp "$svg"/*.xml "$res/drawable/"
