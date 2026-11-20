@@ -21,6 +21,14 @@ pub(crate) fn keep_running(on: bool) {
     KEEP_RUNNING.store(on && CAN_KEEP_RUNNING, Ordering::Relaxed);
 }
 
+/// Whether a chat waits, for the tray icon's dot. Only Linux has a tray icon here.
+pub(crate) fn tray_waiting(on: bool) {
+    #[cfg(target_os = "linux")]
+    tray::waiting(on);
+    #[cfg(not(target_os = "linux"))]
+    let _ = on;
+}
+
 /// The app's view while the process lives, and where its window was when it closed.
 struct Main {
     app: Entity<BeeperApp>,

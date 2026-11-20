@@ -85,9 +85,10 @@ cookie jar after each probe once the address matches. Nothing is written to disk
 | Need | Place |
 |---|---|
 | Title bar and window buttons drawn by the app | `src/ui/frame.rs`; a compositor that insists on its own title bar wins |
-| Tray icon, running on with the window closed | `src/desktop/tray.rs` (StatusNotifierItem over zbus), `src/desktop.rs` |
+| Tray icon (an accent dot while a chat waits), running on with the window closed | `src/desktop/tray.rs` (StatusNotifierItem over zbus), `src/desktop.rs` |
 | Notifications with reply, mark as read, mute | `src/notify/linux.rs` (`org.freedesktop.Notifications`; the reply box is KDE's) |
 | One copy per data directory, raise on a second launch | `src/instance.rs` |
+| A video a network refuses, made into an MP4 when the user agrees: the system's `ffmpeg` on `PATH`, optional (without it the offer is not made) | `src/backend/mp4.rs` |
 | Signing in to a network in a browser window | `src/weblogin.rs`, started by `web_login` in `src/lib.rs` |
 | Launcher and icons | `packaging/linux/`; the window's `app_id` in `src/lib.rs` must stay the `.desktop` file's name, or the shell shows no icon |
 | Fixes to GPUI's Wayland layer (raise from a notification, pasting files) | `vendor/gpui-pre-linux/PATCHES.md` |

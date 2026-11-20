@@ -1,12 +1,14 @@
 //! The tray icon on Linux: a StatusNotifierItem with a two-entry dbusmenu, served on the session
 //! bus. KDE Plasma shows it natively; GNOME only with an extension. Nothing polls: the bus wakes
-//! the task for a click, and for a tray that (re)starts, to register with it again.
+//! the task for a click, and for a tray that (re)starts, to register with it again. While a chat
+//! waits, the icon carries an accent dot, as the chat list's header counts.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use futures_util::StreamExt as _;
 use gpui_kit::App;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use zbus::zvariant::{ObjectPath, OwnedValue, Structure, Value};
 
 use crate::i18n::t;
@@ -22,6 +24,14 @@ const QUIT: i32 = 2;
 /// Shown when the icon theme has no `dev.gpui.beeper` (the app not installed): 64 x 64 x 4 bytes.
 const ICON: &[u8] = include_bytes!("../../packaging/linux/icons/hicolor/64x64/apps/dev.gpui.beeper.png");
 
+/// The dot: centre and radius in the icon's 64 x 64, the clear ring around it, and `Palette::accent`.
+const DOT: (f32, f32, f32) = (49.0, 15.0, 12.0);
+const RING: f32 = 4.0;
+const ACCENT: [u8; 3] = [0xc6, 0xf2, 0x4e];
+
+/// Whether a chat waits; the bus task redraws the icon when it changes.
+static WAITING: OnceLock<watch::Sender<bool>> = OnceLock::new();
+
 /// The spec's pixmaps: width, height and ARGB32 bytes.
 type Pixmaps = Vec<(i32, i32, Vec<u8>)>;
 
@@ -33,8 +43,9 @@ enum Click {
 
 pub(super) fn start(cx: &mut App) {
     let (tx, mut rx) = mpsc::channel(QUEUE);
+    let waiting = WAITING.get_or_init(|| watch::channel(false).0).subscribe();
     cx.background_executor().spawn(async move {
-        if let Err(e) = serve(tx).await {
+        if let Err(e) = serve(tx, waiting).await {
             log::warn!("tray icon: {e}");
         }
     })
@@ -50,23 +61,51 @@ pub(super) fn start(cx: &mut App) {
     .detach();
 }
 
-async fn serve(tx: mpsc::Sender<Click>) -> zbus::Result<()> {
+/// Sets the dot; a no-op when it is already so or there is no tray.
+pub(super) fn waiting(on: bool) {
+    if let Some(tx) = WAITING.get() {
+        tx.send_if_modified(|w| std::mem::replace(w, on) != on);
+    }
+}
+
+async fn serve(tx: mpsc::Sender<Click>, mut waiting: watch::Receiver<bool>) -> zbus::Result<()> {
     let name = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
+    let plain = pixmap(false);
+    let dotted = pixmap(true);
+    let on = *waiting.borrow_and_update();
+    let item = Item { tx: tx.clone(), pixmap: if on { dotted.clone() } else { plain.clone() }, waiting: on };
     let conn = zbus::connection::Builder::session()?
         .name(name.as_str())?
-        .serve_at(ITEM_PATH, Item { tx: tx.clone(), pixmap: pixmap() })?
+        .serve_at(ITEM_PATH, item)?
         .serve_at(MENU_PATH, Menu { tx })?
         .build()
         .await?;
     let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
     // Plasma restarted, or the tray came after the app: the new watcher knows nothing of the icon.
     let mut watchers = dbus.receive_name_owner_changed_with_args(&[(0, WATCHER)]).await?;
-    register(&conn, &name).await;
-    while let Some(change) = watchers.next().await {
-        if change.args().is_ok_and(|a| a.new_owner().is_some()) {
-            register(&conn, &name).await;
+    let item = conn.object_server().interface::<_, Item>(ITEM_PATH).await?;
+    let reregister = async {
+        register(&conn, &name).await;
+        while let Some(change) = watchers.next().await {
+            if change.args().is_ok_and(|a| a.new_owner().is_some()) {
+                register(&conn, &name).await;
+            }
         }
-    }
+    };
+    let redraw = async {
+        while waiting.changed().await.is_ok() {
+            let on = *waiting.borrow_and_update();
+            {
+                let mut it = item.get_mut().await;
+                it.waiting = on;
+                it.pixmap = if on { dotted.clone() } else { plain.clone() };
+            }
+            if let Err(e) = Item::new_icon(item.signal_emitter()).await {
+                log::warn!("tray icon: {e}");
+            }
+        }
+    };
+    futures_util::future::join(reregister, redraw).await;
     Ok(())
 }
 
@@ -77,10 +116,26 @@ async fn register(conn: &zbus::Connection, name: &str) {
     }
 }
 
-/// The icon as the spec's ARGB32 pixmap, alpha first in network byte order.
-fn pixmap() -> Pixmaps {
+/// The icon as the spec's ARGB32 pixmap, alpha first in network byte order, with the dot or not.
+fn pixmap(dot: bool) -> Pixmaps {
     let Ok(img) = image::load_from_memory_with_format(ICON, image::ImageFormat::Png) else { return Vec::new() };
-    let img = img.to_rgba8();
+    let mut img = img.to_rgba8();
+    if dot {
+        let (cx, cy, r) = DOT;
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            // Coverage over a pixel's width keeps both edges smooth.
+            let fill = (r + 0.5 - d).clamp(0.0, 1.0);
+            let clear = (r + RING + 0.5 - d).clamp(0.0, 1.0);
+            let kept = (1.0 - clear) * p[3] as f32;
+            let alpha = fill * 255.0 + (1.0 - fill) * kept;
+            for i in 0..3 {
+                let c = fill * 255.0 * ACCENT[i] as f32 + (1.0 - fill) * kept * p[i] as f32;
+                p[i] = if alpha > 0.0 { (c / alpha).round() as u8 } else { 0 };
+            }
+            p[3] = alpha.round() as u8;
+        }
+    }
     let argb = img.pixels().flat_map(|p| [p[3], p[0], p[1], p[2]]).collect();
     vec![(img.width() as i32, img.height() as i32, argb)]
 }
@@ -88,6 +143,7 @@ fn pixmap() -> Pixmaps {
 struct Item {
     tx: mpsc::Sender<Click>,
     pixmap: Pixmaps,
+    waiting: bool,
 }
 
 #[zbus::interface(name = "org.kde.StatusNotifierItem")]
@@ -104,6 +160,10 @@ impl Item {
     fn context_menu(&self, _x: i32, _y: i32) {}
 
     fn scroll(&self, _delta: i32, _orientation: &str) {}
+
+    /// Tells the tray to read the icon again.
+    #[zbus(signal)]
+    async fn new_icon(emitter: &zbus::object_server::SignalEmitter<'_>) -> zbus::Result<()>;
 
     #[zbus(property)]
     fn category(&self) -> &str {
@@ -130,9 +190,10 @@ impl Item {
         0
     }
 
+    /// The theme's icon has no dot, so a waiting chat sends the pixmap alone.
     #[zbus(property)]
     fn icon_name(&self) -> &str {
-        "dev.gpui.beeper"
+        if self.waiting { "" } else { "dev.gpui.beeper" }
     }
 
     #[zbus(property)]

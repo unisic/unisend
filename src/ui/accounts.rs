@@ -147,7 +147,14 @@ impl Accounts {
             let (Some(mut events), slot) = (a.events.take(), a.slot) else { continue };
             a._listen = Some(cx.spawn(async move |this, cx| {
                 while let Some(ev) = events.recv().await {
-                    if this.update(cx, |this, cx| this.account_event(slot, ev, cx)).is_err() {
+                    let lists = matches!(ev, Ev::Rooms(_) | Ev::RoomGone(_) | Ev::NeedLogin);
+                    let handled = this.update(cx, |this, cx| {
+                        this.account_event(slot, ev, cx);
+                        if lists {
+                            this.tell_tray();
+                        }
+                    });
+                    if handled.is_err() {
                         break;
                     }
                 }
@@ -179,6 +186,12 @@ pub(super) fn waiting(r: &RoomSummary) -> bool {
 }
 
 impl BeeperApp {
+    /// The tray icon shows its dot while a chat of any signed-in account waits, as the list's header counts.
+    fn tell_tray(&self) {
+        #[cfg(not(target_os = "android"))]
+        crate::desktop::tray_waiting(self.rooms.iter().any(waiting) || self.accounts.others(self.accounts.active).any(|a| !a.unread.is_empty()));
+    }
+
     /// The images the screen holds, for their atlas tiles to be freed as it goes.
     // shortcut: the wallpaper, gallery, GIF and caption images go with their decoded copy only; their
     // tiles stay until the window closes, a few per switch. Free them here if switching gets frequent.
