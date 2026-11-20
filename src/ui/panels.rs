@@ -53,10 +53,13 @@ pub(super) enum Page {
     NotifyShows,
     Folders,
     Storage,
+    DownloadMobile,
+    DownloadWifi,
+    DownloadRoaming,
 }
 
 impl Page {
-    fn title(self) -> &'static str {
+    pub(super) fn title(self) -> &'static str {
         match self {
             Self::Profile => t!("Profile"),
             Self::Appearance => t!("Appearance"),
@@ -76,10 +79,13 @@ impl Page {
             Self::NotifyShows => t!("Show|notification"),
             Self::Folders => t!("Chat folders"),
             Self::Storage => t!("Data and storage"),
+            Self::DownloadMobile => t!("When using mobile data"),
+            Self::DownloadWifi => t!("When using Wi-Fi"),
+            Self::DownloadRoaming => t!("When roaming"),
         }
     }
 
-    fn id(self) -> ElementId {
+    pub(super) fn id(self) -> ElementId {
         ("settings-page", self as usize).into()
     }
 }
@@ -619,6 +625,9 @@ impl BeeperApp {
             Page::Emoji => self.render_emoji(cx),
             Page::Folders => self.render_folders(cx),
             Page::Storage => self.render_storage(cx),
+            Page::DownloadMobile => self.render_download(super::download::Net::Mobile, cx),
+            Page::DownloadWifi => self.render_download(super::download::Net::Wifi, cx),
+            Page::DownloadRoaming => self.render_download(super::download::Net::Roaming, cx),
             Page::NotifyShows => pick("notify-shows", crate::NotifyShows::ALL, s.notify_shows, crate::NotifyShows::label, |s, shows| {
                 s.notify_shows = shows;
                 shows.apply();

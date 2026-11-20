@@ -82,7 +82,9 @@ What leaves the device, and who sees it:
 
 - **Your homeserver** sees what any Matrix server sees: your account, the rooms you are in,
   message metadata, your IP address, and the content of unencrypted rooms. Encrypted rooms are
-  end-to-end encrypted. Media and avatars are loaded from the homeserver.
+  end-to-end encrypted. Media and avatars are loaded from the homeserver; with media
+  auto-download (Settings, Data and storage) it also sees audio and documents fetched before you
+  open them.
 - **Beeper**, only with a Beeper account: the sign-in at `api.beeper.com`, the homeserver
   `matrix.beeper.com`, and the bridges. A bridge has to read a message to pass it between Matrix and
   the other network, so Beeper's bridges see the content of bridged chats, and the other network

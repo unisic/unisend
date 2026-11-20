@@ -12,6 +12,8 @@ use crate::i18n::t;
 pub(crate) struct MediaSettings {
     #[serde(default)]
     pub keep: Keep,
+    #[serde(default)]
+    pub download: super::download::Download,
 }
 
 /// What the page knows of the shown account's storage.
@@ -20,6 +22,7 @@ pub(super) struct Storage {
     usage: Option<Usage>,
     /// A size or a clean-up asked for and not answered yet.
     asked: bool,
+    pub(super) held: super::download::Held,
 }
 
 fn keep_label(keep: Keep) -> &'static str {
@@ -44,7 +47,7 @@ impl BeeperApp {
 
     /// Asks again what the shown account takes, for the Settings list's summary and this page.
     pub(super) fn refresh_storage(&mut self, cx: &mut Context<Self>) {
-        self.storage = Storage::default();
+        (self.storage.usage, self.storage.asked) = (None, false);
         self.ask_storage(Cmd::Storage, cx);
     }
 
@@ -91,6 +94,7 @@ impl BeeperApp {
                     .child(card(cx).child(clear))
                     .child(footnote(t!("Clearing removes the photos, videos and files kept on this device. They download again when shown. Nothing is deleted from the server."), cx)),
             )
+            .child(self.render_download_section(cx))
             .child(
                 section(t!("Keep messages"), cx)
                     .child(card(cx).children(Keep::ALL.into_iter().enumerate().map(|(ix, choice)| {

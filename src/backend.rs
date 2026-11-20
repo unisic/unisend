@@ -138,6 +138,8 @@ pub enum Cmd {
     ViewedOnce(OwnedRoomId, String),
     /// Download to the media cache so the system can open it.
     Fetch(String, Media),
+    /// Fetch into the SDK's media cache only, so a later `Fetch` needs no network (auto-download).
+    Prefetch(Media),
     Attach { room: OwnedRoomId, path: PathBuf, reply_to: Option<String> },
     /// Chat networks on the account.
     Networks,
@@ -1561,6 +1563,16 @@ impl State {
                     });
                 }
             }
+            Cmd::Prefetch(media) => {
+                let (client, permits) = (self.client()?.clone(), self.fetches.clone());
+                tokio::spawn(async move {
+                    let Ok(_permit) = permits.acquire().await else { return };
+                    let request = MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File };
+                    if let Err(e) = client.media().get_media_content(&request, true).await {
+                        log::debug!("prefetch: {e:#}");
+                    }
+                });
+            }
             Cmd::ViewedOnce(room_id, event) => {
                 // Only Beeper's bridges take the report; elsewhere there is nobody to tell.
                 if let Ok(api) = self.api() {
@@ -1615,7 +1627,8 @@ impl State {
                 tokio::spawn(async move {
                     let saved = async {
                         let request = MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File };
-                        let bytes = client.media().get_media_content(&request, false).await?;
+                        // From the media cache where auto-download put it; view-once media stays out.
+                        let bytes = client.media().get_media_content(&request, !media.once).await?;
                         save_media(&dir, generation, &id, &media.name, &bytes)
                     };
                     let path = match saved.await {

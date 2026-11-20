@@ -32,6 +32,7 @@ mod camera;
 mod caption;
 pub(crate) use caption::video_frame;
 mod cards;
+mod download;
 mod emojipick;
 mod contacts;
 pub(crate) mod folders;
@@ -1451,8 +1452,9 @@ impl BeeperApp {
     /// Requests the thumbnail of a message that is being drawn. Like `fetch_rows`, leaves half
     /// the command channel to user actions.
     fn want_thumb(&mut self, ix: usize) {
+        self.prefetch(ix);
         let m = &self.msgs[ix];
-        let pictured = m.media.as_ref().filter(|media| !media.once && matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
+        let pictured = m.media.as_ref().filter(|media| !media.once && matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video) && self.may_download(&m.id, media));
         let linked = m.link.as_ref().and_then(|link| link.image.as_ref());
         let quoted = m.reply.as_ref().and_then(|q| q.media.as_ref()).filter(|media| matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
         let wanted: Vec<(String, Media)> = pictured
@@ -1548,6 +1550,9 @@ impl BeeperApp {
     }
 
     fn open_media(&mut self, id: String, media: Media, cx: &mut Context<Self>) {
+        if self.download_anyway(&id, &media, cx) {
+            return;
+        }
         if matches!(media.kind, MediaKind::Image | MediaKind::Sticker) {
             if self.send(Cmd::View(id.clone(), media), cx) {
                 self.viewer = Some((id, None));
@@ -1674,6 +1679,11 @@ impl BeeperApp {
                     // The ring keeps a dark picture's edge from melting into the ground.
                     Some(image) => el.child(img(image).size_full().rounded(px(radius)).object_fit(ObjectFit::Cover).opacity(alpha)).child(
                         div().absolute().inset_0().rounded(px(radius)).border_1().border_color(Palette::of(cx).text.opacity(0.1)).opacity(alpha),
+                    ),
+                    None if !self.may_download(&m.id, media) => el.child(
+                        v_flex().size_full().gap_1().items_center().justify_center().opacity(0.7).child(Icon::new(IconName::Download).size_6()).children(
+                            media.size.filter(|&s| s > 0).filter(|_| !video).map(|size| div().text_size(fs(12.)).font_features(tabular()).child(file_size(size))),
+                        ),
                     ),
                     None => el.child(
                         div().size_full().flex().items_center().justify_center().opacity(0.5).child(
