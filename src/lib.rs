@@ -95,6 +95,8 @@ gpui_kit::assets::icon_assets!(
         UserMinus,
         UserCheck,
         CheckCheck,
+        Palette,
+        Moon,
         Circle,
         CircleCheck,
         CircleAlert
@@ -421,6 +423,9 @@ pub(crate) struct Settings {
     /// What a double tap on a message reacts with; `None` for the heart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub double_tap: Option<String>,
+    /// Chats with a colour or wallpaper of their own, kept on this device only.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub chat_looks: std::collections::BTreeMap<matrix_sdk::ruma::OwnedRoomId, ui::chatlook::ChatLook>,
     /// A muted chat stays archived when a message arrives, as Signal's setting of that name.
     #[serde(default)]
     pub keep_muted_archived: bool,
@@ -441,7 +446,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), send_typing: true, enter_sends: true, reduce_motion: false, large_emoji: true, mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new(), reactions: Vec::new(), double_tap: None, keep_muted_archived: false })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), send_typing: true, enter_sends: true, reduce_motion: false, large_emoji: true, mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new(), reactions: Vec::new(), double_tap: None, keep_muted_archived: false, chat_looks: Default::default() })
     }
 
     /// The ends of the timed mutes of the account in `slot`.
@@ -526,7 +531,7 @@ impl Palette {
 }
 
 /// Sets `Palette` for the current mode and lays it over the component library's theme.
-fn apply_palette(cx: &mut App) {
+pub(crate) fn apply_palette(cx: &mut App) {
     let c = |hex: u32| -> Hsla { rgb(hex).into() };
     let chosen = cx.try_global::<ChatColour>().copied().unwrap_or_default().fill();
     let dark = Theme::global(cx).is_dark();

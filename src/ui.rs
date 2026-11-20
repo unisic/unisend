@@ -32,6 +32,7 @@ mod camera;
 mod caption;
 pub(crate) use caption::video_frame;
 mod cards;
+pub(crate) mod chatlook;
 mod emojipick;
 mod contacts;
 pub(crate) mod folders;
@@ -3724,7 +3725,7 @@ impl BeeperApp {
         self.chat_sheet = Some(id);
         self.sheet_at = at;
         (self.disappear.picking, self.mute_picking, self.folders.picking) = (false, false, false);
-        self.info.member = None;
+        (self.info.member, self.look.chat_page) = (None, None);
         cx.notify();
     }
 
@@ -3735,7 +3736,7 @@ impl BeeperApp {
             self.sheet_last = self.chat_sheet.clone();
         }
         let Some(frame) = self.chat_motion.sample(self.chat_sheet.is_some(), window, cx) else {
-            (self.sheet_last, self.folders.picking) = (None, false);
+            (self.sheet_last, self.folders.picking, self.look.chat_page) = (None, false, None);
             return None;
         };
         let live = frame.live;
@@ -3759,6 +3760,9 @@ impl BeeperApp {
         if self.folders.picking {
             let (title, rows) = self.folder_sheet(&id, live, cx);
             return Some(self.sheet(&self.chat_motion, frame, 5, title, rows, |this| &mut this.chat_motion, window, cx));
+        }
+        if let Some((key, title, rows)) = self.chat_page_sheet(room, live, window, cx) {
+            return Some(self.sheet(&self.chat_motion, frame, key, title, rows, |this| &mut this.chat_motion, window, cx));
         }
         if self.chat_sheet_inside {
             let [_, _, mute, archive, _] = chat_actions(room);
@@ -4843,6 +4847,7 @@ impl Released {
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.switch_pending(window, cx);
+        self.follow_chat_look(cx);
         self.released.free(window, cx);
         let locked = self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked();
         // The chat left open behind the lock is read once the lock is passed, as an opening is.

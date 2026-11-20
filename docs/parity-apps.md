@@ -54,7 +54,7 @@ N impossible over Matrix or bridges.
 | Linked devices list, sign one out | Y | Y | Y | Y | Settings, Devices (`backend/verify.rs` `devices`, `delete_devices`) | Y |
 | Accessibility (screen reader, scaling) | Y | Y | Y | Y | text size steps; no screen reader (GPUI) | Y (client) |
 | Chat colours, wallpaper | Y | Y | Y | Y | `ui/appearance.rs` | Y (local) |
-| Per-chat wallpaper | Y | Y | Y | Y | missing | Y (local) |
+| Per-chat wallpaper and colour | Y | Y | Y | Y | `ui/chatlook.rs` | Y (local) |
 | Language switch in app | Y | Y | Y | Y | Settings, Language (`ui/panels.rs`) | Y |
 | Desktop app | Y | Y | N (web) | Y | Linux; tray `src/desktop/tray.rs`; Windows and macOS compile only | Y |
 | Hotkeys, command bar | P | Y | P | P | missing | Y |
@@ -92,7 +92,7 @@ Effort: S small, M medium, L large.
 10. Push without Google through UnifiedPush, for phones that kill the background connection.
     Medium, L. The push server sees an opaque wake-up only.
 11. Threads for Matrix-native rooms. Medium, L.
-12. Per-chat wallpaper and colour. Low-medium, S.
+12. Per-chat wallpaper and colour: done (`ui/chatlook.rs`).
 13. Desktop hotkeys and a command bar. Medium, M.
 14. Screen reader support (depends on GPUI). High for some users, L.
 15. Matrix-native calls. Only Matrix peers, needs a LiveKit server. L, last.

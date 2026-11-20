@@ -802,6 +802,11 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Unlocks encrypted messages on another device. Copy it here, paste it there.", "Odblokowuje zaszyfrowane wiadomości na innym urządzeniu. Skopiuj go tutaj, wklej tam."),
     ("Keep muted chats archived", "Wyciszone czaty zostają w archiwum"),
     ("New messages do not bring a muted chat back from the archive. On this device only.", "Nowe wiadomości nie wyciągają wyciszonego czatu z archiwum. Tylko na tym urządzeniu."),
+    ("Chat colour and wallpaper", "Kolor czatu i tapeta"),
+    ("Your messages", "Twoje wiadomości"),
+    ("Wallpaper", "Tapeta"),
+    ("Wallpapers show with the dark theme.", "Tapety widać w ciemnym motywie."),
+    ("Same as all chats", "Jak we wszystkich czatach"),
 ];
 
 /// Keyed by the English singular; the forms are one (1), few (2-4, 22-24) and many (0, 5-21, 25...).

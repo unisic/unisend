@@ -529,6 +529,7 @@ impl BeeperApp {
                 let block = summary.as_ref().filter(|r| r.dm).zip(details.as_ref().and_then(|d| d.peer.clone())).map(|(r, peer)| self.block_row(peer, r.name.clone(), r.network.clone(), true, window, cx).px(px(GAP)));
                 let room = summary.map(|r| r.id);
                 let timer = room.as_ref().and_then(|id| self.disappear_entry(id, true, cx)).map(|row| row.px(px(GAP)));
+                let look = room.as_ref().map(|id| self.look_entry(id, cx).px(px(GAP)));
                 let edit = details.as_ref().filter(|d| d.can.edit()).map(|_| {
                     sheet_row("info-edit-group", IconName::Pencil, t!("Edit group"), p.text, window, cx)
                         .px(px(GAP))
@@ -547,6 +548,7 @@ impl BeeperApp {
                             .children(open)
                             .children(edit)
                             .children(timer)
+                            .children(look)
                             .children(block)
                             .children(leave),
                     )

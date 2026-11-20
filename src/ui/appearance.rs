@@ -1,4 +1,5 @@
-//! Settings, Appearance: the text size and the wallpaper behind the messages of every chat.
+//! Settings, Appearance: the text size and the wallpaper behind the messages of every chat. A chat
+//! may have its own wallpaper and colour (`chatlook`), which is drawn in its place.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -56,9 +57,9 @@ pub(crate) enum Wallpaper {
 }
 
 impl Wallpaper {
-    const PRESETS: [Self; 4] = [Self::None, Self::Graphite, Self::Slate, Self::Carbon];
+    pub(super) const PRESETS: [Self; 4] = [Self::None, Self::Graphite, Self::Slate, Self::Carbon];
 
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             Self::None => t!("Black"),
             Self::Graphite => t!("Graphite"),
@@ -69,7 +70,7 @@ impl Wallpaper {
     }
 
     /// `None` for the plain ground. At most `raised` darkened to 85%, so `faint` text keeps 5:1.
-    fn fill(self, p: &Palette) -> Option<Background> {
+    pub(super) fn fill(self, p: &Palette) -> Option<Background> {
         let tone = |t: f32| mix(p.ground, p.raised, t);
         let stop = linear_color_stop;
         match self {
@@ -104,9 +105,9 @@ const MAX_SIDE: u32 = 2400;
 /// Decoded sources above this would take more than ~400 MB while they are scaled down.
 const SOURCE_PX: u32 = 12_000;
 
-/// Copies `src` into `dir` as a picture of `size`, covering it, upright and darkened. Runs once
+/// Copies `src` to `dest` as a picture of `size`, covering it, upright and darkened. Runs once
 /// per chosen photo; only the result is kept and decoded afterwards.
-pub(super) fn import(src: &Path, dir: &Path, size: (u32, u32)) -> Result<Vec<u8>, String> {
+pub(super) fn import(src: &Path, dest: &Path, size: (u32, u32)) -> Result<Vec<u8>, String> {
     use image::ImageDecoder as _;
     let (w, h) = (size.0.clamp(64, MAX_SIDE), size.1.clamp(64, MAX_SIDE));
     let mut reader = image::ImageReader::open(src).map_err(|e| e.to_string())?.with_guessed_format().map_err(|e| e.to_string())?;
@@ -125,14 +126,18 @@ pub(super) fn import(src: &Path, dir: &Path, size: (u32, u32)) -> Result<Vec<u8>
     let mut out = std::io::Cursor::new(Vec::new());
     rgb.write_to(&mut out, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?;
     let out = out.into_inner();
-    let tmp = dir.join(format!("{PHOTO}.tmp"));
-    std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, dir.join(PHOTO))).map_err(|e| e.to_string())?;
+    let tmp = dest.with_extension("tmp");
+    std::fs::write(&tmp, &out).and_then(|()| std::fs::rename(&tmp, dest)).map_err(|e| e.to_string())?;
     Ok(out)
 }
 
 /// The appearance state that is not a setting itself.
 pub(super) struct Look {
     photo: Option<Arc<Image>>,
+    /// The open chat's own photo, decoded while that chat is open.
+    pub(super) chat_photo: Option<(OwnedRoomId, Arc<Image>)>,
+    /// The chat's sheet shows one of the chat's own settings pages.
+    pub(super) chat_page: Option<super::chatlook::ChatPage>,
     pub(super) dim: Entity<SliderState>,
     importing: bool,
     error: Option<String>,
@@ -155,41 +160,32 @@ impl Look {
             .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes)));
         let dim = f32::from(settings.wallpaper_dim.clamp(DIM_MIN, DIM_MAX));
         let dim = cx.new(|_| SliderState::new().min(f32::from(DIM_MIN)).max(f32::from(DIM_MAX)).step(5.).default_value(dim));
-        Self { photo, dim, importing: false, error: None, slide: None }
+        Self { photo, chat_photo: None, chat_page: None, dim, importing: false, error: None, slide: None }
     }
 }
 
 impl BeeperApp {
-    /// Whether a wallpaper is drawn: the presets are dark, so the light theme has none.
-    fn wallpaper_on(&self, cx: &App) -> bool {
-        Theme::global(cx).is_dark()
-            && match self.settings.wallpaper {
-                Wallpaper::None => false,
-                Wallpaper::Photo => self.look.photo.is_some(),
-                _ => true,
-            }
+    /// The open chat's wallpaper and its photo: the chat's own, else the one for all chats.
+    fn chat_paper(&self) -> (Wallpaper, Option<&Arc<Image>>) {
+        match self.open.as_ref().and_then(|id| self.settings.chat_looks.get(id)).and_then(|look| look.wallpaper) {
+            Some(Wallpaper::Photo) => (Wallpaper::Photo, self.look.chat_photo.as_ref().filter(|(id, _)| self.open.as_ref() == Some(id)).map(|(_, photo)| photo)),
+            Some(own) => (own, None),
+            None => (self.settings.wallpaper, self.look.photo.as_ref()),
+        }
     }
 
-    /// The colour of small text that sits straight on the wallpaper (day labels, times beneath a
-    /// message): `fallback` where there is none or it is a preset, white on a photo, whose
+    /// The colour of small text that sits straight on the open chat's wallpaper (day labels, times
+    /// beneath a message): `fallback` where there is none or it is a preset, white on a photo, whose
     /// brightest point is only bounded, not dark.
     pub(super) fn on_wallpaper(&self, fallback: Hsla, cx: &App) -> Hsla {
-        if self.wallpaper_on(cx) && self.settings.wallpaper == Wallpaper::Photo { Palette::of(cx).text } else { fallback }
+        let (paper, photo) = self.chat_paper();
+        ink_on_paper(paper, photo, fallback, cx)
     }
 
-    /// The wallpaper, to be placed first in a box that has `relative()`.
+    /// The open chat's wallpaper, to be placed first in a box that has `relative()`.
     pub(super) fn wallpaper_layer(&self, radius: f32, cx: &App) -> Option<AnyElement> {
-        if !self.wallpaper_on(cx) {
-            return None;
-        }
-        let layer = div().absolute().inset_0().overflow_hidden().rounded(px(radius));
-        Some(match (self.settings.wallpaper, &self.look.photo) {
-            (Wallpaper::Photo, Some(photo)) => layer
-                .child(img(photo.clone()).size_full().rounded(px(radius)).object_fit(ObjectFit::Cover))
-                .child(div().absolute().inset_0().rounded(px(radius)).bg(gpui_kit::black().opacity(f32::from(self.settings.wallpaper_dim) / 100.)))
-                .into_any_element(),
-            (wallpaper, _) => layer.when_some(wallpaper.fill(&Palette::of(cx)), |el, fill| el.bg(fill)).into_any_element(),
-        })
+        let (paper, photo) = self.chat_paper();
+        paper_layer(paper, photo, self.settings.wallpaper_dim, radius, cx)
     }
 
     fn set_text_size(&mut self, size: TextSize, cx: &mut Context<Self>) {
@@ -201,7 +197,7 @@ impl BeeperApp {
         cx.notify();
     }
 
-    fn set_wallpaper(&mut self, wallpaper: Wallpaper, cx: &mut Context<Self>) {
+    pub(super) fn set_wallpaper(&mut self, wallpaper: Wallpaper, cx: &mut Context<Self>) {
         self.settings.wallpaper = wallpaper;
         self.settings.save(&self.dir);
         cx.notify();
@@ -247,34 +243,57 @@ impl BeeperApp {
         }
     }
 
-    fn choose_photo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Picks a photo for all chats, or with `room` for that chat alone.
+    pub(super) fn choose_photo(&mut self, room: Option<OwnedRoomId>, window: &mut Window, cx: &mut Context<Self>) {
         if self.look.importing {
             return;
         }
+        let dest = match &room {
+            Some(_) => match super::chatlook::photo_path(&self.dir, &super::chatlook::new_photo_name()) {
+                Some(dest) => dest,
+                None => return,
+            },
+            None => self.dir.join(PHOTO),
+        };
         let size = window.viewport_size();
         let scale = window.scale_factor();
         let size = ((f32::from(size.width) * scale) as u32, (f32::from(size.height) * scale) as u32);
-        let dir = self.dir.clone();
         let picked = crate::pick_file(cx);
         self.look.importing = true;
         self.look.error = None;
         cx.spawn(async move |this, cx| {
             let imported = match picked.await {
-                Some(path) => Some(cx.background_spawn(async move { import(&path, &dir, size) }).await),
+                Some(path) => Some(
+                    cx.background_spawn(async move {
+                        if let Some(parent) = dest.parent() {
+                            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                        }
+                        import(&path, &dest, size).map(|bytes| (bytes, dest))
+                    })
+                    .await,
+                ),
                 None => None,
             };
             let _ = this.update(cx, |this, cx| {
                 this.look.importing = false;
                 match imported {
-                    Some(Ok(bytes)) => {
-                        if let Some(old) = this.look.photo.replace(Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes))) {
-                            this.released.push(old, cx);
+                    Some(Ok((bytes, dest))) => {
+                        let image = Arc::new(Image::from_bytes(ImageFormat::Jpeg, bytes));
+                        match room {
+                            Some(room) => this.set_chat_photo(room, &dest, image, cx),
+                            None => {
+                                if let Some(old) = this.look.photo.replace(image) {
+                                    this.released.push(old, cx);
+                                }
+                                this.set_wallpaper(Wallpaper::Photo, cx);
+                            }
                         }
-                        this.set_wallpaper(Wallpaper::Photo, cx);
                     }
                     Some(Err(e)) => {
                         log::warn!("wallpaper: {e}");
-                        this.look.error = Some(t!("That picture could not be used.").into());
+                        let error = t!("That picture could not be used.");
+                        // A chat's sheet has no line for it; the app's error bar shows it there.
+                        if room.is_some() { this.error = Some(error.into()) } else { this.look.error = Some(error.into()) }
                     }
                     None => {}
                 }
@@ -317,13 +336,14 @@ impl BeeperApp {
                 .line_height(fs(22.))
                 .child(text)
         };
-        let faint = self.on_wallpaper(p.faint, cx);
+        let (paper, photo) = (self.settings.wallpaper, self.look.photo.as_ref());
+        let faint = ink_on_paper(paper, photo, p.faint, cx);
         let preview = v_flex()
             .relative()
             .overflow_hidden()
             .rounded(px(RADIUS))
             .bg(p.ground)
-            .children(self.wallpaper_layer(RADIUS, cx))
+            .children(paper_layer(paper, photo, self.settings.wallpaper_dim, RADIUS, cx))
             .child(
                 v_flex()
                     .p(px(GAP))
@@ -332,36 +352,17 @@ impl BeeperApp {
                     .child(h_flex().justify_end().child(bubble(t!("And your replies."), true)))
                     .child(div().flex().justify_end().text_size(fs(12.)).text_color(faint).child("12:41")),
             );
-        let swatch = |id: &'static str, on: bool, fill: Div, cx: &mut Context<Self>, set: Wallpaper| {
-            div()
-                .id(id)
-                .size(px(TAP))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.set_wallpaper(set, cx)))
-                .child(
-                    div()
-                        .size(px(32.))
-                        .p(px(2.))
-                        .rounded_full()
-                        .border_2()
-                        .border_color(if on { p.text } else { p.raised })
-                        .child(fill.size_full().rounded_full().overflow_hidden()),
-                )
-        };
         let mut swatches = h_flex().flex_wrap().gap_x(px(4.)).pb(px(4.));
         for wallpaper in Wallpaper::PRESETS {
             let fill = div().bg(wallpaper.fill(&p).unwrap_or_else(|| p.ground.into()));
-            swatches = swatches.child(swatch(wallpaper.label(), self.settings.wallpaper == wallpaper, fill, cx, wallpaper));
+            swatches = swatches.child(swatch(wallpaper.label(), self.settings.wallpaper == wallpaper, fill, cx).on_click(cx.listener(move |this, _, _, cx| this.set_wallpaper(wallpaper, cx))));
         }
         if let Some(photo) = self.look.photo.clone() {
             let fill = div().child(img(photo).size_full().object_fit(ObjectFit::Cover));
-            swatches = swatches.child(swatch(t!("Photo"), self.settings.wallpaper == Wallpaper::Photo, fill, cx, Wallpaper::Photo));
+            swatches = swatches.child(swatch(t!("Photo"), self.settings.wallpaper == Wallpaper::Photo, fill, cx).on_click(cx.listener(|this, _, _, cx| this.set_wallpaper(Wallpaper::Photo, cx))));
         }
         let choose = if self.look.importing { t!("Working…") } else if self.look.photo.is_some() { t!("Change photo") } else { t!("Choose photo") };
-        let choose = super::panels::link("choose-photo", choose, SharedString::default(), Some(IconName::Image), None, cx).on_click(cx.listener(|this, _, window, cx| this.choose_photo(window, cx)));
+        let choose = super::panels::link("choose-photo", choose, SharedString::default(), Some(IconName::Image), None, cx).on_click(cx.listener(|this, _, window, cx| this.choose_photo(None, window, cx)));
         let mut rows = vec![
             row(t!("Text size"), t!("Messages and the rest of the app."), cx).into_any_element(),
             div().pb(px(8.)).child(sizes).into_any_element(),
@@ -382,6 +383,58 @@ impl BeeperApp {
         }
         rows
     }
+}
+
+/// Whether a wallpaper is drawn: the presets are dark, so the light theme has none.
+fn paper_on(paper: Wallpaper, photo: Option<&Arc<Image>>, cx: &App) -> bool {
+    Theme::global(cx).is_dark()
+        && match paper {
+            Wallpaper::None => false,
+            Wallpaper::Photo => photo.is_some(),
+            _ => true,
+        }
+}
+
+fn ink_on_paper(paper: Wallpaper, photo: Option<&Arc<Image>>, fallback: Hsla, cx: &App) -> Hsla {
+    if paper == Wallpaper::Photo && paper_on(paper, photo, cx) { Palette::of(cx).text } else { fallback }
+}
+
+fn paper_layer(paper: Wallpaper, photo: Option<&Arc<Image>>, dim: u8, radius: f32, cx: &App) -> Option<AnyElement> {
+    if !paper_on(paper, photo, cx) {
+        return None;
+    }
+    let layer = div().absolute().inset_0().overflow_hidden().rounded(px(radius));
+    Some(match (paper, photo) {
+        (Wallpaper::Photo, Some(photo)) => layer
+            .child(img(photo.clone()).size_full().rounded(px(radius)).object_fit(ObjectFit::Cover))
+            .child(div().absolute().inset_0().rounded(px(radius)).bg(gpui_kit::black().opacity(f32::from(dim) / 100.)))
+            .into_any_element(),
+        (wallpaper, _) => layer.when_some(wallpaper.fill(&Palette::of(cx)), |el, fill| el.bg(fill)).into_any_element(),
+    })
+}
+
+/// A round swatch that shows `fill`, ringed while `on`; the caller gives it its click.
+pub(super) fn swatch(name: &str, on: bool, fill: Div, cx: &App) -> Stateful<Div> {
+    let p = Palette::of(cx);
+    div()
+        .id(SharedString::from(name.to_owned()))
+        .size(px(TAP))
+        .flex()
+        .items_center()
+        .justify_center()
+        .role(Role::RadioButton)
+        .aria_label(SharedString::from(name.to_owned()))
+        .aria_toggled(on.into())
+        .cursor_pointer()
+        .child(
+            div()
+                .size(px(32.))
+                .p(px(2.))
+                .rounded_full()
+                .border_2()
+                .border_color(if on { p.text } else { p.raised })
+                .child(fill.size_full().rounded_full().overflow_hidden()),
+        )
 }
 
 #[cfg(test)]
@@ -421,12 +474,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("src.png");
         image::RgbImage::from_pixel(900, 300, image::Rgb([255, 255, 255])).save(&src).unwrap();
-        let out = import(&src, &dir, (200, 400)).unwrap();
+        let out = import(&src, &dir.join(PHOTO), (200, 400)).unwrap();
         let stored = image::load_from_memory(&out).unwrap().to_rgb8();
         assert_eq!(stored.dimensions(), (200, 400));
         assert!(stored.pixels().all(|px| px.0.iter().all(|&c| c <= (255. * BAKE) as u8 + 2)));
         assert!(dir.join(PHOTO).exists());
-        assert!(import(&dir.join("missing.png"), &dir, (200, 400)).is_err());
+        assert!(import(&dir.join("missing.png"), &dir.join(PHOTO), (200, 400)).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
