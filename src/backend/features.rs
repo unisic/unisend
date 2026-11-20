@@ -46,6 +46,8 @@ pub struct Features {
     /// (`com.beeper.block_user`), and whether it can unblock them again.
     pub block_user: bool,
     pub no_unblock: bool,
+    /// The level of each sticker type (MIME type) the network gives `m.sticker`; `None` takes all.
+    pub stickers: Option<HashMap<String, i64>>,
 }
 
 impl Features {
@@ -70,6 +72,7 @@ impl Features {
         poll_max: 0,
         block_user: false,
         no_unblock: false,
+        stickers: None,
     };
 
     /// `as_file`: the GIF goes as an `image/gif` (Meta's networks, see `gifs::wants_gif_file`).
@@ -96,6 +99,16 @@ impl Features {
             _ => 3,
         };
         self.captions[ix] >= 1
+    }
+
+    /// The chat takes a sticker of type `mime` (any type, unknown), as Beeper's apps decide it.
+    pub fn takes_sticker(&self, mime: Option<&str>) -> bool {
+        let Some(types) = &self.stickers else { return self.post };
+        let file = WireFile { mime_types: types.clone(), caption: 0 };
+        self.post && match mime {
+            Some(mime) => file.level(mime) > -2,
+            None => types.values().any(|&l| l > -2),
+        }
     }
 
     /// The chat takes reaction `key` (with or without U+FE0F: Telegram's list carries it).
@@ -187,6 +200,7 @@ pub fn parse(content: &Value) -> Features {
         poll_max: usize::try_from(wire.poll_max_options).unwrap_or(0),
         block_user: wire.block_user,
         no_unblock: wire.no_unblock,
+        stickers: Some(f.get("m.sticker").map(|s| s.mime_types.clone()).unwrap_or_default()),
     }
 }
 
@@ -269,6 +283,9 @@ mod tests {
         assert!(f.deletable(0, u64::MAX));
         assert!(f.block_user && !f.no_unblock);
         const { assert!(!Features::ALL.block_user, "a plain Matrix room has no network to block on") };
+        assert!(f.takes_sticker(None) && f.takes_sticker(Some("image/webp")) && !f.takes_sticker(Some("image/gif")));
+        assert!(!parse(&json!({ "file": {} })).takes_sticker(None), "no m.sticker entry: rejected");
+        assert!(Features::ALL.takes_sticker(Some("image/gif")));
     }
 
     #[test]

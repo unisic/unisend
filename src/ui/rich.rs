@@ -1,5 +1,8 @@
-//! A formatted message body drawn inside a bubble: styled runs, quotes, code, lists.
+//! A formatted message body drawn inside a bubble: styled runs, quotes, code, lists. A spoiler is
+//! covered by a block of its colour until a tap on it uncovers the message's spoilers, as Signal
+//! does; uncovered messages are remembered for the session, at most `MAX_SHOWN`.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 
 use gpui_kit::component::{h_flex, v_flex};
@@ -16,15 +19,27 @@ pub(super) const MONO: &str = "Noto Sans Mono";
 #[cfg(target_os = "android")]
 pub(super) const MONO: &str = "Droid Sans Mono";
 
-/// What the drawing needs besides the message: its palette and how a mention is drawn.
+/// Messages whose spoilers were uncovered, newest last.
+const MAX_SHOWN: usize = 256;
+
+#[derive(Default)]
+struct Shown(VecDeque<String>);
+
+impl Global for Shown {}
+
+/// What the drawing needs besides the message: its palette, how a mention is drawn, whether its
+/// spoilers are uncovered and the view to redraw when they are.
 #[derive(Clone, Copy)]
 struct Look {
     p: Palette,
     mention: HighlightStyle,
+    shown: bool,
+    view: EntityId,
 }
 
-pub(super) fn body(m: &Msg, rich: &Rich, p: Palette, mention: HighlightStyle) -> AnyElement {
-    let look = Look { p, mention };
+pub(super) fn body(m: &Msg, rich: &Rich, p: Palette, mention: HighlightStyle, view: EntityId, cx: &App) -> AnyElement {
+    let shown = cx.try_global::<Shown>().is_some_and(|s| s.0.contains(&m.id));
+    let look = Look { p, mention, shown, view };
     let mut n = 0;
     blocks(m, &rich.blocks, look, &mut n).into_any_element()
 }
@@ -90,10 +105,17 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
     cuts.sort_unstable();
     cuts.dedup();
 
-    let (mut marks, mut links, mut targets) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut marks, mut links, mut targets, mut hidden) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for pair in cuts.windows(2) {
         let seg = pair[0]..pair[1];
         let Some(run) = runs.iter().rev().find(|r| r.at - base <= seg.start) else { continue };
+        if run.spoiler && !look.shown {
+            // Text and fill in one colour: the words take their room but cannot be read.
+            let cover = look.p.muted;
+            marks.push((seg.clone(), HighlightStyle { color: Some(cover), background_color: Some(cover), ..Default::default() }));
+            hidden.push(seg);
+            continue;
+        }
         let mut style = HighlightStyle::default();
         if run.bold {
             style.font_weight = Some(FontWeight::SEMIBOLD);
@@ -129,7 +151,31 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
     }
 
     let styled = crate::emoji::styled(text, marks);
-    div().min_w_0().child(linked(format!("{}-rich-{n}", m.id), styled, links, targets)).into_any_element()
+    let layout = styled.layout().clone();
+    let id = format!("{}-rich-{n}", m.id);
+    let text = div().min_w_0().child(linked(id.clone(), styled, links, targets));
+    if hidden.is_empty() {
+        return text.into_any_element();
+    }
+    let (msg, view) = (m.id.clone(), look.view);
+    text.id(SharedString::from(format!("{id}-spoiler")))
+        .on_click(move |e, _, cx| {
+            if let Ok(ix) = layout.index_for_position(e.position())
+                && hidden.iter().any(|r| r.contains(&ix))
+            {
+                // The bubble under the text opens the message's menu on a click; a spoiler does not.
+                cx.stop_propagation();
+                let shown = &mut cx.default_global::<Shown>().0;
+                if !shown.contains(&msg) {
+                    if shown.len() == MAX_SHOWN {
+                        shown.pop_front();
+                    }
+                    shown.push_back(msg.clone());
+                }
+                cx.notify(view);
+            }
+        })
+        .into_any_element()
 }
 
 /// Text whose `links` ranges open the matching `targets` on a click.

@@ -36,6 +36,7 @@ pub(super) async fn members(room: &Room, own: &UserId) -> anyhow::Result<Vec<(Ow
 pub(super) fn content(body: &str, picked: &[(String, OwnedUserId)]) -> RoomMessageEventContentWithoutRelation {
     let pills = find_pills(body, picked);
     let users: Vec<OwnedUserId> = pills.iter().map(|p| picked[p.who].1.clone()).collect();
+    // The body stays as typed, a spoiler's `||` and all: a client without HTML shows it marked.
     let msg = match html(body, &pills, picked) {
         Some(html) => RoomMessageEventContentWithoutRelation::text_html(body, html),
         None => RoomMessageEventContentWithoutRelation::text_plain(body),
@@ -73,6 +74,33 @@ fn find_pills(body: &str, picked: &[(String, OwnedUserId)]) -> Vec<Pill> {
 /// letters, around the pill's index.
 const OPEN: char = '\u{E000}';
 const CLOSE: char = '\u{E001}';
+/// The same for a spoiler, `||text||`, around its index.
+const HIDE: char = '\u{E002}';
+const SHOW: char = '\u{E003}';
+
+/// Each `||text||` of `marked` as a mark around its index, and the texts; the text is taken as
+/// written, without Markdown, as Beeper's composer does (`/^\|\|([^|\n]+?)\|\|/`, trimmed).
+fn mark_spoilers(marked: &str) -> (String, Vec<String>) {
+    let (mut out, mut found) = (String::with_capacity(marked.len()), Vec::new());
+    let mut rest = marked;
+    while let Some(at) = rest.find("||") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 2..];
+        let end = after.find(['|', '\n']).filter(|&e| after[e..].starts_with("||") && !after[..e].trim().is_empty());
+        let Some(end) = end else {
+            out.push_str("||");
+            rest = after;
+            continue;
+        };
+        out.push(HIDE);
+        out.push_str(&found.len().to_string());
+        out.push(SHOW);
+        found.push(after[..end].trim().to_owned());
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    (out, found)
+}
 
 /// The HTML form of `body`, or None when it is plain text with no pill.
 fn html(body: &str, pills: &[Pill], picked: &[(String, OwnedUserId)]) -> Option<String> {
@@ -86,6 +114,7 @@ fn html(body: &str, pills: &[Pill], picked: &[(String, OwnedUserId)]) -> Option<
         from = pill.at.end;
     }
     marked.push_str(&body[from..]);
+    let (marked, spoilers) = mark_spoilers(&marked);
 
     let options = ParseOptions {
         constructs: Constructs {
@@ -104,12 +133,12 @@ fn html(body: &str, pills: &[Pill], picked: &[(String, OwnedUserId)]) -> Option<
     let tree = markdown::to_mdast(&marked, &options).ok()?;
     let Node::Root(root) = &tree else { return None };
     let names: Vec<(&str, &UserId)> = pills.iter().map(|p| (picked[p.who].0.as_str(), picked[p.who].1.as_ref())).collect();
-    let html = Html { pills: &names };
+    let html = Html { pills: &names, spoilers: &spoilers };
     // One paragraph goes out without its `<p>`, as the spec's examples and Element do.
     let children = match root.children.as_slice() {
         [Node::Paragraph(p)] => {
             let plain = p.children.iter().all(|n| matches!(n, Node::Text(_)));
-            if pills.is_empty() && plain && tree.to_string() == marked {
+            if pills.is_empty() && spoilers.is_empty() && plain && tree.to_string() == marked {
                 return None;
             }
             &p.children
@@ -125,6 +154,7 @@ fn html(body: &str, pills: &[Pill], picked: &[(String, OwnedUserId)]) -> Option<
 
 struct Html<'a> {
     pills: &'a [(&'a str, &'a UserId)],
+    spoilers: &'a [String],
 }
 
 impl Html<'_> {
@@ -198,12 +228,26 @@ impl Html<'_> {
         }
     }
 
-    /// Text with its line breaks as `<br>` and its pill marks as links (as `@name` inside a link).
+    /// Text with its line breaks as `<br>`, its pill marks as links (as `@name` inside a link) and
+    /// its spoiler marks as `<span data-mx-spoiler>`.
     fn text(&self, text: &str, out: &mut String, in_link: bool) {
         let mut rest = text;
-        while let Some(open) = rest.find(OPEN) {
+        while let Some(open) = rest.find([OPEN, HIDE]) {
             let (before, after) = rest.split_at(open);
             self.lines(before, out);
+            if let Some(after) = after.strip_prefix(HIDE) {
+                let Some(close) = after.find(SHOW) else {
+                    rest = after;
+                    continue;
+                };
+                if let Some(hidden) = after[..close].parse::<usize>().ok().and_then(|i| self.spoilers.get(i)) {
+                    out.push_str("<span data-mx-spoiler>");
+                    escape(&self.restore(hidden), out);
+                    out.push_str("</span>");
+                }
+                rest = &after[close + SHOW.len_utf8()..];
+                continue;
+            }
             let after = &after[OPEN.len_utf8()..];
             let Some(close) = after.find(CLOSE) else {
                 rest = after;
@@ -237,22 +281,29 @@ impl Html<'_> {
         }
     }
 
-    /// Pill marks back to `@name`, for code, where nothing is a link.
+    /// Pill marks back to `@name` and spoiler marks to `||text||`, for code and spoilers, where
+    /// nothing is a link.
     fn restore(&self, text: &str) -> String {
         let mut out = String::with_capacity(text.len());
         let mut rest = text;
-        while let Some(open) = rest.find(OPEN) {
+        while let Some(open) = rest.find([OPEN, HIDE]) {
             out.push_str(&rest[..open]);
+            let hide = rest[open..].starts_with(HIDE);
             let after = &rest[open + OPEN.len_utf8()..];
-            let Some(close) = after.find(CLOSE) else {
+            let Some(close) = after.find(if hide { SHOW } else { CLOSE }) else {
                 rest = after;
                 continue;
             };
-            if let Some((name, _)) = after[..close].parse::<usize>().ok().and_then(|i| self.pills.get(i)) {
+            let i = after[..close].parse::<usize>().ok();
+            if hide {
+                if let Some(hidden) = i.and_then(|i| self.spoilers.get(i)) {
+                    out.push_str(&format!("||{}||", self.restore(hidden)));
+                }
+            } else if let Some((name, _)) = i.and_then(|i| self.pills.get(i)) {
                 out.push('@');
                 out.push_str(name);
             }
-            rest = &after[close + CLOSE.len_utf8()..];
+            rest = &after[close + OPEN.len_utf8()..];
         }
         out.push_str(rest);
         out
@@ -333,5 +384,24 @@ mod tests {
         assert_eq!(sent("hi @Bob", &picked[1..]), (None, vec![]));
         let (html, _) = sent("`@Ann Lee`", &picked);
         assert_eq!(html.as_deref(), Some("<code>@Ann Lee</code>"));
+    }
+
+    #[test]
+    fn bars_around_text_become_a_spoiler() {
+        let ann = owned_user_id!("@ann:example.org");
+        let picked = vec![("Ann".to_owned(), ann)];
+        let cases = [
+            ("the end: ||he lives||", "the end: <span data-mx-spoiler>he lives</span>"),
+            ("|| a<b ||, **x**", "<span data-mx-spoiler>a&lt;b</span>, <strong>x</strong>"),
+            ("||**not bold**||", "<span data-mx-spoiler>**not bold**</span>"),
+            ("||@Ann|| did it", "<span data-mx-spoiler>@Ann</span> did it"),
+            ("`||code||` and ||x||", "<code>||code||</code> and <span data-mx-spoiler>x</span>"),
+        ];
+        for (body, html) in cases {
+            assert_eq!(sent(body, &picked).0.as_deref(), Some(html), "{body}");
+        }
+        for body in ["a || b", "|| ||", "||a\nb||", "a|b|c"] {
+            assert_eq!(sent(body, &[]).0, None, "{body}");
+        }
     }
 }

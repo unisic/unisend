@@ -202,6 +202,13 @@ pub enum Cmd {
     SendGif { room: OwnedRoomId, gif: gifs::Gif, query: String, reply_to: Option<String> },
     /// The people in a chat, for the mention list.
     Members(OwnedRoomId),
+    /// A message's earlier versions, for its edit history.
+    EditHistory { room: OwnedRoomId, id: String },
+    /// The sticker packs offered in a chat.
+    Stickers(OwnedRoomId),
+    SendSticker { room: OwnedRoomId, sticker: stickers::Sticker, reply_to: Option<String> },
+    /// A sticker's picture for the picker's grid; answered by `StickerThumb`.
+    StickerThumb(matrix_sdk::ruma::OwnedMxcUri),
     /// A photo or video from the preview: with its caption, and as the original when `hd`.
     AttachMedia { room: OwnedRoomId, path: PathBuf, reply_to: Option<String>, caption: String, hd: bool },
     /// A recording to send as a voice message; `levels` are its loudness, 0 to 1, per tick.
@@ -337,6 +344,12 @@ pub enum Ev {
     Uploaded,
     /// Joined members of a chat other than the user, as (user, name), at most `MAX_MEMBERS`.
     Members { room: OwnedRoomId, list: Vec<(OwnedUserId, String)> },
+    /// The versions of message `id`, oldest first; `None` when the server could not give them.
+    EditHistory { id: String, versions: Option<Vec<edits::Version>> },
+    /// The sticker packs offered in a chat, at most `stickers::MAX_PACKS`.
+    Stickers { room: OwnedRoomId, packs: Vec<stickers::Pack> },
+    /// A sticker's picture by its `mxc://` URL, PNG or JPEG of at most `stickers::THUMB_PX`.
+    StickerThumb(String, Vec<u8>),
     /// A forward was queued in this many chats.
     Forwarded(usize),
     Devices(verify::Devices),
@@ -661,7 +674,7 @@ impl Msg {
         let text = match (&self.poll, &self.place) {
             (Some(poll), _) => poll.question.clone(),
             (_, Some(place)) => place.description.clone(),
-            _ => self.body.clone(),
+            _ => rich::masked(&self.body, self.rich.as_ref()),
         };
         Quote {
             id: self.id.clone(),
@@ -684,7 +697,8 @@ impl Msg {
         if let Some(place) = &self.place {
             return if place.description.is_empty() { t!("📍 Location").to_owned() } else { t!("📍 Location: {place}", place = place.description) };
         }
-        let Some(media) = &self.media else { return self.body.clone() };
+        let body = rich::masked(&self.body, self.rich.as_ref());
+        let Some(media) = &self.media else { return body };
         let label = match media.kind {
             MediaKind::Image => t!("📷 Photo"),
             MediaKind::Sticker => t!("🖼 Sticker"),
@@ -693,7 +707,7 @@ impl Msg {
             MediaKind::Audio => t!("🎵 Audio"),
             MediaKind::File => return format!("📎 {}", media.name),
         };
-        if self.body.is_empty() { label.to_owned() } else { format!("{label}: {}", self.body) }
+        if body.is_empty() { label.to_owned() } else { format!("{label}: {body}") }
     }
 }
 
@@ -2111,6 +2125,40 @@ impl State {
                         let _ = ev.send(Ev::Error(t!("GIF not sent: {error}", error = format!("{e:#}")))).await;
                     }
                     let _ = ev.send(Ev::Uploaded).await;
+                });
+            }
+            Cmd::Stickers(room_id) => {
+                let (client, room, ev) = (self.client()?.clone(), self.room(&room_id)?, self.ev.clone());
+                tokio::spawn(async move {
+                    let packs = stickers::packs(&client, &room).await;
+                    let _ = ev.send(Ev::Stickers { room: room_id, packs }).await;
+                });
+            }
+            Cmd::SendSticker { room, sticker, reply_to } => {
+                let room = self.room(&room)?;
+                stickers::send(&room, &sticker, reply_to).await?;
+            }
+            Cmd::StickerThumb(url) => {
+                let client = self.client()?.clone();
+                let (ev, permits) = (self.ev.clone(), self.fetches.clone());
+                tokio::spawn(async move {
+                    let Ok(_permit) = permits.acquire().await else { return };
+                    match stickers::thumb(&client, url.clone()).await {
+                        Ok(bytes) => drop(ev.send(Ev::StickerThumb(url.to_string(), bytes)).await),
+                        Err(e) => log::debug!("sticker thumbnail: {e:#}"),
+                    }
+                });
+            }
+            Cmd::EditHistory { room, id } => {
+                let room = self.room(&room)?;
+                let ev = self.ev.clone();
+                tokio::spawn(async move {
+                    // A message still on its way out has no event ID, and so no edits on the server.
+                    let versions = match OwnedEventId::try_from(id.as_str()) {
+                        Ok(event) => edits::history(&room, &event).await.inspect_err(|e| log::warn!("edit history: {e:#}")).ok(),
+                        Err(_) => None,
+                    };
+                    let _ = ev.send(Ev::EditHistory { id, versions }).await;
                 });
             }
             Cmd::Members(room_id) => {
@@ -4365,6 +4413,8 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
 
 mod location;
 mod contact;
+pub(crate) mod edits;
+pub(crate) mod stickers;
 mod gifs;
 mod linkprev;
 pub(crate) mod update;

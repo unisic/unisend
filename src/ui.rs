@@ -33,6 +33,8 @@ mod caption;
 pub(crate) use caption::video_frame;
 mod cards;
 mod download;
+mod emojihint;
+mod stickers;
 mod emojipick;
 mod contacts;
 pub(crate) mod folders;
@@ -414,6 +416,9 @@ pub struct BeeperApp {
     updates: update::Updates,
     /// The `@` list over the composer.
     mention: mentions::Mentions,
+    /// The `:name` list over the composer.
+    emoji_hint: emojihint::Hints,
+    stickers: stickers::Stickers,
     voice: voice::Voice,
     /// Attachments waiting for the one uploading now, so a batch keeps its order.
     attach_queue: VecDeque<Cmd>,
@@ -570,6 +575,7 @@ impl BeeperApp {
             if matches!(ev, InputEvent::Change) && this.composer_changed(cx) {
                 this.typed(cx);
                 this.mention_typed(cx);
+                this.emoji_hint_typed(cx);
                 this.voice_typed(cx);
                 this.link_typed(cx);
             }
@@ -771,6 +777,8 @@ impl BeeperApp {
             gifs: gifs::Picker::default(),
             updates,
             mention: mentions::Mentions::default(),
+            emoji_hint: emojihint::Hints::default(),
+            stickers: stickers::Stickers::default(),
             voice: voice::Voice::default(),
             attach_queue: VecDeque::new(),
             attaching: false,
@@ -1160,6 +1168,9 @@ impl BeeperApp {
             Ev::GifPreview(url, bytes) => self.on_gif_preview(url, bytes),
             Ev::Uploaded => self.uploads = self.uploads.saturating_sub(1),
             Ev::Members { room, list } => self.members_arrived(room, list, cx),
+            Ev::EditHistory { id, versions } => self.edits_arrived(id, versions, cx),
+            Ev::Stickers { room, packs } => self.stickers_arrived(room, packs, cx),
+            Ev::StickerThumb(url, bytes) => self.sticker_thumb(url, bytes, cx),
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
             ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_) | Ev::RecoveryCode(_)) => self.on_verify_event(ev, cx),
             Ev::Disappear { room, setting } => self.on_disappear(room, setting),
@@ -1381,6 +1392,10 @@ impl BeeperApp {
             self.pick_mention(self.mention.selected, window, cx);
             return;
         }
+        if self.emoji_hint.open() && !gpui_kit::is_mobile() {
+            self.pick_emoji_hint(self.emoji_hint.selected, window, cx);
+            return;
+        }
         let body = self.composer.read(cx).value().trim().to_string();
         let Some(room) = self.open.clone() else { return };
         let (reply_to, edit) = match self.compose.clone() {
@@ -1464,6 +1479,9 @@ impl BeeperApp {
             self.close_emoji(cx);
         } else if self.mention.open() {
             self.mention.close();
+            cx.notify();
+        } else if self.emoji_hint.open() {
+            self.emoji_hint.close();
             cx.notify();
         } else if self.selection_back(cx) {
         } else if self.info_open() {
@@ -1995,6 +2013,7 @@ impl BeeperApp {
         self.close_gallery(cx);
         self.close_gifs(cx);
         self.mention = mentions::Mentions::default();
+        self.emoji_hint.close();
         self.close_link(false, cx);
         self.link_closed = None;
         self.stop_voice(cx);
@@ -2009,6 +2028,7 @@ impl BeeperApp {
         self.typing.clear();
         self.asked.clear();
         self.stills.clear();
+        self.forget_stickers(cx);
         self.thumb_order.clear();
         self.thumb_drawn.clear();
         self.thumb_at.clear();
@@ -2932,7 +2952,7 @@ impl BeeperApp {
                                 .when(faded, |el| el.italic().text_color(inside.faint))
                                 .when(collapsed, |el| el.max_h(fs(22.) * SHORT_LINES as f32).overflow_hidden())
                                 .child(match m.rich.as_ref().filter(|_| !faded) {
-                                    Some(rich) => rich::body(m, rich, inside, ink),
+                                    Some(rich) => rich::body(m, rich, inside, ink, cx.entity_id(), cx),
                                     None => {
                                         let cut = if collapsed { m.body.char_indices().nth(SHORT_CHARS).map_or(m.body.len(), |(at, _)| at) } else { m.body.len() };
                                         let styled = crate::emoji::styled(m.body[..cut].to_owned(), marks.into_iter().filter(|(r, _)| r.end <= cut).collect());
@@ -3149,7 +3169,21 @@ impl BeeperApp {
                                         .child(
                                             h_flex()
                                                 .min_w_0()
-                                                .when(edited, |el| el.child(div().flex_none().child(format!("{} \u{b7} ", t!("Edited")))))
+                                                .when(edited, |el| {
+                                                    let id = m.id.clone();
+                                                    el.child(
+                                                        div()
+                                                            .id("edited")
+                                                            .flex_none()
+                                                            .cursor_pointer()
+                                                            .child(format!("{} \u{b7} ", t!("Edited")))
+                                                            // Its earlier versions, as Signal shows them from the same tap.
+                                                            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                                                                cx.stop_propagation();
+                                                                this.open_people(people::Shown::Edits(id.clone()), Some(e.position()), cx);
+                                                            })),
+                                                    )
+                                                })
                                                 .child(div().flex_none().child(time))
                                                 .children(said),
                                         ),
@@ -3273,6 +3307,7 @@ impl BeeperApp {
                     .children(self.render_tray(window, cx))
                     .children(self.render_link_card(window, cx))
                     .children(self.render_mentions(cx))
+                    .children(self.render_emoji_hints(cx))
                     .when_some(limit.filter(|&(len, max)| len * 5 >= max * 4), |el, (len, max)| {
                         el.child(
                             div()
@@ -3351,6 +3386,7 @@ impl BeeperApp {
                                             }))
                                             .text_size(fs(16.))
                                             .map(|el| self.mention_keys(el, cx))
+                                            .map(|el| self.emoji_hint_keys(el, cx))
                                             .child(Textarea::new(&self.composer).appearance(false).text_size(fs(16.)).token(|t, _, cx| mentions::token(t, cx)))
                                             .child(crate::ime::marks(&self.composer)),
                                     )
