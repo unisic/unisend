@@ -18,6 +18,8 @@ pub(super) enum Page {
     Add { query: Entity<InputState>, people: Option<Vec<(OwnedUserId, String)>>, added: Vec<OwnedUserId>, _sub: Subscription },
     /// A person's nickname and note (`nick.rs`).
     Nick(Box<super::nick::Editing>),
+    /// The group link and requests to join (`invite.rs`).
+    Link,
 }
 
 /// The member whose sheet is up: who, how their network knows them, and whether the sheet asks to
@@ -192,6 +194,7 @@ impl BeeperApp {
             return;
         }
         let Some(d) = self.info.details.as_mut() else { return };
+        super::invite::apply(d, &change);
         match change {
             Change::Topic(topic) => d.topic = Some(topic.trim().to_owned()).filter(|t| !t.is_empty()),
             Change::Remove(user) => {
@@ -206,7 +209,7 @@ impl BeeperApp {
                     added.push(user);
                 }
             }
-            Change::Name(_) | Change::Photo(_) => {}
+            Change::Name(_) | Change::Photo(_) | Change::Link(_) => {}
         }
         self.info_rows();
         cx.notify();
@@ -263,11 +266,12 @@ impl BeeperApp {
             Page::Edit { .. } => Some(t!("Edit group")),
             Page::Add { .. } => Some(t!("Add members")),
             Page::Nick(_) => Some(t!("Nickname")),
+            Page::Link => Some(t!("Group link")),
         }
     }
 
     pub(super) fn render_group_page(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if let Some(page) = self.render_nickname_page(cx) {
+        if let Some(page) = self.render_nickname_page(cx).or_else(|| self.render_group_link_page(cx)) {
             return Some(page);
         }
         let p = Palette::of(cx);
@@ -295,7 +299,7 @@ impl BeeperApp {
                     el.child(h_flex().child(Button::new("group-save").primary().label(t!("Save")).on_click(cx.listener(|this, _, _, cx| this.save_group(cx)))))
                 })
                 .into_any_element(),
-            Page::Nick(_) => return None,
+            Page::Nick(_) | Page::Link => return None,
             Page::Add { query, people, added, .. } => {
                 let typed = query.read(cx).value().trim().to_owned();
                 let needle = typed.to_lowercase();

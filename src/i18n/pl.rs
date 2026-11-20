@@ -812,6 +812,17 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("QR code of your Matrix ID", "Kod QR Twojego Matrix ID"),
     ("Copy link", "Kopiuj link"),
     ("Whoever scans this code or opens the link can start a chat with you. It holds only your Matrix ID; matrix.to's page reads it in the browser and is not sent it.", "Kto zeskanuje ten kod albo otworzy link, może zacząć z Tobą czat. Zawiera tylko Twoje Matrix ID; strona matrix.to odczytuje je w przeglądarce i go nie dostaje."),
+    ("On", "Włączone"),
+    ("Approve", "Zatwierdź"),
+    ("Group link", "Link do grupy"),
+    ("Requests to join", "Prośby o dołączenie"),
+    ("Anyone with the link joins without asking. Turning the link off and on again makes them ask first.", "Każdy z linkiem dołącza bez pytania. Wyłączenie i ponowne włączenie linku sprawi, że najpierw poprosi."),
+    ("Another app set who may join without an invite. Turning the link off and on again makes people ask with the link.", "Inna aplikacja ustawiła, kto może dołączyć bez zaproszenia. Wyłączenie i ponowne włączenie linku sprawi, że ludzie poproszą przez link."),
+    ("Whoever has the link can ask to join; a member who may add people lets them in. The link holds the group's address and its server, not its name or messages.", "Kto ma link, może poprosić o dołączenie; wpuszcza go członek, który może dodawać osoby. Link zawiera adres grupy i jej serwer, nie jej nazwę ani wiadomości."),
+    ("Join group", "Dołącz do grupy"),
+    ("Not a group link", "To nie jest link do grupy"),
+    ("Could not join: {error}", "Nie udało się dołączyć: {error}"),
+    ("You asked to join. Once a member lets you in, the group comes as an invitation.", "Poproszono o dołączenie. Gdy członek Cię wpuści, grupa przyjdzie jako zaproszenie."),
 ];
 
 /// Keyed by the English singular; the forms are one (1), few (2-4, 22-24) and many (0, 5-21, 25...).
@@ -837,6 +848,7 @@ pub(super) static PLURAL: &[(&str, [&str; 3])] = &[
     ("{n} folder", ["{n} folder", "{n} foldery", "{n} folderów"]),
     ("{n} hour", ["{n} godzina", "{n} godziny", "{n} godzin"]),
     ("{n} member", ["{n} członek", "{n} członków", "{n} członków"]),
+    ("{n} request to join", ["{n} prośba o dołączenie", "{n} prośby o dołączenie", "{n} próśb o dołączenie"]),
     ("{n} message deleted for you", ["Usunięto u Ciebie {n} wiadomość", "Usunięto u Ciebie {n} wiadomości", "Usunięto u Ciebie {n} wiadomości"]),
     ("{n} minute", ["{n} minuta", "{n} minuty", "{n} minut"]),
     ("{n} second", ["{n} sekunda", "{n} sekundy", "{n} sekund"]),

@@ -68,6 +68,8 @@ pub(super) struct NewChat {
     picked: Vec<Person>,
     busy: bool,
     error: Option<String>,
+    /// The user asked to join the group a typed link names (`Answer::Asked`).
+    asked: bool,
     /// The search waiting for typing to pause; dropping it cancels it.
     pending: Option<Task<()>>,
     /// Someone typed was added to the group: the field empties on the next frame, which has a window.
@@ -101,6 +103,12 @@ impl NewChat {
         }
         let caps = self.caps.as_ref()?;
         looks_like_identifier(&q, caps).then_some(q)
+    }
+
+    /// What is typed is a group's link, which a new chat on Matrix joins.
+    fn group_link(&self, cx: &App) -> Option<String> {
+        let q = self.query(cx);
+        (!self.group && self.target == Target::Matrix && crate::backend::rooms::room_link(&q).is_some()).then_some(q)
     }
 
     fn placeholder(&self) -> &'static str {
@@ -487,6 +495,7 @@ impl BeeperApp {
             picked: Vec::new(),
             busy: false,
             error: None,
+            asked: false,
             pending: None,
             clear: false,
         });
@@ -530,7 +539,7 @@ impl BeeperApp {
 
     fn query_changed(&mut self, cx: &mut Context<Self>) {
         let Some(new) = self.people.new.as_mut() else { return };
-        new.error = None;
+        (new.error, new.asked) = (None, false);
         new.refresh(cx);
         let query = new.query(cx);
         let searches = new.caps.as_ref().is_some_and(|c| c.search);
@@ -552,7 +561,9 @@ impl BeeperApp {
 
     fn enter_pressed(&mut self, cx: &mut Context<Self>) {
         let Some(new) = self.people.new.as_ref() else { return };
-        if let Some(who) = new.identifier(cx) {
+        if let Some(link) = new.group_link(cx) {
+            self.ask_new(Ask::JoinLink(link), cx);
+        } else if let Some(who) = new.identifier(cx) {
             self.pick_identifier(who, cx);
         } else if let Some(first) = new.rows.first().cloned() {
             self.pick(first, cx);
@@ -655,6 +666,11 @@ impl BeeperApp {
                 self.panel = None;
                 self.open_room(room, cx);
             }
+            Answer::Asked => {
+                if let Some(new) = self.people.new.as_mut() {
+                    (new.busy, new.asked) = (false, true);
+                }
+            }
             Answer::Failed(why) => match self.people.new.as_mut() {
                 Some(new) => (new.busy, new.error) = (false, Some(why)),
                 None => self.error = Some(why.into()),
@@ -680,6 +696,7 @@ impl BeeperApp {
         let edge = if narrow { GUTTER } else { GUTTER + 6. };
         let group_caps = new.caps.as_ref().and_then(|c| c.group.clone());
         let identifier = new.identifier(cx);
+        let link = new.group_link(cx);
         let query = new.query(cx);
         let loading = new.caps.is_none() || (new.caps.as_ref().is_some_and(|c| c.search) && !query.is_empty() && new.found_for != query);
 
@@ -805,6 +822,13 @@ impl BeeperApp {
                     .into_any_element(),
             );
         }
+        if let Some(link) = link {
+            rows.push(
+                row("group-link".into(), t!("Join group").into(), link.clone(), icon_disc(IconName::Link), None)
+                    .on_click(cx.listener(move |this, _, _, cx| this.ask_new(Ask::JoinLink(link.clone()), cx)))
+                    .into_any_element(),
+            );
+        }
         for (ix, person) in new.rows.iter().enumerate() {
             let check = new.group.then(|| new.picked.iter().any(|p| p.id == person.id));
             let chosen = person.clone();
@@ -817,6 +841,8 @@ impl BeeperApp {
         let note = |text: String, ink: Hsla| div().px(px(edge)).py(px(GAP)).text_size(fs(14.)).line_height(fs(20.)).text_color(ink).child(text);
         let status = if let Some(error) = &new.error {
             Some(note(error.clone(), p.negative))
+        } else if new.asked {
+            Some(note(t!("You asked to join. Once a member lets you in, the group comes as an invitation.").to_owned(), p.faint))
         } else if new.busy {
             Some(note(if new.group { t!("Creating the group…").to_owned() } else { t!("Starting the chat…").to_owned() }, p.faint))
         } else if loading {

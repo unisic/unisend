@@ -18,10 +18,10 @@ pub(super) const INFO_W: f32 = 384.;
 /// The conversation keeps at least this beside the panel; a narrower window swaps them.
 const CHAT_MIN: f32 = 420.;
 const BIG_AVATAR: f32 = 96.;
-const MEMBER_AVATAR: f32 = 40.;
+pub(super) const MEMBER_AVATAR: f32 = 40.;
 const CELL_MIN: f32 = 110.;
 const CELL_GAP: f32 = 2.;
-const ROW_H: f32 = 56.;
+pub(super) const ROW_H: f32 = 56.;
 
 #[derive(Clone, Copy, PartialEq, Default)]
 pub(super) enum Shelf {
@@ -40,6 +40,8 @@ enum Row {
     Members,
     /// Adding people, for whoever may.
     Add,
+    /// The group link and requests to join (`invite.rs`).
+    GroupLink,
     Member(usize),
     /// A member still loading, drawn as a skeleton.
     MemberLoading,
@@ -179,6 +181,9 @@ fn rows(info: &Info, group: bool) -> Vec<Row> {
         out.push(Row::Members);
         if d.can.invite {
             out.push(Row::Add);
+        }
+        if d.can.link || (d.can.invite && !d.knocks.is_empty()) {
+            out.push(Row::GroupLink);
         }
         let shown = if info.all_members { d.members.len() } else { d.members.len().min(MEMBERS_SHOWN) };
         out.extend((0..shown).map(Row::Member));
@@ -581,6 +586,7 @@ impl BeeperApp {
                 .child(div().text_size(fs(16.)).child(t!("Add members")))
                 .on_click(cx.listener(|this, _, window, cx| this.open_group_add(window, cx)))
                 .into_any_element(),
+            Row::GroupLink => self.render_group_link_row(cx),
             Row::Member(ix) => {
                 let Some(m) = details.as_ref().and_then(|d| d.members.get(ix)).cloned() else { return div().into_any_element() };
                 self.info_face(&m.id);

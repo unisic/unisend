@@ -3,6 +3,10 @@
 //! `com.beeper.room_features` says it carries the change to the network (`state` by event type,
 //! `member_actions` by action; mautrix-go `event/capabilities.go`). The bridge then makes the
 //! change on the network from the Matrix state event, as for any other client.
+//! The group link is the room's `matrix.to` permalink with the `knock` join rule: whoever has it
+//! asks to join and a member who may invite lets them in, as Signal's link with "Approve new
+//! members" on. No bridge takes `m.room.join_rules` from Matrix (mautrix-go bridgev2 only writes
+//! it), so a bridged group has no link unless its features name that state.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -10,7 +14,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, anyhow};
 use matrix_sdk::{
     Client, Room, RoomMemberships,
-    ruma::{OwnedUserId, UserId, events::StateEventType},
+    ruma::{
+        OwnedUserId, UserId,
+        events::{StateEventType, room::join_rules::JoinRule},
+    },
 };
 use serde_json::Value;
 
@@ -30,6 +37,30 @@ pub enum Change {
     Photo(PathBuf),
     Invite(OwnedUserId),
     Remove(OwnedUserId),
+    /// The group link on (`knock`) or off (`invite`).
+    Link(bool),
+}
+
+/// How someone who was not invited gets into a group.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Join {
+    #[default]
+    Invite,
+    /// They ask with the link and a member lets them in.
+    Knock,
+    /// Anyone who has the link joins.
+    Public,
+    /// A rule this app does not offer (`restricted` to a space's members, a custom one).
+    Other,
+}
+
+pub(super) fn join(room: &Room) -> Join {
+    match room.join_rule() {
+        None | Some(JoinRule::Invite | JoinRule::Private) => Join::Invite,
+        Some(JoinRule::Knock) => Join::Knock,
+        Some(JoinRule::Public) => Join::Public,
+        Some(_) => Join::Other,
+    }
 }
 
 pub enum Mine {
@@ -46,6 +77,9 @@ pub struct Can {
     pub invite: bool,
     /// Removing someone at all; `Member::removable` says whom.
     pub remove: bool,
+    /// Turning the group link on and off: the join rule is the user's to change, the room's version
+    /// has knocking (7 and later) and no bridge stands in the way.
+    pub link: bool,
 }
 
 impl Can {
@@ -92,6 +126,7 @@ pub(super) async fn can(room: &Room) -> (Can, Option<matrix_sdk::ruma::events::r
         topic: state(StateEventType::RoomTopic),
         invite: levels.user_can_invite(own) && allows(&feats, "member_actions", "invite"),
         remove: levels.user_can_kick(own) && allows(&feats, "member_actions", "kick"),
+        link: state(StateEventType::RoomJoinRules) && room.version().and_then(|v| v.rules()).is_some_and(|r| r.authorization.knocking),
     };
     (can, Some(levels))
 }
@@ -122,6 +157,7 @@ pub(super) async fn change(room: &Room, change: &Change) -> Result<()> {
         }
         Change::Invite(user) => room.invite_user_by_id(user).await?,
         Change::Remove(user) => room.kick_user(user, None).await?,
+        Change::Link(on) => room.privacy_settings().update_join_rule(if *on { JoinRule::Knock } else { JoinRule::Invite }).await?,
     }
     Ok(())
 }

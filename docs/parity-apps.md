@@ -57,7 +57,7 @@ N impossible over Matrix or bridges.
 | Desktop app | Y | Y | N (web) | Y | Linux; tray `src/desktop/tray.rs`; Windows and macOS compile only | Y |
 | Hotkeys, command bar | P | Y | P | P | missing | Y |
 | Group admin (roles, rename, members) | Y | Y | P | Y | `backend/group.rs`, `ui/group.rs` | B |
-| Invite links | Y | Y | Y | Y | missing | B |
+| Invite links | Y | Y | Y | Y | `ui/invite.rs`: group link with approval (`knock`) in Matrix groups; no bridge carries it | Y on Matrix; N on bridges today |
 | Nicknames and notes on contacts | Y | N | P | P | `ui/nick.rs`, on this device | Y (local) |
 | QR code to add me | Y | Y | Y | ? | Settings, Profile (`ui/profile.rs`); no scanner | Y |
 | Updates outside a store | N | N | N | N | `backend/update.rs` (Android) | Y |

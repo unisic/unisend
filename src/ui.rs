@@ -50,6 +50,7 @@ mod keys;
 mod linkdraft;
 mod block;
 mod nick;
+mod invite;
 mod menu;
 mod navigate;
 pub(crate) mod motion;

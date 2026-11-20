@@ -2311,7 +2311,7 @@ async fn a_group_is_changed_by_its_admin_only_and_the_profile_by_its_owner() {
             c
         }
     };
-    let (alice, bob, carol) = (login("alice").await, login("bob").await, login("carol").await);
+    let (alice, bob, carol, dave) = (login("alice").await, login("bob").await, login("carol").await, login("dave").await);
     let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
     req.name = Some("Before".into());
     req.invite = vec![bob.user_id().unwrap().to_owned()];
@@ -2326,9 +2326,9 @@ async fn a_group_is_changed_by_its_admin_only_and_the_profile_by_its_owner() {
     bob.sync_once(SyncSettings::default()).await.unwrap();
 
     let (can, _) = group::can(&alice.get_room(&id).unwrap()).await;
-    assert_eq!(can, group::Can { name: true, photo: true, topic: true, invite: true, remove: true });
+    assert_eq!(can, group::Can { name: true, photo: true, topic: true, invite: true, remove: true, link: true });
     let (can, _) = group::can(&bob.get_room(&id).unwrap()).await;
-    assert!(!can.edit() && !can.remove, "a member who is not an admin changes nothing: {can:?}");
+    assert!(!can.edit() && !can.remove && !can.link, "a member who is not an admin changes nothing: {can:?}");
     assert!(group::change(&bob.get_room(&id).unwrap(), &group::Change::Name("Bob's".into())).await.is_err());
 
     let found = group::candidates(&alice, &alice.get_room(&id).unwrap()).await;
@@ -2355,6 +2355,26 @@ async fn a_group_is_changed_by_its_admin_only_and_the_profile_by_its_owner() {
     assert!(invited.iter().any(|m| Some(m.user_id()) == carol.user_id()));
     let joined = room.members_no_sync(RoomMemberships::JOIN).await.unwrap();
     assert!(!joined.iter().any(|m| Some(m.user_id()) == bob.user_id()));
+
+    // The group link: Dave asks to join with it and Alice lets him in.
+    assert_eq!(group::join(&room), group::Join::Invite);
+    let plain = format!("https://matrix.to/#/{id}?via=localhost");
+    assert!(super::rooms::join_link(&dave, &plain).await.is_err(), "no link, no asking");
+    group::change(&room, &group::Change::Link(true)).await.unwrap();
+    alice.sync_once(SyncSettings::default()).await.unwrap();
+    let room = alice.get_room(&id).unwrap();
+    assert_eq!(group::join(&room), group::Join::Knock);
+    let link = room.matrix_to_permalink().await.unwrap();
+    assert_eq!(super::rooms::join_link(&dave, &link.to_string()).await.unwrap(), None, "asked, not joined");
+    alice.sync_once(SyncSettings::default()).await.unwrap();
+    let knocking = room.members_no_sync(RoomMemberships::KNOCK).await.unwrap();
+    assert_eq!(knocking.iter().map(|m| m.user_id().to_owned()).collect::<Vec<_>>(), [dave.user_id().unwrap().to_owned()]);
+    group::change(&room, &group::Change::Invite(dave.user_id().unwrap().to_owned())).await.unwrap();
+    dave.sync_once(SyncSettings::default()).await.unwrap();
+    assert_eq!(dave.get_room(&id).map(|r| r.state()), Some(matrix_sdk::RoomState::Invited));
+    group::change(&room, &group::Change::Link(false)).await.unwrap();
+    alice.sync_once(SyncSettings::default()).await.unwrap();
+    assert_eq!(group::join(&alice.get_room(&id).unwrap()), group::Join::Invite);
 
     group::set_profile(&alice, group::Mine::Name("Alicja".into())).await.unwrap();
     group::set_profile(&alice, group::Mine::Photo(photo)).await.unwrap();
