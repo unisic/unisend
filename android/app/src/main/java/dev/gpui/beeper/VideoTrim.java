@@ -94,7 +94,8 @@ public final class VideoTrim {
         return ok;
     }
 
-    private static int rotation(String path) {
+    /** The turn a player applies, in degrees; 0 when the file names none. */
+    static int rotation(String path) {
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
         try {
             retriever.setDataSource(path);

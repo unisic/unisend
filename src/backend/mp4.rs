@@ -1,10 +1,12 @@
-//! A video that cannot go as it is, made into an MP4 on the device with the system's ffmpeg once the
-//! user agrees: the chat's bridge refuses its type (Meta takes MP4 and MOV only), or the metadata
-//! walk does not know its format. The MP4 is H.264 and AAC, which every bridge takes, without
-//! metadata or chapters, and is then sent as any video. Nothing leaves the device here.
+//! A video that cannot go as it is, made into an MP4 on the device once the user agrees: the chat's
+//! bridge refuses its type (Meta takes MP4 and MOV only), or the metadata walk does not know its
+//! format. The MP4 is H.264 and AAC, which every bridge takes, without metadata, and is then sent as
+//! any video. Nothing leaves the device here. Desktop runs the system's ffmpeg; Android its own
+//! codecs (`dev.gpui.beeper.VideoConvert`, MediaCodec), which every phone has.
 //!
-//! Cost: one ffmpeg process at a time (attachments are sent one by one), CPU-bound for about the
-//! video's length at `veryfast`; the MP4 waits in `pasted/` until it is sent, then goes.
+//! Cost: one conversion at a time (attachments are sent one by one), CPU-bound for about the
+//! video's length (ffmpeg at `veryfast`; the phone's hardware encoder); the MP4 waits in `pasted/`
+//! until it is sent, then goes.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -34,18 +36,41 @@ impl std::fmt::Display for Unfit {
 
 impl std::error::Error for Unfit {}
 
-/// Whether ffmpeg is installed, asked once and blocking. Never on Android, which has none.
+/// Whether a conversion can run here: always on Android; elsewhere where ffmpeg is installed, asked
+/// once, blocking.
 pub fn available() -> bool {
     static FOUND: OnceLock<bool> = OnceLock::new();
-    *FOUND.get_or_init(|| !cfg!(target_os = "android") && quiet(Command::new("ffmpeg").arg("-version")).is_ok_and(|s| s.success()))
+    *FOUND.get_or_init(|| cfg!(target_os = "android") || quiet(Command::new("ffmpeg").arg("-version")).is_ok_and(|s| s.success()))
 }
 
 fn quiet(cmd: &mut Command) -> std::io::Result<std::process::ExitStatus> {
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status()
 }
 
+/// Makes `source` into the MP4 `out` with the phone's codecs, blocking.
+#[cfg(target_os = "android")]
+pub fn convert(source: &Path, out: &Path) -> Result<()> {
+    use gpui_mobile::android::jni as helpers;
+    use jni::objects::JValue;
+
+    let done = helpers::with_env(|env| {
+        let class = helpers::find_app_class(env, "dev.gpui.beeper.VideoConvert")?;
+        let source = env.new_string(source.to_string_lossy()).map_err(|e| e.to_string())?;
+        let out = env.new_string(out.to_string_lossy()).map_err(|e| e.to_string())?;
+        env.call_static_method(&class, jni::jni_str!("convert"), jni::jni_sig!("(Ljava/lang/String;Ljava/lang/String;)Z"), &[JValue::Object(&source), JValue::Object(&out)])
+            .and_then(|v| v.z())
+            .map_err(|e| crate::java_error(env, e))
+    });
+    match done {
+        Ok(true) => Ok(()),
+        Ok(false) => bail!(t!("this phone could not convert the video")),
+        Err(e) => bail!("{e}"),
+    }
+}
+
 /// Makes `source` into the MP4 `out`, blocking: x264 where ffmpeg has it, else OpenH264 (Fedora's
 /// own build has only that). Even sizes, as H.264 in 4:2:0 needs.
+#[cfg(not(target_os = "android"))]
 pub fn convert(source: &Path, out: &Path) -> Result<()> {
     let mut last = None;
     for (codec, quality) in [("libx264", ["-preset", "veryfast", "-crf", "23"]), ("libopenh264", ["-b:v", "4M", "-allow_skip_frames", "1"])] {

@@ -158,10 +158,10 @@ fn wording(c: &Confirm) -> (String, String, &'static str) {
         Confirming::Mp4 { why, .. } => {
             let body = match why {
                 Unfit::Refused => match &c.network {
-                    Some(network) => t!("{network} does not take this video's format. Unisend can make an MP4 of it on this device with ffmpeg, without its metadata, and send that. A long video takes a while.", network = network),
-                    None => t!("This chat's network does not take this video's format. Unisend can make an MP4 of it on this device with ffmpeg, without its metadata, and send that. A long video takes a while.").to_owned(),
+                    Some(network) => t!("{network} does not take this video's format. Unisend can make an MP4 of it on this device, without its metadata, and send that. A long video takes a while.", network = network),
+                    None => t!("This chat's network does not take this video's format. Unisend can make an MP4 of it on this device, without its metadata, and send that. A long video takes a while.").to_owned(),
                 },
-                Unfit::Unclean => t!("Unisend cannot remove the metadata from this video's format. It can make an MP4 of it on this device with ffmpeg, without metadata, and send that. A long video takes a while.").to_owned(),
+                Unfit::Unclean => t!("Unisend cannot remove the metadata from this video's format. It can make an MP4 of it on this device, without metadata, and send that. A long video takes a while.").to_owned(),
             };
             return (t!("Convert this video to MP4?").to_owned(), body, t!("Convert"));
         }

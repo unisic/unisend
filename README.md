@@ -38,6 +38,10 @@ bridges bring WhatsApp, Signal, Messenger, Instagram, Telegram and other network
 ### Media
 
 - Photos, videos and files, with a caption; drag and drop or paste on desktop
+- Location and camera details are removed from photos and videos before they go (JPEG, PNG,
+  WebP, GIF, HEIC, AVIF, MP4, MOV, WebM, MKV; any other picture is drawn anew); a video the
+  network refuses, or one in a format that cannot be cleaned, can be made into an MP4 on the
+  device first (ffmpeg on desktop, the phone's own codecs on Android)
 - Full-screen picture viewer with zoom; a video player on Android
 - Voice messages: recorded and played in the chat on Android and Linux
 - Emoji picker with search, recents and skin tones; a GIF picker in builds with a KLIPY key
@@ -64,6 +68,8 @@ bridges bring WhatsApp, Signal, Messenger, Instagram, Telegram and other network
 ### Notifications
 
 - Android: one notification per chat, with reply and mark as read
+- The app's own sounds: one for direct messages, one for groups, one for mentions (Android); the
+  direct-message one on Linux
 - Android keeps its own background connection to the homeserver, with no push service
 - Linux desktop notifications with reply, mark as read and mute
 - Choose what notifications show: name and message, name only, or neither
@@ -71,7 +77,9 @@ bridges bring WhatsApp, Signal, Messenger, Instagram, Telegram and other network
 ### Desktop
 
 - Chat list and chat side by side, chat info in a panel beside them
-- Keeps running with the window closed, with a tray icon on Linux
+- Keeps running with the window closed, with a tray icon on Linux that gets a dot while a chat
+  waits
+- Typing goes straight into the open chat's message field, without clicking it first
 - Its own title bar and window controls on Linux, where the compositor allows it
 
 Also: dark, light or system theme, chat colours, a chat wallpaper, text size, English and Polish.
@@ -120,7 +128,9 @@ There are no Google services, no telemetry, no crash reporting and no push servi
 
 ## Install
 
-There are no prebuilt packages and no app store listing yet. The app is called Unisend, but the
+There are no released packages and no app store listing yet. The `build` workflow
+(`.github/workflows/build.yml`, run by hand or by a `v*` tag) makes an AppImage for Linux, a zip
+for Windows and macOS, and a debug APK; it has not been run yet. The app is called Unisend, but the
 crate and binary are still named `beeper-gpui`, and the Android app id is `dev.gpui.beeper`.
 
 ### Linux
@@ -133,7 +143,10 @@ fontconfig, freetype, wayland and GStreamer (voice messages; see
     packaging/linux/install.sh
 
 This puts the binary in `~/.local/bin` and the launcher and icons in `~/.local/share`; run both
-again to update. On Fedora without `libxkbcommon-x11-devel`, see the linker note in
+again to update. Or pack it as an AppImage with
+`packaging/linux/appimage.sh target/release Unisend-x86_64.AppImage` (needs `appimagetool`); it
+uses the system's GTK, WebKitGTK and GStreamer. On Fedora without `libxkbcommon-x11-devel`, see
+the linker note in
 [docs/platforms/linux.md](docs/platforms/linux.md).
 
 ### Android
