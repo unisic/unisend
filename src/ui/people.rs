@@ -1,9 +1,10 @@
 //! Who a message reached and who answered it, as Signal shows them: the message's details (when it
-//! was sent, who sent it, who has read it, who it went to) from its menu, and who gave each of its
-//! reactions from a tap on them.
+//! was sent, who sent it, who has read it, who it went to) from its menu, who gave each of its
+//! reactions from a tap on them, and its earlier versions from a tap on its "Edited" mark.
 
 use super::sheet::{self, SheetMotion};
 use super::*;
+use crate::backend::edits::Version;
 
 /// People a list draws at most; a line under them counts the rest.
 const MAX_ROWS: usize = 50;
@@ -24,6 +25,8 @@ pub(super) enum Shown {
     Details(String),
     /// Who gave a message's reactions; with a key, only those who gave that one.
     Reactions(String, Option<String>),
+    /// A message's versions, by its id (`backend/edits.rs`).
+    Edits(String),
 }
 
 #[derive(Default)]
@@ -34,6 +37,9 @@ pub(super) struct People {
     sheet: SheetMotion,
     /// Where a mouse opened it on a desktop: the list stands there, as a menu does.
     at: Option<Point<Pixels>>,
+    /// The versions of the message whose edit history is open: `None` while they load, an empty
+    /// list when the server gave none.
+    edits: Option<(String, Option<Vec<Version>>)>,
 }
 
 /// A list's title, its tabs (the reaction each shows, its label) and its rows.
@@ -69,8 +75,25 @@ fn listed(users: impl ExactSizeIterator<Item = (OwnedUserId, String)>) -> Vec<Li
     out
 }
 
+/// `text` as the bubble at the top of a list, cut by characters, not by the layout's clamp, which
+/// leaves the bubble as narrow as its ellipsis.
+fn preview(mut text: String, own: bool) -> Line {
+    if let Some((cut, _)) = text.char_indices().nth(PREVIEW_LINES * PREVIEW_CHARS) {
+        text.truncate(cut);
+        text.push('\u{2026}');
+    }
+    let rows = text.lines().map(|l| l.chars().count().div_ceil(PREVIEW_CHARS).max(1)).sum::<usize>().clamp(1, PREVIEW_LINES);
+    Line::Preview { text, own, rows }
+}
+
 impl BeeperApp {
     pub(super) fn open_people(&mut self, shown: Shown, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        if let (Shown::Edits(id), Some(room)) = (&shown, self.open.clone()) {
+            if self.audience.edits.as_ref().is_none_or(|(had, _)| had != id) {
+                self.audience.edits = Some((id.clone(), None));
+            }
+            let _ = self.cmd.try_send(Cmd::EditHistory { room, id: id.clone() });
+        }
         self.want_members();
         self.audience.at = at.filter(|_| !gpui_kit::is_mobile());
         self.audience.open = Some(shown);
@@ -83,6 +106,14 @@ impl BeeperApp {
             cx.notify();
         }
         open
+    }
+
+    /// The versions of a message arrived; kept only while its history is the one open.
+    pub(super) fn edits_arrived(&mut self, id: String, versions: Option<Vec<Version>>, cx: &mut Context<Self>) {
+        if self.audience.edits.as_ref().is_some_and(|(open, _)| *open == id) {
+            self.audience.edits = Some((id, Some(versions.unwrap_or_default())));
+            cx.notify();
+        }
     }
 
     /// Someone's name in the open chat: as a member, as the sender of a loaded message, or the
@@ -101,16 +132,9 @@ impl BeeperApp {
             Shown::Details(id) => {
                 let ix = self.msgs.iter().position(|m| m.id == *id && !m.deleted)?;
                 let m = &self.msgs[ix];
-                let mut text = m.summary();
-                // Cut by characters, not by the layout's clamp, which leaves the bubble as narrow as its ellipsis.
-                if let Some((cut, _)) = text.char_indices().nth(PREVIEW_LINES * PREVIEW_CHARS) {
-                    text.truncate(cut);
-                    text.push('\u{2026}');
-                }
-                let rows = text.lines().map(|l| l.chars().count().div_ceil(PREVIEW_CHARS).max(1)).sum::<usize>().clamp(1, PREVIEW_LINES);
                 // Matrix keeps only the time the server took it, which is when it was received too.
                 let when = format!("{}, {}", day_label(m.ts), clock(m.ts));
-                let mut lines = vec![Line::Preview { text, own: m.own, rows }, Line::Fact(if m.own { t!("Sent") } else { t!("Received") }, when)];
+                let mut lines = vec![preview(m.summary(), m.own), Line::Fact(if m.own { t!("Sent") } else { t!("Received") }, when)];
                 if !m.own {
                     lines.push(Line::Head(t!("Sender")));
                     lines.extend(listed(std::iter::once((m.from.clone(), short_time(m.ts)))));
@@ -160,6 +184,23 @@ impl BeeperApp {
                 lines.extend((hidden > 0).then_some(Line::More(hidden)));
                 Some((t!("Reactions"), tabs, lines))
             }
+            Shown::Edits(id) => {
+                let m = self.msgs.iter().find(|m| m.id == *id && m.edited && !m.deleted)?;
+                let versions = self.audience.edits.as_ref().filter(|(open, _)| open == id).and_then(|(_, v)| v.as_ref());
+                let mut lines = Vec::new();
+                match versions {
+                    None => lines.push(Line::Head(t!("Loading…"))),
+                    Some(list) if list.is_empty() => lines.push(Line::Head(t!("Earlier versions could not be loaded."))),
+                    Some(list) => {
+                        for (n, v) in list.iter().enumerate().rev() {
+                            let label = if n == 0 { t!("Original") } else { t!("Edited") };
+                            lines.push(preview(v.text.clone(), m.own));
+                            lines.push(Line::Fact(label, format!("{}, {}", day_label(v.ts), clock(v.ts))));
+                        }
+                    }
+                }
+                Some((t!("Edit history"), Vec::new(), lines))
+            }
         }
     }
 
@@ -193,14 +234,14 @@ impl BeeperApp {
         // As tall as all the reactions take, so it stays put while the tabs change.
         let content_h = match &shown {
             Shown::Reactions(id, Some(_)) => self.people_lines(&Shown::Reactions(id.clone(), None)).map_or_else(|| tall(&lines), |(_, _, all)| tall(&all)),
-            Shown::Reactions(..) | Shown::Details(_) => tall(&lines),
+            Shown::Reactions(..) | Shown::Details(_) | Shown::Edits(_) => tall(&lines),
         };
         let id = match &shown {
-            Shown::Details(id) | Shown::Reactions(id, _) => id.clone(),
+            Shown::Details(id) | Shown::Reactions(id, _) | Shown::Edits(id) => id.clone(),
         };
         let picked = match &shown {
             Shown::Reactions(_, key) => key.clone(),
-            Shown::Details(_) => None,
+            Shown::Details(_) | Shown::Edits(_) => None,
         };
         let tabs = (!tabs.is_empty()).then(|| {
             h_flex().id("people-tabs").flex_none().h(px(TABS_H)).px(px(GUTTER)).gap(px(6.)).overflow_x_scroll().children(tabs.into_iter().enumerate().map(|(n, (key, label))| {

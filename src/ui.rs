@@ -1113,6 +1113,7 @@ impl BeeperApp {
             Ev::GifPreview(url, bytes) => self.on_gif_preview(url, bytes),
             Ev::Uploaded => self.uploads = self.uploads.saturating_sub(1),
             Ev::Members { room, list } => self.members_arrived(room, list, cx),
+            Ev::EditHistory { id, versions } => self.edits_arrived(id, versions, cx),
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
             ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_) | Ev::RecoveryCode(_)) => self.on_verify_event(ev, cx),
             Ev::Disappear { room, setting } => self.on_disappear(room, setting),
@@ -3038,7 +3039,21 @@ impl BeeperApp {
                                         .child(
                                             h_flex()
                                                 .min_w_0()
-                                                .when(edited, |el| el.child(div().flex_none().child(format!("{} \u{b7} ", t!("Edited")))))
+                                                .when(edited, |el| {
+                                                    let id = m.id.clone();
+                                                    el.child(
+                                                        div()
+                                                            .id("edited")
+                                                            .flex_none()
+                                                            .cursor_pointer()
+                                                            .child(format!("{} \u{b7} ", t!("Edited")))
+                                                            // Its earlier versions, as Signal shows them from the same tap.
+                                                            .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+                                                                cx.stop_propagation();
+                                                                this.open_people(people::Shown::Edits(id.clone()), Some(e.position()), cx);
+                                                            })),
+                                                    )
+                                                })
                                                 .child(div().flex_none().child(time))
                                                 .children(said),
                                         ),

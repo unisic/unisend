@@ -200,6 +200,8 @@ pub enum Cmd {
     SendGif { room: OwnedRoomId, gif: gifs::Gif, query: String, reply_to: Option<String> },
     /// The people in a chat, for the mention list.
     Members(OwnedRoomId),
+    /// A message's earlier versions, for its edit history.
+    EditHistory { room: OwnedRoomId, id: String },
     /// A photo or video from the preview: with its caption, and as the original when `hd`.
     AttachMedia { room: OwnedRoomId, path: PathBuf, reply_to: Option<String>, caption: String, hd: bool },
     /// A recording to send as a voice message; `levels` are its loudness, 0 to 1, per tick.
@@ -319,6 +321,8 @@ pub enum Ev {
     Uploaded,
     /// Joined members of a chat other than the user, as (user, name), at most `MAX_MEMBERS`.
     Members { room: OwnedRoomId, list: Vec<(OwnedUserId, String)> },
+    /// The versions of message `id`, oldest first; `None` when the server could not give them.
+    EditHistory { id: String, versions: Option<Vec<edits::Version>> },
     /// A forward was queued in this many chats.
     Forwarded(usize),
     Devices(verify::Devices),
@@ -1957,6 +1961,18 @@ impl State {
                         let _ = ev.send(Ev::Error(t!("GIF not sent: {error}", error = format!("{e:#}")))).await;
                     }
                     let _ = ev.send(Ev::Uploaded).await;
+                });
+            }
+            Cmd::EditHistory { room, id } => {
+                let room = self.room(&room)?;
+                let ev = self.ev.clone();
+                tokio::spawn(async move {
+                    // A message still on its way out has no event ID, and so no edits on the server.
+                    let versions = match OwnedEventId::try_from(id.as_str()) {
+                        Ok(event) => edits::history(&room, &event).await.inspect_err(|e| log::warn!("edit history: {e:#}")).ok(),
+                        Err(_) => None,
+                    };
+                    let _ = ev.send(Ev::EditHistory { id, versions }).await;
                 });
             }
             Cmd::Members(room_id) => {
@@ -4090,6 +4106,7 @@ fn content(msgtype: &MessageType) -> (Option<Media>, String) {
 
 mod location;
 mod contact;
+pub(crate) mod edits;
 mod gifs;
 mod linkprev;
 pub(crate) mod update;
