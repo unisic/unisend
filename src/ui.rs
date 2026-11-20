@@ -1134,7 +1134,7 @@ impl BeeperApp {
                 }
             }
             Ev::InfoItems { room, items, scanned, done } => self.info_items(room, items, scanned, done, cx),
-            Ev::Found { room, query, hits } => self.found(room, query, hits, cx),
+            Ev::Found { room, query, filter, hits } => self.found(room, query, filter, hits, cx),
         }
         cx.notify();
     }

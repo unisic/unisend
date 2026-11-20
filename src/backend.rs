@@ -237,8 +237,8 @@ pub enum Cmd {
     Profile,
     /// Changes the user's own name or picture; answered with `Profile`, else `Ev::Error`.
     SetProfile(group::Mine),
-    /// Messages matching `query` in one room, or in every room; answered with `Found`.
-    Search { room: Option<OwnedRoomId>, query: String },
+    /// Messages matching `query` and `filter` in one room, or in every room; answered with `Found`.
+    Search { room: Option<OwnedRoomId>, query: String, filter: Filter },
     /// Looks for a newer release; answered with `Ev::Update`.
     UpdateCheck,
     /// Downloads, checks and installs this release; replaces a download still running.
@@ -353,8 +353,8 @@ pub enum Ev {
     PeerIds(OwnedRoomId, Vec<String>),
     /// Messages with media, files or links, newest first; `scanned` counts the events read so far.
     InfoItems { room: OwnedRoomId, items: Vec<Msg>, scanned: usize, done: bool },
-    /// The answer to `Cmd::Search` for this room and query.
-    Found { room: Option<OwnedRoomId>, query: String, hits: Vec<Hit> },
+    /// The answer to `Cmd::Search` for this room, query and filter.
+    Found { room: Option<OwnedRoomId>, query: String, filter: Filter, hits: Vec<Hit> },
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -2076,11 +2076,11 @@ impl State {
                 let room = self.room(&room_id)?;
                 self.peer = Some(AbortOnDrop(tokio::spawn(info::peer(room, self.ev.clone()))));
             }
-            Cmd::Search { room, query } => {
+            Cmd::Search { room, query, filter } => {
                 let (client, ev) = (self.client()?.clone(), self.ev.clone());
                 tokio::spawn(async move {
-                    let hits = search::search(&client, room.as_deref(), &query).await;
-                    let _ = ev.send(Ev::Found { room, query, hits }).await;
+                    let hits = search::search(&client, room.as_deref(), &query, filter.clone()).await;
+                    let _ = ev.send(Ev::Found { room, query, filter, hits }).await;
                 });
             }
         }
@@ -4118,7 +4118,7 @@ pub use disappear::{Disappearing, label as disappear_label};
 mod features;
 pub use features::Features;
 mod search;
-pub use search::Hit;
+pub use search::{Filter, Hit, Only};
 pub(crate) use search::{MAX_HITS, MIN_QUERY, save as save_search};
 
 pub(crate) mod rooms;

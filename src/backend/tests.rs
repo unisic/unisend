@@ -2132,7 +2132,7 @@ async fn info_lists_members_and_what_the_history_holds() {
 /// Asks until the answer passes `done`: the index takes what a sync brought a moment later.
 async fn search_until(st: &mut State, seat: &mut Seat, room: Option<&OwnedRoomId>, query: &str, done: impl Fn(&[Hit]) -> bool) -> Vec<Hit> {
     for _ in 0..30 {
-        st.handle(Cmd::Search { room: room.cloned(), query: query.into() }).await.unwrap();
+        st.handle(Cmd::Search { room: room.cloned(), query: query.into(), filter: Default::default() }).await.unwrap();
         let hits = wait_for(seat, "search answer", |e| match e {
             Ev::Found { query: q, hits, .. } if q == query => Some(hits),
             _ => None,

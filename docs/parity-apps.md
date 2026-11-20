@@ -32,7 +32,7 @@ N impossible over Matrix or bridges.
 | Stories, status | ? | Y | Y | Y | missing | N |
 | Contacts, find by username | Y | Y | Y | Y | `ui/contacts.rs`, `ui/people.rs` | B |
 | Search in chat and in all chats | Y | Y | Y | Y | `backend/search.rs`, `ui/search.rs` (local FTS5) | Y (local) |
-| Search filters (date, type) | P | Y | N | P | missing | Y (local index) |
+| Search filters (date, type) | P | Y | N | P | `ui/search.rs`: media, links, files, sender, time, in a chat's search | Y (local index) |
 | Archive | Y | Y | N | Y | done | Y |
 | Pin chats | Y | Y | Y | Y | tag `m.favourite`; no manual order | Y |
 | Pin messages in a chat | Y | Y | N | Y | missing | B |
@@ -84,7 +84,8 @@ Effort: S small, M medium, L large.
 5. Chat folders and filters: DMs, Groups, user lists. Medium-high, M. Local.
 6. Pinned messages in a chat (`m.room.pinned_events`). Medium, S-M.
 7. Starred or saved messages (local list). Medium, S.
-8. Search filters (media, links, date, sender) on the local index. Medium, M.
+8. Search filters (media, links, date, sender) on the local index. Medium, M. Done in a chat's
+   search; the chat list's search has none.
 9. Generated link previews: owner's privacy choice (the linked site sees the user's IP, or the
    homeserver sees the link through its `preview_url`). Medium, M.
 10. Push without Google through UnifiedPush, for phones that kill the background connection.

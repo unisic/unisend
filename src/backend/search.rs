@@ -79,19 +79,69 @@ pub struct Hit {
     pub snippet: String,
     /// Byte ranges of `snippet` that matched.
     pub marks: Vec<Range<usize>>,
+    /// What the message carries, for a hit with no words to show.
+    pub media: Option<MediaKind>,
+}
+
+/// Which messages a search keeps, by what they carry.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Only {
+    #[default]
+    All,
+    /// Photos and videos, GIFs among them.
+    Media,
+    Links,
+    /// Documents and audio files; voice messages are not files.
+    Files,
+}
+
+/// What a search is narrowed to besides its words. With any of it set, a search without words
+/// lists every message it lets through, newest first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Filter {
+    pub only: Only,
+    /// Sent by this person.
+    pub from: Option<OwnedUserId>,
+    /// Sent at or after `since` and before `until`, in ms since the epoch.
+    pub since: Option<u64>,
+    pub until: Option<u64>,
+}
+
+impl Filter {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `msg.kind`: 0 for a text, else 1 + the media's place here. Stored, so the order is fixed.
+const KINDS: [MediaKind; 6] = [MediaKind::Image, MediaKind::Sticker, MediaKind::Video, MediaKind::Audio, MediaKind::Voice, MediaKind::File];
+
+fn kind_code(kind: Option<MediaKind>) -> i64 {
+    kind.and_then(|k| KINDS.iter().position(|&known| known == k)).map_or(0, |at| at as i64 + 1)
+}
+
+fn kind_of(code: i64) -> Option<MediaKind> {
+    usize::try_from(code - 1).ok().and_then(|at| KINDS.get(at).copied())
+}
+
+fn has_link(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("https://") || lower.contains("http://")
 }
 
 #[derive(Debug, PartialEq)]
 enum Change {
     /// A message; `replace` when its text is authoritative (the open timeline, edits applied).
-    Add { event: String, room: String, sender: String, ts: i64, body: String, replace: bool },
+    /// `kind` as `kind_code` gives it.
+    Add { event: String, room: String, sender: String, ts: i64, body: String, kind: i64, replace: bool },
     Edit { target: String, sender: String, ts: i64, body: String },
     Remove(String),
 }
 
 enum Op {
     Write(Vec<Change>),
-    Query { room: Option<String>, query: String, reply: oneshot::Sender<Vec<Found>> },
+    /// `query` is an FTS5 expression, or none to list what `filter` lets through.
+    Query { room: Option<String>, query: Option<String>, filter: Filter, reply: oneshot::Sender<Vec<Found>> },
     Save,
 }
 
@@ -101,6 +151,7 @@ struct Found {
     sender: String,
     ts: i64,
     snippet: String,
+    kind: i64,
 }
 
 /// One account's index, found by the user it belongs to.
@@ -240,12 +291,14 @@ fn row(room: &RoomId, m: &Msg) -> Option<Change> {
     }
     let file = m.media.as_ref().filter(|media| media.kind == MediaKind::File).map(|media| media.name.as_str());
     let body = text(&m.body, file);
-    (!body.is_empty()).then(|| Change::Add {
+    let kind = kind_code(m.media.as_ref().map(|media| media.kind));
+    (!body.is_empty() || kind != 0).then(|| Change::Add {
         event: m.id.clone(),
         room: room.to_string(),
         sender: m.from.to_string(),
         ts: m.ts as i64,
         body,
+        kind,
         replace: true,
     })
 }
@@ -261,18 +314,19 @@ fn change(raw: &Raw<AnySyncTimelineEvent>, room: &RoomId, rules: &RedactionRules
                         target: r.event_id.to_string(),
                         sender: e.sender.to_string(),
                         ts: i64::from(e.origin_server_ts.0),
-                        body: body(&r.new_content.msgtype, false),
+                        body: body(&r.new_content.msgtype, false).0,
                     });
                 }
                 relation => (&e.content.msgtype, matches!(relation, Some(Relation::Reply(_)))),
             };
-            let body = body(msgtype, reply);
-            (!body.is_empty()).then(|| Change::Add {
+            let (body, kind) = body(msgtype, reply);
+            (!body.is_empty() || kind != 0).then(|| Change::Add {
                 event: e.event_id.to_string(),
                 room: room.to_string(),
                 sender: e.sender.to_string(),
                 ts: i64::from(e.origin_server_ts.0),
                 body,
+                kind,
                 replace: false,
             })
         }
@@ -282,12 +336,13 @@ fn change(raw: &Raw<AnySyncTimelineEvent>, room: &RoomId, rules: &RedactionRules
     }
 }
 
-fn body(msgtype: &MessageType, reply: bool) -> String {
+/// The text indexed for a message, and its `kind_code`.
+fn body(msgtype: &MessageType, reply: bool) -> (String, i64) {
     let (media, body) = content(msgtype);
     // Older clients and bridges prepend the quoted message to a reply.
     let body = if reply { remove_plain_reply_fallback(&body).to_owned() } else { body };
     let file = media.as_ref().filter(|m| m.kind == MediaKind::File).map(|m| m.name.as_str());
-    text(&body, file)
+    (text(&body, file), kind_code(media.map(|m| m.kind)))
 }
 
 /// A file is found by its name as well as its caption.
@@ -300,12 +355,16 @@ fn text(body: &str, file: Option<&str>) -> String {
     clean[..clean.floor_char_boundary(MAX_TEXT)].trim().to_owned()
 }
 
-/// Messages matching `query`, newest first, in `room` or in every room. Empty for short queries.
-pub(super) async fn search(client: &Client, room: Option<&RoomId>, query: &str) -> Vec<Hit> {
+/// Messages matching `query` and `filter`, newest first, in `room` or in every room. A query too
+/// short to search lists what the filter lets through; empty when there is no filter either.
+pub(super) async fn search(client: &Client, room: Option<&RoomId>, query: &str, filter: Filter) -> Vec<Hit> {
     let Some(tx) = client.user_id().and_then(sender) else { return Vec::new() };
-    let Some(query) = fts_query(query) else { return Vec::new() };
+    let query = fts_query(query);
+    if query.is_none() && filter.is_empty() {
+        return Vec::new();
+    }
     let (reply, found) = oneshot::channel();
-    if tx.send(Op::Query { room: room.map(ToString::to_string), query, reply }).await.is_err() {
+    if tx.send(Op::Query { room: room.map(ToString::to_string), query, filter, reply }).await.is_err() {
         return Vec::new();
     }
     let Ok(found) = found.await else { return Vec::new() };
@@ -319,7 +378,7 @@ pub(super) async fn search(client: &Client, room: Option<&RoomId>, query: &str) 
             Err(_) => f.sender,
         };
         let (snippet, marks) = marked(&f.snippet);
-        hits.push(Hit { room: room.room_id().to_owned(), id: f.event, sender, own, ts: f.ts.max(0) as u64, snippet, marks });
+        hits.push(Hit { room: room.room_id().to_owned(), id: f.event, sender, own, ts: f.ts.max(0) as u64, snippet, marks, media: kind_of(f.kind) });
     }
     hits
 }
@@ -431,7 +490,9 @@ fn schema(conn: &Connection) -> rusqlite::Result<()> {
              room TEXT NOT NULL,
              sender TEXT NOT NULL,
              ts INTEGER NOT NULL,
-             edit_ts INTEGER NOT NULL DEFAULT 0
+             edit_ts INTEGER NOT NULL DEFAULT 0,
+             kind INTEGER NOT NULL DEFAULT 0,
+             link INTEGER NOT NULL DEFAULT 0
          );
          CREATE INDEX IF NOT EXISTS msg_ts ON msg (ts);
          CREATE VIRTUAL TABLE IF NOT EXISTS body USING fts5 (text, tokenize = 'unicode61 remove_diacritics 2');
@@ -442,7 +503,18 @@ fn schema(conn: &Connection) -> rusqlite::Result<()> {
              text TEXT NOT NULL,
              ts INTEGER NOT NULL
          );",
-    )
+    )?;
+    // An index from before the filters: its links are found again; which of its messages carried
+    // media is not known, so only those indexed from now on are found by kind.
+    let filters: i64 = conn.query_row("SELECT count(*) FROM pragma_table_info('msg') WHERE name = 'kind'", [], |r| r.get(0))?;
+    if filters == 0 {
+        conn.execute_batch(
+            "ALTER TABLE msg ADD COLUMN kind INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE msg ADD COLUMN link INTEGER NOT NULL DEFAULT 0;
+             UPDATE msg SET link = 1 WHERE id IN (SELECT rowid FROM body WHERE text LIKE '%http://%' OR text LIKE '%https://%');",
+        )?;
+    }
+    Ok(())
 }
 
 fn serve(conn: Connection, mut rx: mpsc::Receiver<Op>, mut saver: Option<Saver>) {
@@ -461,7 +533,7 @@ fn serve(conn: Connection, mut rx: mpsc::Receiver<Op>, mut saver: Option<Saver>)
                 }
                 applied
             }
-            Op::Query { room, query, reply } => query_hits(&conn, room.as_deref(), &query).map(|found| {
+            Op::Query { room, query, filter, reply } => query_hits(&conn, room.as_deref(), query.as_deref(), &filter).map(|found| {
                 let _ = reply.send(found);
             }),
             Op::Save => {
@@ -483,10 +555,10 @@ fn apply(conn: &Connection, changes: &[Change], count: &mut i64) -> rusqlite::Re
     prune_bytes(&tx, count, MAX_BYTES)?;
     for change in changes {
         match change {
-            Change::Add { event, room, sender, ts, body, replace } => {
+            Change::Add { event, room, sender, ts, body, kind, replace } => {
                 let added = tx.execute(
-                    "INSERT INTO msg (event, room, sender, ts) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (event) DO NOTHING",
-                    params![event, room, sender, ts],
+                    "INSERT INTO msg (event, room, sender, ts, kind, link) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (event) DO NOTHING",
+                    params![event, room, sender, ts, kind, has_link(body)],
                 )? == 1;
                 let id: i64 = tx.query_row("SELECT id FROM msg WHERE event = ?1", [event], |r| r.get(0))?;
                 if added {
@@ -496,12 +568,13 @@ fn apply(conn: &Connection, changes: &[Change], count: &mut i64) -> rusqlite::Re
                         .optional()?;
                     let text = edit.as_ref().map_or(body, |(text, _)| text);
                     tx.execute("INSERT INTO body (rowid, text) VALUES (?1, ?2)", params![id, text])?;
-                    if let Some((_, edit_ts)) = edit {
-                        tx.execute("UPDATE msg SET edit_ts = ?2 WHERE id = ?1", params![id, edit_ts])?;
+                    if let Some((text, edit_ts)) = &edit {
+                        tx.execute("UPDATE msg SET edit_ts = ?2, link = ?3 WHERE id = ?1", params![id, edit_ts, has_link(text)])?;
                         tx.execute("DELETE FROM pending WHERE target = ?1", [event])?;
                     }
                 } else if *replace {
                     tx.execute("UPDATE body SET text = ?2 WHERE rowid = ?1 AND text IS NOT ?2", params![id, body])?;
+                    tx.execute("UPDATE msg SET link = ?2 WHERE id = ?1 AND link IS NOT ?2", params![id, has_link(body)])?;
                 }
             }
             Change::Edit { target, sender, ts, body } => {
@@ -511,7 +584,7 @@ fn apply(conn: &Connection, changes: &[Change], count: &mut i64) -> rusqlite::Re
                 match id {
                     Some(id) => {
                         tx.execute("UPDATE body SET text = ?2 WHERE rowid = ?1", params![id, body])?;
-                        tx.execute("UPDATE msg SET edit_ts = ?2 WHERE id = ?1", params![id, ts])?;
+                        tx.execute("UPDATE msg SET edit_ts = ?2, link = ?3 WHERE id = ?1", params![id, ts, has_link(body)])?;
                     }
                     None => {
                         let known: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM msg WHERE event = ?1)", [target], |r| r.get(0))?;
@@ -561,15 +634,32 @@ fn prune_bytes(conn: &Connection, count: &mut i64, max: i64) -> rusqlite::Result
     Ok(())
 }
 
-fn query_hits(conn: &Connection, room: Option<&str>, query: &str) -> rusqlite::Result<Vec<Found>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT m.room, m.event, m.sender, m.ts, snippet(body, 0, char(2), char(3), '…', ?3)
-         FROM body JOIN msg m ON m.id = body.rowid
-         WHERE body MATCH ?1 AND (?2 IS NULL OR m.room = ?2)
-         ORDER BY m.ts DESC LIMIT ?4",
-    )?;
-    let rows = stmt.query_map(params![query, room, SNIPPET_WORDS, MAX_HITS as i64], |r| {
-        Ok(Found { room: r.get(0)?, event: r.get(1)?, sender: r.get(2)?, ts: r.get(3)?, snippet: r.get(4)? })
+/// Hits for an FTS5 `query`, or without one every message `filter` lets through.
+fn query_hits(conn: &Connection, room: Option<&str>, query: Option<&str>, filter: &Filter) -> rusqlite::Result<Vec<Found>> {
+    const NARROW: &str = "(?2 IS NULL OR m.room = ?2) AND (?5 IS NULL OR m.sender = ?5) AND m.ts >= ?6 AND m.ts < ?7
+         AND (?8 = 0 OR (?8 = 1 AND m.kind IN (1, 3)) OR (?8 = 2 AND m.link = 1) OR (?8 = 3 AND m.kind IN (4, 6)))";
+    let sql = match query {
+        Some(_) => format!(
+            "SELECT m.room, m.event, m.sender, m.ts, snippet(body, 0, char(2), char(3), '…', ?3), m.kind
+             FROM body JOIN msg m ON m.id = body.rowid
+             WHERE body MATCH ?1 AND {NARROW}
+             ORDER BY m.ts DESC LIMIT ?4"
+        ),
+        // The text's start stands in for a snippet; the bubble's row clamps it anyway.
+        None => format!(
+            "SELECT m.room, m.event, m.sender, m.ts, substr(body.text, 1, 240), m.kind
+             FROM msg m JOIN body ON body.rowid = m.id
+             WHERE {NARROW}
+             ORDER BY m.ts DESC LIMIT ?4"
+        ),
+    };
+    let only = filter.only as i64;
+    let from = filter.from.as_ref().map(|u| u.as_str());
+    let since = filter.since.map_or(0, |t| t.min(i64::MAX as u64) as i64);
+    let until = filter.until.map_or(i64::MAX, |t| t.min(i64::MAX as u64) as i64);
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params![query, room, SNIPPET_WORDS, MAX_HITS as i64, from, since, until, only], |r| {
+        Ok(Found { room: r.get(0)?, event: r.get(1)?, sender: r.get(2)?, ts: r.get(3)?, snippet: r.get(4)?, kind: r.get(5)? })
     })?;
     rows.collect()
 }
@@ -579,11 +669,11 @@ mod tests {
     use super::*;
 
     fn add(event: &str, room: &str, ts: i64, body: &str) -> Change {
-        Change::Add { event: event.into(), room: room.into(), sender: "@a:x".into(), ts, body: body.into(), replace: false }
+        Change::Add { event: event.into(), room: room.into(), sender: "@a:x".into(), ts, body: body.into(), kind: 0, replace: false }
     }
 
     fn find(conn: &Connection, room: Option<&str>, q: &str) -> Vec<(String, String)> {
-        query_hits(conn, room, &fts_query(q).unwrap()).unwrap().into_iter().map(|f| (f.event, f.snippet)).collect()
+        query_hits(conn, room, Some(&fts_query(q).unwrap()), &Filter::default()).unwrap().into_iter().map(|f| (f.event, f.snippet)).collect()
     }
 
     fn temp(name: &str) -> PathBuf {
@@ -633,7 +723,7 @@ mod tests {
         assert_eq!(find(&conn, None, "fixed").len(), 1);
         assert!(find(&conn, None, "fxied").is_empty());
         // The open timeline's text is authoritative; a sync's copy is not.
-        apply(&conn, &[Change::Add { event: "$2".into(), room: "!s".into(), sender: "@a:x".into(), ts: 2, body: "brunch".into(), replace: true }], &mut n).unwrap();
+        apply(&conn, &[Change::Add { event: "$2".into(), room: "!s".into(), sender: "@a:x".into(), ts: 2, body: "brunch".into(), kind: 0, replace: true }], &mut n).unwrap();
         apply(&conn, &[add("$2", "!s", 2, "lunch was great")], &mut n).unwrap();
         assert_eq!(find(&conn, None, "brunch").len(), 1);
         apply(&conn, &[Change::Remove("$2".into()), Change::Remove("$unknown".into())], &mut n).unwrap();
@@ -690,7 +780,7 @@ mod tests {
         let dir = temp("again");
         let conn = open(&dir.join(FILE)).unwrap();
         let mut n = 0;
-        let row = |body: &str| Change::Add { event: "$1".into(), room: "!r".into(), sender: "@a:x".into(), ts: 1, body: body.into(), replace: true };
+        let row = |body: &str| Change::Add { event: "$1".into(), room: "!r".into(), sender: "@a:x".into(), ts: 1, body: body.into(), kind: 0, replace: true };
         apply(&conn, &[row("first words")], &mut n).unwrap();
         let before = conn.total_changes();
         apply(&conn, &[row("first words")], &mut n).unwrap();
@@ -698,6 +788,82 @@ mod tests {
         apply(&conn, &[row("other words")], &mut n).unwrap();
         assert_ne!(conn.total_changes(), before);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn filters_by_kind_link_sender_and_time() {
+        let conn = memory().unwrap();
+        schema(&conn).unwrap();
+        let mut n = 0;
+        let item = |event: &str, sender: &str, ts, body: &str, kind: Option<MediaKind>| Change::Add {
+            event: event.into(),
+            room: "!r".into(),
+            sender: sender.into(),
+            ts,
+            body: body.into(),
+            kind: kind_code(kind),
+            replace: false,
+        };
+        apply(
+            &conn,
+            &[
+                item("$photo", "@a:x", 1, "", Some(MediaKind::Image)),
+                item("$clip", "@b:x", 2, "holiday clip", Some(MediaKind::Video)),
+                item("$doc", "@a:x", 3, "holiday plan.pdf", Some(MediaKind::File)),
+                item("$song", "@a:x", 4, "", Some(MediaKind::Audio)),
+                item("$voice", "@a:x", 5, "", Some(MediaKind::Voice)),
+                item("$link", "@b:x", 6, "holiday at HTTPS://example.org", None),
+                item("$text", "@a:x", 7, "holiday soon", None),
+            ],
+            &mut n,
+        )
+        .unwrap();
+        assert_eq!(n, 7, "media without a caption is indexed too");
+        let list = |q: Option<&str>, filter: Filter| -> Vec<String> {
+            let query = q.and_then(fts_query);
+            query_hits(&conn, Some("!r"), query.as_deref(), &filter).unwrap().into_iter().map(|f| f.event).collect()
+        };
+        let only = |only| Filter { only, ..Default::default() };
+        assert_eq!(list(None, only(Only::Media)), ["$clip", "$photo"]);
+        assert_eq!(list(None, only(Only::Files)), ["$song", "$doc"]);
+        assert_eq!(list(None, only(Only::Links)), ["$link"]);
+        assert_eq!(list(Some("holiday"), only(Only::Media)), ["$clip"]);
+        assert_eq!(list(Some("holiday"), Filter::default()), ["$text", "$link", "$doc", "$clip"]);
+        let from = Filter { from: Some(UserId::parse("@b:x").unwrap()), ..Default::default() };
+        assert_eq!(list(Some("holiday"), from.clone()), ["$link", "$clip"]);
+        assert_eq!(list(None, from), ["$link", "$clip"]);
+        let window = Filter { since: Some(3), until: Some(6), ..Default::default() };
+        assert_eq!(list(None, window), ["$voice", "$song", "$doc"]);
+        let hit = query_hits(&conn, None, None, &only(Only::Media)).unwrap();
+        assert_eq!((kind_of(hit[1].kind), hit[1].snippet.as_str()), (Some(MediaKind::Image), ""));
+        // An edit that drops the link takes the message out of Links.
+        apply(&conn, &[Change::Edit { target: "$link".into(), sender: "@b:x".into(), ts: 8, body: "no link now".into() }], &mut n).unwrap();
+        assert!(list(None, only(Only::Links)).is_empty());
+    }
+
+    #[test]
+    fn an_index_from_before_the_filters_gains_them() {
+        let conn = memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE msg (id INTEGER PRIMARY KEY, event TEXT NOT NULL UNIQUE, room TEXT NOT NULL, sender TEXT NOT NULL, ts INTEGER NOT NULL, edit_ts INTEGER NOT NULL DEFAULT 0);
+             CREATE VIRTUAL TABLE body USING fts5 (text, tokenize = 'unicode61 remove_diacritics 2');
+             INSERT INTO msg VALUES (1, '$1', '!r', '@a:x', 1, 0), (2, '$2', '!r', '@a:x', 2, 0);
+             INSERT INTO body (rowid, text) VALUES (1, 'see https://example.org'), (2, 'plain words');",
+        )
+        .unwrap();
+        schema(&conn).unwrap();
+        schema(&conn).unwrap();
+        let found = query_hits(&conn, None, None, &Filter { only: Only::Links, ..Default::default() }).unwrap();
+        assert_eq!(found.iter().map(|f| f.event.as_str()).collect::<Vec<_>>(), ["$1"]);
+    }
+
+    #[test]
+    fn kinds_keep_their_codes() {
+        for (code, kind) in KINDS.iter().enumerate() {
+            assert_eq!(kind_of(kind_code(Some(*kind))), Some(*kind));
+            assert_eq!(kind_code(Some(*kind)), code as i64 + 1);
+        }
+        assert_eq!((kind_code(None), kind_of(0), kind_of(99)), (0, None, None));
     }
 
     #[test]
@@ -771,6 +937,7 @@ mod tests {
                         sender: format!("@user{:010}:beeper.local", k % 50),
                         ts: 1_700_000_000_000 + k,
                         body: format!("{} {k}", body.join(" ")),
+                        kind: 0,
                         replace: false,
                     }
                 })
