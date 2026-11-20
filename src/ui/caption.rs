@@ -1,6 +1,7 @@
 //! The preview before photos and videos leave: the items large with paging, a caption for each,
-//! a way to drop one, an HD switch and Send. Everything bound for a chat as a photo or video comes
-//! through `queue_attach`, which hands it here; documents skip it.
+//! a way to drop one, the editor for a photo (`edit`), the trim bar for a video (`trim`), an HD
+//! switch and Send. Everything bound for a chat as a photo or video comes through
+//! `queue_attach`, which hands it here; documents skip it.
 //!
 //! Desktop has the tray instead, as Discord does: every file attached, documents too, waits as a
 //! thumbnail over the composer, and the composer's Enter sends them with what it holds as the
@@ -11,6 +12,10 @@
 //! shown and its neighbours (at most 3, 6 MB each decoded).
 
 use std::path::{Path, PathBuf};
+
+mod edit;
+mod paint;
+mod trim;
 
 use super::gallery::{MAX_QUEUED, MAX_SELECTED};
 use super::*;
@@ -35,6 +40,17 @@ struct Entry {
     big: Option<Arc<Image>>,
     /// Nothing could be drawn for it; the file still sends.
     failed: bool,
+    /// `path` is an edited copy: the original and what was done to it.
+    edited: Option<(PathBuf, paint::Edits)>,
+    /// `path` is a trimmed copy: the original and the stretch kept, in seconds.
+    cut: Option<(PathBuf, [f64; 2])>,
+}
+
+impl Entry {
+    /// `path` is a copy made here, which goes when the item does without being sent.
+    fn copied(&self) -> bool {
+        self.edited.is_some() || self.cut.is_some()
+    }
 }
 
 pub(super) struct Preview {
@@ -50,6 +66,11 @@ pub(super) struct Preview {
     /// Where the stage is, sideways, once no finger holds it: it glides home from a let-go pan.
     slide: motion::Glide,
     field: Entity<TextareaState>,
+    editor: Option<edit::Editor>,
+    trimmer: Option<trim::Trimmer>,
+    /// When a finger last touched the editor or the trim bar: the mouse events a tap makes after
+    /// it are not a second stroke.
+    touched: Option<Instant>,
     _subs: Vec<Subscription>,
 }
 
@@ -81,6 +102,9 @@ impl Preview {
             pan: None,
             slide: motion::Glide::new(motion::SETTLE.0, motion::SETTLE.1, 0.5, 0.),
             field,
+            editor: None,
+            trimmer: None,
+            touched: None,
             _subs: subs,
         }
     }
@@ -192,7 +216,7 @@ impl BeeperApp {
             let video = is_media(&path) == Some(true);
             // A document has no picture to draw; its name stands in.
             let failed = is_media(&path).is_none();
-            p.entries.push(Entry { id: p.next_id, path, video, caption: String::new(), strip: None, big: None, failed });
+            p.entries.push(Entry { id: p.next_id, path, video, caption: String::new(), strip: None, big: None, failed, edited: None, cut: None });
         }
         self.pump_preview(cx);
         cx.notify();
@@ -320,9 +344,13 @@ impl BeeperApp {
             return;
         }
         let gone = p.entries.remove(p.cur);
+        if gone.copied() {
+            self.drop_copy(&gone.path, cx);
+        }
         for image in [gone.strip, gone.big].into_iter().flatten() {
             self.released.push(image, cx);
         }
+        let p = &mut self.preview;
         if p.entries.is_empty() {
             return self.close_preview(true, window, cx);
         }
@@ -342,12 +370,19 @@ impl BeeperApp {
         p.pan = None;
         p.slide.set(0.);
         let reply = p.reply_to.take();
-        for entry in p.entries.drain(..) {
+        let entries = std::mem::take(&mut p.entries);
+        let field = p.field.clone();
+        for entry in entries {
+            if entry.copied() {
+                self.drop_copy(&entry.path, cx);
+            }
             for image in [entry.strip, entry.big].into_iter().flatten() {
                 self.released.push(image, cx);
             }
         }
-        p.field.update(cx, |f, cx| f.set_value("", window, cx));
+        self.close_editor(cx);
+        self.preview.trimmer = None;
+        field.update(cx, |f, cx| f.set_value("", window, cx));
         if restore_reply && let Some(id) = reply {
             self.compose = Compose::Reply(id);
         }
@@ -393,6 +428,10 @@ impl BeeperApp {
             .iter()
             .map(|e| Cmd::AttachMedia { room: room.clone(), path: e.path.clone(), reply_to: reply_to.take(), caption: e.caption.clone(), hd })
             .collect();
+        // The edited copies go with the send, which deletes them.
+        for e in &mut p.entries {
+            (e.edited, e.cut) = (None, None);
+        }
         self.uploads += cmds.len();
         self.attach_queue.extend(cmds);
         self.close_preview(false, window, cx);
@@ -401,6 +440,12 @@ impl BeeperApp {
     }
 
     pub(super) fn render_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.preview.editor.is_some() {
+            return self.render_editor(window, cx);
+        }
+        if self.preview.trimmer.is_some() {
+            return self.render_trim(cx);
+        }
         let live = self.preview.open && !tray();
         let shown = Presence::new("preview", live).transition(motion::enter()).sample(window, cx);
         if !live {
@@ -420,6 +465,8 @@ impl BeeperApp {
         let entry = pv.entries.get(pv.cur)?;
         let any_photo = pv.entries.iter().any(|e| !e.video);
         let hd = pv.hd;
+        let edit_cur = can_edit(entry);
+        let trim_cur = can_trim(entry);
 
         let bar = h_flex()
             .h(px(TAP))
@@ -467,12 +514,33 @@ impl BeeperApp {
             .child(page(entry, shift, width, p))
             .when_some(pv.entries.get(pv.cur + 1).filter(|_| shift < 0.), |el, e| el.child(page(e, shift + width + PAGE_GAP, width, p)))
             .child(
-                div().absolute().top(px(4.)).right(px(GUTTER - 10.)).child(
-                    round_button("preview-remove", IconName::Trash, cx)
-                        .bg(gpui_kit::black().opacity(0.5))
-                        .text_color(gpui_kit::white())
-                        .on_click(cx.listener(|this, _, window, cx| this.remove_item(window, cx))),
-                ),
+                h_flex()
+                    .absolute()
+                    .top(px(4.))
+                    .right(px(GUTTER - 10.))
+                    .gap(px(8.))
+                    .when(trim_cur, |el| {
+                        el.child(
+                            round_button("preview-trim", IconName::Scissors, cx)
+                                .bg(gpui_kit::black().opacity(0.5))
+                                .text_color(gpui_kit::white())
+                                .on_click(cx.listener(|this, _, _, cx| this.open_trim(this.preview.cur, cx))),
+                        )
+                    })
+                    .when(edit_cur, |el| {
+                        el.child(
+                            round_button("preview-edit", IconName::Pencil, cx)
+                                .bg(gpui_kit::black().opacity(0.5))
+                                .text_color(gpui_kit::white())
+                                .on_click(cx.listener(|this, _, window, cx| this.open_editor(this.preview.cur, window, cx))),
+                        )
+                    })
+                    .child(
+                        round_button("preview-remove", IconName::Trash, cx)
+                            .bg(gpui_kit::black().opacity(0.5))
+                            .text_color(gpui_kit::white())
+                            .on_click(cx.listener(|this, _, window, cx| this.remove_item(window, cx))),
+                    ),
             );
 
         let strip = (count > 1).then(|| {
@@ -615,6 +683,34 @@ impl BeeperApp {
                                 .child(Icon::new(IconName::X).size_3p5()),
                         ),
                 )
+                .when(can_edit(e) || can_trim(e), |el| {
+                    let video = e.video;
+                    el.child(
+                        div()
+                            .id(("tray-edit", e.id))
+                            .absolute()
+                            .bottom_0()
+                            .left_0()
+                            .size(px(36.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, window, cx| if video { this.open_trim(ix, cx) } else { this.open_editor(ix, window, cx) }))
+                            .child(
+                                div()
+                                    .size(px(24.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(gpui_kit::black().opacity(0.6))
+                                    .text_color(gpui_kit::white())
+                                    .hover(|el| el.bg(gpui_kit::black().opacity(0.8)))
+                                    .child(Icon::new(if video { IconName::Scissors } else { IconName::Pencil }).size_3p5()),
+                            ),
+                    )
+                })
         });
         Some(
             div()
@@ -660,6 +756,15 @@ impl BeeperApp {
                 .into_any_element(),
         )
     }
+}
+
+/// A photo the editor can take, once it has been drawn.
+fn can_edit(entry: &Entry) -> bool {
+    !entry.video && !entry.failed && entry.strip.is_some() && edit::editable(entry.edited.as_ref().map_or(&entry.path, |(source, _)| source))
+}
+
+fn can_trim(entry: &Entry) -> bool {
+    entry.video && trim::trimmable(entry.cut.as_ref().map_or(&entry.path, |(source, _)| source))
 }
 
 /// One item on the stage, `x` from its left edge.

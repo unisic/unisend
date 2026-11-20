@@ -1,6 +1,6 @@
 //! Pictures prepared for sending and for the preview before it: orientation applied, metadata
-//! gone (a re-encode carries none), long side bounded. One full picture is decoded at a time by
-//! whoever calls these.
+//! gone (a re-encode carries none), long side bounded. One full picture is decoded at a time:
+//! each decode of a whole file holds `full_picture` while the picture lives.
 
 use std::io::Cursor;
 use std::path::Path;
@@ -10,7 +10,7 @@ use image::{DynamicImage, ImageDecoder as _, ImageReader, codecs::jpeg::JpegEnco
 
 /// Longest side of a picture sent without HD.
 pub const SEND_PX: u32 = 2048;
-const SEND_QUALITY: u8 = 85;
+pub const SEND_QUALITY: u8 = 85;
 /// Longest side of the picture the preview shows large.
 pub const PREVIEW_PX: u32 = 1280;
 /// Longest side of a filmstrip thumbnail.
@@ -33,7 +33,16 @@ pub fn recodable(mime: &mime_guess::mime::Mime) -> bool {
 /// Longest side of the thumbnail sent with a picture or a video.
 pub const THUMB_PX: u32 = 800;
 
-fn open(path: &Path) -> Result<DynamicImage> {
+static FULL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Held while a whole picture is decoded and alive: the preview, a send and the editor each
+/// decode one, and this keeps them to one at a time.
+pub fn full_picture() -> std::sync::MutexGuard<'static, ()> {
+    FULL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The file decoded upright. Callers hold `full_picture`.
+pub fn open(path: &Path) -> Result<DynamicImage> {
     upright(ImageReader::open(path)?)
 }
 
@@ -63,6 +72,7 @@ fn encode(picture: &DynamicImage, quality: u8) -> Result<(Vec<u8>, &'static str)
 
 /// The file as sent without HD: at most `SEND_PX` on the long side, upright, without metadata.
 pub fn downscale(path: &Path) -> Result<Prepared> {
+    let _one = full_picture();
     let picture = fit(open(path)?, SEND_PX, FilterType::Lanczos3);
     let (bytes, ext) = encode(&picture, SEND_QUALITY)?;
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "image".to_owned());
@@ -78,6 +88,7 @@ pub fn downscale(path: &Path) -> Result<Prepared> {
 /// The thumbnail other clients show before fetching `bytes` (a picture or a video still), upright
 /// and at most `THUMB_PX` on the long side. `None` when the picture is no larger than that.
 pub fn thumbnail(bytes: &[u8]) -> Result<Option<Prepared>> {
+    let _one = full_picture();
     let picture = upright(ImageReader::new(Cursor::new(bytes)))?;
     if picture.width().max(picture.height()) <= THUMB_PX {
         return Ok(None);
@@ -93,8 +104,16 @@ pub fn thumbnail(bytes: &[u8]) -> Result<Option<Prepared>> {
     }))
 }
 
+/// `picture` as JPEG at the quality pictures are sent with, without metadata.
+pub fn jpeg(picture: &image::RgbImage) -> Result<Vec<u8>> {
+    let mut out = Cursor::new(Vec::new());
+    JpegEncoder::new_with_quality(&mut out, SEND_QUALITY).encode_image(picture)?;
+    Ok(out.into_inner())
+}
+
 /// A filmstrip thumbnail, and when `large` the picture for the preview: both encoded, from one decode.
 pub fn preview(path: &Path, large: bool) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+    let _one = full_picture();
     let picture = open(path)?;
     if large {
         let big = fit(picture, PREVIEW_PX, FilterType::Triangle);

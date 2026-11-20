@@ -18,6 +18,7 @@ N impossible over Matrix or bridges.
 | Formatting (bold, code, spoiler) | Y | P | N | N | `backend/rich.rs`, `ui/rich.rs`; `\|\|spoiler\|\|` sent, covered until tapped | Y (HTML) |
 | Threads | N | N | N | P | missing (`m.thread`) | Y natively, bridges flatten |
 | Photos, video, files | Y | Y | Y | Y | `ui/gallery.rs`, `ui/viewer.rs`, `ui/video.rs` | Y |
+| Edit photo, trim video before sending | Y | Y | Y | P | `ui/caption/edit.rs`, `ui/caption/trim.rs`; face blur Android only, trim Android and Linux | Y |
 | Media gallery per chat | Y | Y | P | Y | `ui/info.rs` (Media, Links, Files) | Y |
 | Voice notes | Y | Y | Y | Y | `ui/voice.rs`, `backend/voice.rs`; not recorded on desktop | Y |
 | Stickers (send, packs) | Y | Y | Y | Y | `ui/stickers.rs`, `backend/stickers.rs`: Matrix image packs of the account and its rooms; none bought or downloaded | B (`m.sticker`) |

@@ -49,3 +49,7 @@ atlas tile until the window closes; only `App::drop_image` frees it, and that ne
 `RenderImage`, which `Image::get_render_image` would decode again if the asset is not loaded.
 Change, marked `murmur patch`: `App::has_asset`, `ImageSource::is_asset_cached` and
 `Image::is_asset_cached` are no longer test-only, so the app asks first and decodes nothing.
+
+Glyphs drawn into a picture: the photo editor writes its text into the JPEG it sends, with the
+same fonts and emoji the window draws. Change, marked `murmur patch`, in `src/text_system.rs`:
+`TextSystem::raster_bounds` and `TextSystem::rasterize_glyph` are public (were `pub(crate)`).

@@ -71,6 +71,8 @@ Plain on purpose, short-lived:
 - `notify/`: a chat's picture for a notification, deleted as soon as the notification has it.
 - `cache/voice`, `cache/camera`, `cache/outgoing`, shared-in copies: the user's own recordings,
   photos and picked files on the way out; deleted after sending or when stale.
+- `pasted/`: pasted pictures, edited photos and trimmed videos waiting to send; each is deleted
+  after the send or when its item is removed, and the whole folder at start.
 - Saved to gallery (`Pictures/Unisend`): the user asked for a public copy.
 
 Backup and transfer: `android:allowBackup="false"`, and `res/xml/data_extraction_rules.xml`

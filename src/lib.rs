@@ -103,7 +103,12 @@ gpui_kit::assets::icon_assets!(
         Circle,
         CircleCheck,
         CircleAlert,
-        Merge
+        Merge,
+        Crop,
+        Type,
+        Droplets,
+        Undo2,
+        Scissors
     ]
 );
 

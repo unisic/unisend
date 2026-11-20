@@ -559,7 +559,8 @@ impl TextSystem {
     }
 
     /// Get the rasterized size and location of a specific, rendered glyph.
-    pub(crate) fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+    // murmur patch: public for glyphs drawn into a picture, see vendor/gpui-pre/PATCHES.md
+    pub fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         let raster_bounds = self.raster_bounds.upgradable_read();
         if let Some(bounds) = raster_bounds.get(params) {
             Ok(*bounds)
@@ -571,7 +572,9 @@ impl TextSystem {
         }
     }
 
-    pub(crate) fn rasterize_glyph(
+    /// Rasterize a glyph: an alpha mask, or BGRA for a colour glyph.
+    // murmur patch: public for glyphs drawn into a picture, see vendor/gpui-pre/PATCHES.md
+    pub fn rasterize_glyph(
         &self,
         params: &RenderGlyphParams,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
