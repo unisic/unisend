@@ -333,6 +333,11 @@ impl BeeperApp {
     }
 
     /// The leave or delete dialog is asking about this chat, or waiting to.
+    /// A dialog asks something; the keyboard is its.
+    pub(super) fn confirm_open(&self) -> bool {
+        self.people.confirm.is_some()
+    }
+
     pub(super) fn confirming(&self, room: &OwnedRoomId) -> bool {
         self.people.confirm.as_ref().is_some_and(|c| matches!(&c.what, Confirming::Leave { room: r, .. } if r == room))
     }

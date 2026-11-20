@@ -261,6 +261,8 @@ pub struct BeeperApp {
     matrix: signin::Form,
     recovery: Entity<InputState>,
     composer: Entity<TextareaState>,
+    /// The last frame drew the open chat's composer: typing with nothing focused goes there.
+    composer_drawn: bool,
     need_recovery: bool,
     /// The chat list's unlock row shows its field; `recovery_later` puts the row away until the next start.
     recovery_open: bool,
@@ -691,6 +693,7 @@ impl BeeperApp {
             matrix,
             recovery,
             composer,
+            composer_drawn: false,
             need_recovery: false,
             recovery_open: false,
             recovery_later: false,
@@ -3227,6 +3230,7 @@ impl BeeperApp {
         let drop_tint = p.surface;
         let pending = self.render_pending_bar(cx).or_else(|| self.render_blocked_bar(cx));
         let composing = pending.is_none();
+        self.composer_drawn = composing;
         v_flex()
             .size_full()
             .relative()
@@ -5060,10 +5064,28 @@ impl Render for BeeperApp {
 }
 
 impl BeeperApp {
+    /// On a desktop, as Signal Desktop has it: a character typed while no field has the keyboard
+    /// starts the open chat's message, without a click into the composer first.
+    fn type_into_composer(&mut self, key: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let m = &key.modifiers;
+        let free = self.composer_drawn && self.focus.is_focused(window) && self.viewer.is_none() && self.panel.is_none() && !self.confirm_open();
+        // AltGr types Polish letters, so only Ctrl and the platform key mark a shortcut.
+        let Some(text) = key.key_char.as_deref().filter(|t| !t.is_empty() && !t.chars().any(char::is_control)) else { return false };
+        if gpui_kit::is_mobile() || !free || m.control || m.platform {
+            return false;
+        }
+        self.composer.update(cx, |c, cx| {
+            c.focus(window, cx);
+            c.insert(text, window, cx);
+        });
+        true
+    }
+
     fn render_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         let (top, bottom) = crate::insets();
         self.apply_draft(window, cx);
+        self.composer_drawn = false;
         if window.focused(cx).is_none() {
             window.focus(&self.focus, cx);
         }
@@ -5075,7 +5097,7 @@ impl BeeperApp {
                 if event.keystroke.key == "tab" && !gpui_kit::is_mobile() && !(m.control || m.alt || m.platform) {
                     if m.shift { window.focus_prev(cx) } else { window.focus_next(cx) }
                     cx.stop_propagation();
-                } else if this.pad_keystroke(&event.keystroke.key, cx) || (event.keystroke.key == "escape" && this.go_back(window, cx)) || this.viewer_key(&event.keystroke.key, cx) {
+                } else if this.pad_keystroke(&event.keystroke.key, cx) || (event.keystroke.key == "escape" && this.go_back(window, cx)) || this.viewer_key(&event.keystroke.key, cx) || this.type_into_composer(&event.keystroke, window, cx) {
                     cx.stop_propagation();
                 }
             }))
