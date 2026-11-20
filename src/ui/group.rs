@@ -16,6 +16,8 @@ const FACE: f32 = 56.;
 pub(super) enum Page {
     Edit { name: Entity<InputState>, topic: Entity<InputState>, _subs: [Subscription; 2] },
     Add { query: Entity<InputState>, people: Option<Vec<(OwnedUserId, String)>>, added: Vec<OwnedUserId>, _sub: Subscription },
+    /// A person's nickname and note (`nick.rs`).
+    Nick(Box<super::nick::Editing>),
 }
 
 /// The member whose sheet is up: who, how their network knows them, and whether the sheet asks to
@@ -108,7 +110,7 @@ impl BeeperApp {
                 v_flex()
                     .flex_1()
                     .min_w_0()
-                    .child(div().text_size(fs(18.)).line_height(fs(24.)).font_weight(FontWeight::SEMIBOLD).truncate().child(m.name.clone()))
+                    .child(div().text_size(fs(18.)).line_height(fs(24.)).font_weight(FontWeight::SEMIBOLD).truncate().child(self.shown_name(&m.id, &m.name)))
                     .when(!line.is_empty(), |el| el.child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.faint).truncate().child(line))),
             );
         let mut rows = vec![head];
@@ -121,8 +123,9 @@ impl BeeperApp {
         let remove = (details.can.remove && m.removable).then(|| sheet_row("member-remove", IconName::UserMinus, t!("Remove from group"), p.negative, window, cx));
         let network = self.rooms.iter().find(|r| r.id == room).and_then(|r| r.network.clone());
         let block = (self.user.as_ref() != Some(&m.id)).then(|| self.block_row(m.id.clone(), m.name.clone(), network, None, live, window, cx)).flatten();
+        let nickname = self.nickname_row(m.id.clone(), m.name.clone(), window, cx);
         if !live {
-            rows.extend([message, mention]);
+            rows.extend([message, mention, nickname]);
             rows.extend(block);
             rows.extend(remove);
             return Some((2, rows));
@@ -138,6 +141,7 @@ impl BeeperApp {
             this.close_info(cx);
             this.mention_member(user.clone(), name.clone(), window, cx);
         })));
+        rows.push(nickname);
         rows.extend(block);
         rows.extend(remove.map(|row| {
             row.on_click(cx.listener(|this, _, _, cx| {
@@ -258,10 +262,14 @@ impl BeeperApp {
         match self.info.page.as_ref()? {
             Page::Edit { .. } => Some(t!("Edit group")),
             Page::Add { .. } => Some(t!("Add members")),
+            Page::Nick(_) => Some(t!("Nickname")),
         }
     }
 
     pub(super) fn render_group_page(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(page) = self.render_nickname_page(cx) {
+            return Some(page);
+        }
         let p = Palette::of(cx);
         let d = self.info.details.clone()?;
         let room = self.info.room.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id)).cloned()?;
@@ -287,6 +295,7 @@ impl BeeperApp {
                     el.child(h_flex().child(Button::new("group-save").primary().label(t!("Save")).on_click(cx.listener(|this, _, _, cx| this.save_group(cx)))))
                 })
                 .into_any_element(),
+            Page::Nick(_) => return None,
             Page::Add { query, people, added, .. } => {
                 let typed = query.read(cx).value().trim().to_owned();
                 let needle = typed.to_lowercase();

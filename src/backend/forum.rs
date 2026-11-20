@@ -115,6 +115,7 @@ mod tests {
             dm: false,
             note: false,
             net_blocked: false,
+            peer: None,
             pinned: false,
             low_priority: false,
             muted,

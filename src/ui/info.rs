@@ -527,6 +527,14 @@ impl BeeperApp {
                         .on_click(move |_, _, cx| crate::open_link(cx, &url))
                 });
                 let block = summary.as_ref().filter(|r| r.dm).zip(details.as_ref().and_then(|d| d.peer.clone())).and_then(|(r, peer)| self.block_row(peer, r.name.clone(), r.network.clone(), Some(r.id.clone()), true, window, cx)).map(|row| row.px(px(GAP)));
+                // A one-to-one chat's person: the note about them, and the row that sets it and a nickname.
+                let person = summary.as_ref().filter(|r| r.dm && !r.note).zip(details.as_ref().and_then(|d| d.peer.clone()));
+                let note = person.as_ref().and_then(|(_, peer)| self.about(peer)).map(|a| a.note.clone()).filter(|n| !n.is_empty()).map(|n| fact(IconName::StickyNote, n.into()));
+                // Its own name, under the nickname that titles the chat.
+                let nickname = person.map(|(r, peer)| {
+                    let name = self.people_real_name(&r.id).unwrap_or(&r.name).to_owned();
+                    self.nickname_row(peer, name, window, cx).px(px(GAP))
+                });
                 let room = summary.map(|r| r.id);
                 let timer = room.as_ref().and_then(|id| self.disappear_entry(id, true, cx)).map(|row| row.px(px(GAP)));
                 let edit = details.as_ref().filter(|d| d.can.edit()).map(|_| {
@@ -543,8 +551,10 @@ impl BeeperApp {
                             .rounded(px(RADIUS))
                             .bg(p.surface)
                             .children(topic.map(|t| fact(IconName::Info, t.into())))
+                            .children(note)
                             .child(fact(icon, text.into()))
                             .children(open)
+                            .children(nickname)
                             .children(edit)
                             .children(timer)
                             .children(block)
@@ -588,7 +598,7 @@ impl BeeperApp {
                     .px(px(GUTTER))
                     .gap(px(12.))
                     .child(avatar(&m.name, self.faces.get(&m.id), MEMBER_AVATAR, cx))
-                    .child(div().flex_1().min_w_0().text_size(fs(16.)).truncate().child(if me { t!("You").to_owned() } else { m.name.clone() }))
+                    .child(div().flex_1().min_w_0().text_size(fs(16.)).truncate().child(if me { t!("You").to_owned() } else { self.shown_name(&m.id, &m.name) }))
                     .children(role_label(m.role).map(|r| div().flex_none().text_size(fs(12.)).text_color(p.faint).child(r)))
                     .into_any_element()
             }

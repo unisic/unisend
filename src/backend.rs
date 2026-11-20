@@ -438,6 +438,9 @@ pub struct RoomSummary {
     /// The bridge blocked the other person of this one-to-one chat on the network (`block.rs`).
     #[serde(default)]
     pub net_blocked: bool,
+    /// The other person of a one-to-one chat.
+    #[serde(default)]
+    pub peer: Option<OwnedUserId>,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -2768,6 +2771,7 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>, live: bool) -> Room
         read_by: Vec::new(),
         note: false,
         net_blocked: false,
+        peer: None,
     }
 }
 
@@ -3109,6 +3113,7 @@ async fn summarize(
         forum,
         dm: peer.is_some() || note,
         note,
+        peer: peer.clone(),
         preview: current(seen.preview),
         preview_id: seen.preview_id,
         unread,
@@ -3366,6 +3371,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 read_by: Vec::new(),
                 note: false,
                 net_blocked: false,
+                peer: None,
             };
             let mut summary = summarize(&room, &notif, peer, seen).await;
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);

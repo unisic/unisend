@@ -38,6 +38,7 @@ Not protected:
 | `session.enc` | access token and device | sealed |
 | `rooms.enc` | chat list with names and message previews | sealed |
 | `drafts.enc` | unsent text per chat | sealed |
+| `people.enc` | nicknames and notes the user gave people (`ui/nick.rs`) | sealed |
 | `search.enc` | message search index (FTS5), kept in memory, saved every 5 minutes while it changes, at most 24 MiB | sealed |
 | `rooms-lang.txt`, `settings.json`, `emoji-recents.json`, `hidden-<account>.txt` (ids of hidden messages), `wallpaper.jpg`, `klipy-id`, app PIN hash, emoji font | no chat content | plain |
 

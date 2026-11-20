@@ -58,6 +58,7 @@ N impossible over Matrix or bridges.
 | Hotkeys, command bar | P | Y | P | P | missing | Y |
 | Group admin (roles, rename, members) | Y | Y | P | Y | `backend/group.rs`, `ui/group.rs` | B |
 | Invite links | Y | Y | Y | Y | missing | B |
+| Nicknames and notes on contacts | Y | N | P | P | `ui/nick.rs`, on this device | Y (local) |
 | Updates outside a store | N | N | N | N | `backend/update.rs` (Android) | Y |
 
 ## What bridges make impossible

@@ -49,6 +49,7 @@ mod profile;
 mod keys;
 mod linkdraft;
 mod block;
+mod nick;
 mod menu;
 mod navigate;
 pub(crate) mod motion;
@@ -438,6 +439,8 @@ pub struct BeeperApp {
     loading: bool,
     timeline: ListState,
     drafts: navigate::Drafts,
+    /// Nicknames and notes about people, on this device only.
+    nicks: nick::People,
     place: navigate::Place,
     rooms_scroll: UniformListScrollHandle,
     /// Kept here so the settings return to where they were after the lock keypad replaces them.
@@ -654,6 +657,7 @@ impl BeeperApp {
 
         // Plain until the backend says otherwise: a sealed install has no plain drafts to find.
         let drafts = navigate::Drafts::load(&crate::accounts::dir(&dir, accounts.active()), crate::vault::Seal::Plain);
+        let nicks = nick::People::load(&crate::accounts::dir(&dir, accounts.active()), crate::vault::Seal::Plain);
         Self {
             cmd,
             screen: Screen::Starting,
@@ -785,6 +789,7 @@ impl BeeperApp {
             settings_pages: Vec::new(),
             page_scroll: ScrollHandle::new(),
             drafts,
+            nicks,
             place: navigate::Place::default(),
             avatars: HashMap::new(),
             avatar_seen: HashMap::new(),
@@ -836,6 +841,7 @@ impl BeeperApp {
                     }
                     // The backend removed the file; what is in memory must not write it back.
                     self.drafts = navigate::Drafts::load(&self.account_dir(), crate::vault::Seal::Plain);
+                    self.nicks = nick::People::load(&self.account_dir(), crate::vault::Seal::Plain);
                     self.unencrypted = false;
                 }
                 (self.panel, self.networks, self.user) = (None, None, None);
@@ -859,7 +865,9 @@ impl BeeperApp {
                 self.sync_stopped = false;
                 self.unencrypted = cfg!(target_os = "android") && crate::vault::layout(&self.account_dir()) == crate::vault::Layout::Legacy;
                 if seal.sealed() {
-                    self.drafts = navigate::Drafts::load(&self.account_dir(), seal);
+                    self.drafts = navigate::Drafts::load(&self.account_dir(), seal.clone());
+                    self.nicks = nick::People::load(&self.account_dir(), seal);
+                    self.nicks.rename(&mut self.rooms);
                 }
                 crate::background(true);
                 crate::stay_connected(self.settings.stay_connected);
@@ -1185,7 +1193,11 @@ impl BeeperApp {
     }
 
     /// Takes chats new or changed into the list, which moves its rows into their new places.
-    fn merge_rooms(&mut self, changed: Vec<RoomSummary>, cx: &mut Context<Self>) {
+    fn merge_rooms(&mut self, mut changed: Vec<RoomSummary>, cx: &mut Context<Self>) {
+        for r in &changed {
+            self.nicks.arrived(&r.id);
+        }
+        self.nicks.rename(&mut changed);
         let calm = !slide::Fly::quiet(changed.len()) && !cx.reduce_motion() && !self.rooms.is_empty() && self.list_at_top() && !self.finger_down();
         let before = calm.then(|| slide::snapshot(&self.shown, &self.rooms));
         let first = self.rooms.is_empty();
@@ -2928,7 +2940,7 @@ impl BeeperApp {
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(p.muted)
                                 .truncate()
-                                .child(m.sender.clone()),
+                                .child(this.shown_name(&m.from, &m.sender)),
                         )
                     })
                     .on_scroll_wheel(cx.listener({
@@ -5133,6 +5145,7 @@ mod tests {
             dm: false,
             note: false,
             net_blocked: false,
+            peer: None,
             pinned: false,
             low_priority: false,
             muted: false,

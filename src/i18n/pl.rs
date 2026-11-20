@@ -802,6 +802,12 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Unlocks encrypted messages on another device. Copy it here, paste it there.", "Odblokowuje zaszyfrowane wiadomości na innym urządzeniu. Skopiuj go tutaj, wklej tam."),
     ("Blocked on {network}", "Zablokowano w {network}"),
     ("{network} blocks {name} for you: they can no longer write to you there. They are not told.", "{network} zablokuje dla Ciebie {name}: nie będzie już mógł(a) do Ciebie tam pisać. Ta osoba nie dostanie powiadomienia."),
+    ("Add nickname and note", "Dodaj pseudonim i notatkę"),
+    ("Edit nickname and note", "Zmień pseudonim i notatkę"),
+    ("Nickname", "Pseudonim"),
+    ("Note", "Notatka"),
+    ("{n} characters left", "Zostało znaków: {n}"),
+    ("Nicknames and notes stay on this device. Only you see them; the person and the server do not.", "Pseudonimy i notatki zostają na tym urządzeniu. Widzisz je tylko Ty, ani ta osoba, ani serwer."),
 ];
 
 /// Keyed by the English singular; the forms are one (1), few (2-4, 22-24) and many (0, 5-21, 25...).
