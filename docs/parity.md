@@ -30,7 +30,7 @@ is not started.
 | Archive / unarchive, new message unarchives | done | same; rule mirrors Desktop's `isRoomDone` |
 | Pin / unpin, pins on top | part | `m.favourite` tag; manual order (`com.beeper.favourites_order`) todo |
 | Mute / unmute | done | for 1 hour, 8 hours, 1 day, 7 days or always, written as Beeper's apps write a mute: a room push rule without notify, so mentions still notify (the sheet says so in groups). An override rule without notify (Element's mute) also reads as muted; unmute removes both. Matrix keeps no end: a timed mute's end is kept in `settings.json` (at most 256) and one timer lifts it, rechecked once synced and when the window returns. Chat info says "Muted until 14:30" |
-| Mark read / unread | done | `m.marked_unread`, `m.read.private` receipt |
+| Mark read / unread | done | `m.marked_unread`, `m.read.private` receipt; the open chat is read as far as it has been on screen (as Signal), not all at once on opening: the receipt and `m.fully_read` move to the newest event shown, never back. Mark as unread also in the chat's own menu, which then closes the chat |
 | Unread counts | done | server notification counts |
 | Search chats by name | part | names, and a Messages section with hits from every chat (local index, below). Beeper also searches contacts and networks |
 | Unread filter | done | local |

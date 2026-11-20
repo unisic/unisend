@@ -350,6 +350,7 @@ impl BeeperApp {
     }
 
     fn info_thumb(&mut self, key: String, media: &Media) {
+        self.drew_thumb(&key);
         if self.asked.contains(&key) || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
             return;
         }
@@ -468,7 +469,7 @@ impl BeeperApp {
             }
             Row::Actions => {
                 let Some(room) = summary else { return div().into_any_element() };
-                // No read or unread here: the chat is open, so it is read; the list's sheet and swipe mark it.
+                // No read or unread here: the chat's menu, the list's sheet and swipe mark it.
                 let [_, pin, mute, archive, _] = chat_actions(&room);
                 // A muted chat's tile says how: "Muted until 14:30"; a tap unmutes it.
                 let mute_state = self.mute_state(&room);

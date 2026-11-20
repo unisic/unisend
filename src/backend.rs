@@ -251,6 +251,9 @@ pub enum Cmd {
     EmojiSet { set: usize, to: PathBuf },
     /// The chat of the open merged chat that the composer sends to: (merged chat, chat).
     Target(OwnedRoomId, OwnedRoomId),
+    /// The user has had the open chat on screen down to this event, as Signal reads: the chat (or
+    /// a chat of the open merged chat) is read up to it. A receipt that would go back is dropped.
+    Seen(OwnedRoomId, OwnedEventId),
 }
 
 pub enum Ev {
@@ -1554,12 +1557,12 @@ impl State {
                     return Ok(());
                 }
                 if union::is_union(&room) {
-                    let merged = union::open(self.client()?, &room, &self.ev, self.incognito.clone()).await?;
+                    let merged = union::open(self.client()?, &room, &self.ev).await?;
                     self.older_merged(&merged, true);
                     self.merged = Some(merged);
                     return Ok(());
                 }
-                let open = timeline::open(&room, &self.ev, self.incognito.clone()).await?;
+                let open = timeline::open(&room, &self.ev).await?;
                 self.older(&open, true);
                 self.open = Some(open);
             }
@@ -1570,6 +1573,17 @@ impl State {
                 }
                 if let Some(merged) = &self.merged {
                     self.older_merged(merged, false);
+                }
+            }
+            Cmd::Seen(room, event) => {
+                let lanes = self.merged.iter().flat_map(|m| &m.lanes);
+                if let Some(open) = self.open.iter().chain(lanes).find(|o| o.room == room) {
+                    let (timeline, private) = (open.timeline.clone(), self.incognito.load(Ordering::Relaxed));
+                    tokio::spawn(async move {
+                        if let Err(e) = read_to(&timeline, event, private).await {
+                            log::warn!("mark read: {e:#}");
+                        }
+                    });
                 }
             }
             Cmd::Target(union, lane) => {
@@ -2193,7 +2207,7 @@ impl State {
     /// Asks for older messages in the background; the rows arrive as changes to the timeline. The
     /// first time, also until there is something to read: a page may hold nothing that is shown.
     fn older(&self, open: &timeline::Open, first: bool) {
-        let (timeline, room, ev, incognito) = (open.timeline.clone(), open.room.clone(), self.ev.clone(), self.incognito.clone());
+        let (timeline, room, ev) = (open.timeline.clone(), open.room.clone(), self.ev.clone());
         tokio::spawn(async move {
             let mut more = true;
             for _ in 0..if first { MAX_PAGES_PER_REQUEST } else { 1 } {
@@ -2208,17 +2222,15 @@ impl State {
                     break;
                 }
             }
+            // Read as far as it shows, by the UI's `Cmd::Seen`, not on opening.
             let _ = ev.send(Ev::Paged { room, more }).await;
-            if first && !crate::LOCKED.load(Ordering::Relaxed) && let Err(e) = mark_read(timeline.room(), timeline.latest_event_id().await, incognito.load(Ordering::Relaxed)).await {
-                log::warn!("mark read: {e:#}");
-            }
         });
     }
 
     /// `older` for each chat of the open merged chat; the merged chat has more while any chat has.
     fn older_merged(&self, merged: &union::Merged, first: bool) {
         let lanes: Vec<_> = merged.lanes.iter().map(|o| o.timeline.clone()).collect();
-        let (id, ev, incognito) = (merged.id.clone(), self.ev.clone(), self.incognito.clone());
+        let (id, ev) = (merged.id.clone(), self.ev.clone());
         tokio::spawn(async move {
             let mut more = false;
             for timeline in &lanes {
@@ -2236,9 +2248,6 @@ impl State {
                     }
                 }
                 more |= lane_more;
-                if first && !crate::LOCKED.load(Ordering::Relaxed) && let Err(e) = mark_read(timeline.room(), timeline.latest_event_id().await, incognito.load(Ordering::Relaxed)).await {
-                    log::warn!("mark read: {e:#}");
-                }
             }
             let _ = ev.send(Ev::Paged { room: id, more }).await;
         });
@@ -3036,6 +3045,24 @@ async fn mark_read(room: &Room, newest: Option<OwnedEventId>, private: bool) -> 
         let receipts = if private { receipts.private_read_receipt(id) } else { receipts.public_read_receipt(id) };
         room.send_multiple_receipts(receipts).await?;
     }
+    Ok(())
+}
+
+/// `mark_read` for the open chat, up to what the user has seen. The timeline sends a receipt only
+/// past the one it has, so scrolling back up never unreads; it clears the unread mark either way.
+async fn read_to(timeline: &matrix_sdk_ui::Timeline, id: OwnedEventId, private: bool) -> Result<()> {
+    let room = timeline.room();
+    if room.state() != RoomState::Joined {
+        return Ok(());
+    }
+    if request(room).await {
+        room.set_unread_flag(false).await?;
+        return Ok(());
+    }
+    let receipts = matrix_sdk::room::Receipts::new().fully_read_marker(id.clone());
+    let private = private || is_note(room).await;
+    let receipts = if private { receipts.private_read_receipt(id) } else { receipts.public_read_receipt(id) };
+    timeline.send_multiple_receipts(receipts).await?;
     Ok(())
 }
 

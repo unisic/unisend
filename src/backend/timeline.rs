@@ -5,10 +5,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
     time::Duration,
 };
 
@@ -40,7 +37,7 @@ use matrix_sdk_ui::timeline::{
 use tokio::sync::{broadcast, mpsc};
 
 use super::{
-    AbortOnDrop, act, deleted, undecrypted, utd, utd_because, Delivery, Ev, Kind, OwnRead, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview, mark_read,
+    AbortOnDrop, act, deleted, undecrypted, utd, utd_because, Delivery, Ev, Kind, OwnRead, MAX_KEY_FETCHES, Msg, Place, Poll, Quote, QuoteState, Reaction, content, display_name, link_preview,
     format, marks, bridge_names, other_person, plain, sticker, disappear, features,
 };
 use crate::i18n::t;
@@ -94,7 +91,7 @@ struct Viewer {
 
 /// Starts following a room: sends the rows it has now, then every change to them, and who is
 /// typing. While the window is in front, a message that arrives is marked read.
-pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<AtomicBool>) -> Result<Open> {
+pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>) -> Result<Open> {
     // A note to self reads like a direct chat: no "You created the group" line on top.
     let dm = other_person(room).await.is_some() || super::is_note(room).await;
     // Past this many people, who comes and goes is noise: Beeper draws the same line.
@@ -183,7 +180,6 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
                 };
                 batch.iter().cloned().for_each(|diff| diff.apply(&mut shown));
                 let timer_changed = std::mem::take(&mut first) || batch.iter().flat_map(touched).any(|item| sets_timer(item));
-                let arrived = batch.iter().any(|diff| matches!(diff, VectorDiff::PushBack { value } if from_someone_else(value)));
                 let quotes: Vec<OwnedEventId> =
                     batch.iter().flat_map(touched).filter_map(unknown_quote).filter(|id| asked.len() < MAX_QUOTES_FETCHED && asked.insert(id.clone())).collect();
                 let sessions: Vec<String> = batch.iter().flat_map(touched).filter_map(|item| locked(item)).filter(|s| !keyed.contains(s)).collect();
@@ -208,12 +204,6 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<Atom
                 };
                 if !sessions.is_empty() || !quotes.is_empty() {
                     let _ = lookups.send((sessions, quotes)).await;
-                }
-                if arrived && crate::FOREGROUND.load(Ordering::Relaxed) && !crate::LOCKED.load(Ordering::Relaxed) {
-                    let newest = timeline.latest_event_id().await;
-                    if let Err(e) = mark_read(timeline.room(), newest, incognito.load(Ordering::Relaxed)).await {
-                        log::warn!("mark read: {e:#}");
-                    }
                 }
             }
         }
@@ -319,10 +309,6 @@ fn touched(diff: &VectorDiff<Arc<TimelineItem>>) -> Vec<&Arc<TimelineItem>> {
 fn sets_timer(item: &TimelineItem) -> bool {
     item.as_event()
         .is_some_and(|event| matches!(event.content(), TimelineItemContent::OtherState(state) if state.content().event_type().to_string() == disappear::TIMER))
-}
-
-fn from_someone_else(item: &Arc<TimelineItem>) -> bool {
-    item.as_event().is_some_and(|event| event.is_remote_event() && !event.is_own())
 }
 
 /// The event of a reply whose original is not among the loaded messages and was not asked for.

@@ -7,7 +7,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, atomic::AtomicBool},
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -472,7 +472,7 @@ impl Merged {
 
 /// Opens every chat of the union on this device. Memory: one more copy of each chat's rows (the
 /// rows as sent are only keys); CPU: the merge walks all rows once per change, a few thousand at most.
-pub(super) async fn open(client: &Client, union: &Room, ev: &mpsc::Sender<Ev>, incognito: Arc<AtomicBool>) -> Result<Merged> {
+pub(super) async fn open(client: &Client, union: &Room, ev: &mpsc::Sender<Ev>) -> Result<Merged> {
     let rooms = members(client, union).await;
     let ids: Vec<OwnedRoomId> = rooms.iter().map(|r| r.room_id().to_owned()).collect();
     let merge = Arc::new(Mutex::new(Merge::new(ids.clone())));
@@ -480,7 +480,7 @@ pub(super) async fn open(client: &Client, union: &Room, ev: &mpsc::Sender<Ev>, i
     let task = tokio::spawn(follow(union.room_id().to_owned(), merge.clone(), rx, ev.clone()));
     let mut lanes = Vec::with_capacity(rooms.len());
     for room in &rooms {
-        lanes.push(timeline::open(room, &tx, incognito.clone()).await?);
+        lanes.push(timeline::open(room, &tx).await?);
     }
     Ok(Merged { id: union.room_id().to_owned(), lanes, target: ids.first().cloned(), merge, _task: AbortOnDrop(task) })
 }

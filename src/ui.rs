@@ -167,6 +167,10 @@ const BRIDGE_WAIT_MS: u64 = 2 * 60 * 1000;
 /// Inline thumbnails kept decoded; each is at most 2.6 MB of pixels, so about 50 MB of heap and as
 /// much GPU memory at most. A screen shows about 6; scrolling back reads the others from disk.
 const MAX_THUMBS: usize = 20;
+/// Kept past `MAX_THUMBS` while all of them are on screen (a tall media grid): memory as above, three times.
+const MAX_THUMBS_SHOWN: usize = 3 * MAX_THUMBS;
+/// A thumbnail drawn this recently counts as on screen.
+const THUMB_ON_SCREEN: Duration = Duration::from_secs(1);
 /// Room avatars kept, the least recently shown going first: 96 px, about 36 KB decoded each plus
 /// its atlas tile, so about 7 MB of heap and as much GPU memory.
 const MAX_AVATARS: usize = 200;
@@ -334,6 +338,9 @@ pub struct BeeperApp {
     /// Link previews whose GIF came past `MAX_MOVING_THUMBS`: asked for as stills.
     stills: HashSet<String>,
     thumb_order: VecDeque<String>,
+    /// When each kept thumbnail was last drawn: one on screen is never the one let go, else a grid
+    /// wider than `MAX_THUMBS` would drop and fetch its own pictures in a loop.
+    thumb_drawn: HashMap<String, Instant>,
     /// When a link's or a quote's picture landed, while it fades in; at most `MAX_THUMB_FADES`.
     thumb_at: HashMap<String, Instant>,
     /// Messages whose thumbnail was requested.
@@ -617,11 +624,8 @@ impl BeeperApp {
                 // Messages that came to the open chat while the window was away are read now that it
                 // is back (another chat opened here is read as it opens); the lock's screen reads them
                 // once passed.
-                if let Some(id) = this.open.clone().filter(|id| was_open.as_ref() == Some(id))
-                    && this.rooms.iter().any(|r| r.id == id && r.unread > 0)
-                    && !(this.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked())
-                {
-                    this.send(Cmd::Chat(id, ChatAction::Unread(false)), cx);
+                if this.open.as_ref().is_some_and(|id| was_open.as_ref() == Some(id)) {
+                    this.place.check_seen = true;
                 }
                 this.take_share(Some(window), cx);
                 this.publish_share_targets();
@@ -720,6 +724,7 @@ impl BeeperApp {
             stills: HashSet::new(),
             thumb_at: HashMap::new(),
             thumb_order: VecDeque::new(),
+            thumb_drawn: HashMap::new(),
             asked: HashSet::new(),
             viewer: None,
             fetching: HashSet::new(),
@@ -928,7 +933,13 @@ impl BeeperApp {
                     }
                     self.thumb_order.push_back(id);
                     while self.thumb_order.len() > MAX_THUMBS {
+                        // The screen's own pictures stay, up to `MAX_THUMBS_SHOWN`.
+                        let on_screen = self.thumb_order.front().and_then(|old| self.thumb_drawn.get(old)).is_some_and(|at| at.elapsed() < THUMB_ON_SCREEN);
+                        if on_screen && self.thumb_order.len() <= MAX_THUMBS_SHOWN {
+                            break;
+                        }
                         let Some(old) = self.thumb_order.pop_front() else { break };
+                        self.thumb_drawn.remove(&old);
                         // Forgetting the request lets it load again when scrolled back to.
                         self.asked.remove(&old);
                         if let Some(image) = self.thumbs.remove(&old) {
@@ -1036,6 +1047,7 @@ impl BeeperApp {
                     self.count_missed(len_before, new);
                 }
                 self.seek_unread();
+                self.place.check_seen = true;
                 self.name_readers();
                 if let Some((id, _)) = self.seek.as_ref().filter(|(id, _)| self.msgs.iter().any(|m| &m.id == id)) {
                     let id = id.clone();
@@ -1051,7 +1063,7 @@ impl BeeperApp {
                     return;
                 }
                 (self.loading, self.more) = (false, more);
-                self.place.seek_unread = false;
+                (self.place.seek_unread, self.place.check_seen) = (false, true);
                 if let Some((id, pages)) = self.seek.take() {
                     if self.msgs.iter().any(|m| m.id == id) {
                         self.reveal(&id, cx);
@@ -1461,6 +1473,20 @@ impl BeeperApp {
         cx.notify();
     }
 
+    /// A kept thumbnail is being drawn: it goes last in line to be let go.
+    pub(super) fn drew_thumb(&mut self, key: &str) {
+        if !self.thumbs.contains_key(key) {
+            return;
+        }
+        self.thumb_drawn.insert(key.to_owned(), Instant::now());
+        if let Some(ix) = self.thumb_order.iter().position(|k| k == key)
+            && ix + 1 != self.thumb_order.len()
+            && let Some(k) = self.thumb_order.remove(ix)
+        {
+            self.thumb_order.push_back(k);
+        }
+    }
+
     /// Requests the thumbnail of a message that is being drawn. Like `fetch_rows`, leaves half
     /// the command channel to user actions.
     fn want_thumb(&mut self, ix: usize) {
@@ -1480,6 +1506,7 @@ impl BeeperApp {
             .chain(quoted.map(|media| (quote_key(&m.id), media.clone())))
             .collect();
         for (key, media) in wanted {
+            self.drew_thumb(&key);
             if self.asked.contains(&key) || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
                 continue;
             }
@@ -1916,6 +1943,7 @@ impl BeeperApp {
         self.asked.clear();
         self.stills.clear();
         self.thumb_order.clear();
+        self.thumb_drawn.clear();
         self.thumb_at.clear();
         for (_, image) in self.thumbs.drain() {
             self.released.push(image, cx);
@@ -3882,6 +3910,17 @@ impl BeeperApp {
                 }))
             }));
         }
+        // Seen, not read: the chat goes back to the list marked, as one left for later.
+        rows.push(sheet_row("chat-unread", IconName::Mail, t!("Mark as unread"), p.text, window, cx).when(live, |row| {
+            let id = id.clone();
+            row.on_click(cx.listener(move |this, _, _, cx| {
+                close(this, cx);
+                if this.chat_action(id.clone(), ChatAction::Unread(true), false, cx) {
+                    if cfg!(target_os = "android") { this.pop_room(cx) } else { this.close_room(cx) }
+                }
+                cx.notify();
+            }))
+        }));
         // Above Archive, as Signal orders them.
         if let Some(row) = self.disappear_entry(&id, live, cx) {
             rows.insert(3, row);
@@ -4885,9 +4924,12 @@ impl Render for BeeperApp {
         // The chat left open behind the lock is read once the lock is passed, as an opening is.
         if crate::LOCKED.swap(locked, std::sync::atomic::Ordering::Relaxed)
             && !locked
-            && let Some(id) = self.open.clone()
+            && self.open.is_some()
         {
-            self.send(Cmd::Chat(id, ChatAction::Unread(false)), cx);
+            self.place.check_seen = true;
+        }
+        if !locked && self.open.is_some() && std::mem::take(&mut self.place.check_seen) {
+            cx.on_next_frame(window, |this, _, cx| this.mark_seen(cx));
         }
         if locked {
             let lock = self.render_lock(window, cx);

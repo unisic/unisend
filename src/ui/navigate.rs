@@ -2,6 +2,7 @@
 //! the scroll to the first unread one.
 
 use super::*;
+use matrix_sdk::ruma::OwnedEventId;
 
 /// Chats whose draft is kept, and the longest draft kept.
 const MAX_DRAFTS: usize = 200;
@@ -123,6 +124,10 @@ pub(super) struct Place {
     pub scrolled_at: Option<Instant>,
     /// A timer to hide the day is running; one at a time.
     pub pill_timer: bool,
+    /// The rows or the scroll changed: once the next frame is laid out, what is on screen is read.
+    pub check_seen: bool,
+    /// The newest event read by being on screen, per chat (one, or each of a merged chat's).
+    pub seen: Vec<(OwnedRoomId, String)>,
 }
 
 /// How long the floating day stays after scrolling stops.
@@ -190,7 +195,9 @@ impl BeeperApp {
         let list = &self.timeline;
         let view = list.viewport_bounds().size.height;
         let far = view > px(0.) && list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y > view;
-        if far != self.place.away {
+        let bounds_changed = far != self.place.away;
+        self.place.check_seen = true;
+        if bounds_changed {
             self.place.away = far;
             if !far {
                 self.place.missed = 0;
@@ -202,7 +209,53 @@ impl BeeperApp {
     pub(super) fn jump_to_newest(&mut self, cx: &mut Context<Self>) {
         self.timeline.scroll_to_end();
         (self.place.away, self.place.missed) = (false, 0);
+        self.place.check_seen = true;
         cx.notify();
+    }
+
+    /// Reads the open chat as far as it has been on screen, as Signal does: opening a chat at its
+    /// first unread message reads only what shows, the rest once scrolled to. Runs after a frame,
+    /// when the list knows where its rows are; a row not yet measured is not taken as seen.
+    /// CPU: walks the rows on screen, once per scroll or change.
+    pub(super) fn mark_seen(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.open.clone() else { return };
+        let hidden = !crate::FOREGROUND.load(std::sync::atomic::Ordering::Relaxed) || crate::LOCKED.load(std::sync::atomic::Ordering::Relaxed);
+        if hidden || self.place.seek_unread || self.msgs.len() != self.timeline.item_count() {
+            return;
+        }
+        let (top, bottom) = (self.timeline.logical_scroll_top().item_ix, self.timeline.viewport_bounds().bottom());
+        let mut last = None;
+        for ix in top..self.msgs.len() {
+            match self.timeline.bounds_for_item(ix) {
+                Some(b) if b.top() < bottom => last = Some(ix),
+                _ => break,
+            }
+        }
+        let Some(last) = last else { return };
+        let (mut done, mut reads): (Vec<OwnedRoomId>, Vec<(OwnedRoomId, OwnedEventId)>) = (Vec::new(), Vec::new());
+        for m in self.msgs[..=last].iter().rev().filter(|m| m.id.starts_with('$')) {
+            let lane = m.lane.clone().unwrap_or_else(|| open.clone());
+            if done.contains(&lane) {
+                continue;
+            }
+            done.push(lane.clone());
+            let new = match self.place.seen.iter_mut().find(|(room, _)| *room == lane) {
+                Some((_, id)) => *id != m.id && { id.clone_from(&m.id); true },
+                None => {
+                    self.place.seen.push((lane.clone(), m.id.clone()));
+                    true
+                }
+            };
+            if new && let Ok(event) = OwnedEventId::try_from(m.id.as_str()) {
+                reads.push((lane, event));
+            }
+            if self.open_lanes().len() <= done.len() {
+                break;
+            }
+        }
+        for (lane, event) in reads {
+            self.send(Cmd::Seen(lane, event), cx);
+        }
     }
 
     /// Once the rows of a freshly opened chat are in, marks its first unread one and brings it into view.
