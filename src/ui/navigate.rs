@@ -111,6 +111,8 @@ pub(super) struct Place {
     pub missed: usize,
     /// The chat was just opened: scroll to its first unread message once it is in the list.
     pub seek_unread: bool,
+    /// The chat's unread count when it opened, before reading it moved.
+    pub unread_open: u64,
     /// The first message the user had not seen when the chat opened: the unread line stays above
     /// it while the chat is open, though reading moves the SDK's marker to the end.
     pub unread: Option<String>,
@@ -136,7 +138,8 @@ const PILL_LINGER: Duration = Duration::from_secs(1);
 impl BeeperApp {
     /// A chat opened or closed: the composer shows its draft, or is emptied.
     pub(super) fn show_draft(&mut self, room: Option<&OwnedRoomId>) {
-        self.place = Place { restore: Some(room.and_then(|id| self.drafts.get(id)).unwrap_or_default().to_owned()), seek_unread: room.is_some(), ..Place::default() };
+        let unread_open = room.and_then(|id| self.rooms.iter().find(|r| &r.id == id)).map_or(0, |r| r.unread);
+        self.place = Place { restore: Some(room.and_then(|id| self.drafts.get(id)).unwrap_or_default().to_owned()), seek_unread: room.is_some(), unread_open, ..Place::default() };
     }
 
     /// Gives the composer what `show_draft` chose. Needs a window, so it waits for the frame.
@@ -224,7 +227,8 @@ impl BeeperApp {
             return;
         }
         let (top, bottom) = (self.timeline.logical_scroll_top().item_ix, self.timeline.viewport_bounds().bottom());
-        let mut last = None;
+        // Held at the bottom, the list has no top row of its own: the newest row is on screen.
+        let mut last = (top >= self.msgs.len()).then(|| self.msgs.len().checked_sub(1)).flatten();
         for ix in top..self.msgs.len() {
             match self.timeline.bounds_for_item(ix) {
                 Some(b) if b.top() < bottom => last = Some(ix),
@@ -259,11 +263,15 @@ impl BeeperApp {
     }
 
     /// Once the rows of a freshly opened chat are in, marks its first unread one and brings it into view.
-    pub(super) fn seek_unread(&mut self) {
+    /// The SDK's read marker can stand lower than the chat's unread count says (its event was not
+    /// loaded when the marker was placed), so the count wins once enough rows are in; `last` takes
+    /// the oldest loaded unread one when they never are.
+    pub(super) fn seek_unread(&mut self, last: bool) {
         if !self.place.seek_unread {
             return;
         }
-        if let Some(ix) = first_unseen(&self.msgs) {
+        let others: Vec<usize> = self.msgs.iter().enumerate().filter(|(_, m)| m.kind == Kind::Message && !m.own && !self.is_hidden(&m.id)).map(|(ix, _)| ix).collect();
+        if let Some(ix) = first_unread(first_unseen(&self.msgs), &others, self.place.unread_open, last) {
             self.place.seek_unread = false;
             self.place.unread = Some(self.msgs[ix].id.clone());
             self.place.unread_count = self.msgs[ix..].iter().filter(|m| m.kind == Kind::Message && !m.own && !self.is_hidden(&m.id)).count().max(1);
@@ -373,13 +381,30 @@ pub(super) fn first_unseen(msgs: &[Msg]) -> Option<usize> {
     msgs[mark..].iter().position(|m| m.kind == Kind::Message && !m.own).map(|ix| mark + ix)
 }
 
+/// The first unread row of `others` (rows of messages from someone else), by the SDK's `marker`
+/// and the chat's unread `count`, whichever is older. A count larger than the loaded rows waits
+/// for more, unless `last`, which takes the oldest loaded one.
+fn first_unread(marker: Option<usize>, others: &[usize], count: u64, last: bool) -> Option<usize> {
+    let want = usize::try_from(count).unwrap_or(usize::MAX);
+    let by_count = match others.len().checked_sub(want) {
+        _ if want == 0 => None,
+        Some(k) => others.get(k).copied(),
+        None => others.first().copied().filter(|_| last),
+    };
+    match (marker, by_count) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (marker, None) if want == 0 || last => marker,
+        (_, count) => count,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use matrix_sdk::ruma::{OwnedRoomId, user_id};
 
-    use super::{Drafts, MAX_DRAFT_BYTES, MAX_DRAFTS, first_unseen};
+    use super::{Drafts, MAX_DRAFT_BYTES, MAX_DRAFTS, first_unread, first_unseen};
     use crate::backend::{Delivery, Kind, Msg};
     use crate::vault::Seal;
 
@@ -394,6 +419,18 @@ mod tests {
         assert_eq!(first_unseen(&[row(Kind::Message, false), row(Kind::Unread, false)]), None, "marker last");
         let unread = [row(Kind::Message, true), row(Kind::Unread, false), row(Kind::Hidden, false), row(Kind::Day, false), row(Kind::Message, false)];
         assert_eq!(first_unseen(&unread), Some(4));
+    }
+
+    #[test]
+    fn first_unread_takes_the_older_of_marker_and_count() {
+        let others = [2, 3, 5, 8, 9];
+        assert_eq!(first_unread(Some(8), &others, 3, false), Some(5), "marker placed too low, the count wins");
+        assert_eq!(first_unread(Some(3), &others, 1, false), Some(3), "count lower than the marker says");
+        assert_eq!(first_unread(Some(8), &others, 0, false), Some(8), "no count, the marker");
+        assert_eq!(first_unread(None, &others, 0, false), None, "nothing unread");
+        assert_eq!(first_unread(Some(8), &others, 9, false), None, "more unread than loaded: wait for rows");
+        assert_eq!(first_unread(Some(8), &others, 9, true), Some(2), "grace over: the oldest loaded");
+        assert_eq!(first_unread(None, &[], 4, true), None, "no rows at all");
     }
 
     fn room(n: usize) -> OwnedRoomId {

@@ -167,6 +167,8 @@ const BRIDGE_WAIT_MS: u64 = 2 * 60 * 1000;
 /// Inline thumbnails kept decoded; each is at most 2.6 MB of pixels, so about 50 MB of heap and as
 /// much GPU memory at most. A screen shows about 6; scrolling back reads the others from disk.
 const MAX_THUMBS: usize = 20;
+/// How long after its first page a chat still looks for its first unread row, whose rows may come later.
+const SEEK_GRACE: Duration = Duration::from_millis(500);
 /// Kept past `MAX_THUMBS` while all of them are on screen (a tall media grid): memory as above, three times.
 const MAX_THUMBS_SHOWN: usize = 3 * MAX_THUMBS;
 /// A thumbnail drawn this recently counts as on screen.
@@ -1046,7 +1048,7 @@ impl BeeperApp {
                     }
                     self.count_missed(len_before, new);
                 }
-                self.seek_unread();
+                self.seek_unread(false);
                 self.place.check_seen = true;
                 self.name_readers();
                 if let Some((id, _)) = self.seek.as_ref().filter(|(id, _)| self.msgs.iter().any(|m| &m.id == id)) {
@@ -1063,7 +1065,24 @@ impl BeeperApp {
                     return;
                 }
                 (self.loading, self.more) = (false, more);
-                (self.place.seek_unread, self.place.check_seen) = (false, true);
+                // The page's rows come on their own channel and may land after this: the first
+                // unread one is looked for a moment longer before the chat counts as read to the end.
+                if self.place.seek_unread {
+                    let (room, opened) = (room.clone(), self.opened_at);
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(SEEK_GRACE).await;
+                        let _ = this.update(cx, |this, cx| {
+                            if this.open.as_ref() == Some(&room) && this.opened_at == opened && this.place.seek_unread {
+                                this.seek_unread(true);
+                                this.place.seek_unread = false;
+                                this.place.check_seen = true;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }
+                self.place.check_seen = true;
                 if let Some((id, pages)) = self.seek.take() {
                     if self.msgs.iter().any(|m| m.id == id) {
                         self.reveal(&id, cx);
