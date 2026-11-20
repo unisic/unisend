@@ -11,16 +11,16 @@ N impossible over Matrix or bridges.
 | feature | Signal | WhatsApp | Instagram | Messenger | Unisend | Matrix/bridges? |
 |---|---|---|---|---|---|---|
 | Text, replies, forward | Y | Y | Y | Y | `backend/forward.rs`, `ui/forward.rs` | Y |
-| Edit, delete for everyone | Y | Y | Y | Y | `ui/menu.rs`; limits from `backend/features.rs` | B |
+| Edit, delete for everyone | Y | Y | Y | Y | `ui/menu.rs`; limits from `backend/features.rs`; edit history from "Edited" (`backend/edits.rs`) | B |
 | Delete for me | Y | Y | Y | Y | local hide list | Y (local) |
 | Reactions | Y | Y | Y | Y | `ui/heart.rs`, `ui/emojipick.rs` | B |
 | Mentions | Y | Y | Y | Y | `backend/mentions.rs` | B |
-| Formatting (bold, code, spoiler) | Y | P | N | N | `backend/rich.rs`, `ui/rich.rs`; spoilers plain | Y (HTML) |
+| Formatting (bold, code, spoiler) | Y | P | N | N | `backend/rich.rs`, `ui/rich.rs`; `\|\|spoiler\|\|` sent, covered until tapped | Y (HTML) |
 | Threads | N | N | N | P | missing (`m.thread`) | Y natively, bridges flatten |
 | Photos, video, files | Y | Y | Y | Y | `ui/gallery.rs`, `ui/viewer.rs`, `ui/video.rs` | Y |
 | Media gallery per chat | Y | Y | P | Y | `ui/info.rs` (Media, Links, Files) | Y |
 | Voice notes | Y | Y | Y | Y | `ui/voice.rs`, `backend/voice.rs`; not recorded on desktop | Y |
-| Stickers (send, packs) | Y | Y | Y | Y | missing (received only) | B (`m.sticker`) |
+| Stickers (send, packs) | Y | Y | Y | Y | `ui/stickers.rs`, `backend/stickers.rs`: Matrix image packs of the account and its rooms; none bought or downloaded | B (`m.sticker`) |
 | GIF search | Y | Y | Y | Y | `ui/gifs.rs` (KLIPY, only with a build key) | Y |
 | Polls | Y | Y | N | P | `ui/pollnew.rs`, `backend/polls.rs` | B |
 | Location, send | P (no live) | Y + live | N | Y + live | `ui/location.rs`, `backend/location.rs` | B; live N |
@@ -77,8 +77,8 @@ Effort: S small, M medium, L large.
 
 1. Block and unblock a person, with a list of blocked people (Matrix ignore list). High, S.
    Stays in account data on the homeserver.
-2. Sticker picker and sending (`m.sticker`, image packs `m.image_pack`), local packs only.
-   High, M.
+2. Sticker picker and sending: done (`ui/stickers.rs`); adding or editing packs remains.
+   Medium, M.
 3. Inline video playback in the timeline. High, M.
 4. Voice notes on desktop (record and play in the bubble). Medium-high, M.
 5. Chat folders and filters: DMs, Groups, user lists. Medium-high, M. Local.
