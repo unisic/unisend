@@ -213,7 +213,7 @@ impl BeeperApp {
         }
         let grid = if self.stickers.rows.is_empty() {
             let note = if self.stickers.packs.is_none() { t!("Loading…") } else { t!("No sticker packs. Packs added in another Matrix app show here.") };
-            div().flex_1().flex().items_center().justify_center().px(px(24.)).text_center().text_size(fs(14.)).text_color(p.faint).child(note).into_any_element()
+            div().flex_1().flex().items_center().justify_center().px(px(24.)).text_center().text_size(fs(14.)).text_color(p.faint).child(div().w_full().child(note)).into_any_element()
         } else {
             // Rows differ in height (a pack's name, a row of stickers): `list`, not `uniform_list`.
             list(

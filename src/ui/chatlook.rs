@@ -166,7 +166,7 @@ impl BeeperApp {
             let fill = div().bg(colour.fill().map_or(p.raised, |hex| rgb(hex).into()));
             let name = t!("Chat colour: {colour}", colour = colour.label());
             let room = room.clone();
-            swatch(&name, look.colour == Some(colour), fill, cx).when(live, |el| {
+            swatch(&name, look.colour.unwrap_or(self.settings.chat_colour) == colour, fill, cx).when(live, |el| {
                 el.on_click(cx.listener(move |this, _, _, cx| this.change_look(&room, |l| l.colour = Some(colour), cx)))
             })
         }));
@@ -174,7 +174,7 @@ impl BeeperApp {
         for paper in Wallpaper::PRESETS {
             let fill = div().bg(paper.fill(&p).unwrap_or_else(|| p.ground.into()));
             let room = room.clone();
-            papers = papers.child(swatch(paper.label(), look.wallpaper == Some(paper), fill, cx).when(live, |el| {
+            papers = papers.child(swatch(paper.label(), look.wallpaper.unwrap_or(self.settings.wallpaper) == paper, fill, cx).when(live, |el| {
                 el.on_click(cx.listener(move |this, _, _, cx| this.change_look(&room, |l| l.wallpaper = Some(paper), cx)))
             }));
         }

@@ -364,7 +364,7 @@ impl BeeperApp {
         }
     }
 
-    fn info_face(&mut self, user: &OwnedUserId) {
+    pub(super) fn info_face(&mut self, user: &OwnedUserId) {
         if self.faces.contains_key(user) || self.faces.len() >= MAX_FACES || self.cmd.capacity() < self.cmd.max_capacity() / 2 {
             return;
         }

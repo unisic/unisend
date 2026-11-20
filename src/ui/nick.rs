@@ -180,6 +180,7 @@ impl BeeperApp {
 
     fn open_nickname(&mut self, user: OwnedUserId, name: String, window: &mut Window, cx: &mut Context<Self>) {
         let about = self.nicks.get(&user).cloned().unwrap_or_default();
+        self.info_face(&user);
         let nick = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Nickname")));
         let note = cx.new(|cx| TextareaState::new(window, cx).auto_grow(2, 6).placeholder(t!("Note")));
         nick.update(cx, |input, cx| input.set_value(about.nick, window, cx));

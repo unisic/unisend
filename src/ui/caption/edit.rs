@@ -740,13 +740,14 @@ impl BeeperApp {
             .child(tool_button("edit-blur", Tool::Blur, IconName::Droplets));
 
         let swatches = matches!(ed.tool, Tool::Pen | Tool::Text).then(|| {
+            // Eight targets need 366 px; a phone has about 328, so they narrow rather than overflow.
             h_flex().gap(px(2.)).children(COLORS.iter().enumerate().map(|(ix, &c)| {
                 let on = ix == ed.color;
                 div()
                     .id(("edit-color", ix))
-                    .size(px(TAP))
+                    .w(px(TAP))
+                    .h(px(TAP))
                     .flex()
-                    .flex_none()
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
@@ -806,9 +807,9 @@ impl BeeperApp {
             .min_h(px(TAP))
             .px(px(GUTTER))
             .gap(px(8.))
+            .flex_wrap()
             .justify_center()
             .items_center()
-            .overflow_x_scroll()
             .children(swatches)
             .children(sizes)
             .children(faces)
