@@ -61,6 +61,7 @@ mod slide;
 mod people;
 mod pollnew;
 pub(crate) mod receipt;
+mod readall;
 mod rich;
 mod search;
 mod sheet;
@@ -2490,6 +2491,7 @@ impl BeeperApp {
                     window,
                     cx,
                 ))
+                .children(self.read_all_button(cx))
                 .child(round_button("new-chat", IconName::Plus, cx).on_click(cx.listener(|this, _, window, cx| this.open_new_chat(window, cx))))
                 .child(round_button("search", IconName::Search, cx).on_click(cx.listener(|this, _, window, cx| {
                     this.set_searching(true, window, cx);

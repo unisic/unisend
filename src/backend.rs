@@ -125,6 +125,8 @@ pub enum Cmd {
     /// The user is, or stopped, writing in the chat.
     Typing(OwnedRoomId, bool),
     Chat(OwnedRoomId, ChatAction),
+    /// Marks these chats read, one after another, as `ChatAction::Unread(false)` does each.
+    ReadAll(Vec<OwnedRoomId>),
     Avatars(Vec<OwnedRoomId>),
     /// The picture of a person in a chat, as that chat shows them.
     Face(OwnedRoomId, OwnedUserId),
@@ -1475,10 +1477,7 @@ impl State {
                     ChatAction::Pin(on) => room.set_is_favourite(on, Some(1.0)).await?,
                     ChatAction::LowPriority(on) => room.set_is_low_priority(on, Some(0.0)).await?,
                     ChatAction::Unread(true) => room.set_unread_flag(true).await?,
-                    ChatAction::Unread(false) => {
-                        let resp = room.messages(MessagesOptions::backward()).await?;
-                        mark_read(&room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito.load(Ordering::Relaxed)).await?;
-                    }
+                    ChatAction::Unread(false) => read_newest(&room, self.incognito.load(Ordering::Relaxed)).await?,
                     ChatAction::Mute(mode) => {
                         let notif = self.notif.as_ref().context(t!("Not signed in"))?;
                         if mode == RoomNotificationMode::AllMessages {
@@ -1643,6 +1642,23 @@ impl State {
                         let _ = ev.send(Ev::Error(t!("Attachment not sent: {error}", error = format!("{e:#}")))).await;
                     }
                     let _ = ev.send(Ev::Attached).await;
+                });
+            }
+            Cmd::ReadAll(ids) => {
+                let (client, ev, incognito) = (self.client()?.clone(), self.ev.clone(), self.incognito.clone());
+                // One chat at a time: two requests each, and the command loop stays free meanwhile.
+                tokio::spawn(async move {
+                    let mut failed = 0u32;
+                    for id in ids {
+                        let Some(room) = client.get_room(&id) else { continue };
+                        if let Err(e) = read_newest(&room, incognito.load(Ordering::Relaxed)).await {
+                            log::warn!("read all: {e:#}");
+                            failed += 1;
+                        }
+                    }
+                    if failed > 0 {
+                        let _ = ev.send(Ev::Error(tn!(failed, "{n} chat could not be marked as read", "{n} chats could not be marked as read"))).await;
+                    }
                 });
             }
             Cmd::Incognito(on) => self.incognito.store(on, Ordering::Relaxed),
@@ -2882,6 +2898,12 @@ struct Done {
 /// again without the unread line.
 /// Nothing is sent before the user takes the chat: an invitation or a message request is not
 /// told it was seen.
+/// Marks the chat read up to its newest event.
+async fn read_newest(room: &Room, private: bool) -> Result<()> {
+    let resp = room.messages(MessagesOptions::backward()).await?;
+    mark_read(room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned), private).await
+}
+
 async fn mark_read(room: &Room, newest: Option<OwnedEventId>, private: bool) -> Result<()> {
     if room.state() != RoomState::Joined {
         return Ok(());

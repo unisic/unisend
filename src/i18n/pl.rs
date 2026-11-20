@@ -835,4 +835,5 @@ pub(super) static PLURAL: &[(&str, [&str; 3])] = &[
     ("{names} and {n} other", ["{names} i {n} inna osoba", "{names} i {n} inne osoby", "{names} i {n} innych osób"]),
     ("{one}, {two} and {n} other", ["{one}, {two} i {n} inna osoba", "{one}, {two} i {n} inne osoby", "{one}, {two} i {n} innych osób"]),
     ("{who} joined", ["{who} dołączył(a)", "{who} dołączyli", "{who} dołączyli"]),
+    ("{n} chat could not be marked as read", ["Nie udało się oznaczyć {n} czatu jako przeczytanego", "Nie udało się oznaczyć {n} czatów jako przeczytanych", "Nie udało się oznaczyć {n} czatów jako przeczytanych"]),
 ];
