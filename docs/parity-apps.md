@@ -81,7 +81,11 @@ Effort: S small, M medium, L large.
    Stays in account data on the homeserver.
 2. Sticker picker and sending (`m.sticker`, image packs `m.image_pack`), local packs only.
    High, M.
-3. Inline video playback in the timeline. High, M.
+3. Inline video playback in the timeline. High, M. Bridged GIFs loop in their bubble (at most
+   5 s, 10 frames a second, 320 px, made into a GIF on the device); other videos show their
+   poster and length and play full screen. Playing any video in the bubble is left out: GPUI
+   draws pictures, not a video surface, so each frame would be decoded, converted and uploaded
+   as a new image, with sound kept in step by hand, per bubble on screen.
 4. Voice notes on desktop (record and play in the bubble). Medium-high, M.
 5. Chat folders and filters: DMs, Groups, user lists. Medium-high, M. Local.
 6. Pinned messages in a chat (`m.room.pinned_events`). Medium, S-M.

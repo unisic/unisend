@@ -64,7 +64,9 @@ Plain on purpose, short-lived:
 - `media/`: attachments downloaded to open in another app or to play. Each event's folder is
   deleted 10 minutes after it was written (swept on each download and every 5 minutes), and the
   whole directory at start and at sign-out. A player or app that already opened the file keeps
-  reading it; one that opens it again later gets an error and the file is downloaded anew.
+  reading it; one that opens it again later gets an error and the file is downloaded anew. A
+  bridged GIF's clip lies here only while its frames are read for the bubble's loop, a second or
+  so; the loop itself stays in memory.
 - `notify/`: a chat's picture for a notification, deleted as soon as the notification has it.
 - `cache/voice`, `cache/camera`, `cache/outgoing`, shared-in copies: the user's own recordings,
   photos and picked files on the way out; deleted after sending or when stale.

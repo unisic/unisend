@@ -1551,9 +1551,17 @@ impl State {
                 for (id, media) in wanted {
                     let client = self.client()?.clone();
                     let (ev, permits) = (self.ev.clone(), self.fetches.clone());
+                    let (dir, generation) = (media_dir(&self.dir), media_generation());
                     tokio::spawn(async move {
                         let Ok(_permit) = permits.acquire().await else { return };
-                        match thumbnail(&client, &media).await {
+                        let looped = match media.kind == MediaKind::Video && media.looped {
+                            true => looping(&client, &media, &id, &dir, generation).await.unwrap_or_else(|e| {
+                                log::debug!("loop: {e:#}");
+                                None
+                            }),
+                            false => None,
+                        };
+                        match if looped.is_some() { Ok(looped) } else { thumbnail(&client, &media).await } {
                             Ok(Some(bytes)) => {
                                 let _ = ev.send(Ev::Thumb(id, bytes)).await;
                             }
@@ -2432,6 +2440,38 @@ async fn thumbnail(client: &Client, media: &Media) -> Result<Option<Vec<u8>>> {
         return Ok(Some(bytes));
     }
     Ok(Some(tokio::task::spawn_blocking(move || shrink(&bytes, THUMB_PX)).await??))
+}
+
+/// A bridged GIF as a loop for its bubble (`video::looping`), made once and kept in memory.
+/// `None` for a clip without a size or over `video::MAX_LOOP_SOURCE`, and where it does not decode.
+async fn looping(client: &Client, media: &Media, id: &str, dir: &Path, generation: u64) -> Result<Option<Vec<u8>>> {
+    if let Some(gif) = video::kept(id) {
+        return Ok(Some(gif));
+    }
+    let Some(dims) = media.dims else { return Ok(None) };
+    if media.size.is_some_and(|s| s > video::MAX_LOOP_SOURCE) {
+        return Ok(None);
+    }
+    let request = MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File };
+    let bytes = client.media().get_media_content(&request, true).await?;
+    if bytes.len() as u64 > video::MAX_LOOP_SOURCE {
+        return Ok(None);
+    }
+    let (dir, key, name, duration) = (dir.to_owned(), format!("{id}#loop"), media.name.clone(), media.duration);
+    // The decoders read a file: it is there in `media/` only while they do.
+    let gif = tokio::task::spawn_blocking(move || {
+        let path = save_media(&dir, generation, &key, &name, &bytes)?;
+        let gif = video::looping(&path, dims, duration);
+        if let Some(folder) = path.parent() {
+            let _ = std::fs::remove_dir_all(folder);
+        }
+        anyhow::Ok(gif)
+    })
+    .await??;
+    if let Some(gif) = &gif {
+        video::keep(id, gif.clone());
+    }
+    Ok(gif)
 }
 
 /// Queues a file as the message type its content calls for: the chat shows it at once, and the

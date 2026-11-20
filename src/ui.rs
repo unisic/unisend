@@ -1458,7 +1458,11 @@ impl BeeperApp {
         let linked = m.link.as_ref().and_then(|link| link.image.as_ref());
         let quoted = m.reply.as_ref().and_then(|q| q.media.as_ref()).filter(|media| matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
         let wanted: Vec<(String, Media)> = pictured
-            .map(|media| (m.id.clone(), media.clone()))
+            .map(|media| {
+                let mut media = media.clone();
+                media.looped &= !self.stills.contains(&m.id);
+                (m.id.clone(), media)
+            })
             .into_iter()
             .chain(linked.map(|image| {
                 let key = link_key(&m.id);
@@ -1638,6 +1642,8 @@ impl BeeperApp {
             let (w, h) = picture_size(media, room);
             let thumb = self.thumbs.get(&m.id).cloned();
             let video = media.kind == MediaKind::Video;
+            // A bridged GIF that loops in place (`backend/video.rs`): no play mark, a tap opens it.
+            let moving = video && thumb.as_ref().is_some_and(|image| image.format == ImageFormat::Gif);
             // Fades in when it loads; one already loaded is there at once. Left out while the
             // viewer draws this picture over its place, which stays as the slot it lands in.
             let arrived = transition((SharedString::from(m.id.clone()), "in"), if thumb.is_some() { 1. } else { 0. }, Transition::new(motion::THUMB_IN).easing(motion::EASE_OUT), window, cx);
@@ -1691,7 +1697,21 @@ impl BeeperApp {
                         ),
                     ),
                 })
-                .when(video, |el| {
+                .when(moving, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .left_2()
+                            .bottom_2()
+                            .px_1p5()
+                            .rounded_full()
+                            .bg(gpui_kit::black().opacity(0.55))
+                            .text_color(gpui_kit::white())
+                            .text_size(fs(11.))
+                            .child("GIF"),
+                    )
+                })
+                .when(video && !moving, |el| {
                     el.child(
                         div().absolute().inset_0().flex().items_center().justify_center().child(
                             div()
