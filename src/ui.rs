@@ -32,6 +32,7 @@ mod camera;
 mod caption;
 pub(crate) use caption::video_frame;
 mod cards;
+mod emojihint;
 mod emojipick;
 mod contacts;
 pub(crate) mod folders;
@@ -400,6 +401,8 @@ pub struct BeeperApp {
     updates: update::Updates,
     /// The `@` list over the composer.
     mention: mentions::Mentions,
+    /// The `:name` list over the composer.
+    emoji_hint: emojihint::Hints,
     voice: voice::Voice,
     /// Attachments waiting for the one uploading now, so a batch keeps its order.
     attach_queue: VecDeque<Cmd>,
@@ -552,6 +555,7 @@ impl BeeperApp {
             if matches!(ev, InputEvent::Change) && this.composer_changed(cx) {
                 this.typed(cx);
                 this.mention_typed(cx);
+                this.emoji_hint_typed(cx);
                 this.voice_typed(cx);
                 this.link_typed(cx);
             }
@@ -754,6 +758,7 @@ impl BeeperApp {
             gifs: gifs::Picker::default(),
             updates,
             mention: mentions::Mentions::default(),
+            emoji_hint: emojihint::Hints::default(),
             voice: voice::Voice::default(),
             attach_queue: VecDeque::new(),
             attaching: false,
@@ -1313,6 +1318,10 @@ impl BeeperApp {
             self.pick_mention(self.mention.selected, window, cx);
             return;
         }
+        if self.emoji_hint.open() && !gpui_kit::is_mobile() {
+            self.pick_emoji_hint(self.emoji_hint.selected, window, cx);
+            return;
+        }
         let body = self.composer.read(cx).value().trim().to_string();
         let Some(room) = self.open.clone() else { return };
         let (reply_to, edit) = match self.compose.clone() {
@@ -1396,6 +1405,9 @@ impl BeeperApp {
             self.close_emoji(cx);
         } else if self.mention.open() {
             self.mention.close();
+            cx.notify();
+        } else if self.emoji_hint.open() {
+            self.emoji_hint.close();
             cx.notify();
         } else if self.selection_back(cx) {
         } else if self.info_open() {
@@ -1874,6 +1886,7 @@ impl BeeperApp {
         self.close_gallery(cx);
         self.close_gifs(cx);
         self.mention = mentions::Mentions::default();
+        self.emoji_hint.close();
         self.close_link(false, cx);
         self.link_closed = None;
         self.stop_voice(cx);
@@ -3147,6 +3160,7 @@ impl BeeperApp {
                     .children(self.render_tray(window, cx))
                     .children(self.render_link_card(window, cx))
                     .children(self.render_mentions(cx))
+                    .children(self.render_emoji_hints(cx))
                     .when_some(limit.filter(|&(len, max)| len * 5 >= max * 4), |el, (len, max)| {
                         el.child(
                             div()
@@ -3225,6 +3239,7 @@ impl BeeperApp {
                                             }))
                                             .text_size(fs(16.))
                                             .map(|el| self.mention_keys(el, cx))
+                                            .map(|el| self.emoji_hint_keys(el, cx))
                                             .child(Textarea::new(&self.composer).appearance(false).text_size(fs(16.)).token(|t, _, cx| mentions::token(t, cx)))
                                             .child(crate::ime::marks(&self.composer)),
                                     )

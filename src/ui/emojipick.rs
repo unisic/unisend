@@ -249,6 +249,21 @@ impl Picker {
         self.built.as_ref().is_some_and(|(c, q, t, r, a)| (*c, q.as_str(), *t, r, a.as_deref()) == (cols, query, self.tone, &self.recents, allowed))
     }
 
+    /// Every emoji in the chosen skin tone that `keep` takes, as the grid offers them.
+    pub(super) fn shown<'a>(&self, keep: &'a dyn Fn(&str) -> bool) -> impl Iterator<Item = &'static emojis::Emoji> + 'a {
+        shown(self.tone, keep)
+    }
+
+    pub(super) fn recents(&self) -> &[&'static str] {
+        &self.recents
+    }
+
+    /// Notes `emoji` as used now, for the recents.
+    pub(super) fn used(&mut self, emoji: &'static str, dir: &Path) {
+        remember(&mut self.recents, emoji);
+        self.save(dir);
+    }
+
     fn rebuild(&mut self, cols: usize, query: &str, allowed: Option<Vec<String>>) {
         (self.rows, self.starts) = build(cols, query, self.tone, &self.recents, &|e| offered(allowed.as_deref(), e));
         self.built = Some((cols, query.to_owned(), self.tone, self.recents.clone(), allowed));
@@ -297,8 +312,7 @@ impl BeeperApp {
     }
 
     fn pick_emoji(&mut self, emoji: &'static str, window: &mut Window, cx: &mut Context<Self>) {
-        remember(&mut self.emoji_pick.recents, emoji);
-        self.emoji_pick.save(&self.dir);
+        self.emoji_pick.used(emoji, &self.dir);
         match self.emoji_open.clone() {
             Some(Target::React(id)) => {
                 self.emoji_open = None;
