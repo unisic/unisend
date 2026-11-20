@@ -600,6 +600,8 @@ mod tests {
             read_by: Vec::new(),
             note: false,
             union: None,
+            net_blocked: false,
+            peer: None,
         }
     }
 

@@ -572,6 +572,8 @@ mod tests {
             dm,
             note: false,
             union: None,
+            net_blocked: false,
+            peer: None,
             pinned: false,
             low_priority: false,
             muted: false,

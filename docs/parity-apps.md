@@ -46,7 +46,7 @@ N impossible over Matrix or bridges.
 | Notifications, quick reply | Y | Y | Y | Y | `src/notify/*` | Y |
 | Notifications with the app in background | Y (own server) | Y (FCM) | Y | Y | Android: own background connection (`stay_connected`); desktop: runs on with the window closed (`src/desktop.rs`) | Y; UnifiedPush possible, FCM excluded |
 | Message requests | Y | Y | Y | Y | `backend/rooms.rs` | B |
-| Block a person | Y | Y | Y | Y | only by ignoring an invite's sender (`backend/rooms.rs`) | Y (Matrix ignore list) |
+| Block a person | Y | Y | Y | Y | `backend/block.rs`, `ui/block.rs`: Matrix ignore list; on the network where the bridge has `block_user` | Y; B on the network |
 | App lock, screen security | Y | Y | N | Y | `src/applock*.rs`, `ui/pinpad.rs`, `FLAG_SECURE` | Y (local) |
 | Verify contacts / devices | Y | Y | N | Y | `backend/verify.rs`, `ui/verify.rs` | Y (Matrix SAS) |
 | No read receipts / typing | Y | Y | N | P | default on | Y |
@@ -59,7 +59,9 @@ N impossible over Matrix or bridges.
 | Desktop app | Y | Y | N (web) | Y | Linux; tray `src/desktop/tray.rs`; Windows and macOS compile only | Y |
 | Hotkeys, command bar | P | Y | P | P | missing | Y |
 | Group admin (roles, rename, members) | Y | Y | P | Y | `backend/group.rs`, `ui/group.rs` | B |
-| Invite links | Y | Y | Y | Y | missing | B |
+| Invite links | Y | Y | Y | Y | `ui/invite.rs`: group link with approval (`knock`) in Matrix groups; no bridge carries it | Y on Matrix; N on bridges today |
+| Nicknames and notes on contacts | Y | N | P | P | `ui/nick.rs`, on this device | Y (local) |
+| QR code to add me | Y | Y | Y | ? | Settings, Profile (`ui/profile.rs`); no scanner | Y |
 | Updates outside a store | N | N | N | N | `backend/update.rs` (Android) | Y |
 
 ## What bridges make impossible
@@ -77,8 +79,6 @@ N impossible over Matrix or bridges.
 
 Effort: S small, M medium, L large.
 
-1. Block and unblock a person, with a list of blocked people (Matrix ignore list). High, S.
-   Stays in account data on the homeserver.
 2. Sticker picker and sending (`m.sticker`, image packs `m.image_pack`), local packs only.
    High, M.
 3. Inline video playback in the timeline. High, M. Bridged GIFs loop in their bubble (at most

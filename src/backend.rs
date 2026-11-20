@@ -229,6 +229,9 @@ pub enum Cmd {
     PeerIds(OwnedRoomId),
     /// Blocks (true) or unblocks the person; the new list comes as `Ev::Blocked`, a failure as `Ev::Error`.
     SetBlocked(OwnedUserId, bool),
+    /// Has the one-to-one chat's bridge block (true) or unblock the person on the network; the
+    /// bridge's answer comes with the chat, a failure as `Ev::Error`.
+    BlockOnNetwork(OwnedRoomId, bool),
     /// Changes a group; answered with `Ev::Group` once the server took it, else `Ev::Error`.
     Group { room: OwnedRoomId, change: group::Change },
     /// People who could be added to a group; answered with `Candidates`.
@@ -452,6 +455,12 @@ pub struct RoomSummary {
     /// A merged chat (`com.beeper.union`) and the chats it stands for.
     #[serde(default)]
     pub union: Option<union::Union>,
+    /// The bridge blocked the other person of this one-to-one chat on the network (`block.rs`).
+    #[serde(default)]
+    pub net_blocked: bool,
+    /// The other person of a one-to-one chat.
+    #[serde(default)]
+    pub peer: Option<OwnedUserId>,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -2184,6 +2193,15 @@ impl State {
                     let _ = ev.send(Ev::MemberIds(user, ids)).await;
                 });
             }
+            Cmd::BlockOnNetwork(room, on) => {
+                let (client, ev) = (self.client()?.clone(), self.ev.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = block::set_on_network(&client, &room, on).await {
+                        log::warn!("network block: {e:#}");
+                        let _ = ev.send(Ev::Error(t!("Could not change who you have blocked: {error}", error = plain(&format!("{e:#}"))))).await;
+                    }
+                });
+            }
             Cmd::SetBlocked(user, on) => {
                 let (client, ev) = (self.client()?.clone(), self.ev.clone());
                 tokio::spawn(async move {
@@ -2979,6 +2997,8 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>, live: bool) -> Room
         read_by: Vec::new(),
         note: false,
         union: None,
+        net_blocked: false,
+        peer: None,
     }
 }
 
@@ -3343,6 +3363,7 @@ async fn summarize(
         forum,
         dm: peer.is_some() || note,
         note,
+        peer: peer.clone(),
         preview: current(seen.preview),
         preview_id: seen.preview_id,
         unread,
@@ -3356,6 +3377,7 @@ async fn summarize(
     };
     s.archived = is_done(&done, &s, now_ms());
     s.pending = request(room).await.then_some(Pending::Request);
+    s.net_blocked = s.network.is_some() && block::on_network(room).await;
     s.moved_to = room.successor_room().map(|next| next.room_id);
     s.union = union::read(room).await;
     if s.own_last && let Some(id) = s.preview_id.as_deref().and_then(|id| EventId::parse(id).ok()) {
@@ -3600,6 +3622,8 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 read_by: Vec::new(),
                 note: false,
                 union: None,
+                net_blocked: false,
+                peer: None,
             };
             let mut summary = summarize(&room, &notif, peer, seen).await;
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);

@@ -1,5 +1,6 @@
 //! Leaving and deleting chats, and starting new ones: on Matrix itself, and through a bridge's
-//! provisioning API (mautrix bridgev2, `bridgev2/matrix/provisioning.go`).
+//! provisioning API (mautrix bridgev2, `bridgev2/matrix/provisioning.go`). A group's link
+//! (`matrix.to` or `matrix:`) joins the group, or asks to when it takes requests (`knock`).
 
 use std::{
     collections::HashSet,
@@ -13,7 +14,7 @@ use matrix_sdk::{
     deserialized_responses::RawAnySyncOrStrippedState,
     reqwest::{Method, Url},
     ruma::{
-        MatrixToUri, MatrixUri, OwnedRoomId, OwnedUserId, RoomId, UserId,
+        MatrixToUri, MatrixUri, OwnedRoomId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomId, UserId,
         matrix_uri::MatrixId,
         serde::Raw,
         api::client::room::create_room,
@@ -125,6 +126,8 @@ pub enum Ask {
     Merge { rooms: Vec<OwnedRoomId>, name: String },
     /// Takes one chat out of a merged chat; the last one out ends it.
     Unmerge { union: OwnedRoomId, room: OwnedRoomId },
+    /// Joins the group a link names, or asks to join it.
+    JoinLink(String),
 }
 
 pub enum Answer {
@@ -137,6 +140,8 @@ pub enum Answer {
     Resolved(Target, Person),
     /// The new chat, joined.
     Ready(OwnedRoomId),
+    /// The group takes requests: the user asked and gets an invitation once let in.
+    Asked,
     Failed(String),
 }
 
@@ -226,6 +231,11 @@ pub(super) fn handle(client: Client, api: Option<Api>, rooms: Rooms, ev: mpsc::S
             },
             Ask::Start { target, who } => outcome(start(&client, api.as_ref(), &target, &who).await),
             Ask::Note => outcome(note(&client).await),
+            Ask::JoinLink(text) => match join_link(&client, &text).await {
+                Ok(Some(room)) => Answer::Ready(room),
+                Ok(None) => Answer::Asked,
+                Err(e) => Answer::Failed(t!("Could not join: {error}", error = super::plain(&format!("{e:#}")))),
+            },
             Ask::Group { target, kind, name, people } => outcome(group(&client, api.as_ref(), &target, &kind, &name, people).await),
         };
         let _ = ev.send(Ev::People(answer)).await;
@@ -472,6 +482,42 @@ pub(crate) fn matrix_id(text: &str) -> Option<OwnedUserId> {
     }
 }
 
+/// A group as its link names it: `matrix.to` or `matrix:r/`/`matrix:roomid/`, with the servers
+/// to ask through.
+pub(crate) fn room_link(text: &str) -> Option<(OwnedRoomOrAliasId, Vec<OwnedServerName>)> {
+    let text = text.trim();
+    let (id, via) = match MatrixToUri::parse(text) {
+        Ok(uri) => (uri.id().clone(), uri.via().to_vec()),
+        Err(_) => MatrixUri::parse(text).map(|uri| (uri.id().clone(), uri.via().to_vec())).ok()?,
+    };
+    match id {
+        MatrixId::Room(room) => Some((room.into(), via)),
+        MatrixId::RoomAlias(alias) => Some((alias.into(), via)),
+        _ => None,
+    }
+}
+
+/// Joins the linked group; when it lets in only on request, asks instead and answers `None`.
+pub(super) async fn join_link(client: &Client, text: &str) -> Result<Option<OwnedRoomId>> {
+    let (target, via) = room_link(text).context(t!("Not a group link"))?;
+    if let Ok(room) = RoomId::parse(target.as_str())
+        && client.get_room(&room).is_some_and(|r| r.state() == RoomState::Joined)
+    {
+        return Ok(Some(room));
+    }
+    match client.join_room_by_id_or_alias(&target, &via).await {
+        Ok(room) => Ok(Some(room.room_id().to_owned())),
+        Err(joining) => match client.knock(target, None, via).await {
+            Ok(_) => Ok(None),
+            // The join's refusal says more than the knock's when the group takes neither.
+            Err(e) => {
+                log::debug!("knock after a refused join: {e}");
+                Err(joining.into())
+            }
+        },
+    }
+}
+
 fn matrix_user(who: &str) -> Result<OwnedUserId> {
     matrix_id(who).ok_or_else(|| anyhow!(t!("Enter a full Matrix ID, like @name:matrix.org")))
 }
@@ -602,6 +648,17 @@ mod tests {
         }
         for other in ["ann", "ann:matrix.org", "@ann", "https://matrix.to/#/#room:matrix.org", "https://example.org/@ann:matrix.org"] {
             assert_eq!(matrix_id(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_group_link_names_its_room_or_alias_and_servers() {
+        let (room, via) = room_link(" https://matrix.to/#/!abc:hs.org?via=hs.org&via=b.org ").unwrap();
+        assert_eq!((room.as_str(), via.iter().map(|s| s.as_str()).collect::<Vec<_>>()), ("!abc:hs.org", vec!["hs.org", "b.org"]));
+        assert_eq!(room_link("https://matrix.to/#/%23team%3Ahs.org").unwrap().0.as_str(), "#team:hs.org");
+        assert_eq!(room_link("matrix:r/team:hs.org").unwrap().0.as_str(), "#team:hs.org");
+        for other in ["https://matrix.to/#/@ann:hs.org", "#team:hs.org", "!abc:hs.org", "https://example.org/#/!abc:hs.org", ""] {
+            assert!(room_link(other).is_none(), "{other}");
         }
     }
 

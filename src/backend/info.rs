@@ -10,7 +10,7 @@ use matrix_sdk::{
 };
 use tokio::sync::mpsc;
 
-use super::group::{self, Can};
+use super::group::{self, Can, Join};
 use super::{Block, Ev, Msg, link_preview, messages, other_person, to_msgs};
 
 /// Events read back through the history at most, and messages worth listing kept at most: the
@@ -58,6 +58,11 @@ pub struct Details {
     pub can: Can,
     /// The room's bridge as `(bridge, login)`, for starting a chat with a member through it.
     pub bridge: Option<(String, String)>,
+    pub join: Join,
+    /// The group's `matrix.to` link, for whoever may turn it on.
+    pub link: Option<String>,
+    /// People asking to join, for whoever may let them in; at most `MAX_MEMBERS`.
+    pub knocks: Vec<Member>,
 }
 
 /// Tells the UI the chat's details, then what its history holds, page by page. Runs until the
@@ -85,6 +90,13 @@ pub(super) async fn run(room: Room, ev: mpsc::Sender<Ev>) {
         details.members = members(&room, levels.as_ref()).await;
         (details.can, details.members_loaded) = (can, true);
         details.bridge = group::bridge(&room).await;
+        details.join = group::join(&room);
+        if details.can.link {
+            details.link = room.matrix_to_permalink().await.ok().map(|uri| uri.to_string());
+        }
+        if details.can.invite {
+            details.knocks = knocks(&room).await;
+        }
     }
     if ev.send(Ev::Info(id.clone(), Box::new(details))).await.is_err() {
         return;
@@ -193,6 +205,19 @@ async fn members(room: &Room, levels: Option<&RoomPowerLevels>) -> Vec<Member> {
         })
         .collect();
     sort_members(&mut out, room.own_user_id());
+    out.truncate(MAX_MEMBERS);
+    out
+}
+
+/// Those asking to join, oldest name first. The member list was just fetched, so the store has them.
+async fn knocks(room: &Room) -> Vec<Member> {
+    let mut out: Vec<Member> = room
+        .members_no_sync(RoomMemberships::KNOCK)
+        .await
+        .unwrap_or_default()
+        .iter()
+        .map(|m| Member { id: m.user_id().to_owned(), name: m.name().to_owned(), role: Role::Member, removable: true })
+        .collect();
     out.truncate(MAX_MEMBERS);
     out
 }

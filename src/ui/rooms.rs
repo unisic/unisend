@@ -32,8 +32,9 @@ pub(super) enum Confirming {
     /// A chat the user asked to leave; drawn once the backend says whether its bridge can delete it.
     /// `block`: block the person behind an invitation or a message request, then leave.
     Leave { room: OwnedRoomId, dm: bool, delete: Option<bool>, block: bool },
-    /// Blocking a person: the Matrix ignore list, not their chat network.
-    Person { user: OwnedUserId },
+    /// Blocking a person: the Matrix ignore list, or on their chat network through `dm`, the
+    /// one-to-one chat whose bridge blocks there.
+    Person { user: OwnedUserId, dm: Option<OwnedRoomId> },
     /// Signing an account out of a network; `name` is the account's.
     SignOut { bridge: String, login: String },
     /// Turning a Discord server off; `name` is the server's.
@@ -67,6 +68,8 @@ pub(super) struct NewChat {
     picked: Vec<Person>,
     busy: bool,
     error: Option<String>,
+    /// The user asked to join the group a typed link names (`Answer::Asked`).
+    asked: bool,
     /// The search waiting for typing to pause; dropping it cancels it.
     pending: Option<Task<()>>,
     /// Someone typed was added to the group: the field empties on the next frame, which has a window.
@@ -102,6 +105,12 @@ impl NewChat {
         looks_like_identifier(&q, caps).then_some(q)
     }
 
+    /// What is typed is a group's link, which a new chat on Matrix joins.
+    fn group_link(&self, cx: &App) -> Option<String> {
+        let q = self.query(cx);
+        (!self.group && self.target == Target::Matrix && crate::backend::rooms::room_link(&q).is_some()).then_some(q)
+    }
+
     fn placeholder(&self) -> &'static str {
         match (&self.target, &self.caps) {
             (Target::Matrix, _) => t!("Name or Matrix ID"),
@@ -128,8 +137,9 @@ fn wording(c: &Confirm) -> (String, String, &'static str) {
     let network = c.network.as_deref().unwrap_or(t!("the network"));
     let (delete, dm, block) = match &c.what {
         Confirming::Leave { delete, dm, block, .. } => (*delete, *dm, *block),
-        Confirming::Person { .. } => {
+        Confirming::Person { dm, .. } => {
             let body = match &c.network {
+                Some(network) if dm.is_some() => t!("{network} blocks {name} for you: they can no longer write to you there. They are not told.", name = c.name, network = network),
                 Some(network) => t!("You stop getting messages from {name} in Unisend. They are not blocked on {network}: they can still write to you there. They are not told.", name = c.name, network = network),
                 None => t!("{name} can no longer send you messages or invitations. They are not told.", name = c.name),
             };
@@ -297,8 +307,8 @@ impl BeeperApp {
     }
 
     /// Asks before a person is put on the ignore list.
-    pub(super) fn ask_block_person(&mut self, user: OwnedUserId, name: String, network: Option<String>, cx: &mut Context<Self>) {
-        self.people.confirm = Some(Confirm { name, network, what: Confirming::Person { user } });
+    pub(super) fn ask_block_person(&mut self, user: OwnedUserId, name: String, network: Option<String>, dm: Option<OwnedRoomId>, cx: &mut Context<Self>) {
+        self.people.confirm = Some(Confirm { name, network, what: Confirming::Person { user, dm } });
         cx.notify();
     }
 
@@ -339,7 +349,11 @@ impl BeeperApp {
         let Some(c) = self.people.confirm.take() else { return };
         let (room, delete, block) = match c.what {
             Confirming::Leave { room, delete, block, .. } => (room, delete == Some(true), block),
-            Confirming::Person { user } => {
+            Confirming::Person { dm: Some(room), .. } => {
+                self.block_on_network(room, true, cx);
+                return;
+            }
+            Confirming::Person { user, dm: None } => {
                 self.send(Cmd::SetBlocked(user, true), cx);
                 return;
             }
@@ -492,6 +506,7 @@ impl BeeperApp {
             picked: Vec::new(),
             busy: false,
             error: None,
+            asked: false,
             pending: None,
             clear: false,
         });
@@ -535,7 +550,7 @@ impl BeeperApp {
 
     fn query_changed(&mut self, cx: &mut Context<Self>) {
         let Some(new) = self.people.new.as_mut() else { return };
-        new.error = None;
+        (new.error, new.asked) = (None, false);
         new.refresh(cx);
         let query = new.query(cx);
         let searches = new.caps.as_ref().is_some_and(|c| c.search);
@@ -557,7 +572,9 @@ impl BeeperApp {
 
     fn enter_pressed(&mut self, cx: &mut Context<Self>) {
         let Some(new) = self.people.new.as_ref() else { return };
-        if let Some(who) = new.identifier(cx) {
+        if let Some(link) = new.group_link(cx) {
+            self.ask_new(Ask::JoinLink(link), cx);
+        } else if let Some(who) = new.identifier(cx) {
             self.pick_identifier(who, cx);
         } else if let Some(first) = new.rows.first().cloned() {
             self.pick(first, cx);
@@ -660,6 +677,11 @@ impl BeeperApp {
                 self.panel = None;
                 self.open_room(room, cx);
             }
+            Answer::Asked => {
+                if let Some(new) = self.people.new.as_mut() {
+                    (new.busy, new.asked) = (false, true);
+                }
+            }
             Answer::Failed(why) => match self.people.new.as_mut() {
                 Some(new) => (new.busy, new.error) = (false, Some(why)),
                 None => self.error = Some(why.into()),
@@ -685,6 +707,7 @@ impl BeeperApp {
         let edge = if narrow { GUTTER } else { GUTTER + 6. };
         let group_caps = new.caps.as_ref().and_then(|c| c.group.clone());
         let identifier = new.identifier(cx);
+        let link = new.group_link(cx);
         let query = new.query(cx);
         let loading = new.caps.is_none() || (new.caps.as_ref().is_some_and(|c| c.search) && !query.is_empty() && new.found_for != query);
 
@@ -810,6 +833,13 @@ impl BeeperApp {
                     .into_any_element(),
             );
         }
+        if let Some(link) = link {
+            rows.push(
+                row("group-link".into(), t!("Join group").into(), link.clone(), icon_disc(IconName::Link), None)
+                    .on_click(cx.listener(move |this, _, _, cx| this.ask_new(Ask::JoinLink(link.clone()), cx)))
+                    .into_any_element(),
+            );
+        }
         for (ix, person) in new.rows.iter().enumerate() {
             let check = new.group.then(|| new.picked.iter().any(|p| p.id == person.id));
             let chosen = person.clone();
@@ -822,6 +852,8 @@ impl BeeperApp {
         let note = |text: String, ink: Hsla| div().px(px(edge)).py(px(GAP)).text_size(fs(14.)).line_height(fs(20.)).text_color(ink).child(text);
         let status = if let Some(error) = &new.error {
             Some(note(error.clone(), p.negative))
+        } else if new.asked {
+            Some(note(t!("You asked to join. Once a member lets you in, the group comes as an invitation.").to_owned(), p.faint))
         } else if new.busy {
             Some(note(if new.group { t!("Creating the group…").to_owned() } else { t!("Starting the chat…").to_owned() }, p.faint))
         } else if loading {
@@ -912,6 +944,17 @@ mod tests {
         assert!(body.contains("invitation is declined"));
         c.network = Some("Instagram".into());
         assert!(wording(&c).1.starts_with("Instagram blocks them"));
+    }
+
+    #[test]
+    fn blocking_a_person_says_where_it_holds() {
+        let user: matrix_sdk::ruma::OwnedUserId = "@ann:x".try_into().unwrap();
+        let mut c = Confirm { name: "Ann".into(), network: Some("Signal".into()), what: Confirming::Person { user: user.clone(), dm: None } };
+        assert!(wording(&c).1.contains("not blocked on Signal"));
+        c.what = Confirming::Person { user, dm: Some("!a:b".try_into().unwrap()) };
+        let (title, body, act) = wording(&c);
+        assert_eq!((title.as_str(), act), ("Block Ann?", "Block"));
+        assert!(body.starts_with("Signal blocks Ann for you"));
     }
 
     #[test]

@@ -189,6 +189,7 @@ impl BeeperApp {
         out.extend([self.viewer.take(), self.viewer_last.take()].into_iter().flatten().filter_map(|(_, i)| i));
         out.extend(self.qr.take());
         out.extend(self.profile.take().1);
+        out.extend(self.profile.take_qr());
         out
     }
 
