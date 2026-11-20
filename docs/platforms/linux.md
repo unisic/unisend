@@ -8,6 +8,7 @@ X11 is compiled in too.
     cargo run                     # debug, against the real account in ~/.local/share/beeper-gpui
     cargo build --release
     packaging/linux/install.sh    # binary to ~/.local/bin, launcher and icons to ~/.local/share
+    packaging/linux/appimage.sh target/release Unisend-x86_64.AppImage   # or one AppImage, system libraries outside it
 
 A test install takes `cargo build --profile fast` and `packaging/linux/install.sh
 target/fast/beeper-gpui`: as optimised, but without LTO and incremental, so after a change only

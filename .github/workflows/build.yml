@@ -38,11 +38,16 @@ jobs:
           key: linux-${{ hashFiles('Cargo.lock') }}
           restore-keys: linux-
       - run: cargo build --release --locked --bin beeper-gpui --bin beeper-gpui-weblogin
-      - run: tar -C target/release -czf beeper-gpui-linux-x64.tar.gz beeper-gpui beeper-gpui-weblogin
+      # appimagetool 1.9.1, pinned by checksum (the one packaging/linux/appimage.sh was tried with).
+      - run: |
+          curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool" | sha256sum -c
+          chmod +x appimagetool
+          APPIMAGETOOL="$PWD/appimagetool --appimage-extract-and-run" packaging/linux/appimage.sh target/release Unisend-x86_64.AppImage
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: beeper-gpui-linux-x64
-          path: beeper-gpui-linux-x64.tar.gz
+          name: Unisend-x86_64.AppImage
+          path: Unisend-x86_64.AppImage
 
   windows:
     name: Windows x64
