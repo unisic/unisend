@@ -41,6 +41,112 @@ pub fn video(data: &mut Vec<u8>) -> Result<()> {
     iso(data)
 }
 
+/// How a video plays: its size as shown, turned as its track says, and its length.
+#[derive(Debug, PartialEq)]
+pub struct Shape {
+    pub width: u32,
+    pub height: u32,
+    pub millis: Option<u64>,
+}
+
+/// The shape of an MP4, MOV, 3GP, WebM or MKV, read from its headers; `None` when it has no picture
+/// track or is not one of those. Other clients lay the bubble out from it before the file loads.
+pub fn shape(d: &[u8]) -> Option<Shape> {
+    if d.starts_with(&EBML.to_be_bytes()) { matroska_shape(d).map(Some) } else { iso_like(d).then(|| iso_shape(d)).transpose() }
+        .map_err(|e| log::debug!("shape: {e:#}"))
+        .ok()
+        .flatten()
+        .filter(|s| s.width > 0 && s.height > 0)
+}
+
+fn iso_shape(d: &[u8]) -> Result<Shape> {
+    let (top, _) = boxes(d, 0, d.len());
+    let inside = kids(d, find(&top, b"moov").context("iso: no movie")?, 0)?;
+    let millis = match find(&inside, b"mvhd") {
+        Some(b) => {
+            let (scale, length) = if byte(d, b.body)? == 1 { (be32(d, b.body + 20)?, be64(d, b.body + 24)?) } else { (be32(d, b.body + 12)?, u64::from(be32(d, b.body + 16)?)) };
+            (scale > 0).then(|| length.saturating_mul(1000) / u64::from(scale))
+        }
+        None => None,
+    };
+    for trak in inside.iter().filter(|b| &b.kind == b"trak") {
+        let parts = kids(d, trak, 0)?;
+        let media = find(&parts, b"mdia").map(|m| kids(d, m, 0)).transpose()?.unwrap_or_default();
+        let (Some(tkhd), Some(hdlr)) = (find(&parts, b"tkhd"), find(&media, b"hdlr")) else { continue };
+        if get(d, hdlr.body + 8, 4)? != b"vide" {
+            continue;
+        }
+        // The matrix after the times, track ID and duration (16.16 numbers), then width and height.
+        let matrix = tkhd.body + if byte(d, tkhd.body)? == 1 { 52 } else { 40 };
+        let (width, height) = (be32(d, matrix + 36)? >> 16, be32(d, matrix + 40)? >> 16);
+        // A quarter turn has no `a` term: the picture stands the other way up.
+        let turned = be32(d, matrix)? == 0;
+        let (width, height) = if turned { (height, width) } else { (width, height) };
+        return Ok(Shape { width, height, millis });
+    }
+    bail!("iso: no picture track")
+}
+
+const TIMECODE_SCALE: u32 = 0x2A_D7B1;
+const DURATION: u32 = 0x4489;
+const TRACK_TYPE: u32 = 0x83;
+const VIDEO: u32 = 0xE0;
+const PIXEL_WIDTH: u32 = 0xB0;
+const PIXEL_HEIGHT: u32 = 0xBA;
+
+fn matroska_shape(d: &[u8]) -> Result<Shape> {
+    let uint = |e: &El| -> Result<u64> { Ok(get(d, e.body, e.end.context("mkv: open number")? - e.body)?.iter().take(8).fold(0, |v, &c| v << 8 | u64::from(c))) };
+    let head = el(d, 0)?;
+    let seg = el(d, head.end.context("mkv: open EBML header")?)?;
+    ensure!(seg.id == SEGMENT, "mkv: no segment after the header");
+    let to = seg.end.unwrap_or(d.len()).min(d.len());
+    let (mut at, mut size, mut scale, mut length) = (seg.body, None, 1_000_000_u64, None);
+    while at < to && (size.is_none() || length.is_none()) {
+        let e = el(d, at)?;
+        match e.id {
+            INFO => {
+                for k in children(d, &e)? {
+                    match k.id {
+                        TIMECODE_SCALE => scale = uint(&k)?,
+                        DURATION => {
+                            let raw = get(d, k.body, k.end.context("mkv: open duration")? - k.body)?;
+                            length = match raw.len() {
+                                4 => Some(f64::from(f32::from_be_bytes(raw.try_into()?))),
+                                8 => Some(f64::from_be_bytes(raw.try_into()?)),
+                                _ => None,
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TRACKS => {
+                for entry in children(d, &e)?.iter().filter(|k| k.id == TRACK_ENTRY) {
+                    let parts = children(d, entry)?;
+                    if parts.iter().find(|k| k.id == TRACK_TYPE).map(uint).transpose()? != Some(1) {
+                        continue;
+                    }
+                    if let Some(video) = parts.iter().find(|k| k.id == VIDEO) {
+                        let dims = children(d, video)?;
+                        let side = |id| dims.iter().find(|k| k.id == id).map(uint).transpose();
+                        if let (Some(w), Some(h)) = (side(PIXEL_WIDTH)?, side(PIXEL_HEIGHT)?) {
+                            size = Some((u32::try_from(w)?, u32::try_from(h)?));
+                            break;
+                        }
+                    }
+                }
+            }
+            CLUSTER => break,
+            _ => {}
+        }
+        at = e.end.context("mkv: open element before the clusters")?;
+    }
+    let (width, height) = size.context("mkv: no picture track")?;
+    // Duration counts ticks of TimecodeScale nanoseconds.
+    let millis = length.filter(|l| l.is_finite() && *l >= 0.).map(|l| (l * scale as f64 / 1e6) as u64);
+    Ok(Shape { width, height, millis })
+}
+
 fn get(d: &[u8], at: usize, n: usize) -> Result<&[u8]> {
     at.checked_add(n).and_then(|end| d.get(at..end)).ok_or_else(|| anyhow!("truncated at {at}"))
 }
@@ -982,5 +1088,28 @@ mod tests {
         video(&mut cut).unwrap();
         assert!(!has(&cut, b"GPS"));
         assert!(video(&mut vec![0x1A, 0x45, 0xDF, 0xA3, 0x00]).is_err());
+    }
+
+    #[test]
+    fn shape_reads_size_turn_and_length() {
+        let full = |v: u8| [v, 0, 0, 0];
+        let fixed = |n: u32| (n << 16).to_be_bytes();
+        let tkhd = |a: u32, b: u32| bx(b"tkhd", &[&full(0), &[0; 36], &a.to_be_bytes(), &b.to_be_bytes(), &[0; 28], &fixed(1920), &fixed(1080)]);
+        let mvhd = bx(b"mvhd", &[&full(0), &[0; 8], &1000_u32.to_be_bytes(), &2500_u32.to_be_bytes(), &[0; 80]]);
+        let trak = |kind: &[u8; 4], tkhd: Vec<u8>| bx(b"trak", &[&tkhd, &bx(b"mdia", &[&bx(b"hdlr", &[&full(0), &[0; 4], kind, &[0; 13]])])]);
+        let movie = |tkhd: Vec<u8>| [bx(b"ftyp", &[b"isom", &[0; 4]]), bx(b"moov", &[&mvhd, &trak(b"soun", bx(b"tkhd", &[&full(0), &[0; 88]])), &trak(b"vide", tkhd)])].concat();
+        assert_eq!(shape(&movie(tkhd(0x1_0000, 0))), Some(Shape { width: 1920, height: 1080, millis: Some(2500) }));
+        // A phone held upright: stored wide, played turned a quarter.
+        assert_eq!(shape(&movie(tkhd(0, 0x1_0000))), Some(Shape { width: 1080, height: 1920, millis: Some(2500) }));
+
+        let info = [mkv(TIMECODE_SCALE, Some(&[0x0F, 0x42, 0x40])), mkv(DURATION, Some(&1500_f32.to_be_bytes()))].concat();
+        let audio = mkv(TRACK_ENTRY, Some(&mkv(TRACK_TYPE, Some(&[2]))));
+        let picture = mkv(TRACK_ENTRY, Some(&[mkv(TRACK_TYPE, Some(&[1])), mkv(VIDEO, Some(&[mkv(PIXEL_WIDTH, Some(&[0x02, 0x80])), mkv(PIXEL_HEIGHT, Some(&[0x01, 0x68]))].concat()))].concat()));
+        let segment = [mkv(INFO, Some(&info)), mkv(TRACKS, Some(&[audio, picture].concat())), mkv(CLUSTER, None)].concat();
+        let webm = [mkv(EBML, Some(&mkv(0x4282, Some(b"webm")))), mkv(SEGMENT, None), segment].concat();
+        assert_eq!(shape(&webm), Some(Shape { width: 640, height: 360, millis: Some(1500) }));
+
+        assert_eq!(shape(b"plain text"), None);
+        assert_eq!(shape(&movie(bx(b"tkhd", &[&full(0)]))), None, "a cut header");
     }
 }

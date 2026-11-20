@@ -24,7 +24,7 @@ use matrix_sdk::{
         secret_storage::SecretStorageError,
     },
     notification_settings::{NotificationSettings, RoomNotificationMode},
-    attachment::{AttachmentConfig, AttachmentInfo, BaseImageInfo, Thumbnail},
+    attachment::{AttachmentConfig, AttachmentInfo, BaseImageInfo, BaseVideoInfo, Thumbnail},
     media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings},
     reqwest,
     room::{
@@ -2840,6 +2840,15 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &st
                 ..Default::default()
             }));
         }
+    } else if let Some(shape) = filmed.then(|| strip::shape(&data)).flatten() {
+        // Without a size, clients (this one too) draw a video as a file.
+        config = config.info(AttachmentInfo::Video(BaseVideoInfo {
+            width: Some(shape.width.into()),
+            height: Some(shape.height.into()),
+            duration: shape.millis.map(Duration::from_millis),
+            size: UInt::new(data.len() as u64),
+            blurhash: None,
+        }));
     }
     let caption = caption.trim();
     let apart = !caption.is_empty() && !features::read(room).await.is_none_or(|f| f.keeps_caption(mime.essence_str()));
