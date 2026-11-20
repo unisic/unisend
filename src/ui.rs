@@ -3422,6 +3422,8 @@ impl BeeperApp {
                                     .child(Icon::new(IconName::ArrowUp).size_5())
                                     .when(over, |el| el.opacity(0.4))
                                     .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.muted)))
+                                    // The press would hand focus to the root and drop the keyboard; Signal keeps it up.
+                                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                                     .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
                             } else {
                                 round_button("attach", IconName::Plus, cx).bg(p.raised).on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.attach(e.position(), cx)))
