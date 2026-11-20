@@ -55,6 +55,10 @@ event contents, state, members, keys and media are encrypted. Values written wit
 `set_custom_value` are stored plain; only sliding sync and OAuth's cross-process refresh lock use
 them, and this app uses neither.
 
+The media cache inside `store/` is bounded: 400 MiB, 20 MiB a file, media not opened for 60 days
+(or the shorter time Settings keeps messages) removed by the SDK's daily cleanup. Settings, Data and
+storage empties it through the SDK; no other part of `store/` and no key is touched by that.
+
 Plain on purpose, short-lived:
 
 - `media/`: attachments downloaded to open in another app or to play. Each event's folder is

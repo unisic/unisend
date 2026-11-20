@@ -318,6 +318,7 @@ impl BeeperApp {
                 }
                 let a = self.accounts.get_mut(slot).expect("found above");
                 let _ = a.cmd.try_send(Cmd::Incognito(incognito));
+                let _ = a.cmd.try_send(Cmd::Keep(self.settings.media.keep));
                 if !shown {
                     let _ = a.cmd.try_send(Cmd::Profile);
                 }

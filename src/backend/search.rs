@@ -143,6 +143,8 @@ enum Op {
     /// `query` is an FTS5 expression, or none to list what `filter` lets through.
     Query { room: Option<String>, query: Option<String>, filter: Filter, reply: oneshot::Sender<Vec<Found>> },
     Save,
+    /// Messages older than this leave the index, now and as they arrive; none keeps them all.
+    Keep(Option<Duration>),
 }
 
 struct Found {
@@ -238,6 +240,14 @@ pub(super) fn start(dir: &Path, client: &Client, seal: &Seal) {
         let rules = room.clone_info().room_version_rules_or_default().redaction;
         write(room.own_user_id(), change(&event, room.room_id(), &rules).into_iter().collect()).await;
     });
+}
+
+/// Keeps only the messages younger than `age` in the account's index. Never waits: the setting is
+/// sent again on the next start.
+pub(super) fn keep(client: &Client, age: Option<Duration>) {
+    if let Some(tx) = client.user_id().and_then(sender) {
+        let _ = tx.try_send(Op::Keep(age));
+    }
 }
 
 /// Writes a sealed index back if it changed. Never waits: a full queue leaves it to the timer.
@@ -519,13 +529,14 @@ fn schema(conn: &Connection) -> rusqlite::Result<()> {
 
 fn serve(conn: Connection, mut rx: mpsc::Receiver<Op>, mut saver: Option<Saver>) {
     let mut count: i64 = conn.query_row("SELECT count(*) FROM msg", [], |r| r.get(0)).unwrap_or(0);
+    let mut keep: Option<Duration> = None;
     while let Some(op) = rx.blocking_recv() {
         let result = match op {
             Op::Write(changes) => {
                 // A batch that changes nothing (an open chat sends its rows again on every receipt)
                 // leaves the sealed copy as it is.
                 let before = conn.total_changes();
-                let applied = apply(&conn, &changes, &mut count);
+                let applied = apply(&conn, &changes, &mut count).and_then(|()| forget_older(&conn, keep, &mut count));
                 if let Some(saver) = &mut saver
                     && conn.total_changes() != before
                 {
@@ -541,6 +552,17 @@ fn serve(conn: Connection, mut rx: mpsc::Receiver<Op>, mut saver: Option<Saver>)
                     saver.save(&conn);
                 }
                 Ok(())
+            }
+            Op::Keep(age) => {
+                keep = age;
+                let before = conn.total_changes();
+                let forgot = forget_older(&conn, keep, &mut count);
+                if let Some(saver) = &mut saver
+                    && conn.total_changes() != before
+                {
+                    saver.dirty = true;
+                }
+                forgot
             }
         };
         if let Err(e) = result {
@@ -619,6 +641,19 @@ fn apply(conn: &Connection, changes: &[Change], count: &mut i64) -> rusqlite::Re
         *count = MAX_MESSAGES;
     }
     prune_bytes(&tx, count, MAX_BYTES)?;
+    tx.commit()
+}
+
+/// Deletes the messages sent more than `keep` ago, and edits waiting for them. One range of the
+/// `ts` index, empty on most calls.
+fn forget_older(conn: &Connection, keep: Option<Duration>, count: &mut i64) -> rusqlite::Result<()> {
+    let Some(keep) = keep else { return Ok(()) };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let before = now.saturating_sub(keep).as_millis().min(i64::MAX as u128) as i64;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM body WHERE rowid IN (SELECT id FROM msg WHERE ts < ?1)", [before])?;
+    *count -= tx.execute("DELETE FROM msg WHERE ts < ?1", [before])? as i64;
+    tx.execute("DELETE FROM pending WHERE ts < ?1", [before])?;
     tx.commit()
 }
 
@@ -855,6 +890,21 @@ mod tests {
         schema(&conn).unwrap();
         let found = query_hits(&conn, None, None, &Filter { only: Only::Links, ..Default::default() }).unwrap();
         assert_eq!(found.iter().map(|f| f.event.as_str()).collect::<Vec<_>>(), ["$1"]);
+    }
+
+    #[test]
+    fn messages_older_than_kept_are_forgotten() {
+        let conn = memory().unwrap();
+        schema(&conn).unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        const DAY: i64 = 24 * 60 * 60 * 1000;
+        let mut n = 0;
+        apply(&conn, &[add("$old", "!r", now - 40 * DAY, "old words"), add("$new", "!r", now - DAY, "new words")], &mut n).unwrap();
+        forget_older(&conn, None, &mut n).unwrap();
+        assert_eq!(find(&conn, None, "words").len(), 2, "kept forever");
+        forget_older(&conn, Some(Duration::from_secs(30 * 24 * 60 * 60)), &mut n).unwrap();
+        assert_eq!(find(&conn, None, "words").iter().map(|h| h.0.as_str()).collect::<Vec<_>>(), ["$new"]);
+        assert_eq!(n, 1);
     }
 
     #[test]

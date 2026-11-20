@@ -237,6 +237,12 @@ pub enum Cmd {
     Profile,
     /// Changes the user's own name or picture; answered with `Profile`, else `Ev::Error`.
     SetProfile(group::Mine),
+    /// How long messages stay in this device's caches (`storage::Keep`).
+    Keep(storage::Keep),
+    /// What the account takes on this device; answered with `Ev::Storage`.
+    Storage,
+    /// Empties the media cache and the downloads; answered with `Ev::Storage`, else `Ev::Error`.
+    ClearMedia,
     /// Messages matching `query` and `filter` in one room, or in every room; answered with `Found`.
     Search { room: Option<OwnedRoomId>, query: String, filter: Filter },
     /// Looks for a newer release; answered with `Ev::Update`.
@@ -353,6 +359,8 @@ pub enum Ev {
     PeerIds(OwnedRoomId, Vec<String>),
     /// Messages with media, files or links, newest first; `scanned` counts the events read so far.
     InfoItems { room: OwnedRoomId, items: Vec<Msg>, scanned: usize, done: bool },
+    /// The answer to `Cmd::Storage` and `Cmd::ClearMedia`.
+    Storage(storage::Usage),
     /// The answer to `Cmd::Search` for this room, query and filter.
     Found { room: Option<OwnedRoomId>, query: String, filter: Filter, hits: Vec<Hit> },
 }
@@ -2076,6 +2084,23 @@ impl State {
                 let room = self.room(&room_id)?;
                 self.peer = Some(AbortOnDrop(tokio::spawn(info::peer(room, self.ev.clone()))));
             }
+            Cmd::Keep(keep) => {
+                let client = self.client()?.clone();
+                tokio::spawn(async move { storage::keep(&client, keep).await });
+            }
+            cmd @ (Cmd::Storage | Cmd::ClearMedia) => {
+                let (client, ev, dir) = (self.client()?.clone(), self.ev.clone(), self.dir.clone());
+                tokio::spawn(async move {
+                    if matches!(cmd, Cmd::ClearMedia)
+                        && let Err(e) = storage::clear_media(&client, &dir).await
+                    {
+                        let _ = ev.send(Ev::Error(t!("Could not clear the media cache: {error}", error = format!("{e:#}")))).await;
+                    }
+                    if let Ok(usage) = tokio::task::spawn_blocking(move || storage::usage(&dir)).await {
+                        let _ = ev.send(Ev::Storage(usage)).await;
+                    }
+                });
+            }
             Cmd::Search { room, query, filter } => {
                 let (client, ev) = (self.client()?.clone(), self.ev.clone());
                 tokio::spawn(async move {
@@ -2344,6 +2369,12 @@ async fn sweep_media_every(dir: PathBuf) {
         })
         .await;
     }
+}
+
+/// Deletes every download now, for Settings' Storage page.
+fn sweep_now(dir: &Path) {
+    let _held = MEDIA.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    sweep_media(dir, Duration::ZERO);
 }
 
 /// A file name with nothing that could leave its directory.
@@ -4118,6 +4149,7 @@ pub use disappear::{Disappearing, label as disappear_label};
 mod features;
 pub use features::Features;
 mod search;
+pub(crate) mod storage;
 pub use search::{Filter, Hit, Only};
 pub(crate) use search::{MAX_HITS, MIN_QUERY, save as save_search};
 

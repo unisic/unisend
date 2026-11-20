@@ -32,6 +32,7 @@ N impossible over Matrix or bridges.
 | Stories, status | ? | Y | Y | Y | missing | N |
 | Contacts, find by username | Y | Y | Y | Y | `ui/contacts.rs`, `ui/people.rs` | B |
 | Search in chat and in all chats | Y | Y | Y | Y | `backend/search.rs`, `ui/search.rs` (local FTS5) | Y (local) |
+| Manage storage, keep messages | Y | Y | N? | N? | `ui/storage.rs`: sizes, clear media cache, keep 30 days / 1 year / forever | Y (local) |
 | Search filters (date, type) | P | Y | N | P | `ui/search.rs`: media, links, files, sender, time, in a chat's search | Y (local index) |
 | Archive | Y | Y | N | Y | done | Y |
 | Pin chats | Y | Y | Y | Y | tag `m.favourite`; no manual order | Y |

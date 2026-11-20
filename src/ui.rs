@@ -58,6 +58,7 @@ mod pinpad;
 mod pins;
 mod press;
 mod slide;
+pub(crate) mod storage;
 mod people;
 mod pollnew;
 pub(crate) mod receipt;
@@ -429,6 +430,7 @@ pub struct BeeperApp {
     viewer_last: Option<(String, Option<Arc<Image>>)>,
     zoom: viewer::Zoom,
     find: search::Find,
+    storage: storage::Storage,
     /// The reaction under the pointer in the picker.
     picker_hover: Option<usize>,
     emoji_pick: emojipick::Picker,
@@ -772,6 +774,7 @@ impl BeeperApp {
             viewer_last: None,
             zoom: viewer::Zoom::default(),
             find,
+            storage: Default::default(),
             picker_hover: None,
             emoji_pick,
             emoji_open: None,
@@ -868,6 +871,7 @@ impl BeeperApp {
                 self.load_hidden(&user);
                 self.user = Some(user);
                 self.send(Cmd::Incognito(self.settings.incognito), cx);
+                self.send(Cmd::Keep(self.settings.media.keep), cx);
                 let l = &self.settings.lock;
                 crate::applock::configure(l.mode, l.timeout_secs(), l.secure);
                 self.screen = Screen::Main;
@@ -1134,6 +1138,7 @@ impl BeeperApp {
                 }
             }
             Ev::InfoItems { room, items, scanned, done } => self.info_items(room, items, scanned, done, cx),
+            Ev::Storage(usage) => self.storage_usage(usage),
             Ev::Found { room, query, filter, hits } => self.found(room, query, filter, hits, cx),
         }
         cx.notify();
