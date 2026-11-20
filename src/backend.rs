@@ -138,6 +138,8 @@ pub enum Cmd {
     ViewedOnce(OwnedRoomId, String),
     /// Download to the media cache so the system can open it.
     Fetch(String, Media),
+    /// Fetch into the SDK's media cache only, so a later `Fetch` needs no network (auto-download).
+    Prefetch(Media),
     Attach { room: OwnedRoomId, path: PathBuf, reply_to: Option<String> },
     /// Chat networks on the account.
     Networks,
@@ -237,8 +239,14 @@ pub enum Cmd {
     Profile,
     /// Changes the user's own name or picture; answered with `Profile`, else `Ev::Error`.
     SetProfile(group::Mine),
-    /// Messages matching `query` in one room, or in every room; answered with `Found`.
-    Search { room: Option<OwnedRoomId>, query: String },
+    /// How long messages stay in this device's caches (`storage::Keep`).
+    Keep(storage::Keep),
+    /// What the account takes on this device; answered with `Ev::Storage`.
+    Storage,
+    /// Empties the media cache and the downloads; answered with `Ev::Storage`, else `Ev::Error`.
+    ClearMedia,
+    /// Messages matching `query` and `filter` in one room, or in every room; answered with `Found`.
+    Search { room: Option<OwnedRoomId>, query: String, filter: Filter },
     /// Looks for a newer release; answered with `Ev::Update`.
     UpdateCheck,
     /// Downloads, checks and installs this release; replaces a download still running.
@@ -360,8 +368,10 @@ pub enum Ev {
     PeerIds(OwnedRoomId, Vec<String>),
     /// Messages with media, files or links, newest first; `scanned` counts the events read so far.
     InfoItems { room: OwnedRoomId, items: Vec<Msg>, scanned: usize, done: bool },
-    /// The answer to `Cmd::Search` for this room and query.
-    Found { room: Option<OwnedRoomId>, query: String, hits: Vec<Hit> },
+    /// The answer to `Cmd::Storage` and `Cmd::ClearMedia`.
+    Storage(storage::Usage),
+    /// The answer to `Cmd::Search` for this room, query and filter.
+    Found { room: Option<OwnedRoomId>, query: String, filter: Filter, hits: Vec<Hit> },
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -1451,7 +1461,7 @@ impl State {
             Cmd::Group { room, change } => Cmd::Group { room: at(room, None)?, change },
             // shortcut: a search in a merged chat looks through the chat picked under the composer;
             // search each chat and merge the hits if people miss them.
-            Cmd::Search { room: Some(room), query } => Cmd::Search { room: Some(at(room, None)?), query },
+            Cmd::Search { room: Some(room), query, filter } => Cmd::Search { room: Some(at(room, None)?), query, filter },
             other => other,
         })
     }
@@ -1654,9 +1664,17 @@ impl State {
                 for (id, media) in wanted {
                     let client = self.client()?.clone();
                     let (ev, permits) = (self.ev.clone(), self.fetches.clone());
+                    let (dir, generation) = (media_dir(&self.dir), media_generation());
                     tokio::spawn(async move {
                         let Ok(_permit) = permits.acquire().await else { return };
-                        match thumbnail(&client, &media).await {
+                        let looped = match media.kind == MediaKind::Video && media.looped {
+                            true => looping(&client, &media, &id, &dir, generation).await.unwrap_or_else(|e| {
+                                log::debug!("loop: {e:#}");
+                                None
+                            }),
+                            false => None,
+                        };
+                        match if looped.is_some() { Ok(looped) } else { thumbnail(&client, &media).await } {
                             Ok(Some(bytes)) => {
                                 let _ = ev.send(Ev::Thumb(id, bytes)).await;
                             }
@@ -1665,6 +1683,16 @@ impl State {
                         }
                     });
                 }
+            }
+            Cmd::Prefetch(media) => {
+                let (client, permits) = (self.client()?.clone(), self.fetches.clone());
+                tokio::spawn(async move {
+                    let Ok(_permit) = permits.acquire().await else { return };
+                    let request = MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File };
+                    if let Err(e) = client.media().get_media_content(&request, true).await {
+                        log::debug!("prefetch: {e:#}");
+                    }
+                });
             }
             Cmd::ViewedOnce(room_id, event) => {
                 // Only Beeper's bridges take the report; elsewhere there is nobody to tell.
@@ -1720,7 +1748,8 @@ impl State {
                 tokio::spawn(async move {
                     let saved = async {
                         let request = MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File };
-                        let bytes = client.media().get_media_content(&request, false).await?;
+                        // From the media cache where auto-download put it; view-once media stays out.
+                        let bytes = client.media().get_media_content(&request, !media.once).await?;
                         save_media(&dir, generation, &id, &media.name, &bytes)
                     };
                     let path = match saved.await {
@@ -2193,11 +2222,28 @@ impl State {
                 let room = self.room(&room_id)?;
                 self.peer = Some(AbortOnDrop(tokio::spawn(info::peer(room, self.ev.clone()))));
             }
-            Cmd::Search { room, query } => {
+            Cmd::Keep(keep) => {
+                let client = self.client()?.clone();
+                tokio::spawn(async move { storage::keep(&client, keep).await });
+            }
+            cmd @ (Cmd::Storage | Cmd::ClearMedia) => {
+                let (client, ev, dir) = (self.client()?.clone(), self.ev.clone(), self.dir.clone());
+                tokio::spawn(async move {
+                    if matches!(cmd, Cmd::ClearMedia)
+                        && let Err(e) = storage::clear_media(&client, &dir).await
+                    {
+                        let _ = ev.send(Ev::Error(t!("Could not clear the media cache: {error}", error = format!("{e:#}")))).await;
+                    }
+                    if let Ok(usage) = tokio::task::spawn_blocking(move || storage::usage(&dir)).await {
+                        let _ = ev.send(Ev::Storage(usage)).await;
+                    }
+                });
+            }
+            Cmd::Search { room, query, filter } => {
                 let (client, ev) = (self.client()?.clone(), self.ev.clone());
                 tokio::spawn(async move {
-                    let hits = search::search(&client, room.as_deref(), &query).await;
-                    let _ = ev.send(Ev::Found { room, query, hits }).await;
+                    let hits = search::search(&client, room.as_deref(), &query, filter.clone()).await;
+                    let _ = ev.send(Ev::Found { room, query, filter, hits }).await;
                 });
             }
         }
@@ -2487,6 +2533,12 @@ async fn sweep_media_every(dir: PathBuf) {
     }
 }
 
+/// Deletes every download now, for Settings' Storage page.
+fn sweep_now(dir: &Path) {
+    let _held = MEDIA.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    sweep_media(dir, Duration::ZERO);
+}
+
 /// A file name with nothing that could leave its directory.
 fn safe_name(name: &str) -> String {
     let clean: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') { c } else { '_' }).collect();
@@ -2529,6 +2581,39 @@ async fn thumbnail(client: &Client, media: &Media) -> Result<Option<Vec<u8>>> {
         return Ok(Some(bytes));
     }
     Ok(Some(tokio::task::spawn_blocking(move || shrink(&bytes, THUMB_PX)).await??))
+}
+
+/// A bridged GIF as a loop for its bubble (`video::looping`), made once and kept in memory.
+/// `None` for a clip without a size or over `video::MAX_LOOP_SOURCE`, and where it does not decode.
+async fn looping(client: &Client, media: &Media, id: &str, dir: &Path, generation: u64) -> Result<Option<Vec<u8>>> {
+    if let Some(gif) = video::kept(id) {
+        return Ok(Some(gif));
+    }
+    let Some(dims) = media.dims else { return Ok(None) };
+    if media.size.is_some_and(|s| s > video::MAX_LOOP_SOURCE) {
+        return Ok(None);
+    }
+    let request = MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File };
+    let bytes = client.media().get_media_content(&request, true).await?;
+    if bytes.len() as u64 > video::MAX_LOOP_SOURCE {
+        return Ok(None);
+    }
+    let (dir, key, name, duration) = (dir.to_owned(), format!("{id}#loop"), media.name.clone(), media.duration);
+    let _one = video::DECODING.acquire().await?;
+    // The decoders read a file: it is there in `media/` only while they do.
+    let gif = tokio::task::spawn_blocking(move || {
+        let path = save_media(&dir, generation, &key, &name, &bytes)?;
+        let gif = video::looping(&path, dims, duration);
+        if let Some(folder) = path.parent() {
+            let _ = std::fs::remove_dir_all(folder);
+        }
+        anyhow::Ok(gif)
+    })
+    .await??;
+    if let Some(gif) = &gif {
+        video::keep(id, gif.clone());
+    }
+    Ok(gif)
 }
 
 /// Queues a file as the message type its content calls for: the chat shows it at once, and the
@@ -4286,7 +4371,8 @@ pub use disappear::{Disappearing, label as disappear_label};
 mod features;
 pub use features::Features;
 mod search;
-pub use search::Hit;
+pub(crate) mod storage;
+pub use search::{Filter, Hit, Only};
 pub(crate) use search::{MAX_HITS, MIN_QUERY, save as save_search};
 
 pub(crate) mod rooms;

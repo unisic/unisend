@@ -32,6 +32,7 @@ mod camera;
 mod caption;
 pub(crate) use caption::video_frame;
 mod cards;
+mod download;
 mod emojipick;
 mod contacts;
 pub(crate) mod folders;
@@ -59,6 +60,7 @@ mod pinpad;
 mod pins;
 mod press;
 mod slide;
+pub(crate) mod storage;
 mod people;
 mod pollnew;
 pub(crate) mod receipt;
@@ -439,6 +441,7 @@ pub struct BeeperApp {
     viewer_last: Option<(String, Option<Arc<Image>>)>,
     zoom: viewer::Zoom,
     find: search::Find,
+    storage: storage::Storage,
     /// The reaction under the pointer in the picker.
     picker_hover: Option<usize>,
     emoji_pick: emojipick::Picker,
@@ -781,6 +784,7 @@ impl BeeperApp {
             viewer_last: None,
             zoom: viewer::Zoom::default(),
             find,
+            storage: Default::default(),
             picker_hover: None,
             emoji_pick,
             emoji_open: None,
@@ -878,6 +882,7 @@ impl BeeperApp {
                 self.load_hidden(&user);
                 self.user = Some(user);
                 self.send(Cmd::Incognito(self.settings.incognito), cx);
+                self.send(Cmd::Keep(self.settings.media.keep), cx);
                 let l = &self.settings.lock;
                 crate::applock::configure(l.mode, l.timeout_secs(), l.secure);
                 self.screen = Screen::Main;
@@ -1178,7 +1183,8 @@ impl BeeperApp {
                 }
             }
             Ev::InfoItems { room, items, scanned, done } => self.info_items(room, items, scanned, done, cx),
-            Ev::Found { room, query, hits } => self.found(room, query, hits, cx),
+            Ev::Storage(usage) => self.storage_usage(usage),
+            Ev::Found { room, query, filter, hits } => self.found(room, query, filter, hits, cx),
         }
         cx.notify();
     }
@@ -1509,12 +1515,17 @@ impl BeeperApp {
     /// Requests the thumbnail of a message that is being drawn. Like `fetch_rows`, leaves half
     /// the command channel to user actions.
     fn want_thumb(&mut self, ix: usize) {
+        self.prefetch(ix);
         let m = &self.msgs[ix];
-        let pictured = m.media.as_ref().filter(|media| !media.once && matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
+        let pictured = m.media.as_ref().filter(|media| !media.once && matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video) && self.may_download(&m.id, media));
         let linked = m.link.as_ref().and_then(|link| link.image.as_ref());
         let quoted = m.reply.as_ref().and_then(|q| q.media.as_ref()).filter(|media| matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video));
         let wanted: Vec<(String, Media)> = pictured
-            .map(|media| (m.id.clone(), media.clone()))
+            .map(|media| {
+                let mut media = media.clone();
+                media.looped &= !self.stills.contains(&m.id);
+                (m.id.clone(), media)
+            })
             .into_iter()
             .chain(linked.map(|image| {
                 let key = link_key(&m.id);
@@ -1607,6 +1618,9 @@ impl BeeperApp {
     }
 
     fn open_media(&mut self, id: String, media: Media, cx: &mut Context<Self>) {
+        if self.download_anyway(&id, &media, cx) {
+            return;
+        }
         if matches!(media.kind, MediaKind::Image | MediaKind::Sticker) {
             if self.send(Cmd::View(id.clone(), media), cx) {
                 self.viewer = Some((id, None));
@@ -1692,6 +1706,8 @@ impl BeeperApp {
             let (w, h) = picture_size(media, room);
             let thumb = self.thumbs.get(&m.id).cloned();
             let video = media.kind == MediaKind::Video;
+            // A bridged GIF that loops in place (`backend/video.rs`): no play mark, a tap opens it.
+            let moving = video && thumb.as_ref().is_some_and(|image| image.format == ImageFormat::Gif);
             // Fades in when it loads; one already loaded is there at once. Left out while the
             // viewer draws this picture over its place, which stays as the slot it lands in.
             let arrived = transition((SharedString::from(m.id.clone()), "in"), if thumb.is_some() { 1. } else { 0. }, Transition::new(motion::THUMB_IN).easing(motion::EASE_OUT), window, cx);
@@ -1734,13 +1750,32 @@ impl BeeperApp {
                     Some(image) => el.child(img(image).size_full().rounded(px(radius)).object_fit(ObjectFit::Cover).opacity(alpha)).child(
                         div().absolute().inset_0().rounded(px(radius)).border_1().border_color(Palette::of(cx).text.opacity(0.1)).opacity(alpha),
                     ),
+                    None if !self.may_download(&m.id, media) => el.child(
+                        v_flex().size_full().gap_1().items_center().justify_center().opacity(0.7).child(Icon::new(IconName::Download).size_6()).children(
+                            media.size.filter(|&s| s > 0).filter(|_| !video).map(|size| div().text_size(fs(12.)).font_features(tabular()).child(file_size(size))),
+                        ),
+                    ),
                     None => el.child(
                         div().size_full().flex().items_center().justify_center().opacity(0.5).child(
                             Icon::new(if video { IconName::Video } else { IconName::Image }).size_6(),
                         ),
                     ),
                 })
-                .when(video, |el| {
+                .when(moving, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .left_2()
+                            .bottom_2()
+                            .px_1p5()
+                            .rounded_full()
+                            .bg(gpui_kit::black().opacity(0.55))
+                            .text_color(gpui_kit::white())
+                            .text_size(fs(11.))
+                            .child("GIF"),
+                    )
+                })
+                .when(video && !moving, |el| {
                     el.child(
                         div().absolute().inset_0().flex().items_center().justify_center().child(
                             div()

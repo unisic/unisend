@@ -1,8 +1,10 @@
 //! Message search: a bar over the open chat, and a Messages section under the chat list's matches.
-//! The backend answers from this device's index (`backend/search.rs`).
+//! The backend answers from this device's index (`backend/search.rs`). The chat's bar narrows it
+//! to media, links or files, to one sender and to a time; with any of those set, the bar lists
+//! what they let through before a word is typed.
 
 use super::*;
-use crate::backend::{Hit, MAX_HITS, MIN_QUERY};
+use crate::backend::{Filter, Hit, MAX_HITS, MIN_QUERY, Only};
 use crate::i18n::t;
 
 /// Older pages a jump to a found message may load before it gives up; 40 events each.
@@ -15,8 +17,56 @@ pub(super) struct Find {
     /// Its results cover the conversation; hidden after a jump until the field is touched again.
     results: bool,
     /// The latest answers, each with the query it answers; at most `MAX_HITS` hits each.
-    local: (String, Vec<Hit>),
+    local: (String, Filter, Vec<Hit>),
     global: (String, Vec<Hit>),
+    /// What the chat's search is narrowed to; `when` is the choice `filter`'s times came from.
+    filter: Filter,
+    when: When,
+    /// The choices of a filter, listed in place of the results.
+    picking: Option<Picking>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Picking {
+    From,
+    When,
+}
+
+/// The times a search can be narrowed to, counted back from when the choice is made.
+#[derive(Clone, Copy, PartialEq)]
+enum When {
+    Any,
+    Week,
+    Month,
+    Year,
+    Older,
+}
+
+impl When {
+    const ALL: [Self; 5] = [Self::Any, Self::Week, Self::Month, Self::Year, Self::Older];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Any => t!("Any time"),
+            Self::Week => t!("Past week"),
+            Self::Month => t!("Past month"),
+            Self::Year => t!("Past year"),
+            Self::Older => t!("Older than a year"),
+        }
+    }
+
+    /// (since, until) in ms since the epoch, for `now`.
+    fn range(self, now: u64) -> (Option<u64>, Option<u64>) {
+        const DAY: u64 = 24 * 60 * 60 * 1000;
+        let back = |days: u64| Some(now.saturating_sub(days * DAY));
+        match self {
+            Self::Any => (None, None),
+            Self::Week => (back(7), None),
+            Self::Month => (back(30), None),
+            Self::Year => (back(365), None),
+            Self::Older => (None, back(365)),
+        }
+    }
 }
 
 impl Find {
@@ -32,13 +82,14 @@ impl Find {
             keyboard_follows(ev, Keyboard::Text, cx);
             cx.notify();
         }));
-        Self { input, open: false, results: true, local: Default::default(), global: Default::default() }
+        Self { input, open: false, results: true, local: Default::default(), global: Default::default(), filter: Filter::default(), when: When::Any, picking: None }
     }
 
     /// The open chat is gone: so is its search.
     pub(super) fn close(&mut self) {
         self.open = false;
         self.local = Default::default();
+        (self.filter, self.when, self.picking) = (Filter::default(), When::Any, None);
     }
 }
 
@@ -52,6 +103,7 @@ fn long_enough(query: &str) -> bool {
 
 impl BeeperApp {
     pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find.close();
         (self.find.open, self.find.results) = (true, true);
         self.find.input.update(cx, |input, cx| {
             input.set_value("", window, cx);
@@ -68,11 +120,28 @@ impl BeeperApp {
 
     fn find_in_chat(&mut self, cx: &mut Context<Self>) {
         let query = query_of(&self.find.input, cx);
-        let Some(room) = self.open.clone().filter(|_| long_enough(&query)) else {
-            self.find.local = (query, Vec::new());
+        let filter = self.find.filter.clone();
+        let Some(room) = self.open.clone().filter(|_| long_enough(&query) || !filter.is_empty()) else {
+            self.find.local = (query, filter, Vec::new());
             return;
         };
-        let _ = self.cmd.try_send(Cmd::Search { room: Some(room), query });
+        let _ = self.cmd.try_send(Cmd::Search { room: Some(room), query, filter });
+    }
+
+    fn set_filter(&mut self, change: impl FnOnce(&mut Find), cx: &mut Context<Self>) {
+        change(&mut self.find);
+        (self.find.picking, self.find.results) = (None, true);
+        self.find_in_chat(cx);
+        cx.notify();
+    }
+
+    fn pick_filter(&mut self, picking: Picking, cx: &mut Context<Self>) {
+        if picking == Picking::From {
+            self.want_members();
+        }
+        self.find.picking = (self.find.picking != Some(picking)).then_some(picking);
+        self.find.results = true;
+        cx.notify();
     }
 
     /// The chat list's query changed: look for it in messages too.
@@ -82,13 +151,13 @@ impl BeeperApp {
             self.find.global = (query, Vec::new());
             return;
         }
-        let _ = self.cmd.try_send(Cmd::Search { room: None, query });
+        let _ = self.cmd.try_send(Cmd::Search { room: None, query, filter: Filter::default() });
     }
 
     /// An answer; one for a query the user has typed past is dropped.
-    pub(super) fn found(&mut self, room: Option<OwnedRoomId>, query: String, hits: Vec<Hit>, cx: &mut Context<Self>) {
+    pub(super) fn found(&mut self, room: Option<OwnedRoomId>, query: String, filter: Filter, hits: Vec<Hit>, cx: &mut Context<Self>) {
         match room {
-            None if self.searching && query == query_of(&self.search, cx) => {
+            None if self.searching && filter.is_empty() && query == query_of(&self.search, cx) => {
                 let missing: Vec<OwnedRoomId> =
                     hits.iter().map(|h| h.room.clone()).filter(|id| !self.avatars.contains_key(id)).collect::<HashSet<_>>().into_iter().collect();
                 if !missing.is_empty() && self.cmd.try_send(Cmd::Avatars(missing.clone())).is_ok() {
@@ -96,8 +165,8 @@ impl BeeperApp {
                 }
                 self.find.global = (query, hits);
             }
-            Some(room) if self.find.open && self.open.as_ref() == Some(&room) && query == query_of(&self.find.input, cx) => {
-                self.find.local = (query, hits);
+            Some(room) if self.find.open && self.open.as_ref() == Some(&room) && query == query_of(&self.find.input, cx) && filter == self.find.filter => {
+                self.find.local = (query, filter, hits);
             }
             _ => {}
         }
@@ -185,11 +254,11 @@ impl BeeperApp {
         round_button("find", IconName::Search, cx).on_click(cx.listener(|this, _, window, cx| this.open_find(window, cx)))
     }
 
-    /// The search field in place of the chat's header.
+    /// The search field in place of the chat's header, and the filters under it.
     pub(super) fn find_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
         let p = Palette::of(cx);
         self.find.open.then(|| {
-            h_flex().flex_none().h(px(BAR_H)).px(px(GUTTER)).child(
+            let field = h_flex().flex_none().h(px(BAR_H)).px(px(GUTTER)).child(
                 h_flex()
                     .flex_1()
                     .h(px(TAP))
@@ -200,18 +269,94 @@ impl BeeperApp {
                     .child(Icon::new(IconName::Search).size_4().flex_none().text_color(p.faint))
                     .child(div().flex_1().min_w_0().child(Input::new(&self.find.input).appearance(false)).child(crate::ime::marks(&self.find.input)))
                     .child(round_button("close-find", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx)))),
-            )
+            );
+            v_flex().flex_none().child(field).child(self.find_filters(cx))
         })
+    }
+
+    /// Media, Links, Files, From and Date, as chips; From and Date list their choices.
+    fn find_filters(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let filter = &self.find.filter;
+        let kinds = [(Only::Media, t!("Media")), (Only::Links, t!("Links")), (Only::Files, t!("Files"))].map(|(only, label)| {
+            let on = filter.only == only;
+            chip(("find-only", only as usize), label.to_owned(), on, false, cx).on_click(cx.listener(move |this, _, _, cx| {
+                this.set_filter(|find| find.filter.only = if on { Only::All } else { only }, cx);
+            }))
+        });
+        let from = filter.from.as_ref().map(|user| self.sender_name(user));
+        let when = (self.find.when != When::Any).then(|| self.find.when.label().to_owned());
+        h_flex()
+            .id("find-filters")
+            .px(px(GUTTER))
+            .pb(px(8.))
+            .gap(px(8.))
+            .overflow_x_scroll()
+            .children(kinds)
+            .child(
+                chip("find-from", from.clone().unwrap_or_else(|| t!("From").to_owned()), from.is_some(), true, cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.pick_filter(Picking::From, cx))),
+            )
+            .child(
+                chip("find-when", when.clone().unwrap_or_else(|| t!("Date").to_owned()), when.is_some(), true, cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.pick_filter(Picking::When, cx))),
+            )
+    }
+
+    fn sender_name(&self, user: &OwnedUserId) -> String {
+        if self.user.as_ref() == Some(user) {
+            return t!("You").to_owned();
+        }
+        self.members().iter().find(|(id, _)| id == user).map_or_else(|| user.to_string(), |(_, name)| name.clone())
+    }
+
+    /// The choices of the filter being picked, in place of the results.
+    fn find_choices(&self, picking: Picking, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+        match picking {
+            Picking::When => When::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(ix, when)| {
+                    choice(("find-when-choice", ix), when.label().to_owned(), self.find.when == when, cx).on_click(cx.listener(move |this, _, _, cx| {
+                        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                        this.set_filter(
+                            |find| {
+                                find.when = when;
+                                (find.filter.since, find.filter.until) = when.range(now);
+                            },
+                            cx,
+                        );
+                    }))
+                })
+                .collect(),
+            Picking::From => {
+                let people = std::iter::once((None, t!("Anyone").to_owned()))
+                    .chain(self.user.clone().map(|me| (Some(me), t!("You").to_owned())))
+                    .chain(self.members().iter().map(|(id, name)| (Some(id.clone()), name.clone())));
+                people
+                    .enumerate()
+                    .map(|(ix, (user, name))| {
+                        let on = self.find.filter.from == user;
+                        choice(("find-from-choice", ix), name, on, cx).on_click(cx.listener(move |this, _, _, cx| {
+                            let user = user.clone();
+                            this.set_filter(|find| find.filter.from = user, cx);
+                        }))
+                    })
+                    .collect()
+            }
+        }
     }
 
     /// What was found in the open chat, over its messages.
     pub(super) fn find_results(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let query = query_of(&self.find.input, cx);
-        if !self.find.open || !self.find.results || !long_enough(&query) {
+        if !self.find.open || !self.find.results || (!long_enough(&query) && self.find.filter.is_empty() && self.find.picking.is_none()) {
             return None;
         }
         let p = Palette::of(cx);
-        let (answered, hits) = &self.find.local;
+        if let Some(picking) = self.find.picking {
+            return Some(div().id("find-choices").absolute().inset_0().bg(p.ground).overflow_y_scroll().child(v_flex().w_full().py(px(4.)).children(self.find_choices(picking, cx))));
+        }
+        let (answered, filter, hits) = &self.find.local;
         let note = |text: &'static str| div().px(px(GUTTER)).py(px(GAP)).text_size(fs(14.)).text_color(p.faint).child(text);
         let rows = hits.iter().map(|hit| {
             let (line, marks) = with_prefix("", hit, p);
@@ -256,7 +401,7 @@ impl BeeperApp {
                         .child(crate::emoji::styled(line, marks)),
                 )
         });
-        let waiting = hits.is_empty() && *answered != query;
+        let waiting = hits.is_empty() && (*answered != query || *filter != self.find.filter);
         Some(
             div()
                 .id("find-results")
@@ -276,10 +421,81 @@ impl BeeperApp {
     }
 }
 
-/// The snippet after `prefix`, with its matches set in the text colour.
+/// The snippet after `prefix`, with its matches set in the text colour; for media without a
+/// caption, what it is.
 fn with_prefix(prefix: &str, hit: &Hit, p: Palette) -> (String, Vec<(std::ops::Range<usize>, HighlightStyle)>) {
     let style = HighlightStyle { color: Some(p.text), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
     let shift = prefix.len();
     let marks = hit.marks.iter().map(|r| (r.start + shift..r.end + shift, style)).collect();
-    (format!("{prefix}{}", hit.snippet), marks)
+    let text = match (hit.snippet.is_empty(), hit.media) {
+        (true, Some(kind)) => match kind {
+            MediaKind::Image => t!("Photo"),
+            MediaKind::Video => t!("Video"),
+            MediaKind::Sticker => t!("Sticker"),
+            MediaKind::Voice => t!("Voice message"),
+            MediaKind::Audio => t!("Audio"),
+            MediaKind::File => t!("File"),
+        },
+        _ => hit.snippet.as_str(),
+    };
+    (format!("{prefix}{text}"), marks)
+}
+
+/// A filter's chip; `list` when a tap lists choices rather than turning it on.
+fn chip(id: impl Into<ElementId>, label: String, on: bool, list: bool, cx: &App) -> Stateful<Div> {
+    let p = Palette::of(cx);
+    h_flex()
+        .id(id)
+        .flex_none()
+        .h(px(32.))
+        .px(px(12.))
+        .gap(px(4.))
+        .rounded_full()
+        .border_1()
+        .border_color(if on { p.raised } else { p.rule })
+        .when(on, |el| el.bg(p.raised))
+        .text_size(fs(14.))
+        .text_color(if on { p.text } else { p.muted })
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .when(!list, |el| el.aria_toggled(on.into()))
+        .cursor_pointer()
+        .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.surface)))
+        .active(|el| el.bg(p.raised))
+        .child(label)
+        .when(list, |el| el.child(Icon::new(IconName::ChevronDown).size_4().text_color(p.faint)))
+}
+
+/// One choice of a filter, checked when it is the one set.
+fn choice(id: impl Into<ElementId>, label: String, on: bool, cx: &App) -> Stateful<Div> {
+    let p = Palette::of(cx);
+    h_flex()
+        .id(id)
+        .w_full()
+        .min_h(px(TAP))
+        .px(px(GUTTER))
+        .gap(px(GAP))
+        .role(Role::RadioButton)
+        .aria_label(label.clone())
+        .aria_toggled(on.into())
+        .cursor_pointer()
+        .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.surface)))
+        .active(|el| el.bg(p.raised))
+        .child(div().flex_1().min_w_0().truncate().text_size(fs(16.)).child(label))
+        .when(on, |el| el.child(Icon::new(IconName::Check).size_5().flex_none().text_color(p.text)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::When;
+
+    #[test]
+    fn times_count_back_from_the_choice() {
+        const DAY: u64 = 24 * 60 * 60 * 1000;
+        let now = 1000 * DAY;
+        assert_eq!(When::Any.range(now), (None, None));
+        assert_eq!(When::Week.range(now), (Some(993 * DAY), None));
+        assert_eq!(When::Older.range(now), (None, Some(635 * DAY)));
+        assert_eq!(When::Year.range(DAY), (Some(0), None), "never before the epoch");
+    }
 }

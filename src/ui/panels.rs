@@ -52,10 +52,14 @@ pub(super) enum Page {
     LockAfter,
     NotifyShows,
     Folders,
+    Storage,
+    DownloadMobile,
+    DownloadWifi,
+    DownloadRoaming,
 }
 
 impl Page {
-    fn title(self) -> &'static str {
+    pub(super) fn title(self) -> &'static str {
         match self {
             Self::Profile => t!("Profile"),
             Self::Appearance => t!("Appearance"),
@@ -74,10 +78,14 @@ impl Page {
             Self::LockAfter => t!("Auto-lock"),
             Self::NotifyShows => t!("Show|notification"),
             Self::Folders => t!("Chat folders"),
+            Self::Storage => t!("Data and storage"),
+            Self::DownloadMobile => t!("When using mobile data"),
+            Self::DownloadWifi => t!("When using Wi-Fi"),
+            Self::DownloadRoaming => t!("When roaming"),
         }
     }
 
-    fn id(self) -> ElementId {
+    pub(super) fn id(self) -> ElementId {
         ("settings-page", self as usize).into()
     }
 }
@@ -94,6 +102,7 @@ impl BeeperApp {
             self.settings_pages.clear();
             self.load_devices(cx);
             self.send(Cmd::Profile, cx);
+            self.refresh_storage(cx);
         }
         self.panel = Some(panel);
         cx.notify();
@@ -563,7 +572,8 @@ impl BeeperApp {
                 card(cx)
                     .child(category(Page::Appearance, IconName::Palette, look.into(), cx))
                     .child(category(Page::Chats, IconName::MessageCircle, chats.into(), cx))
-                    .child(category(Page::Notifications, IconName::Bell, notices, cx)),
+                    .child(category(Page::Notifications, IconName::Bell, notices, cx))
+                    .child(category(Page::Storage, IconName::Folder, self.storage_summary(), cx)),
             )
             .child(
                 card(cx)
@@ -614,6 +624,10 @@ impl BeeperApp {
             Page::Updates => self.render_updates(cx).map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
             Page::Emoji => self.render_emoji(cx),
             Page::Folders => self.render_folders(cx),
+            Page::Storage => self.render_storage(cx),
+            Page::DownloadMobile => self.render_download(super::download::Net::Mobile, cx),
+            Page::DownloadWifi => self.render_download(super::download::Net::Wifi, cx),
+            Page::DownloadRoaming => self.render_download(super::download::Net::Roaming, cx),
             Page::NotifyShows => pick("notify-shows", crate::NotifyShows::ALL, s.notify_shows, crate::NotifyShows::label, |s, shows| {
                 s.notify_shows = shows;
                 shows.apply();
@@ -1526,7 +1540,7 @@ pub(super) fn link(id: impl Into<ElementId>, label: &'static str, value: SharedS
 }
 
 /// One answer among a setting's choices, checked when it is the one set.
-fn option(id: impl Into<ElementId>, label: &str, detail: &str, on: bool, cx: &App) -> Stateful<Div> {
+pub(super) fn option(id: impl Into<ElementId>, label: &str, detail: &str, on: bool, cx: &App) -> Stateful<Div> {
     let p = Palette::of(cx);
     row(label, detail, cx)
         .id(id)

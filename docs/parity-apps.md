@@ -32,7 +32,9 @@ N impossible over Matrix or bridges.
 | Stories, status | ? | Y | Y | Y | missing | N |
 | Contacts, find by username | Y | Y | Y | Y | `ui/contacts.rs`, `ui/people.rs` | B |
 | Search in chat and in all chats | Y | Y | Y | Y | `backend/search.rs`, `ui/search.rs` (local FTS5) | Y (local) |
-| Search filters (date, type) | P | Y | N | P | missing | Y (local index) |
+| Media auto-download by network | Y | Y | N? | N? | `ui/download.rs`: mobile data, Wi-Fi, roaming | Y (local) |
+| Manage storage, keep messages | Y | Y | N? | N? | `ui/storage.rs`: sizes, clear media cache, keep 30 days / 1 year / forever | Y (local) |
+| Search filters (date, type) | P | Y | N | P | `ui/search.rs`: media, links, files, sender, time, in a chat's search | Y (local index) |
 | Archive | Y | Y | N | Y | done | Y |
 | Pin chats | Y | Y | Y | Y | tag `m.favourite`; no manual order | Y |
 | Pin messages in a chat | Y | Y | N | Y | missing | B |
@@ -79,12 +81,17 @@ Effort: S small, M medium, L large.
    Stays in account data on the homeserver.
 2. Sticker picker and sending (`m.sticker`, image packs `m.image_pack`), local packs only.
    High, M.
-3. Inline video playback in the timeline. High, M.
+3. Inline video playback in the timeline. High, M. Bridged GIFs loop in their bubble (at most
+   5 s, 10 frames a second, 320 px, made into a GIF on the device); other videos show their
+   poster and length and play full screen. Playing any video in the bubble is left out: GPUI
+   draws pictures, not a video surface, so each frame would be decoded, converted and uploaded
+   as a new image, with sound kept in step by hand, per bubble on screen.
 4. Voice notes on desktop (record and play in the bubble). Medium-high, M.
 5. Chat folders and filters: DMs, Groups, user lists. Medium-high, M. Local.
 6. Pinned messages in a chat (`m.room.pinned_events`). Medium, S-M.
 7. Starred or saved messages (local list). Medium, S.
-8. Search filters (media, links, date, sender) on the local index. Medium, M.
+8. Search filters (media, links, date, sender) on the local index. Medium, M. Done in a chat's
+   search; the chat list's search has none.
 9. Generated link previews: owner's privacy choice (the linked site sees the user's IP, or the
    homeserver sees the link through its `preview_url`). Medium, M.
 10. Push without Google through UnifiedPush, for phones that kill the background connection.
