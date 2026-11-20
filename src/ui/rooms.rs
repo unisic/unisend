@@ -248,6 +248,17 @@ impl BeeperApp {
     /// The last row of a chat's sheet.
     pub(super) fn leave_row(&self, room: OwnedRoomId, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = Palette::of(cx);
+        // Splitting a merged chat leaves its room; its chats come back as they were, so no question.
+        if self.merged.folded.is_union(&room) {
+            let row = sheet_row("chat-split", IconName::Unlink, t!("Split chats"), p.text, window, cx);
+            if !live {
+                return row;
+            }
+            return row.on_click(cx.listener(move |this, _, _, cx| {
+                this.chat_sheet = None;
+                this.send(Cmd::People(Ask::Leave { room: room.clone(), delete: false }), cx);
+            }));
+        }
         let bridged = self.rooms.iter().any(|r| r.id == room && r.network.is_some());
         let row = if bridged {
             sheet_row("chat-delete", IconName::Trash, t!("Delete chat"), p.negative, window, cx)

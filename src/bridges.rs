@@ -48,7 +48,7 @@ pub fn needs_sign_in(state: &str) -> bool {
 
 /// Logins an account can hold that need signing in again, as Beeper's account API reports them:
 /// bridge and login name.
-fn attention(whoami: &Value) -> Vec<(String, String)> {
+pub fn attention(whoami: &Value) -> Vec<(String, String)> {
     let bridges = whoami.pointer("/user/bridges").and_then(Value::as_object).into_iter().flatten();
     let logins = bridges.filter(|(bridge, _)| *bridge != "hungryserv").flat_map(|(bridge, info)| {
         let states = info.get("remoteState").and_then(Value::as_object).into_iter().flatten();
@@ -286,10 +286,10 @@ impl Api {
         Ok(out)
     }
 
-    /// Logins that need signing in again, from one call to Beeper's account API: the states it last
-    /// heard from each bridge (`remoteState`, bridge-manager api/beeperapi/whoami.go).
-    pub async fn attention(&self) -> Result<Vec<(String, String)>> {
-        Ok(attention(&self.send(Method::GET, format!("{}/whoami", self.api), None, CALL_TIMEOUT).await?))
+    /// The account as Beeper's API describes it (bridge-manager api/beeperapi/whoami.go): bridges
+    /// and the states they last reported, the plan's features.
+    pub async fn whoami(&self) -> Result<Value> {
+        self.send(Method::GET, format!("{}/whoami", self.api), None, CALL_TIMEOUT).await
     }
 
     /// Ways to log in to a bridge, starting the bridge first when the account does not run it yet.

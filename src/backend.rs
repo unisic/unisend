@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
     time::Duration,
 };
@@ -249,6 +249,8 @@ pub enum Cmd {
     /// Downloads emoji font `emoji::SETS[set]` to `to`, checked against its SHA-256; answered by
     /// `Ev::EmojiSet`.
     EmojiSet { set: usize, to: PathBuf },
+    /// The chat of the open merged chat that the composer sends to: (merged chat, chat).
+    Target(OwnedRoomId, OwnedRoomId),
 }
 
 pub enum Ev {
@@ -299,6 +301,8 @@ pub enum Ev {
     Networks(Vec<Network>),
     /// Logins that need signing in again, as (bridge, login name); checked now and then.
     Attention(Vec<(String, String)>),
+    /// How many merged chats the Beeper account keeps active (`max-merge-chats`); -1 for no limit.
+    MergeLimit(i64),
     Flows(String, Vec<Flow>),
     /// A login's Discord servers, by login ID.
     Guilds(String, Vec<Guild>),
@@ -432,6 +436,9 @@ pub struct RoomSummary {
     /// The user's note to self (`com.beeper.rooms.note_to_self`): only they are in it.
     #[serde(default)]
     pub note: bool,
+    /// A merged chat (`com.beeper.union`) and the chats it stands for.
+    #[serde(default)]
+    pub union: Option<union::Union>,
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -495,6 +502,8 @@ pub struct Msg {
     pub disappear: u64,
     /// The Meta bridge's placeholder for a message it could not decrypt (`fi.mau.meta.undecryptable`).
     pub undecryptable: bool,
+    /// In a merged chat, the chat the row comes from; `None` elsewhere.
+    pub lane: Option<OwnedRoomId>,
 }
 
 /// What a row of a conversation is.
@@ -601,6 +610,7 @@ impl Msg {
             seen: Vec::new(),
             disappear: 0,
             undecryptable: false,
+            lane: None,
         }
     }
 }
@@ -931,6 +941,10 @@ struct State {
     login_request: Option<String>,
     /// The conversation on screen.
     open: Option<timeline::Open>,
+    /// The merged chat on screen, instead of `open`.
+    merged: Option<union::Merged>,
+    /// The account's `max-merge-chats` once Beeper said it; `i64::MIN` before.
+    merge_limit: Arc<AtomicI64>,
     rooms: Rooms,
     /// The blocked people last told to the UI, told again when the window turns to this account.
     blocked: Arc<Mutex<Vec<block::Blocked>>>,
@@ -984,7 +998,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     let _ = std::fs::remove_dir_all(update::folder(&dir));
     // Older builds kept KLIPY's customer ID on disk; it now lives only in memory.
     let _ = std::fs::remove_file(dir.join("klipy-id"));
-    let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None,
+    let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None, merged: None, merge_limit: Arc::new(AtomicI64::new(i64::MIN)),
         rooms: Rooms::default(), blocked: Arc::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), previews: Arc::new(tokio::sync::Semaphore::new(PROBES)), notif: None,
         incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, browser: None, replaceable: false, update: None, link_task: None, link_made: Arc::default() };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
@@ -1245,7 +1259,7 @@ impl State {
         self.client = Some(client);
         // Tests sign in to a local server as if it were Beeper's; its token stays off Beeper's API.
         if let Some(api) = self.api().ok().filter(|_| !cfg!(test)) {
-            self.tasks.push(tokio::spawn(watch_networks(api, self.ev.clone())));
+            self.tasks.push(tokio::spawn(watch_networks(api, self.ev.clone(), self.merge_limit.clone())));
         }
         if let Some(user) = user {
             self.emit(Ev::Ready { user, beeper: self.beeper, seal: self.seal.clone() }).await;
@@ -1344,7 +1358,103 @@ impl State {
         self.client.as_ref().ok_or_else(|| anyhow!(t!("Not signed in")))
     }
 
+    /// A chat-list action on one room. `pinned_stops` keeps a pinned chat from being archived;
+    /// the chats of a merged chat are archived with it whatever their own pin says.
+    async fn chat_action(&self, room: &Room, room_id: OwnedRoomId, action: ChatAction, pinned_stops: bool) -> Result<()> {
+        match action {
+            ChatAction::Pin(on) => room.set_is_favourite(on, Some(1.0)).await?,
+            ChatAction::LowPriority(on) => room.set_is_low_priority(on, Some(0.0)).await?,
+            ChatAction::Unread(true) => room.set_unread_flag(true).await?,
+            ChatAction::Unread(false) => {
+                let resp = room.messages(MessagesOptions::backward()).await?;
+                mark_read(room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito.load(Ordering::Relaxed)).await?;
+            }
+            ChatAction::Mute(mode) => {
+                let notif = self.notif.as_ref().context(t!("Not signed in"))?;
+                if mode == RoomNotificationMode::AllMessages {
+                    notif.delete_user_defined_room_rules(&room_id).await?;
+                } else {
+                    notif.set_room_notification_mode(&room_id, mode).await?;
+                }
+            }
+            ChatAction::Archive(false) => {
+                room.set_account_data_raw(DONE.into(), Raw::new(&Done::default())?.cast_unchecked()).await?;
+            }
+            ChatAction::Archive(true) => {
+                if pinned_stops && room.is_favourite() {
+                    return Err(anyhow!(t!("Pinned chats can't be archived")));
+                }
+                // Like Beeper: archived up to the newest event, by the server's own order.
+                let resp = room.messages(MessagesOptions::backward()).await?;
+                let newest = resp.chunk.first();
+                let order = newest.and_then(hs_order).filter(|o| *o != 0);
+                let done = Done { updated_ts: Some(now_ms()), at_order: order };
+                room.set_account_data_raw(DONE.into(), Raw::new(&done)?.cast_unchecked()).await?;
+                // Without a server order the rule compares timestamps, which never archive an unread chat.
+                if order.is_none() || mark_read_on_archive(self.client()?).await {
+                    mark_read(room, newest.and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito.load(Ordering::Relaxed)).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The timelines on screen: the open chat's, or each of the open merged chat's.
+    fn opens(&self) -> impl Iterator<Item = &timeline::Open> {
+        self.open.iter().chain(self.merged.iter().flat_map(|m| m.lanes.iter()))
+    }
+
+    /// The timeline of `room`, when it is on screen alone or in the open merged chat.
+    fn opened(&self, room: &RoomId) -> Option<&timeline::Open> {
+        self.opens().find(|open| open.room == room)
+    }
+
+    /// A command for the open merged chat goes to one of its chats: the one holding the message it
+    /// is about (reply, edit, reaction), else the one picked under the composer.
+    fn route(&self, cmd: Cmd) -> Result<Cmd> {
+        let Some(m) = self.merged.as_ref() else { return Ok(cmd) };
+        let at = |room: OwnedRoomId, about: Option<&str>| -> Result<OwnedRoomId> {
+            if room != m.id {
+                return Ok(room);
+            }
+            about.and_then(|id| m.lane_of(id)).or_else(|| m.target.clone()).context(t!("This merged chat has no chats on this device"))
+        };
+        Ok(match cmd {
+            Cmd::Send { room, body, reply_to, edit, mentions, preview } => {
+                Cmd::Send { room: at(room, edit.as_deref().or(reply_to.as_deref()))?, body, reply_to, edit, mentions, preview }
+            }
+            Cmd::Attach { room, path, reply_to } => Cmd::Attach { room: at(room, reply_to.as_deref())?, path, reply_to },
+            Cmd::AttachMedia { room, path, reply_to, caption, hd } => Cmd::AttachMedia { room: at(room, reply_to.as_deref())?, path, reply_to, caption, hd },
+            Cmd::Voice { room, path, duration, levels, reply_to } => Cmd::Voice { room: at(room, reply_to.as_deref())?, path, duration, levels, reply_to },
+            Cmd::SendLocation { room, lat, lon, accuracy, reply_to } => Cmd::SendLocation { room: at(room, reply_to.as_deref())?, lat, lon, accuracy, reply_to },
+            Cmd::SendGif { room, gif, query, reply_to } => Cmd::SendGif { room: at(room, reply_to.as_deref())?, gif, query, reply_to },
+            Cmd::SendPoll { room, question, answers, multiple } => Cmd::SendPoll { room: at(room, None)?, question, answers, multiple },
+            Cmd::React { room, target, key } => Cmd::React { room: at(room, Some(&target))?, target, key },
+            Cmd::Vote { room, target, unstable, answers } => Cmd::Vote { room: at(room, Some(&target))?, target, unstable, answers },
+            Cmd::Delete { room, target } => Cmd::Delete { room: at(room, Some(&target))?, target },
+            Cmd::Retry { room, target } => Cmd::Retry { room: at(room, Some(&target))?, target },
+            Cmd::Pin { room, target, pin } => Cmd::Pin { room: at(room, Some(&target))?, target, pin },
+            Cmd::EndPoll { room, target } => Cmd::EndPoll { room: at(room, Some(&target))?, target },
+            Cmd::ViewedOnce(room, id) => Cmd::ViewedOnce(at(room, Some(&id))?, id),
+            Cmd::ViewPicture { id, room, user } => Cmd::ViewPicture { room: at(room, Some(&id))?, id, user },
+            Cmd::Forward { room, targets, to } => Cmd::Forward { room: at(room, targets.first().map(String::as_str))?, targets, to },
+            Cmd::Typing(room, on) => Cmd::Typing(at(room, None)?, on),
+            Cmd::Face(room, user) => Cmd::Face(at(room, None)?, user),
+            Cmd::SetDisappear { room, ms } => Cmd::SetDisappear { room: at(room, None)?, ms },
+            Cmd::Members(room) => Cmd::Members(at(room, None)?),
+            Cmd::PeerIds(room) => Cmd::PeerIds(at(room, None)?),
+            Cmd::Candidates(room) => Cmd::Candidates(at(room, None)?),
+            Cmd::MemberIds(room, user) => Cmd::MemberIds(at(room, None)?, user),
+            Cmd::Group { room, change } => Cmd::Group { room: at(room, None)?, change },
+            // shortcut: a search in a merged chat looks through the chat picked under the composer;
+            // search each chat and merge the hits if people miss them.
+            Cmd::Search { room: Some(room), query } => Cmd::Search { room: Some(at(room, None)?), query },
+            other => other,
+        })
+    }
+
     async fn handle(&mut self, cmd: Cmd) -> Result<()> {
+        let cmd = self.route(cmd)?;
         match cmd {
             Cmd::SendCode(email) => {
                 self.login_request = Some(beeper::send_code(&self.http, email.trim()).await?);
@@ -1384,7 +1494,7 @@ impl State {
                 if let Err(e) = self.seal.write(&self.dir, vault::RECOVERY, key.trim().as_bytes()) {
                     log::warn!("keep recovery code: {e}");
                 }
-                if let Some(open) = &self.open {
+                for open in self.opens() {
                     timeline::unlock(&open.timeline).await;
                 }
                 let incomplete = recovery.state() == RecoveryState::Incomplete;
@@ -1428,7 +1538,7 @@ impl State {
             }
             Cmd::Open(room_id) => {
                 // The old conversation stops being followed before the new one starts.
-                self.open = None;
+                (self.open, self.merged) = (None, None);
                 crate::clear_notification(&crate::accounts::key(crate::accounts::slot_of(&self.dir), room_id.as_str()));
                 let room = self.room(&room_id)?;
                 let ev = self.ev.clone();
@@ -1443,14 +1553,28 @@ impl State {
                     let _ = self.ev.send(Ev::Paged { room: room_id, more: false }).await;
                     return Ok(());
                 }
+                if union::is_union(&room) {
+                    let merged = union::open(self.client()?, &room, &self.ev, self.incognito.clone()).await?;
+                    self.older_merged(&merged, true);
+                    self.merged = Some(merged);
+                    return Ok(());
+                }
                 let open = timeline::open(&room, &self.ev, self.incognito.clone()).await?;
                 self.older(&open, true);
                 self.open = Some(open);
             }
-            Cmd::Close => self.open = None,
+            Cmd::Close => (self.open, self.merged) = (None, None),
             Cmd::LoadOlder => {
                 if let Some(open) = &self.open {
                     self.older(open, false);
+                }
+                if let Some(merged) = &self.merged {
+                    self.older_merged(merged, false);
+                }
+            }
+            Cmd::Target(union, lane) => {
+                if let Some(merged) = self.merged.as_mut().filter(|m| m.id == union && m.lanes.iter().any(|o| o.room == lane)) {
+                    merged.target = Some(lane);
                 }
             }
             Cmd::Typing(room_id, on) => {
@@ -1471,41 +1595,16 @@ impl State {
             }
             Cmd::Chat(room_id, action) => {
                 let room = self.room(&room_id)?;
-                match action {
-                    ChatAction::Pin(on) => room.set_is_favourite(on, Some(1.0)).await?,
-                    ChatAction::LowPriority(on) => room.set_is_low_priority(on, Some(0.0)).await?,
-                    ChatAction::Unread(true) => room.set_unread_flag(true).await?,
-                    ChatAction::Unread(false) => {
-                        let resp = room.messages(MessagesOptions::backward()).await?;
-                        mark_read(&room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito.load(Ordering::Relaxed)).await?;
-                    }
-                    ChatAction::Mute(mode) => {
-                        let notif = self.notif.as_ref().context(t!("Not signed in"))?;
-                        if mode == RoomNotificationMode::AllMessages {
-                            notif.delete_user_defined_room_rules(&room_id).await?;
-                        } else {
-                            notif.set_room_notification_mode(&room_id, mode).await?;
-                        }
-                    }
-                    ChatAction::Archive(false) => {
-                        room.set_account_data_raw(DONE.into(), Raw::new(&Done::default())?.cast_unchecked()).await?;
-                    }
-                    ChatAction::Archive(true) => {
-                        if room.is_favourite() {
-                            return Err(anyhow!(t!("Pinned chats can't be archived")));
-                        }
-                        // Like Beeper: archived up to the newest event, by the server's own order.
-                        let resp = room.messages(MessagesOptions::backward()).await?;
-                        let newest = resp.chunk.first();
-                        let order = newest.and_then(hs_order).filter(|o| *o != 0);
-                        let done = Done { updated_ts: Some(now_ms()), at_order: order };
-                        room.set_account_data_raw(DONE.into(), Raw::new(&done)?.cast_unchecked()).await?;
-                        // Without a server order the rule compares timestamps, which never archive an unread chat.
-                        if order.is_none() || mark_read_on_archive(self.client()?).await {
-                            mark_read(&room, newest.and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito.load(Ordering::Relaxed)).await?;
+                // A merged chat's row is its chats: archiving, reading and muting it reach each of
+                // them, as in Beeper; pinning and marking unread stay on the merged chat's own room.
+                if union::is_union(&room) && matches!(action, ChatAction::Archive(_) | ChatAction::Mute(_) | ChatAction::Unread(false)) {
+                    for member in union::members(self.client()?, &room).await {
+                        if let Err(e) = self.chat_action(&member, member.room_id().to_owned(), action, false).await {
+                            log::warn!("merged chat action: {e:#}");
                         }
                     }
                 }
+                self.chat_action(&room, room_id, action, true).await?;
             }
             Cmd::Face(room_id, user) => {
                 let client = self.client()?.clone();
@@ -1689,6 +1788,10 @@ impl State {
                 if !list.is_empty() {
                     self.emit(Ev::Rooms(list)).await;
                 }
+                let limit = self.merge_limit.load(Ordering::Relaxed);
+                if limit != i64::MIN {
+                    self.emit(Ev::MergeLimit(limit)).await;
+                }
                 let blocked = self.blocked.lock().unwrap().clone();
                 if !blocked.is_empty() {
                     self.emit(Ev::Blocked(blocked)).await;
@@ -1731,7 +1834,7 @@ impl State {
                     }
                 }
                 self.notif = None;
-                (self.open, self.info) = (None, None);
+                (self.open, self.merged, self.info) = (None, None, None);
                 self.rooms.lock().unwrap().clear();
                 wipe_account(&self.dir);
                 // One posted between the window's sign-out and the wipe; other accounts keep theirs.
@@ -1752,7 +1855,7 @@ impl State {
                 }
             }
             Cmd::Relabel => {
-                if let Some(open) = &self.open {
+                for open in self.opens() {
                     open.relabel.notify_one();
                 }
                 let changed = relabel_rooms(&mut self.rooms.lock().unwrap(), crate::i18n::polish());
@@ -1799,7 +1902,7 @@ impl State {
                 if asked {
                     self.emit(Ev::Uploaded).await;
                 }
-                match self.open.as_ref().filter(|open| open.room == room) {
+                match self.opened(&room) {
                     // The timeline shows the message at once and keeps trying to send it.
                     Some(open) => match (edit, reply_to) {
                         (Some(id), _) => open.timeline.edit(&timeline::item_id(&id)?, EditedContent::RoomMessage(text)).await?,
@@ -1811,15 +1914,15 @@ impl State {
                 }
             }
             Cmd::React { room, target, key } => {
-                let open = self.open.as_ref().filter(|open| open.room == room).context(t!("That chat is not open"))?;
+                let open = self.opened(&room).context(t!("That chat is not open"))?;
                 open.timeline.toggle_reaction(&timeline::item_id(&target)?, &key).await?;
             }
             Cmd::Delete { room, target } => {
-                let open = self.open.as_ref().filter(|open| open.room == room).context(t!("That chat is not open"))?;
+                let open = self.opened(&room).context(t!("That chat is not open"))?;
                 open.timeline.redact(&timeline::item_id(&target)?, None).await?;
             }
             Cmd::Retry { room, target } => {
-                let open = self.open.as_ref().filter(|open| open.room == room).context(t!("That chat is not open"))?;
+                let open = self.opened(&room).context(t!("That chat is not open"))?;
                 // A failed send stops the chat's queue; trying again starts it.
                 open.timeline.room().send_queue().set_enabled(true);
                 timeline::retry(&open.timeline, &target).await?;
@@ -1868,7 +1971,7 @@ impl State {
             }
             Cmd::SendLocation { room, lat, lon, accuracy, reply_to } => {
                 let place = location::content(lat, lon, accuracy);
-                match self.open.as_ref().filter(|open| open.room == room) {
+                match self.opened(&room) {
                     Some(open) => match reply_to {
                         Some(id) => drop(open.timeline.send_reply(place, EventId::parse(id)?).await?),
                         None => drop(open.timeline.send(RoomMessageEventContent::from(place).into()).await?),
@@ -1986,7 +2089,7 @@ impl State {
                 });
             }
             Cmd::Forward { room, targets, to } => {
-                let open = self.open.as_ref().filter(|open| open.room == room).context(t!("That chat is not open"))?;
+                let open = self.opened(&room).context(t!("That chat is not open"))?;
                 let rooms = to.iter().map(|id| self.room(id)).collect::<Result<Vec<_>>>()?;
                 let done = forward::forward(&open.timeline, &targets, &rooms).await?;
                 self.emit(Ev::Forwarded(done)).await;
@@ -2109,6 +2212,35 @@ impl State {
             if first && !crate::LOCKED.load(Ordering::Relaxed) && let Err(e) = mark_read(timeline.room(), timeline.latest_event_id().await, incognito.load(Ordering::Relaxed)).await {
                 log::warn!("mark read: {e:#}");
             }
+        });
+    }
+
+    /// `older` for each chat of the open merged chat; the merged chat has more while any chat has.
+    fn older_merged(&self, merged: &union::Merged, first: bool) {
+        let lanes: Vec<_> = merged.lanes.iter().map(|o| o.timeline.clone()).collect();
+        let (id, ev, incognito) = (merged.id.clone(), self.ev.clone(), self.incognito.clone());
+        tokio::spawn(async move {
+            let mut more = false;
+            for timeline in &lanes {
+                let mut lane_more = true;
+                for _ in 0..if first { MAX_PAGES_PER_REQUEST } else { 1 } {
+                    match timeline.paginate_backwards(PAGE).await {
+                        Ok(start) => lane_more = !start,
+                        Err(e) => {
+                            let _ = ev.send(Ev::Error(t!("Could not load messages: {error}", error = e))).await;
+                            break;
+                        }
+                    }
+                    if !lane_more || timeline.items().await.iter().filter(|item| timeline::drawn(item)).count() >= MIN_ITEMS {
+                        break;
+                    }
+                }
+                more |= lane_more;
+                if first && !crate::LOCKED.load(Ordering::Relaxed) && let Err(e) = mark_read(timeline.room(), timeline.latest_event_id().await, incognito.load(Ordering::Relaxed)).await {
+                    log::warn!("mark read: {e:#}");
+                }
+            }
+            let _ = ev.send(Ev::Paged { room: id, more }).await;
         });
     }
 
@@ -2752,6 +2884,7 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>, live: bool) -> Room
         own_last: false,
         read_by: Vec::new(),
         note: false,
+        union: None,
     }
 }
 
@@ -2806,12 +2939,17 @@ impl Drop for AbortOnDrop {
 /// How often Beeper is asked whether a network's login broke: one GET of its account API.
 const NETWORK_CHECK: Duration = Duration::from_secs(15 * 60);
 
-/// Notices a login that broke while Unisend runs, so the chat list can say so; the first check is at once.
-async fn watch_networks(api: bridges::Api, ev: mpsc::Sender<Ev>) {
+/// Notices a login that broke while Unisend runs, so the chat list can say so, and the plan's limit
+/// on merged chats; the first check is at once.
+async fn watch_networks(api: bridges::Api, ev: mpsc::Sender<Ev>, merge_limit: Arc<AtomicI64>) {
     loop {
-        match api.attention().await {
-            Ok(logins) => {
-                if ev.send(Ev::Attention(logins)).await.is_err() {
+        match api.whoami().await {
+            Ok(whoami) => {
+                let limit = union::limit(&whoami);
+                if merge_limit.swap(limit, Ordering::Relaxed) != limit && ev.send(Ev::MergeLimit(limit)).await.is_err() {
+                    return;
+                }
+                if ev.send(Ev::Attention(bridges::attention(&whoami))).await.is_err() {
                     return;
                 }
             }
@@ -3107,6 +3245,7 @@ async fn summarize(
     s.archived = is_done(&done, &s, now_ms());
     s.pending = request(room).await.then_some(Pending::Request);
     s.moved_to = room.successor_room().map(|next| next.room_id);
+    s.union = union::read(room).await;
     if s.own_last && let Some(id) = s.preview_id.as_deref().and_then(|id| EventId::parse(id).ok()) {
         s.read_by = readers(room, &id).await;
     }
@@ -3348,6 +3487,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 own_last: amended.or(msgs.last()).map(|m| m.own).or_else(|| prev.as_ref().map(|p| p.own_last)).unwrap_or(false),
                 read_by: Vec::new(),
                 note: false,
+                union: None,
             };
             let mut summary = summarize(&room, &notif, peer, seen).await;
             summary.mentions = unread_mentions(summary.mentions, summary.unread, &msgs);
@@ -4110,6 +4250,7 @@ pub use info::{Details, MAX_MEMBERS, MAX_SCAN, Role, links_profiles, profile_lin
 pub use info::Member;
 
 mod timeline;
+pub mod union;
 mod video;
 mod pins;
 pub use pins::Pins;

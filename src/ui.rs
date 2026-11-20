@@ -53,6 +53,7 @@ mod menu;
 mod navigate;
 pub(crate) mod motion;
 mod mute;
+mod merged;
 mod panels;
 mod pinpad;
 mod pins;
@@ -474,6 +475,7 @@ pub struct BeeperApp {
     /// Leaving chats and starting new ones.
     people: rooms::People,
     disappear: disappear::Disappear,
+    merged: merged::Ui,
     /// What the open chat's network takes, once read.
     features: Option<(OwnedRoomId, Option<crate::backend::Features>, bool)>,
     /// The open chat's pinned messages, and the one the pinned bar shows next.
@@ -802,6 +804,7 @@ impl BeeperApp {
             accounts,
             people: Default::default(),
             disappear: disappear::Disappear::default(),
+            merged: merged::Ui::default(),
             features: None,
             pins: None,
             pin_shown: None,
@@ -978,10 +981,14 @@ impl BeeperApp {
                 }
                 self.merge_rooms(changed, cx);
             }
+            Ev::MergeLimit(limit) => self.on_merge_limit(limit, cx),
             Ev::RoomGone(id) if self.elsewhere.contains_key(&id) => {}
             Ev::RoomGone(id) => {
                 self.list_typing.remove(&id);
                 self.rooms.retain(|r| r.id != id);
+                // A merged chat gone gives its chats their rows back.
+                self.fold_unions(cx);
+                self.rooms.sort_unstable_by_key(|r| (!r.pinned, std::cmp::Reverse(r.ts)));
                 self.refilter(cx);
                 if self.open.as_ref() == Some(&id) {
                     self.close_room(cx);
@@ -1114,6 +1121,12 @@ impl BeeperApp {
             Ev::Features { room, features, moderate } => {
                 if self.open.as_ref() == Some(&room) {
                     self.features = Some((room, features, moderate));
+                } else if self.open_lanes().contains(&room) && self.merged.lanes.len() < crate::backend::union::MAX_MEMBERS {
+                    // A merged chat's composer and menus take what the chat they act on takes.
+                    if self.merged.target.as_ref() == Some(&room) {
+                        self.features = self.open.clone().map(|open| (open, features.clone(), moderate));
+                    }
+                    self.merged.lanes.insert(room, (features, moderate));
                 }
             }
             Ev::Pins { room, pins } => self.on_pins(room, pins),
@@ -1192,6 +1205,7 @@ impl BeeperApp {
         let mut by_id: HashMap<_, _> = self.rooms.drain(..).map(|r| (r.id.clone(), r)).collect();
         by_id.extend(changed.into_iter().map(|r| (r.id.clone(), r)));
         self.rooms = by_id.into_values().collect();
+        self.fold_unions(cx);
         self.rooms.sort_unstable_by_key(|r| (!r.pinned, std::cmp::Reverse(r.ts)));
         self.refilter(cx);
         if first && !self.rooms.is_empty() {
@@ -1218,6 +1232,10 @@ impl BeeperApp {
             self.forum = None;
         }
         let passes = |r: &RoomSummary| {
+            // A merged chat stands for its chats; one past the plan's limit is not shown.
+            if self.merged.folded.hidden.contains(&r.id) {
+                return false;
+            }
             // A search looks through every section.
             if !query.is_empty() {
                 return r.name.to_lowercase().contains(&query);
@@ -1770,6 +1788,14 @@ impl BeeperApp {
         self.features.as_ref().filter(|(room, ..)| self.open.as_ref() == Some(room)).and_then(|(_, f, _)| f.as_ref())
     }
 
+    /// What the chat holding message `id` takes: in a merged chat, that message's own chat.
+    fn caps_for(&self, id: &str) -> &crate::backend::Features {
+        match self.msgs.iter().find(|m| m.id == id).and_then(|m| m.lane.as_ref()) {
+            Some(lane) => self.merged.lanes.get(lane).and_then(|(f, _)| f.as_ref()).unwrap_or(&crate::backend::Features::ALL),
+            None => self.caps(),
+        }
+    }
+
     /// The user may delete other people's messages in the open chat: a moderator of a plain Matrix
     /// chat. A bridge would only hide them on Matrix, so a bridged chat never offers it.
     fn moderates(&self) -> bool {
@@ -1794,7 +1820,7 @@ impl BeeperApp {
         // The SDK takes a reaction back only by its exact key; the user's own may lack or carry U+FE0F.
         let own = self.msgs.iter().find(|m| m.id == target).and_then(|m| m.reactions.iter().find(|r| r.own && menu::same_emoji(&r.key, key)));
         let adding = own.is_none();
-        if adding && !self.caps().reacts_with(key) {
+        if adding && !self.caps_for(target).reacts_with(key) {
             self.error = Some(t!("This chat does not take that reaction").into());
             cx.notify();
             return;
@@ -1855,6 +1881,7 @@ impl BeeperApp {
         self.opened_at = Some(Instant::now());
         self.show_draft(Some(&id));
         self.loading = self.send(Cmd::Open(id), cx);
+        self.seed_target(cx);
     }
 
     fn open_forum(&mut self, forum: String, cx: &mut Context<Self>) {
@@ -2640,7 +2667,7 @@ impl BeeperApp {
                 let next = this.msgs[ix + 1..].iter().find(drawn);
                 // A run: one person's messages with no long pause, and no other row, between them.
                 let joined = |a: &Msg, b: &Msg| {
-                    b.kind == a.kind && a.from == b.from && b.ts.saturating_sub(a.ts) < RUN_PAUSE_MS && this.place.unread.as_ref() != Some(&b.id)
+                    b.kind == a.kind && a.from == b.from && a.lane == b.lane && b.ts.saturating_sub(a.ts) < RUN_PAUSE_MS && this.place.unread.as_ref() != Some(&b.id)
                 };
                 let first = prev.is_none_or(|p| !joined(p, m));
                 let last = next.is_none_or(|n| !joined(m, n));
@@ -2919,6 +2946,8 @@ impl BeeperApp {
                     .when_some(arriving.filter(|_| !m.own), |el, (v, _)| el.opacity(v))
                     .px(px(GUTTER))
                     .pt(if first { px(GAP) } else { px(3.) })
+                    // In a merged chat, the network a run came through heads it.
+                    .when(first, |el| el.children(this.lane_tag(m, cx).map(|tag| tag.pl(side + px(GAP)).when(m.own, |tag| tag.text_right().pr(px(GAP))))))
                     .when(faces && first, |el| {
                         el.child(
                             div()
@@ -3143,6 +3172,8 @@ impl BeeperApp {
                     .px(px(column))
                     .children(self.render_unlock_hint(cx))
                     .children(self.render_typing(window, cx))
+                    .children(self.render_merge_banner(cx))
+                    .children(self.render_lane_picker(cx))
                     .children(self.render_compose_strip(window, cx))
                     .children(self.render_tray(window, cx))
                     .children(self.render_link_card(window, cx))
@@ -3684,7 +3715,7 @@ impl BeeperApp {
     /// Follows a pan to the right over a message, as in Signal and iMessage; one that travels far
     /// enough starts a reply.
     fn swipe(&mut self, id: &str, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.fwd.selecting() || self.caps().reply < 1 {
+        if self.fwd.selecting() || self.caps_for(id).reply < 1 {
             return;
         }
         let delta = event.delta.pixel_delta(px(20.));
@@ -3732,7 +3763,7 @@ impl BeeperApp {
             self.sheet_last = self.chat_sheet.clone();
         }
         let Some(frame) = self.chat_motion.sample(self.chat_sheet.is_some(), window, cx) else {
-            (self.sheet_last, self.folders.picking) = (None, false);
+            (self.sheet_last, self.folders.picking, self.merged.picking) = (None, false, false);
             return None;
         };
         let live = frame.live;
@@ -3756,6 +3787,10 @@ impl BeeperApp {
         if self.folders.picking {
             let (title, rows) = self.folder_sheet(&id, live, cx);
             return Some(self.sheet(&self.chat_motion, frame, 5, title, rows, |this| &mut this.chat_motion, window, cx));
+        }
+        if self.merged.picking {
+            let (title, rows) = self.merge_sheet(room, live, window, cx);
+            return Some(self.sheet(&self.chat_motion, frame, 6, title, rows, |this| &mut this.chat_motion, window, cx));
         }
         if self.chat_sheet_inside {
             let [_, _, mute, archive, _] = chat_actions(room);
@@ -3796,6 +3831,8 @@ impl BeeperApp {
             rows.extend(self.disappear_entry(&id, live, cx));
         }
         rows.push(self.folder_entry(live, window, cx));
+        let room = room.clone();
+        rows.extend(self.merge_entry(&room, live, window, cx));
         if !foreign {
             rows.push(self.leave_row(id, live, window, cx));
         }
@@ -3850,6 +3887,9 @@ impl BeeperApp {
             rows.insert(3, row);
         }
         rows.push(self.folder_entry(live, window, cx));
+        if let Some(room) = self.rooms.iter().find(|r| r.id == id).cloned() {
+            rows.extend(self.merge_entry(&room, live, window, cx));
+        }
         rows.push(self.leave_row(id, live, window, cx));
         self.sheet(&self.chat_motion, frame, 0, title, rows, |this| &mut this.chat_motion, window, cx)
     }
@@ -5132,6 +5172,7 @@ mod tests {
             mentions: 0,
             dm: false,
             note: false,
+            union: None,
             pinned: false,
             low_priority: false,
             muted: false,

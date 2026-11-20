@@ -89,6 +89,10 @@ What leaves the device, and who sees it:
   (WhatsApp, Messenger and so on) sees what it always sees. Signing in to some networks opens that
   network's own login page; on Android and Linux it opens in the app's own browser window, which
   keeps its cookies and storage in memory only and hands them to the bridge, nothing else.
+- **Merged chats**: merging chats makes one more room on your homeserver, with only you in it,
+  holding its name, a picture taken from one of the chats, and the IDs of the chats it joins. Your
+  homeserver (and Beeper, with a Beeper account) sees which chats you merged; the people in them and
+  the bridges are not told.
 - **KLIPY**, only in builds with a KLIPY key and only when you open the GIF picker: your IP
   address, what you search for, the GIF you send and a random ID made once per app start.
 - **The update host**, only in Android builds made with `UNISEND_UPDATE_URL`: a plain request for
