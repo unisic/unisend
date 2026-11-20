@@ -4,7 +4,8 @@
 //! through bounds-checked slices, so a malformed file ends in an error, never a panic or a hang.
 //!
 //! Memory: a picture is copied once (the input and the output live together, at most `MAX_UPLOAD`
-//! each); ISO media (MP4, MOV, HEIC, AVIF) is rewritten in place, with no copy.
+//! each); ISO media (MP4, MOV, HEIC, AVIF) and Matroska (WebM, MKV) are rewritten in place, with
+//! no copy.
 
 use std::ops::Range;
 
@@ -30,8 +31,12 @@ pub fn image(data: Vec<u8>) -> Result<Vec<u8>> {
     }
 }
 
-/// An MP4, MOV or 3GP without location, device, times or timed-metadata tracks; nothing else is known.
+/// An MP4, MOV or 3GP without location, device, times or timed-metadata tracks, or a WebM or MKV
+/// without its title, date, tags, attachments and track names; nothing else is known.
 pub fn video(data: &mut Vec<u8>) -> Result<()> {
+    if data.starts_with(&EBML.to_be_bytes()) {
+        return matroska(data);
+    }
     ensure!(iso_like(data), "not an ISO media file");
     iso(data)
 }
@@ -356,6 +361,139 @@ fn iso(d: &mut Vec<u8>) -> Result<()> {
         d.truncate(at);
     }
     Ok(())
+}
+
+/// Matroska element IDs, marker bits included, as the specification writes them.
+const EBML: u32 = 0x1A45_DFA3;
+const SEGMENT: u32 = 0x1853_8067;
+const SEEK_HEAD: u32 = 0x114D_9B74;
+const SEEK: u32 = 0x4DBB;
+const SEEK_ID: u32 = 0x53AB;
+const INFO: u32 = 0x1549_A966;
+const TITLE: u32 = 0x7BA9;
+const DATE_UTC: u32 = 0x4461;
+const TRACKS: u32 = 0x1654_AE6B;
+const TRACK_ENTRY: u32 = 0xAE;
+const TRACK_NAME: u32 = 0x536E;
+const CLUSTER: u32 = 0x1F43_B675;
+const CUES: u32 = 0x1C53_BB6B;
+const TAGS: u32 = 0x1254_C367;
+const ATTACHMENTS: u32 = 0x1941_A469;
+const CHAPTERS: u32 = 0x1043_A770;
+const CRC32: u32 = 0xBF;
+const VOID: u8 = 0xEC;
+
+/// One EBML element; `end` is `None` for an unknown size (a live recording's segment and clusters).
+struct El {
+    start: usize,
+    body: usize,
+    end: Option<usize>,
+    id: u32,
+}
+
+fn el(d: &[u8], at: usize) -> Result<El> {
+    let n = byte(d, at)?.leading_zeros() as usize + 1;
+    ensure!(n <= 4, "mkv: bad id at {at}");
+    let id = get(d, at, n)?.iter().fold(0, |v, &c| v << 8 | u32::from(c));
+    let m = byte(d, at + n)?.leading_zeros() as usize + 1;
+    ensure!(m <= 8, "mkv: bad size at {at}");
+    let all = u64::MAX >> (64 - 7 * m);
+    let size = get(d, at + n, m)?.iter().fold(0, |v, &c| v << 8 | u64::from(c)) & all;
+    let body = at + n + m;
+    let end = if size == all { None } else { Some(body.checked_add(usize::try_from(size)?).context("mkv: size")?) };
+    Ok(El { start: at, body, end, id })
+}
+
+/// The elements inside `e`, which must have a size and hold them all.
+fn children(d: &[u8], e: &El) -> Result<Vec<El>> {
+    let to = e.end.context("mkv: open element where a sized one belongs")?;
+    ensure!(to <= d.len(), "mkv: element past the file");
+    let (mut at, mut found) = (e.body, Vec::new());
+    while at < to {
+        let k = el(d, at)?;
+        at = k.end.filter(|&end| end <= to).with_context(|| format!("mkv: element at {at} past its parent"))?;
+        found.push(k);
+    }
+    Ok(found)
+}
+
+/// Where a cluster of unknown size ends: at the next element of the segment, or the file's end.
+fn open_end(d: &[u8], mut at: usize) -> Result<usize> {
+    while at < d.len() {
+        let k = el(d, at)?;
+        if matches!(k.id, CLUSTER | CUES | TAGS | ATTACHMENTS | CHAPTERS | INFO | TRACKS | SEEK_HEAD) {
+            break;
+        }
+        at = k.end.context("mkv: open element inside a cluster")?;
+    }
+    Ok(at)
+}
+
+/// Voids the children of `e` that `drop` picks, and its CRC-32 with them, as it no longer holds.
+fn void_kids(d: &[u8], e: &El, voids: &mut Vec<Range<usize>>, drop: impl Fn(&El) -> Result<bool>) -> Result<()> {
+    let kids = children(d, e)?;
+    let before = voids.len();
+    for k in &kids {
+        if drop(k)? {
+            voids.push(k.start..k.end.unwrap_or(k.body));
+        }
+    }
+    if voids.len() > before {
+        voids.extend(kids.iter().filter(|k| k.id == CRC32).map(|k| k.start..k.end.unwrap_or(k.body)));
+    }
+    Ok(())
+}
+
+/// WebM and MKV: the title, date, tags, attachments (cover art) and track names become Void elements
+/// of the same length, so the seek index and cues still point right; the seek entries for what went
+/// go too. MuxingApp and WritingApp stay: Matroska requires them, and they name only the program.
+fn matroska(d: &mut [u8]) -> Result<()> {
+    let head = el(d, 0)?;
+    ensure!(head.id == EBML, "mkv: no EBML header");
+    let seg = el(d, head.end.context("mkv: open EBML header")?)?;
+    ensure!(seg.id == SEGMENT, "mkv: no segment after the header");
+    let to = seg.end.unwrap_or(d.len()).min(d.len());
+    let (mut at, mut voids) = (seg.body, Vec::new());
+    while at < to {
+        let e = el(d, at)?;
+        match e.id {
+            TAGS | ATTACHMENTS => voids.push(e.start..e.end.context("mkv: open tags")?.min(to)),
+            INFO => void_kids(d, &e, &mut voids, |k| Ok(matches!(k.id, TITLE | DATE_UTC)))?,
+            TRACKS => {
+                for entry in children(d, &e)?.iter().filter(|k| k.id == TRACK_ENTRY) {
+                    void_kids(d, entry, &mut voids, |k| Ok(k.id == TRACK_NAME))?;
+                }
+            }
+            SEEK_HEAD => void_kids(d, &e, &mut voids, |seek| {
+                Ok(seek.id == SEEK && children(d, seek)?.iter().any(|k| k.id == SEEK_ID && k.end.is_some_and(|end| matches!(d.get(k.body..end), Some(id) if id == TAGS.to_be_bytes() || id == ATTACHMENTS.to_be_bytes()))))
+            })?,
+            _ => {}
+        }
+        at = match e.end {
+            Some(end) => end,
+            None if e.id == CLUSTER => open_end(d, e.body)?,
+            None => bail!("mkv: open element {:#x} in the segment", e.id),
+        };
+    }
+    for r in voids {
+        void(d, r);
+    }
+    Ok(())
+}
+
+/// Overwrites `r` (at least the two bytes any element takes) with one Void element of its length.
+fn void(d: &mut [u8], r: Range<usize>) {
+    let n = r.len();
+    d[r.start] = VOID;
+    let body = if n - 2 < 0x7f {
+        d[r.start + 1] = 0x80 | (n - 2) as u8;
+        r.start + 2
+    } else {
+        d[r.start + 1] = 0x01;
+        d[r.start + 2..r.start + 9].copy_from_slice(&((n - 9) as u64).to_be_bytes()[1..]);
+        r.start + 9
+    };
+    d[body..r.end].fill(0);
 }
 
 /// Zeroes the creation and modification times of an mvhd, tkhd or mdhd.
@@ -803,5 +941,46 @@ mod tests {
         let exif_at = mdat_at as usize + 8 + pixels.len();
         assert_eq!(&clean[exif_at..exif_at + 18], b"\0\0\0\0MM\0\x2a\0\0\0\x08\0\0\0\0\0\0");
         survives(image, &sample);
+    }
+
+    /// An element with a one-byte size, or an unknown size when `body` is `None`.
+    fn mkv(id: u32, body: Option<&[u8]>) -> Vec<u8> {
+        let mut out: Vec<u8> = id.to_be_bytes().into_iter().skip_while(|&b| b == 0).collect();
+        match body {
+            Some(b) if b.len() < 0x7f => out.push(0x80 | b.len() as u8),
+            Some(b) => {
+                out.push(0x01);
+                out.extend_from_slice(&(b.len() as u64).to_be_bytes()[1..]);
+            }
+            None => out.push(0xff),
+        }
+        out.extend_from_slice(body.unwrap_or_default());
+        out
+    }
+
+    #[test]
+    fn a_webm_loses_its_title_tags_cover_and_track_name_and_keeps_its_frames() {
+        let cover = [GPS; 8].concat();
+        let seek = [mkv(SEEK, Some(&[mkv(SEEK_ID, Some(&TAGS.to_be_bytes())), mkv(0x53AC, Some(&[9]))].concat())), mkv(SEEK, Some(&[mkv(SEEK_ID, Some(&CUES.to_be_bytes())), mkv(0x53AC, Some(&[7]))].concat()))].concat();
+        let info = [mkv(CRC32, Some(&[1, 2, 3, 4])), mkv(TITLE, Some(GPS)), mkv(DATE_UTC, Some(&[0; 8])), mkv(0x4D80, Some(b"Lavf"))].concat();
+        let track = mkv(TRACK_ENTRY, Some(&[mkv(0xD7, Some(&[1])), mkv(TRACK_NAME, Some(GPS))].concat()));
+        let cluster = [mkv(0xE7, Some(&[0])), mkv(0xA3, Some(b"frame bytes"))].concat();
+        let segment = [mkv(SEEK_HEAD, Some(&seek)), mkv(INFO, Some(&info)), mkv(TRACKS, Some(&track)), mkv(CLUSTER, None), cluster, mkv(TAGS, Some(GPS)), mkv(ATTACHMENTS, Some(&cover))].concat();
+        let file = [mkv(EBML, Some(&mkv(0x4282, Some(b"webm")))), mkv(SEGMENT, None), segment].concat();
+        let mut clean = file.clone();
+        video(&mut clean).unwrap();
+        assert_eq!(clean.len(), file.len(), "offsets moved");
+        assert!(!has(&clean, b"GPS"), "metadata survived");
+        assert!(!has(&clean, &[1, 2, 3, 4]), "a stale CRC survived");
+        let frame = file.windows(11).position(|w| w == b"frame bytes").unwrap();
+        assert_eq!(&clean[frame..frame + 11], b"frame bytes");
+        assert!(has(&clean, b"Lavf") && has(&clean, &CUES.to_be_bytes()), "kept too little");
+        assert!(!has(&clean, &TAGS.to_be_bytes()), "the seek entry for the tags survived");
+        video(&mut clean.clone()).unwrap();
+        // A recording cut off inside its attachments still goes, without them.
+        let mut cut = file[..file.len() - 4].to_vec();
+        video(&mut cut).unwrap();
+        assert!(!has(&cut, b"GPS"));
+        assert!(video(&mut vec![0x1A, 0x45, 0xDF, 0xA3, 0x00]).is_err());
     }
 }
