@@ -51,7 +51,7 @@ const RETRY_SOON: Duration = Duration::from_secs(5);
 const APP_ID: &str = "dev.gpui.beeper";
 
 enum Req {
-    Show { chat: String, name: String, icon: String, id: String, line: String, alert: bool },
+    Show { chat: String, name: String, icon: String, id: String, line: String, alert: bool, quiet: bool },
     /// Message `id` was edited to `line`, or deleted (`None`).
     Amend { chat: String, id: String, line: Option<String> },
     Close(String),
@@ -118,7 +118,7 @@ fn to_ui(msg: ToUi) {
 }
 
 pub(crate) fn show(notice: &crate::Notice) {
-    request(Req::Show { chat: notice.chat.into(), name: notice.name.into(), icon: notice.icon.into(), id: notice.note.id.clone(), line: line(notice), alert: notice.alert });
+    request(Req::Show { chat: notice.chat.into(), name: notice.name.into(), icon: notice.icon.into(), id: notice.note.id.clone(), line: line(notice), alert: notice.alert, quiet: notice.quiet });
 }
 
 /// The notice's message as its notification shows it again, edited, or with `gone` deleted.
@@ -379,13 +379,13 @@ pub(crate) async fn serve(dir: PathBuf) {
             }
             () = tokio::time::sleep_until((service.tried + service.wait).into()), if service.sink.is_none() => service.open().await,
             req = requests.recv() => match req {
-                Some(Req::Show { chat, name, icon, id, line, alert }) => {
+                Some(Req::Show { chat, name, icon, id, line, alert, quiet }) => {
                     if let Some(old) = shown.add(&chat, &name, &id, &line, icon) {
                         drop_entry(service.sink.as_mut(), old).await;
                     }
                     // Earlier messages of one sync only add their lines: the last one posts them all.
                     if alert && let Some(sink) = service.sink().await {
-                        post(sink, &mut shown, &chat, true).await;
+                        post(sink, &mut shown, &chat, !quiet).await;
                     }
                 }
                 Some(Req::Amend { chat, id, line }) => match shown.amend(&chat, &id, line.as_deref()) {

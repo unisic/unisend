@@ -947,6 +947,8 @@ pub(crate) struct Notice<'a> {
     pub note: &'a backend::Note,
     /// False for all but the last of messages that arrive together: one sound for them.
     pub alert: bool,
+    /// Shown without sound or vibration: the chat's own setting.
+    pub quiet: bool,
 }
 
 /// What stands for a chat or a person without a picture: the first letter or digit of each of the
@@ -1383,7 +1385,7 @@ mod android_files {
                     JValue::Bool(notice.note.mention),
                     JValue::Object(&icon),
                     JValue::Object(&initials),
-                    JValue::Bool(notice.alert),
+                    JValue::Bool(notice.alert && !notice.quiet),
                     JValue::Int(crate::NotifyShows::current() as i32),
                 ],
             )
@@ -1604,7 +1606,7 @@ mod tests {
     fn a_notification_shows_only_what_the_setting_lets_it() {
         use super::{Notice, NotifyShows, backend::Note};
         let note = Note { id: "$e".into(), sender: "Ann".into(), text: "secret".into(), ts: 1, mention: true };
-        let notice = Notice { chat: "!a:x", name: "Book club", group: true, icon: "/pic.png", note: &note, alert: true };
+        let notice = Notice { chat: "!a:x", name: "Book club", group: true, icon: "/pic.png", note: &note, alert: true, quiet: false };
         let seen = |shows: NotifyShows| {
             let mut out = None;
             shows.redact(&notice, |n| out = Some((n.chat.to_owned(), n.name.to_owned(), n.icon.to_owned(), n.note.sender.clone(), n.note.text.clone(), n.note.mention)));

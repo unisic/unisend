@@ -808,7 +808,7 @@ async fn test_notice(client: Client, dir: PathBuf) {
     let icon = file.as_deref().and_then(Path::to_str).unwrap_or_default();
     let note = Note { id: String::new(), sender: "Unisend".into(), text: t!("Test notification. Reply, mark as read or mute to try the buttons: nothing is sent.").into(), ts: now_ms().max(0) as u64, mention: false };
     let chat = crate::accounts::key(crate::accounts::slot_of(&dir), TEST_CHAT);
-    crate::notify(&crate::Notice { chat: &chat, name: "Unisend", group: false, icon, note: &note, alert: true });
+    crate::notify(&crate::Notice { chat: &chat, name: "Unisend", group: false, icon, note: &note, alert: true, quiet: false });
     // Android has decoded the picture by now; desktop removes it with the notification.
     if cfg!(target_os = "android")
         && let Some(file) = file
@@ -2571,7 +2571,7 @@ fn amend_notes(dir: &Path, summary: &RoomSummary, amends: &[Msg]) {
     for m in amends.iter().filter(|m| recent(m, now)) {
         let chat = crate::accounts::key(crate::accounts::slot_of(dir), summary.id.as_str());
         let note = Note { id: m.id.clone(), sender: m.sender.clone(), text: m.summary(), ts: m.ts, mention: false };
-        crate::amend_notification(&crate::Notice { chat: &chat, name: &summary.name, group: !summary.dm, icon: "", note: &note, alert: false }, m.deleted);
+        crate::amend_notification(&crate::Notice { chat: &chat, name: &summary.name, group: !summary.dm, icon: "", note: &note, alert: false, quiet: false }, m.deleted);
     }
 }
 
@@ -2686,8 +2686,8 @@ fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary,
                 log::info!(target: "notify", "shown ({})", counts(&client, &summary.id));
                 let chat = crate::accounts::key(crate::accounts::slot_of(&dir), summary.id.as_str());
                 for (n, note) in notes.iter().enumerate() {
-                    let alert = loud && n + 1 == notes.len();
-                    crate::notify(&crate::Notice { chat: &chat, name: &summary.name, group: !summary.dm, icon, note, alert });
+                    let alert = n + 1 == notes.len();
+                    crate::notify(&crate::Notice { chat: &chat, name: &summary.name, group: !summary.dm, icon, note, alert, quiet: !loud });
                 }
             }
         }
