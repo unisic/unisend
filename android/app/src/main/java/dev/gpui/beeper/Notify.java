@@ -18,6 +18,8 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Shader;
 import android.graphics.Typeface;
+import android.media.AudioAttributes;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -45,9 +47,11 @@ import java.util.Map;
  * Android is showing, so a dismissed chat starts afresh.
  */
 public final class Notify {
-    static final String MESSAGES = "messages";
-    static final String GROUPS = "groups";
-    static final String MENTIONS = "mentions";
+    /** Android fixes a channel's sound when it is made: these carry the app's own, the old ones go. */
+    static final String MESSAGES = "messages-2";
+    static final String GROUPS = "groups-2";
+    static final String MENTIONS = "mentions-2";
+    private static final String[] OLD_CHANNELS = {"messages", "groups", "mentions"};
     static final String CONNECTION = "connection";
     static final String EXTRA_CHAT = "chat";
     /** A message line's event ID, in its extras, by which an edit or deletion finds it. */
@@ -92,9 +96,12 @@ public final class Notify {
 
     static void channels(Context context) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
-        manager.createNotificationChannel(channel(MESSAGES, context.getString(R.string.channel_direct), NotificationManager.IMPORTANCE_HIGH));
-        manager.createNotificationChannel(channel(GROUPS, context.getString(R.string.channel_groups), NotificationManager.IMPORTANCE_DEFAULT));
-        manager.createNotificationChannel(channel(MENTIONS, context.getString(R.string.channel_mentions), NotificationManager.IMPORTANCE_HIGH));
+        for (String old : OLD_CHANNELS) {
+            manager.deleteNotificationChannel(old);
+        }
+        manager.createNotificationChannel(sounding(channel(MESSAGES, context.getString(R.string.channel_direct), NotificationManager.IMPORTANCE_HIGH), context, R.raw.notify_direct));
+        manager.createNotificationChannel(sounding(channel(GROUPS, context.getString(R.string.channel_groups), NotificationManager.IMPORTANCE_DEFAULT), context, R.raw.notify_group));
+        manager.createNotificationChannel(sounding(channel(MENTIONS, context.getString(R.string.channel_mentions), NotificationManager.IMPORTANCE_HIGH), context, R.raw.notify_mention));
         NotificationChannel connection = channel(CONNECTION, context.getString(R.string.channel_connection), NotificationManager.IMPORTANCE_MIN);
         connection.setShowBadge(false);
         manager.createNotificationChannel(connection);
@@ -135,6 +142,16 @@ public final class Notify {
     private static String text(Notification n, String key) {
         CharSequence text = n.extras.getCharSequence(key);
         return text == null ? "" : text.toString();
+    }
+
+    /** The app's own sound for a message channel, played as a messaging app's notification. */
+    private static NotificationChannel sounding(NotificationChannel channel, Context context, int sound) {
+        AudioAttributes attributes = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build();
+        channel.setSound(Uri.parse("android.resource://" + context.getPackageName() + "/" + sound), attributes);
+        return channel;
     }
 
     private static NotificationChannel channel(String id, String name, int importance) {

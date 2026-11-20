@@ -364,6 +364,8 @@ pub(crate) async fn serve(dir: PathBuf) {
     let _ = std::fs::remove_dir_all(dir.join("notify"));
     #[cfg(target_os = "windows")]
     windows::register(&dir);
+    #[cfg(target_os = "linux")]
+    linux::keep_sound(&dir);
     let mut service = Service { sink: None, tried: Instant::now(), wait: RETRY_FIRST };
     service.open().await;
     let mut shown = Shown::default();
