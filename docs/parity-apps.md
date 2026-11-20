@@ -34,6 +34,8 @@ N impossible over Matrix or bridges.
 | Search in chat and in all chats | Y | Y | Y | Y | `backend/search.rs`, `ui/search.rs` (local FTS5) | Y (local) |
 | Search filters (date, type) | P | Y | N | P | missing | Y (local index) |
 | Archive | Y | Y | N | Y | done | Y |
+| Keep muted chats archived | Y | ? | N | ? | `ui/mute.rs` (local setting) | Y (local) |
+| Mark all read | Y | Y | N | ? | `ui/readall.rs` | Y |
 | Pin chats | Y | Y | Y | Y | tag `m.favourite`; no manual order | Y |
 | Pin messages in a chat | Y | Y | N | Y | missing | B |
 | Mute with durations | Y | Y | Y | Y | `ui/mute.rs` | Y |

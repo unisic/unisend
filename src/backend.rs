@@ -411,6 +411,10 @@ pub struct RoomSummary {
     pub marked_unread: bool,
     #[serde(default)]
     pub archived: bool,
+    /// The chat carries an archive mark that a newer message has overridden: archived again where
+    /// muted chats stay archived (Signal's "Keep muted chats archived"), a choice of this device.
+    #[serde(default)]
+    pub archive_mark: bool,
     /// Beeper's server-side order of the newest message from someone else; 0 when unknown.
     #[serde(default)]
     pub order: i64,
@@ -2761,6 +2765,7 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>, live: bool) -> Room
         muted: false,
         marked_unread: false,
         archived: false,
+        archive_mark: false,
         order: 0,
         dated: true,
         pending: Some(Pending::Invite { by, name: inviter }),
@@ -2956,6 +2961,13 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
+impl Done {
+    /// Archived at some point and not unarchived since, which writes `{}`.
+    fn marked(&self) -> bool {
+        self.at_order.is_some_and(|o| o != 0) || self.updated_ts.is_some_and(|t| t > 0)
+    }
+}
+
 /// Same rule as Beeper Desktop: a pinned chat is never archived, and a message newer than the mark
 /// brings the chat back. `at_order` wins when both sides know the server order; else timestamps.
 fn is_done(done: &Done, s: &RoomSummary, now: i64) -> bool {
@@ -3037,7 +3049,7 @@ async fn recount(client: Client, notif: NotificationSettings, rooms: Rooms, ev: 
         let Some(seen) = rooms.lock().unwrap().get(&id).cloned().filter(|s| (encrypted || s.muted) && s.unread != counted(s)) else { continue };
         let fresh = summarize(&room, &notif, other_person(&room).await, seen).await;
         let changed = rooms.lock().unwrap().get_mut(&id).map(|r| {
-            (r.unread, r.mentions, r.archived) = (fresh.unread, fresh.mentions, fresh.archived);
+            (r.unread, r.mentions, r.archived, r.archive_mark) = (fresh.unread, fresh.mentions, fresh.archived, fresh.archive_mark);
             r.clone()
         });
         if let Some(summary) = changed {
@@ -3127,6 +3139,7 @@ async fn summarize(
         ..seen
     };
     s.archived = is_done(&done, &s, now_ms());
+    s.archive_mark = !s.archived && !s.pinned && done.marked();
     s.pending = request(room).await.then_some(Pending::Request);
     s.moved_to = room.successor_room().map(|next| next.room_id);
     if s.own_last && let Some(id) = s.preview_id.as_deref().and_then(|id| EventId::parse(id).ok()) {
@@ -3364,6 +3377,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 muted: false,
                 marked_unread: false,
                 archived: false,
+                archive_mark: false,
                 dated,
                 pending: None,
                 moved_to: None,

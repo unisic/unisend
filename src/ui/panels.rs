@@ -799,7 +799,8 @@ impl BeeperApp {
                     card(cx)
                         .child(link(Page::Folders.id(), Page::Folders.title(), self.folders_summary().into(), None, Some(IconName::ChevronRight), cx).on_click(cx.listener(|this, _, _, cx| this.open_folders_page(cx))))
                         .child(choice(Page::SwipeLeft, left, cx))
-                        .child(choice(Page::SwipeRight, right, cx)),
+                        .child(choice(Page::SwipeRight, right, cx))
+                        .child(self.keep_muted_row(cx)),
                 ),
             )
             .child(self.render_quick_reactions(cx))

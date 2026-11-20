@@ -800,6 +800,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("The old code stops working in every app, Beeper too. Keep the new one somewhere safe.", "Stary kod przestanie działać we wszystkich aplikacjach, także w Beeperze. Zapisz nowy w bezpiecznym miejscu."),
     ("This device does not hold all of the account's keys, so it cannot make a new recovery code.", "To urządzenie nie ma wszystkich kluczy konta, więc nie może utworzyć nowego kodu odzyskiwania."),
     ("Unlocks encrypted messages on another device. Copy it here, paste it there.", "Odblokowuje zaszyfrowane wiadomości na innym urządzeniu. Skopiuj go tutaj, wklej tam."),
+    ("Keep muted chats archived", "Wyciszone czaty zostają w archiwum"),
+    ("New messages do not bring a muted chat back from the archive. On this device only.", "Nowe wiadomości nie wyciągają wyciszonego czatu z archiwum. Tylko na tym urządzeniu."),
 ];
 
 /// Keyed by the English singular; the forms are one (1), few (2-4, 22-24) and many (0, 5-21, 25...).

@@ -1186,7 +1186,8 @@ impl BeeperApp {
     }
 
     /// Takes chats new or changed into the list, which moves its rows into their new places.
-    fn merge_rooms(&mut self, changed: Vec<RoomSummary>, cx: &mut Context<Self>) {
+    fn merge_rooms(&mut self, mut changed: Vec<RoomSummary>, cx: &mut Context<Self>) {
+        mute::keep_archived(&mut changed, self.settings.keep_muted_archived);
         let calm = !slide::Fly::quiet(changed.len()) && !cx.reduce_motion() && !self.rooms.is_empty() && self.list_at_top() && !self.finger_down();
         let before = calm.then(|| slide::snapshot(&self.shown, &self.rooms));
         let first = self.rooms.is_empty();
@@ -5139,6 +5140,7 @@ mod tests {
             muted: false,
             marked_unread: false,
             archived: false,
+            archive_mark: false,
             order: 0,
             dated: true,
             pending,
