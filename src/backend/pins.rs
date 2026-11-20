@@ -20,7 +20,7 @@ use matrix_sdk::{
 };
 use tokio::sync::{Mutex, mpsc};
 
-use super::{Ev, Quote, QuoteState, content, display_name};
+use super::{Ev, Quote, QuoteState, content, display_name, html};
 
 /// Pins resolved and shown, newest first. Matrix sets no limit and every pin costs a lookup (the
 /// event cache first, then one request), so the oldest beyond this are left out.
@@ -76,6 +76,10 @@ async fn quote(room: &Room, id: &EventId) -> Option<Quote> {
     let sender = match event {
         AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Original(e)) => {
             let (media, text) = content(&e.content.msgtype);
+            let text = match html(&e.content.msgtype).and_then(super::rich::parse) {
+                Some((plain, rich)) if !rich.spoilers().is_empty() => super::rich::masked(&plain, Some(&rich)),
+                _ => text,
+            };
             q.place = matches!(e.content.msgtype, MessageType::Location(_));
             (q.media, q.text) = (media, text);
             e.sender

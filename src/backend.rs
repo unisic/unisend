@@ -629,7 +629,7 @@ impl Msg {
         let text = match (&self.poll, &self.place) {
             (Some(poll), _) => poll.question.clone(),
             (_, Some(place)) => place.description.clone(),
-            _ => self.body.clone(),
+            _ => rich::masked(&self.body, self.rich.as_ref()),
         };
         Quote {
             id: self.id.clone(),
@@ -652,7 +652,8 @@ impl Msg {
         if let Some(place) = &self.place {
             return if place.description.is_empty() { t!("📍 Location").to_owned() } else { t!("📍 Location: {place}", place = place.description) };
         }
-        let Some(media) = &self.media else { return self.body.clone() };
+        let body = rich::masked(&self.body, self.rich.as_ref());
+        let Some(media) = &self.media else { return body };
         let label = match media.kind {
             MediaKind::Image => t!("📷 Photo"),
             MediaKind::Sticker => t!("🖼 Sticker"),
@@ -661,7 +662,7 @@ impl Msg {
             MediaKind::Audio => t!("🎵 Audio"),
             MediaKind::File => return format!("📎 {}", media.name),
         };
-        if self.body.is_empty() { label.to_owned() } else { format!("{label}: {}", self.body) }
+        if body.is_empty() { label.to_owned() } else { format!("{label}: {body}") }
     }
 }
 

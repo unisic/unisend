@@ -2823,7 +2823,7 @@ impl BeeperApp {
                                 .when(faded, |el| el.italic().text_color(inside.faint))
                                 .when(collapsed, |el| el.max_h(fs(22.) * SHORT_LINES as f32).overflow_hidden())
                                 .child(match m.rich.as_ref().filter(|_| !faded) {
-                                    Some(rich) => rich::body(m, rich, inside, ink),
+                                    Some(rich) => rich::body(m, rich, inside, ink, cx.entity_id(), cx),
                                     None => {
                                         let cut = if collapsed { m.body.char_indices().nth(SHORT_CHARS).map_or(m.body.len(), |(at, _)| at) } else { m.body.len() };
                                         let styled = crate::emoji::styled(m.body[..cut].to_owned(), marks.into_iter().filter(|(r, _)| r.end <= cut).collect());

@@ -2,7 +2,8 @@
 //!
 //! Bridges send HTML next to a markdown-ish plain `body`. The model keeps what the bubble can
 //! draw: bold, italic, strikethrough, underline, inline code, links, quotes, code blocks, lists.
-//! Everything else keeps its text. Spoilers (`data-mx-spoiler`) are plain text, not hidden.
+//! Everything else keeps its text. Spoilers (`data-mx-spoiler`) are runs of their own, which the
+//! bubble covers until a tap and every preview writes as blocks (`masked`), as Beeper Desktop does.
 
 use matrix_sdk::ruma::html::{Html, NodeData, NodeRef};
 
@@ -36,6 +37,7 @@ pub struct Run {
     pub strike: bool,
     pub underline: bool,
     pub code: bool,
+    pub spoiler: bool,
     pub href: Option<String>,
 }
 
@@ -46,7 +48,41 @@ struct Style {
     strike: bool,
     underline: bool,
     code: bool,
+    spoiler: bool,
     href: Option<String>,
+}
+
+impl Rich {
+    /// Byte ranges of the plain text that are spoilers.
+    pub fn spoilers(&self) -> Vec<std::ops::Range<usize>> {
+        fn walk(blocks: &[Block], out: &mut Vec<std::ops::Range<usize>>) {
+            for block in blocks {
+                match block {
+                    Block::Para(runs) => out.extend(runs.iter().filter(|r| r.spoiler).map(|r| r.at..r.at + r.text.len())),
+                    Block::Quote(inside) => walk(inside, out),
+                    Block::Code(..) => {}
+                    Block::List { items, .. } => items.iter().for_each(|item| walk(item, out)),
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.blocks, &mut out);
+        out
+    }
+}
+
+/// `plain` with each spoiler's characters as blocks, for a preview or a notification. Beeper
+/// Desktop's previews write one block per character.
+pub fn masked(plain: &str, rich: Option<&Rich>) -> String {
+    let hidden = rich.map(Rich::spoilers).unwrap_or_default();
+    if hidden.is_empty() {
+        return plain.to_owned();
+    }
+    let mut out = String::with_capacity(plain.len() * 2);
+    for (at, ch) in plain.char_indices() {
+        out.push(if hidden.iter().any(|r| r.contains(&at)) { '\u{2588}' } else { ch });
+    }
+    out
 }
 
 #[derive(Default)]
@@ -161,7 +197,7 @@ fn push(out: String, st: &Style, cur: &mut Vec<Run>, b: &mut Builder) {
     let at = b.plain.len();
     b.plain.push_str(&out);
     let same = |r: &Run| {
-        (r.bold, r.italic, r.strike, r.underline, r.code, &r.href) == (st.bold, st.italic, st.strike, st.underline, st.code, &st.href)
+        (r.bold, r.italic, r.strike, r.underline, r.code, r.spoiler, &r.href) == (st.bold, st.italic, st.strike, st.underline, st.code, st.spoiler, &st.href)
     };
     match cur.last_mut() {
         Some(last) if same(last) => last.text.push_str(&out),
@@ -173,6 +209,7 @@ fn push(out: String, st: &Style, cur: &mut Vec<Run>, b: &mut Builder) {
             strike: st.strike,
             underline: st.underline,
             code: st.code,
+            spoiler: st.spoiler,
             href: st.href.clone(),
         }),
     }
@@ -318,7 +355,11 @@ fn walk(node: &NodeRef, st: &Style, depth: usize, blocks: &mut Vec<Block>, cur: 
             }
             kids(&inner, blocks, cur, b)
         }
-        // Unknown tags and spans (spoilers, colours, mention pills) keep their text.
+        "span" | "font" if attr(node, "data-mx-spoiler").is_some() => {
+            inner.spoiler = true;
+            kids(&inner, blocks, cur, b)
+        }
+        // Unknown tags and spans (colours, mention pills) keep their text.
         _ => kids(&inner, blocks, cur, b),
     }
 }
@@ -399,6 +440,17 @@ mod tests {
         let (plain, rich) = parse("<h2>Title</h2><span data-mx-spoiler=\"\">secret</span> <blink>keep</blink><img src=\"mxc://x/y\" alt=\"pic\">").unwrap();
         assert_eq!(plain, "Title\nsecret keeppic");
         assert!(para(&rich, 0)[0].bold);
+        assert!(para(&rich, 1)[0].spoiler && para(&rich, 1)[0].text == "secret");
+        assert!(!para(&rich, 1)[1].spoiler);
+    }
+
+    #[test]
+    fn spoilers_are_masked_for_previews() {
+        let (plain, rich) = parse("he <span data-mx-spoiler>díes</span>!<blockquote><b><span data-mx-spoiler=\"why\">x</span></b></blockquote>").unwrap();
+        assert_eq!(plain, "he díes!\nx");
+        assert_eq!(rich.spoilers(), [3..8, 10..11]);
+        assert_eq!(masked(&plain, Some(&rich)), "he \u{2588}\u{2588}\u{2588}\u{2588}!\n\u{2588}");
+        assert_eq!(masked("plain", None), "plain");
     }
 
     #[test]
