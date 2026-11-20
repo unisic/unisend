@@ -33,6 +33,7 @@ mod caption;
 pub(crate) use caption::video_frame;
 mod cards;
 mod emojihint;
+mod stickers;
 mod emojipick;
 mod contacts;
 pub(crate) mod folders;
@@ -403,6 +404,7 @@ pub struct BeeperApp {
     mention: mentions::Mentions,
     /// The `:name` list over the composer.
     emoji_hint: emojihint::Hints,
+    stickers: stickers::Stickers,
     voice: voice::Voice,
     /// Attachments waiting for the one uploading now, so a batch keeps its order.
     attach_queue: VecDeque<Cmd>,
@@ -759,6 +761,7 @@ impl BeeperApp {
             updates,
             mention: mentions::Mentions::default(),
             emoji_hint: emojihint::Hints::default(),
+            stickers: stickers::Stickers::default(),
             voice: voice::Voice::default(),
             attach_queue: VecDeque::new(),
             attaching: false,
@@ -1114,6 +1117,8 @@ impl BeeperApp {
             Ev::Uploaded => self.uploads = self.uploads.saturating_sub(1),
             Ev::Members { room, list } => self.members_arrived(room, list, cx),
             Ev::EditHistory { id, versions } => self.edits_arrived(id, versions, cx),
+            Ev::Stickers { room, packs } => self.stickers_arrived(room, packs, cx),
+            Ev::StickerThumb(url, bytes) => self.sticker_thumb(url, bytes, cx),
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
             ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_) | Ev::RecoveryCode(_)) => self.on_verify_event(ev, cx),
             Ev::Disappear { room, setting } => self.on_disappear(room, setting),
@@ -1902,6 +1907,7 @@ impl BeeperApp {
         self.typing.clear();
         self.asked.clear();
         self.stills.clear();
+        self.forget_stickers(cx);
         self.thumb_order.clear();
         self.thumb_at.clear();
         for (_, image) in self.thumbs.drain() {

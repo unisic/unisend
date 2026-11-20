@@ -42,6 +42,8 @@ pub struct Features {
     pub max_text: usize,
     /// The most options of a poll; 0 when it names no limit.
     pub poll_max: usize,
+    /// The level of each sticker type (MIME type) the network gives `m.sticker`; `None` takes all.
+    pub stickers: Option<HashMap<String, i64>>,
 }
 
 impl Features {
@@ -64,6 +66,7 @@ impl Features {
         post: true,
         max_text: 0,
         poll_max: 0,
+        stickers: None,
     };
 
     /// `as_file`: the GIF goes as an `image/gif` (Meta's networks, see `gifs::wants_gif_file`).
@@ -90,6 +93,16 @@ impl Features {
             _ => 3,
         };
         self.captions[ix] >= 1
+    }
+
+    /// The chat takes a sticker of type `mime` (any type, unknown), as Beeper's apps decide it.
+    pub fn takes_sticker(&self, mime: Option<&str>) -> bool {
+        let Some(types) = &self.stickers else { return self.post };
+        let file = WireFile { mime_types: types.clone(), caption: 0 };
+        self.post && match mime {
+            Some(mime) => file.level(mime) > -2,
+            None => types.values().any(|&l| l > -2),
+        }
     }
 
     /// The chat takes reaction `key` (with or without U+FE0F: Telegram's list carries it).
@@ -177,6 +190,7 @@ pub fn parse(content: &Value) -> Features {
         post: true,
         max_text: usize::try_from(wire.max_text_length).unwrap_or(0),
         poll_max: usize::try_from(wire.poll_max_options).unwrap_or(0),
+        stickers: Some(f.get("m.sticker").map(|s| s.mime_types.clone()).unwrap_or_default()),
     }
 }
 
@@ -257,6 +271,9 @@ mod tests {
         assert!(f.gif(true) && !f.gif(false));
         assert!(f.editable(0, 899_999) && !f.editable(0, 900_000));
         assert!(f.deletable(0, u64::MAX));
+        assert!(f.takes_sticker(None) && f.takes_sticker(Some("image/webp")) && !f.takes_sticker(Some("image/gif")));
+        assert!(!parse(&json!({ "file": {} })).takes_sticker(None), "no m.sticker entry: rejected");
+        assert!(Features::ALL.takes_sticker(Some("image/gif")));
     }
 
     #[test]

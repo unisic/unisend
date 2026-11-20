@@ -434,6 +434,10 @@ impl BeeperApp {
     /// Search and skin tone on top, the grid, the category tabs under it. `react`: for a reaction,
     /// limited to what the chat takes.
     fn emoji_body(&mut self, width: f32, react: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let composer = self.emoji_open == Some(Target::Composer) && self.stickers_offered();
+        if composer && self.stickers.shown {
+            return self.sticker_body(width, cx);
+        }
         let p = Palette::of(cx);
         let (cols, cell_w) = columns(width);
         let query = self.emoji_pick.search.read(cx).value().to_string();
@@ -525,6 +529,7 @@ impl BeeperApp {
                     }
                 }))
         }));
+        let tabs = tabs.when(composer, |el| el.child(self.sticker_tab(true, cx)));
         let open = self.emoji_pick.tones;
         let shown = Presence::new("emoji-tones", open).transition(if open { motion::enter() } else { motion::exit() }).sample(window, cx);
         // Opened from the swatch at the top right, it drops from under it as the app's menus do.
