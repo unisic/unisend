@@ -120,6 +120,11 @@ pub enum Ask {
     /// The user's note to self: the one there is, or a new one.
     Note,
     Group { target: Target, kind: String, name: String, people: Vec<String> },
+    /// Merges chats into one (`union.rs`), or adds them to the merged chat among them; `name`
+    /// names a new one. Answered with `Ready` of the merged chat.
+    Merge { rooms: Vec<OwnedRoomId>, name: String },
+    /// Takes one chat out of a merged chat; the last one out ends it.
+    Unmerge { union: OwnedRoomId, room: OwnedRoomId },
 }
 
 pub enum Answer {
@@ -177,6 +182,17 @@ pub(super) fn handle(client: Client, api: Option<Api>, rooms: Rooms, ev: mpsc::S
                 return leave(&client, &rooms, &ev, room, false).await;
             }
             Ask::Upgrade(room) => outcome(successor(&client, &room).await),
+            Ask::Merge { rooms, name } => match super::union::merge(&client, rooms, name).await {
+                Ok(id) => Answer::Ready(id),
+                Err(e) => Answer::Failed(t!("Could not merge the chats: {error}", error = super::plain(&format!("{e:#}")))),
+            },
+            Ask::Unmerge { union, room } => {
+                let Some(u) = client.get_room(&union) else { return };
+                if let Err(e) = super::union::take_out(&u, &room).await {
+                    let _ = ev.send(Ev::Error(t!("Could not split the chats: {error}", error = super::plain(&format!("{e:#}"))))).await;
+                }
+                return;
+            }
             Ask::Open(target) => {
                 let caps = match &target {
                     Target::Matrix => Ok(Caps::matrix()),
@@ -248,6 +264,9 @@ async fn leave(client: &Client, rooms: &Rooms, ev: &mpsc::Sender<Ev>, id: OwnedR
     let _ = ev.send(Ev::RoomGone(id.clone())).await;
     let result = if delete { delete_chat(&room).await } else { leave_and_forget(&room).await };
     unmark(&id);
+    if result.is_ok() && !super::union::is_union(&room) {
+        super::union::forget_member(client, &id).await;
+    }
     if let Err(e) = result {
         if let Some(summary) = summary {
             rooms.lock().unwrap().insert(id, summary.clone());

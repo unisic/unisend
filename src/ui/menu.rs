@@ -386,7 +386,7 @@ impl BeeperApp {
     /// empty composer edits.
     pub(super) fn last_editable(&self) -> Option<String> {
         let m = self.msgs.iter().rev().find(|m| m.own && !m.deleted)?;
-        taken(acts(m, MenuKind::List, true), m, self.caps()).contains(&Act::Edit).then(|| m.id.clone())
+        taken(acts(m, MenuKind::List, true), m, self.caps_for(&m.id)).contains(&Act::Edit).then(|| m.id.clone())
     }
 
     pub(super) fn menu_open(&self) -> bool {
@@ -494,7 +494,7 @@ impl BeeperApp {
             return;
         }
         let (scrub, menu_id) = (m.scrub, m.id.clone());
-        let chosen = scrub.zip(self.msgs.iter().find(|msg| msg.id == menu_id)).map(|(n, msg)| (msg.id.clone(), bar_keys(msg, self.caps(), &quick(&self.settings)).get(n).cloned()));
+        let chosen = scrub.zip(self.msgs.iter().find(|msg| msg.id == menu_id)).map(|(n, msg)| (msg.id.clone(), bar_keys(msg, self.caps_for(&msg.id), &quick(&self.settings)).get(n).cloned()));
         match chosen {
             Some((id, Some(key))) => self.toggle_reaction(&id, &key, cx),
             Some((id, None)) => {
@@ -658,12 +658,12 @@ impl BeeperApp {
             .when(m.own, |el| el.flex_row_reverse())
             .opacity(if open { 1. } else { 0. })
             .group_hover("message", |el| el.opacity(1.))
-            .when(sent && self.caps().reaction >= 1, |el| {
+            .when(sent && self.caps_for(&m.id).reaction >= 1, |el| {
                 el.child(button("react", IconName::Heart).on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
                     this.open_menu(react.clone(), MenuKind::Picker, e.position(), None, false, cx)
                 })))
             })
-            .when(sent && self.caps().reply >= 1, |el| {
+            .when(sent && self.caps_for(&m.id).reply >= 1, |el| {
                 el.child(button("reply", IconName::Reply).on_click(cx.listener(move |this, _, window, cx| {
                     this.start_compose(Compose::Reply(reply.clone()), window, cx)
                 })))
@@ -768,7 +768,7 @@ impl BeeperApp {
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
         let id = m.id.clone();
-        let caps = self.caps();
+        let caps = self.caps_for(&id);
         let keys = bar_keys(m, caps, &quick(&self.settings));
         let more = more_offered(&keys, caps);
         let reacts = id.starts_with('$') && caps.reaction >= 1;
@@ -878,8 +878,8 @@ impl BeeperApp {
         let view = frame::viewport(window);
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
-        let (id, keys) = (m.id.clone(), bar_keys(m, self.caps(), &quick(&self.settings)));
-        let more = more_offered(&keys, self.caps());
+        let (id, keys) = (m.id.clone(), bar_keys(m, self.caps_for(&m.id), &quick(&self.settings)));
+        let more = more_offered(&keys, self.caps_for(&id));
         let w = (keys.len() + more as usize) as f32 * PICK + 2. * PICK_PAD_X;
         let h = PICK + 2. * PICK_PAD_Y;
         let (top, bottom) = crate::insets();
@@ -950,7 +950,7 @@ impl BeeperApp {
         let menu = self.menu.as_ref()?;
         let m = self.msgs.iter().find(|m| m.id == menu.id)?;
         let id = m.id.clone();
-        let acts = self.with_pin(taken(acts(m, MenuKind::List, narrow), m, self.caps()), m);
+        let acts = self.with_pin(taken(acts(m, MenuKind::List, narrow), m, self.caps_for(&m.id)), m);
         let h = POINTER_ROW_H * acts.len() as f32 + 12.;
         let (top, bottom) = crate::insets();
         let at = frame::local(window, menu.at);

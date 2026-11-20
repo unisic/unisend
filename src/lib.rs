@@ -97,7 +97,8 @@ gpui_kit::assets::icon_assets!(
         CheckCheck,
         Circle,
         CircleCheck,
-        CircleAlert
+        CircleAlert,
+        Merge
     ]
 );
 
@@ -1639,6 +1640,7 @@ mod tests {
             include_str!("ui/receipt.rs"),
             include_str!("ui/rich.rs"),
             include_str!("ui/rooms.rs"),
+            include_str!("ui/merged.rs"),
             include_str!("ui/sharein.rs"),
             include_str!("ui/signin.rs"),
             include_str!("ui/verify.rs"),

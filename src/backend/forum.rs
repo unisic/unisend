@@ -114,6 +114,7 @@ mod tests {
             mentions,
             dm: false,
             note: false,
+            union: None,
             pinned: false,
             low_priority: false,
             muted,

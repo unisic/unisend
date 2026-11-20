@@ -10,7 +10,7 @@ impl BeeperApp {
         // Where it is not taken, the double tap does nothing rather than raise an error.
         let like = self.settings.double_tap.clone().unwrap_or_else(|| LIKE.to_owned());
         let ours = self.msgs.iter().any(|m| m.id == id && m.reactions.iter().any(|r| r.own && menu::same_emoji(&r.key, &like)));
-        if !ours && !self.caps().reacts_with(&like) {
+        if !ours && !self.caps_for(id).reacts_with(&like) {
             return;
         }
         self.toggle_reaction(id, &like, cx);
