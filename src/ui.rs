@@ -1002,6 +1002,7 @@ impl BeeperApp {
                 self.attaching = false;
                 self.next_attach(cx);
             }
+            Ev::OfferMp4 { room, path, reply_to, caption, why } => self.ask_mp4(room, path, reply_to, caption, why, cx),
             Ev::LinkPreview(url, draft) => {
                 if let Some(link) = self.link.as_mut().filter(|l| l.url == url && matches!(l.made, Made::Reading)) {
                     link.made = match draft {

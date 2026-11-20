@@ -48,6 +48,8 @@ pub struct Features {
     pub no_unblock: bool,
     /// The level of each sticker type (MIME type) the network gives `m.sticker`; `None` takes all.
     pub stickers: Option<HashMap<String, i64>>,
+    /// The level of each video type the network gives `m.video`; `None` takes all.
+    pub videos: Option<HashMap<String, i64>>,
 }
 
 impl Features {
@@ -73,6 +75,7 @@ impl Features {
         block_user: false,
         no_unblock: false,
         stickers: None,
+        videos: None,
     };
 
     /// `as_file`: the GIF goes as an `image/gif` (Meta's networks, see `gifs::wants_gif_file`).
@@ -104,11 +107,15 @@ impl Features {
     /// The chat takes a sticker of type `mime` (any type, unknown), as Beeper's apps decide it.
     pub fn takes_sticker(&self, mime: Option<&str>) -> bool {
         let Some(types) = &self.stickers else { return self.post };
-        let file = WireFile { mime_types: types.clone(), caption: 0 };
         self.post && match mime {
-            Some(mime) => file.level(mime) > -2,
+            Some(mime) => level(types, mime) > -2,
             None => types.values().any(|&l| l > -2),
         }
+    }
+
+    /// The bridge takes a video of type `mime` as it is; one it refuses has to become an MP4 first.
+    pub fn takes_video(&self, mime: &str) -> bool {
+        self.videos.as_ref().is_none_or(|types| level(types, mime) > -2)
     }
 
     /// The chat takes reaction `key` (with or without U+FE0F: Telegram's list carries it).
@@ -148,20 +155,18 @@ struct WireFile {
     caption: i64,
 }
 
-impl WireFile {
-    /// mautrix-go `FileFeatures.GetMimeSupport`: the type, without parameters, `type/*`, `*/*`.
-    fn level(&self, mime: &str) -> i64 {
-        let plain = mime.split(';').next().unwrap_or(mime).trim();
-        let general = mime.split_once('/').map(|(kind, _)| format!("{kind}/*"));
-        [Some(mime), Some(plain), general.as_deref(), Some("*/*")].into_iter().flatten().find_map(|m| self.mime_types.get(m).copied()).unwrap_or(-2)
-    }
+/// mautrix-go `FileFeatures.GetMimeSupport`: the type, without parameters, `type/*`, `*/*`.
+fn level(types: &HashMap<String, i64>, mime: &str) -> i64 {
+    let plain = mime.split(';').next().unwrap_or(mime).trim();
+    let general = mime.split_once('/').map(|(kind, _)| format!("{kind}/*"));
+    [Some(mime), Some(plain), general.as_deref(), Some("*/*")].into_iter().flatten().find_map(|m| types.get(m).copied()).unwrap_or(-2)
 }
 
 /// bridgev2 (`checkMessageContentCaps`) refuses a file whose type has no entry or whose MIME type
 /// is rejected; anything above that goes through.
 fn takes(file: &HashMap<String, WireFile>, msgtype: &str, mime: Option<&str>) -> bool {
     file.get(msgtype).is_some_and(|f| match mime {
-        Some(mime) => f.level(mime) > -2,
+        Some(mime) => level(&f.mime_types, mime) > -2,
         None => f.mime_types.values().any(|&l| l > -2),
     })
 }
@@ -201,6 +206,7 @@ pub fn parse(content: &Value) -> Features {
         block_user: wire.block_user,
         no_unblock: wire.no_unblock,
         stickers: Some(f.get("m.sticker").map(|s| s.mime_types.clone()).unwrap_or_default()),
+        videos: Some(f.get("m.video").map(|v| v.mime_types.clone()).unwrap_or_default()),
     }
 }
 
@@ -286,6 +292,8 @@ mod tests {
         assert!(f.takes_sticker(None) && f.takes_sticker(Some("image/webp")) && !f.takes_sticker(Some("image/gif")));
         assert!(!parse(&json!({ "file": {} })).takes_sticker(None), "no m.sticker entry: rejected");
         assert!(Features::ALL.takes_sticker(Some("image/gif")));
+        assert!(f.takes_video("video/mp4") && !f.takes_video("video/webm"), "Meta takes MP4 and MOV only");
+        assert!(Features::ALL.takes_video("video/webm"));
     }
 
     #[test]
@@ -373,11 +381,11 @@ mod tests {
 
     #[test]
     fn mime_lookup_follows_mautrix() {
-        let file = WireFile { mime_types: HashMap::from([("audio/*".to_owned(), 1), ("audio/ogg".to_owned(), -2)]), caption: 0 };
-        assert_eq!(file.level("audio/ogg"), -2);
-        assert_eq!(file.level("audio/ogg; codecs=opus"), -2);
-        assert_eq!(file.level("audio/mp4"), 1);
-        assert_eq!(file.level("video/mp4"), -2);
+        let types = HashMap::from([("audio/*".to_owned(), 1), ("audio/ogg".to_owned(), -2)]);
+        assert_eq!(level(&types, "audio/ogg"), -2);
+        assert_eq!(level(&types, "audio/ogg; codecs=opus"), -2);
+        assert_eq!(level(&types, "audio/mp4"), 1);
+        assert_eq!(level(&types, "video/mp4"), -2);
     }
 
     #[test]

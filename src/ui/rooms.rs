@@ -3,6 +3,7 @@
 //! signed in to.
 
 use super::*;
+use crate::backend::mp4::Unfit;
 use crate::backend::rooms::{Answer, Ask, Caps, Person, Target};
 use crate::i18n::t;
 
@@ -39,6 +40,8 @@ pub(super) enum Confirming {
     SignOut { bridge: String, login: String },
     /// Turning a Discord server off; `name` is the server's.
     StopGuild { bridge: String, login: String, guild: String },
+    /// Making an MP4 of a video that cannot go as it is (`Ev::OfferMp4`), then sending it.
+    Mp4 { room: OwnedRoomId, path: PathBuf, reply_to: Option<String>, caption: String, why: Unfit },
 }
 
 impl Confirm {
@@ -151,6 +154,16 @@ fn wording(c: &Confirm) -> (String, String, &'static str) {
                 t!("Its channels are removed from your chats in every Beeper app. Turning it on again brings them back.").to_owned(),
                 t!("Turn off"),
             );
+        }
+        Confirming::Mp4 { why, .. } => {
+            let body = match why {
+                Unfit::Refused => match &c.network {
+                    Some(network) => t!("{network} does not take this video's format. Unisend can make an MP4 of it on this device with ffmpeg, without its metadata, and send that. A long video takes a while.", network = network),
+                    None => t!("This chat's network does not take this video's format. Unisend can make an MP4 of it on this device with ffmpeg, without its metadata, and send that. A long video takes a while.").to_owned(),
+                },
+                Unfit::Unclean => t!("Unisend cannot remove the metadata from this video's format. It can make an MP4 of it on this device with ffmpeg, without metadata, and send that. A long video takes a while.").to_owned(),
+            };
+            return (t!("Convert this video to MP4?").to_owned(), body, t!("Convert"));
         }
         Confirming::SignOut { .. } => {
             return (
@@ -345,9 +358,23 @@ impl BeeperApp {
         cx.notify();
     }
 
+    /// Asks before a video that cannot go as it is becomes an MP4.
+    pub(super) fn ask_mp4(&mut self, room: OwnedRoomId, path: PathBuf, reply_to: Option<String>, caption: String, why: Unfit, cx: &mut Context<Self>) {
+        let network = self.rooms.iter().find(|r| r.id == room).and_then(|r| r.network.clone());
+        // shortcut: a refused offer leaves a pasted or edited source in `pasted/` until sign-out; delete it on Cancel if that grows.
+        self.people.confirm = Some(Confirm { name: String::new(), network, what: Confirming::Mp4 { room, path, reply_to, caption, why } });
+        cx.notify();
+    }
+
     fn confirmed(&mut self, cx: &mut Context<Self>) {
         let Some(c) = self.people.confirm.take() else { return };
         let (room, delete, block) = match c.what {
+            Confirming::Mp4 { room, path, reply_to, caption, .. } => {
+                self.uploads += 1;
+                self.attach_queue.push_back(Cmd::Mp4 { room, path, reply_to, caption });
+                self.next_attach(cx);
+                return cx.notify();
+            }
             Confirming::Leave { room, delete, block, .. } => (room, delete == Some(true), block),
             Confirming::Person { dm: Some(room), .. } => {
                 self.block_on_network(room, true, cx);
@@ -385,9 +412,10 @@ impl BeeperApp {
         let live = self.people.confirm.as_ref().is_some_and(Confirm::ready);
         let shown = Presence::new("leave-dialog", live).transition(if live { motion::enter() } else { motion::exit() }).sample(window, cx);
         // The words outlive the confirmation so the dialog can fade out showing what it asked.
-        let last = window.use_keyed_state("leave-dialog-last", cx, |_, _| None::<(String, String, &'static str)>);
+        let last = window.use_keyed_state("leave-dialog-last", cx, |_, _| None::<((String, String, &'static str), bool)>);
         if let Some(c) = self.people.confirm.as_ref().filter(|c| c.ready()) {
-            let words = wording(c);
+            // Converting loses nothing: the primary button, not the red one.
+            let words = (wording(c), matches!(c.what, Confirming::Mp4 { .. }));
             if last.read(cx).as_ref() != Some(&words) {
                 last.update(cx, |l, _| *l = Some(words));
             }
@@ -398,7 +426,7 @@ impl BeeperApp {
             }
             return None;
         }
-        let (title, body, act) = last.read(cx).clone()?;
+        let ((title, body, act), calm) = last.read(cx).clone()?;
         let v = shown.progress;
         let p = Palette::of(cx);
         let width = DIALOG_W.min(f32::from(frame::viewport(window).width) - 2. * GUTTER);
@@ -439,7 +467,7 @@ impl BeeperApp {
                             this.close_confirm(cx);
                         }))
                     }))
-                    .child(button("leave-confirm", act, p.negative, gpui_kit::white()).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.confirmed(cx))))),
+                    .child(button("leave-confirm", act, if calm { p.text } else { p.negative }, if calm { p.ground } else { gpui_kit::white() }).when(live, |el| el.on_click(cx.listener(|this, _, _, cx| this.confirmed(cx))))),
             )
             .opacity(v)
             .top(px(8. * (1. - v)));

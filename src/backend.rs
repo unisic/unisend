@@ -213,6 +213,8 @@ pub enum Cmd {
     StickerThumb(matrix_sdk::ruma::OwnedMxcUri),
     /// A photo or video from the preview: with its caption, and as the original when `hd`.
     AttachMedia { room: OwnedRoomId, path: PathBuf, reply_to: Option<String>, caption: String, hd: bool },
+    /// A video `OfferMp4` named, made into an MP4 with ffmpeg and sent; `Attached` follows.
+    Mp4 { room: OwnedRoomId, path: PathBuf, reply_to: Option<String>, caption: String },
     /// A recording to send as a voice message; `levels` are its loudness, 0 to 1, per tick.
     Voice { room: OwnedRoomId, path: PathBuf, duration: Duration, levels: Vec<f32>, reply_to: Option<String> },
     /// Sends these messages of the open chat (event IDs, oldest first) again in each chat of `to`.
@@ -321,6 +323,8 @@ pub enum Ev {
     Fetched(String, Option<PathBuf>),
     /// An attachment is in the send queue, or failed before it.
     Attached,
+    /// A video that cannot go as it is, `why`; ffmpeg is here to make an MP4 of it (`Cmd::Mp4`).
+    OfferMp4 { room: OwnedRoomId, path: PathBuf, reply_to: Option<String>, caption: String, why: mp4::Unfit },
     Networks(Vec<Network>),
     /// Logins that need signing in again, as (bridge, login name); checked now and then.
     Attention(Vec<(String, String)>),
@@ -1464,6 +1468,7 @@ impl State {
             }
             Cmd::Attach { room, path, reply_to } => Cmd::Attach { room: at(room, reply_to.as_deref())?, path, reply_to },
             Cmd::AttachMedia { room, path, reply_to, caption, hd } => Cmd::AttachMedia { room: at(room, reply_to.as_deref())?, path, reply_to, caption, hd },
+            Cmd::Mp4 { room, path, reply_to, caption } => Cmd::Mp4 { room: at(room, reply_to.as_deref())?, path, reply_to, caption },
             Cmd::Voice { room, path, duration, levels, reply_to } => Cmd::Voice { room: at(room, reply_to.as_deref())?, path, duration, levels, reply_to },
             Cmd::SendLocation { room, lat, lon, accuracy, reply_to } => Cmd::SendLocation { room: at(room, reply_to.as_deref())?, lat, lon, accuracy, reply_to },
             Cmd::SendGif { room, gif, query, reply_to } => Cmd::SendGif { room: at(room, reply_to.as_deref())?, gif, query, reply_to },
@@ -1795,19 +1800,56 @@ impl State {
                     _ => unreachable!("matched above"),
                 };
                 // `Attached` follows every attachment, sent or not: the next one waits for it.
-                let room = self.room(&room);
+                let target = self.room(&room);
                 let ev = self.ev.clone();
-                // A pasted picture sits in a folder of its own there, which goes with it.
-                let pasted = path.parent().filter(|folder| folder.parent() == Some(self.dir.join(PASTED).as_path())).map(Path::to_path_buf);
+                let pasted = self.pasted_folder(&path);
                 tokio::spawn(async move {
-                    let sent = match room {
-                        Ok(room) => attach(&room, &path, reply_to, &caption, hd).await,
+                    let sent = match target {
+                        Ok(target) => attach(&target, &path, reply_to.clone(), &caption, hd).await,
                         Err(e) => Err(e),
                     };
-                    if let Some(folder) = pasted {
+                    let why = sent.as_ref().err().and_then(|e| e.downcast_ref::<mp4::Unfit>().copied());
+                    let offer = match why {
+                        Some(why) if tokio::task::spawn_blocking(mp4::available).await.unwrap_or(false) => Some(why),
+                        _ => None,
+                    };
+                    // The file stays for the MP4 the user may still ask for.
+                    if let (Some(folder), None) = (pasted, offer) {
+                        let _ = tokio::fs::remove_dir_all(folder).await;
+                    }
+                    match (sent, offer) {
+                        (_, Some(why)) => {
+                            let _ = ev.send(Ev::OfferMp4 { room, path, reply_to, caption, why }).await;
+                        }
+                        (Err(e), None) => {
+                            let _ = ev.send(Ev::Error(t!("Attachment not sent: {error}", error = format!("{e:#}")))).await;
+                        }
+                        (Ok(()), None) => {}
+                    }
+                    let _ = ev.send(Ev::Attached).await;
+                });
+            }
+            Cmd::Mp4 { room, path, reply_to, caption } => {
+                let target = self.room(&room);
+                let ev = self.ev.clone();
+                let pasted = self.pasted_folder(&path);
+                let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+                let scratch = self.dir.join(PASTED).join(format!("mp4-{stamp}"));
+                tokio::spawn(async move {
+                    let sent = async {
+                        let target = target?;
+                        tokio::fs::create_dir_all(&scratch).await?;
+                        let out = scratch.join("video.mp4");
+                        let (source, made) = (path.clone(), out.clone());
+                        tokio::task::spawn_blocking(move || mp4::convert(&source, &made)).await??;
+                        attach(&target, &out, reply_to, &caption, true).await
+                    }
+                    .await;
+                    for folder in std::iter::once(scratch).chain(pasted) {
                         let _ = tokio::fs::remove_dir_all(folder).await;
                     }
                     if let Err(e) = sent {
+                        log::warn!("mp4: {e:#}");
                         let _ = ev.send(Ev::Error(t!("Attachment not sent: {error}", error = format!("{e:#}")))).await;
                     }
                     let _ = ev.send(Ev::Attached).await;
@@ -2402,6 +2444,11 @@ impl State {
         })
     }
 
+    /// The folder of its own a pasted or edited file sits in under `pasted/`, which goes with it.
+    fn pasted_folder(&self, path: &Path) -> Option<PathBuf> {
+        path.parent().filter(|folder| folder.parent() == Some(self.dir.join(PASTED).as_path())).map(Path::to_path_buf)
+    }
+
     fn room(&self, id: &OwnedRoomId) -> Result<Room> {
         self.client()?.get_room(id).ok_or_else(|| anyhow!("Unknown room {id}"))
     }
@@ -2740,10 +2787,13 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &st
             }
         }
     } else if filmed {
+        if features::read(room).await.is_some_and(|f| !f.takes_video(mime.essence_str())) {
+            return Err(mp4::Unfit::Refused.into());
+        }
         let mut raw = tokio::fs::read(path).await?;
         tokio::task::spawn_blocking(move || strip::video(&mut raw).map(|()| raw)).await?.map_err(|e| {
             log::debug!("strip: {e:#}");
-            anyhow!(t!("could not remove the location from this video"))
+            mp4::Unfit::Unclean
         })?
     } else {
         tokio::fs::read(path).await?
@@ -4465,6 +4515,7 @@ pub(crate) mod update;
 pub(crate) use gifs::{Found as GifPage, Gif, enabled as gifs_enabled, wants_gif_file};
 pub(crate) mod caption;
 mod strip;
+pub(crate) mod mp4;
 pub(crate) mod forward;
 mod info;
 pub(crate) mod block;
