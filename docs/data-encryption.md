@@ -40,7 +40,7 @@ Not protected:
 | `drafts.enc` | unsent text per chat | sealed |
 | `people.enc` | nicknames and notes the user gave people (`ui/nick.rs`) | sealed |
 | `search.enc` | message search index (FTS5), kept in memory, saved every 5 minutes while it changes, at most 24 MiB | sealed |
-| `rooms-lang.txt`, `settings.json`, `emoji-recents.json`, `hidden-<account>.txt` (ids of hidden messages), `wallpaper.jpg`, `klipy-id`, app PIN hash, emoji font | no chat content | plain |
+| `rooms-lang.txt`, `settings.json`, `emoji-recents.json`, `hidden-<account>.txt` (ids of hidden messages), `wallpaper.jpg`, `wallpapers/*.jpg` (a chat's own photo), `klipy-id`, app PIN hash, emoji font | no chat content | plain |
 
 A sealed file is `1 | nonce (12, random) | AES-256-GCM ciphertext | tag (16)`. The format byte and
 the plain file name are authenticated with it (AAD), so one file cannot be swapped for another and

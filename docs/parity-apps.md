@@ -36,6 +36,8 @@ N impossible over Matrix or bridges.
 | Manage storage, keep messages | Y | Y | N? | N? | `ui/storage.rs`: sizes, clear media cache, keep 30 days / 1 year / forever | Y (local) |
 | Search filters (date, type) | P | Y | N | P | `ui/search.rs`: media, links, files, sender, time, in a chat's search | Y (local index) |
 | Archive | Y | Y | N | Y | done | Y |
+| Keep muted chats archived | Y | ? | N | ? | `ui/mute.rs` (local setting) | Y (local) |
+| Mark all read | Y | Y | N | ? | `ui/readall.rs` | Y |
 | Pin chats | Y | Y | Y | Y | tag `m.favourite`; no manual order | Y |
 | Pin messages in a chat | Y | Y | N | Y | missing | B |
 | Mute with durations | Y | Y | Y | Y | `ui/mute.rs` | Y |
@@ -44,6 +46,8 @@ N impossible over Matrix or bridges.
 | Note to self | Y | Y | N | ? | done, Beeper's `com.beeper.rooms.note_to_self` | Y |
 | Drafts | Y | Y | Y | Y | local only | Y |
 | Notifications, quick reply | Y | Y | Y | Y | `src/notify/*` | Y |
+| Per-chat notification settings (sound, mentions) | Y | Y | P | P | `src/quiet.rs`, `ui/quiet.rs` (local) | Y (local; push rules possible) |
+| Notification profiles (schedule, exceptions) | Y | N | N | N | `src/quiet.rs`, `ui/quiet.rs` (local) | Y (local) |
 | Notifications with the app in background | Y (own server) | Y (FCM) | Y | Y | Android: own background connection (`stay_connected`); desktop: runs on with the window closed (`src/desktop.rs`) | Y; UnifiedPush possible, FCM excluded |
 | Message requests | Y | Y | Y | Y | `backend/rooms.rs` | B |
 | Block a person | Y | Y | Y | Y | `backend/block.rs`, `ui/block.rs`: Matrix ignore list; on the network where the bridge has `block_user` | Y; B on the network |
@@ -54,7 +58,7 @@ N impossible over Matrix or bridges.
 | Linked devices list, sign one out | Y | Y | Y | Y | Settings, Devices (`backend/verify.rs` `devices`, `delete_devices`) | Y |
 | Accessibility (screen reader, scaling) | Y | Y | Y | Y | text size steps; no screen reader (GPUI) | Y (client) |
 | Chat colours, wallpaper | Y | Y | Y | Y | `ui/appearance.rs` | Y (local) |
-| Per-chat wallpaper | Y | Y | Y | Y | missing | Y (local) |
+| Per-chat wallpaper and colour | Y | Y | Y | Y | `ui/chatlook.rs` | Y (local) |
 | Language switch in app | Y | Y | Y | Y | Settings, Language (`ui/panels.rs`) | Y |
 | Desktop app | Y | Y | N (web) | Y | Linux; tray `src/desktop/tray.rs`; Windows and macOS compile only | Y |
 | Hotkeys, command bar | P | Y | P | P | missing | Y |
@@ -97,7 +101,7 @@ Effort: S small, M medium, L large.
 10. Push without Google through UnifiedPush, for phones that kill the background connection.
     Medium, L. The push server sees an opaque wake-up only.
 11. Threads for Matrix-native rooms. Medium, L.
-12. Per-chat wallpaper and colour. Low-medium, S.
+12. Per-chat wallpaper and colour: done (`ui/chatlook.rs`).
 13. Desktop hotkeys and a command bar. Medium, M.
 14. Screen reader support (depends on GPUI). High for some users, L.
 15. Matrix-native calls. Only Matrix peers, needs a LiveKit server. L, last.

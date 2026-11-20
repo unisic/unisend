@@ -579,6 +579,7 @@ mod tests {
             muted: false,
             marked_unread: false,
             archived: false,
+            archive_mark: false,
             order: 0,
             dated: true,
             pending: None,

@@ -988,6 +988,7 @@ fn archive_rule_matches_beeper() {
         muted: false,
         marked_unread: false,
         archived: false,
+        archive_mark: false,
         order,
         dated: true,
         pending: None,
@@ -1010,6 +1011,9 @@ fn archive_rule_matches_beeper() {
     assert!(!is_done(&done(Some(20_000), None), &room(100, 0, 0, false), now));
     // Pinned chats stay in the inbox.
     assert!(!is_done(&done(Some(500), Some(7)), &room(100, 7, 0, true), now));
+    // An archive mark stays until unarchiving writes `{}`.
+    assert!(done(Some(500), None).marked() && done(None, Some(7)).marked());
+    assert!(!done(None, None).marked() && !done(Some(0), Some(0)).marked());
 }
 
 #[test]

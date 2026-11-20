@@ -35,6 +35,7 @@ mod cards;
 mod download;
 mod emojihint;
 mod stickers;
+pub(crate) mod chatlook;
 mod emojipick;
 mod contacts;
 pub(crate) mod folders;
@@ -67,7 +68,9 @@ mod slide;
 pub(crate) mod storage;
 mod people;
 mod pollnew;
+mod quiet;
 pub(crate) mod receipt;
+mod readall;
 mod rich;
 mod search;
 mod sheet;
@@ -490,6 +493,7 @@ pub struct BeeperApp {
     /// The user's own name and picture.
     profile: profile::Ui,
     folders: folders::Ui,
+    quiet: quiet::Ui,
     info: info::Info,
     _subs: Vec<Subscription>,
     accounts: accounts::Accounts,
@@ -569,6 +573,7 @@ impl BeeperApp {
         let verify = verify::Ui::new(window, cx, &mut subs);
         let profile = profile::Ui::new(window, cx, &mut subs);
         let folders = folders::Ui::new(settings.folder.clone(), window, cx, &mut subs);
+        let quiet = quiet::Ui::new(window, cx, &mut subs);
         let find = search::Find::new(window, cx, &mut subs);
         subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
@@ -824,6 +829,7 @@ impl BeeperApp {
             verify,
             profile,
             folders,
+            quiet,
             info: info::Info::default(),
             _subs: subs,
             accounts,
@@ -1260,6 +1266,7 @@ impl BeeperApp {
             self.nicks.arrived(&r.id);
         }
         self.nicks.rename(&mut changed);
+        mute::keep_archived(&mut changed, self.settings.keep_muted_archived);
         let calm = !slide::Fly::quiet(changed.len()) && !cx.reduce_motion() && !self.rooms.is_empty() && self.list_at_top() && !self.finger_down();
         let before = calm.then(|| slide::snapshot(&self.shown, &self.rooms));
         let first = self.rooms.is_empty();
@@ -2632,6 +2639,7 @@ impl BeeperApp {
                     window,
                     cx,
                 ))
+                .children(self.read_all_button(cx))
                 .child(round_button("new-chat", IconName::Plus, cx).on_click(cx.listener(|this, _, window, cx| this.open_new_chat(window, cx))))
                 .child(round_button("search", IconName::Search, cx).on_click(cx.listener(|this, _, window, cx| {
                     this.set_searching(true, window, cx);
@@ -3883,7 +3891,7 @@ impl BeeperApp {
         self.chat_sheet = Some(id);
         self.sheet_at = at;
         (self.disappear.picking, self.mute_picking, self.folders.picking) = (false, false, false);
-        self.info.member = None;
+        (self.info.member, self.look.chat_page) = (None, None);
         cx.notify();
     }
 
@@ -3894,7 +3902,7 @@ impl BeeperApp {
             self.sheet_last = self.chat_sheet.clone();
         }
         let Some(frame) = self.chat_motion.sample(self.chat_sheet.is_some(), window, cx) else {
-            (self.sheet_last, self.folders.picking, self.merged.picking) = (None, false, false);
+            (self.sheet_last, self.folders.picking, self.merged.picking, self.look.chat_page) = (None, false, false, None);
             return None;
         };
         let live = frame.live;
@@ -3921,7 +3929,10 @@ impl BeeperApp {
         }
         if self.merged.picking {
             let (title, rows) = self.merge_sheet(room, live, window, cx);
-            return Some(self.sheet(&self.chat_motion, frame, 6, title, rows, |this| &mut this.chat_motion, window, cx));
+            return Some(self.sheet(&self.chat_motion, frame, 8, title, rows, |this| &mut this.chat_motion, window, cx));
+        }
+        if let Some((key, title, rows)) = self.chat_page_sheet(room, live, window, cx) {
+            return Some(self.sheet(&self.chat_motion, frame, key, title, rows, |this| &mut this.chat_motion, window, cx));
         }
         if self.chat_sheet_inside {
             let [_, _, mute, archive, _] = chat_actions(room);
@@ -5022,6 +5033,7 @@ impl Released {
 impl Render for BeeperApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.switch_pending(window, cx);
+        self.follow_chat_look(cx);
         self.released.free(window, cx);
         let locked = self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked();
         // The chat left open behind the lock is read once the lock is passed, as an opening is.
@@ -5325,6 +5337,7 @@ mod tests {
             muted: false,
             marked_unread: false,
             archived: false,
+            archive_mark: false,
             order: 0,
             dated: true,
             pending,

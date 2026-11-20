@@ -1,9 +1,11 @@
 //! Muting a chat as Signal offers it: for an hour, eight hours, a day, a week or for good. The mode
 //! is the room's push rules, so other Matrix clients agree; Matrix has no end time, so the end of a
-//! timed mute is kept in `settings.json` and one timer lifts it.
+//! timed mute is kept in `settings.json` and one timer lifts it. Also Signal's "Keep muted chats
+//! archived", which keeps such a chat in the archive here when a message arrives.
 
 use super::*;
 use super::disappear::plain_row;
+use gpui_kit::component::switch::Switch;
 use matrix_sdk::notification_settings::RoomNotificationMode;
 use std::collections::BTreeMap;
 
@@ -125,6 +127,21 @@ impl BeeperApp {
         (t!("Mute for…").to_owned(), rows)
     }
 
+    /// Settings' switch for Signal's "Keep muted chats archived".
+    pub(super) fn keep_muted_row(&self, cx: &mut Context<Self>) -> Div {
+        let weak = cx.entity().downgrade();
+        super::panels::row(t!("Keep muted chats archived"), t!("New messages do not bring a muted chat back from the archive. On this device only."), cx).child(
+            Switch::new("keep-muted-archived").checked(self.settings.keep_muted_archived).on_click(move |on, _, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.settings.keep_muted_archived = *on;
+                    this.settings.save(&this.dir);
+                    keep_archived(&mut this.rooms, *on);
+                    this.refilter(cx);
+                });
+            }),
+        )
+    }
+
     /// A chat action from a menu, the info screen or a swipe: muting asks for how long first where
     /// a sheet can, and unmuting forgets the mute's end.
     pub(super) fn chat_action(&mut self, room: OwnedRoomId, action: ChatAction, ask: bool, cx: &mut Context<Self>) -> bool {
@@ -153,6 +170,14 @@ fn due(ends: &BTreeMap<OwnedRoomId, u64>, now: u64, muted: impl Fn(&OwnedRoomId)
     (lift, forget, ends.values().copied().filter(|at| *at > now).min())
 }
 
+/// Shows a muted chat whose archive mark a new message overrode as archived while `on`; the mark
+/// itself stays as the server has it, so other devices follow their own rule.
+pub(super) fn keep_archived(rooms: &mut [RoomSummary], on: bool) {
+    for r in rooms.iter_mut().filter(|r| r.archive_mark) {
+        r.archived = on && r.muted;
+    }
+}
+
 /// Keeps when the chat's mute ends, within `MAX_TIMED` chats.
 fn remember(ends: &mut BTreeMap<OwnedRoomId, u64>, room: OwnedRoomId, at: u64) {
     if ends.len() >= MAX_TIMED
@@ -166,7 +191,7 @@ fn remember(ends: &mut BTreeMap<OwnedRoomId, u64>, room: OwnedRoomId, at: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BTreeMap, MAX_TIMED, OwnedRoomId, due, remember};
+    use super::{BTreeMap, MAX_TIMED, OwnedRoomId, due, keep_archived, remember};
 
     #[test]
     fn a_mute_whose_time_is_up_is_forgotten_only_once_the_chat_notifies() {
@@ -181,6 +206,18 @@ mod tests {
         assert_eq!(due(&ends, 200, muted), (vec![id(1)], vec![id(2), id(3)], Some(300)));
         assert_eq!(due(&ends, 50, muted), (vec![], vec![], Some(100)));
         assert_eq!(due(&ends, 600, muted).2, None);
+    }
+
+    #[test]
+    fn only_muted_chats_with_an_archive_mark_stay_archived() {
+        let room = |id: &str, muted: bool, mark: bool| -> crate::backend::RoomSummary {
+            serde_json::from_value(serde_json::json!({ "id": id, "name": "", "preview": null, "ts": 0, "muted": muted, "archive_mark": mark })).unwrap()
+        };
+        let mut rooms = [room("!a:x", true, true), room("!b:x", false, true), room("!c:x", true, false)];
+        keep_archived(&mut rooms, true);
+        assert_eq!(rooms.each_ref().map(|r| r.archived), [true, false, false]);
+        keep_archived(&mut rooms, false);
+        assert_eq!(rooms.each_ref().map(|r| r.archived), [false, false, false]);
     }
 
     #[test]

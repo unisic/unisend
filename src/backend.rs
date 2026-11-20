@@ -125,6 +125,8 @@ pub enum Cmd {
     /// The user is, or stopped, writing in the chat.
     Typing(OwnedRoomId, bool),
     Chat(OwnedRoomId, ChatAction),
+    /// Marks these chats read, one after another, as `ChatAction::Unread(false)` does each.
+    ReadAll(Vec<OwnedRoomId>),
     Avatars(Vec<OwnedRoomId>),
     /// The picture of a person in a chat, as that chat shows them.
     Face(OwnedRoomId, OwnedUserId),
@@ -442,6 +444,10 @@ pub struct RoomSummary {
     pub marked_unread: bool,
     #[serde(default)]
     pub archived: bool,
+    /// The chat carries an archive mark that a newer message has overridden: archived again where
+    /// muted chats stay archived (Signal's "Keep muted chats archived"), a choice of this device.
+    #[serde(default)]
+    pub archive_mark: bool,
     /// Beeper's server-side order of the newest message from someone else; 0 when unknown.
     #[serde(default)]
     pub order: i64,
@@ -848,7 +854,7 @@ async fn test_notice(client: Client, dir: PathBuf) {
     let icon = file.as_deref().and_then(Path::to_str).unwrap_or_default();
     let note = Note { id: String::new(), sender: "Unisend".into(), text: t!("Test notification. Reply, mark as read or mute to try the buttons: nothing is sent.").into(), ts: now_ms().max(0) as u64, mention: false };
     let chat = crate::accounts::key(crate::accounts::slot_of(&dir), TEST_CHAT);
-    crate::notify(&crate::Notice { chat: &chat, name: "Unisend", group: false, icon, note: &note, alert: true });
+    crate::notify(&crate::Notice { chat: &chat, name: "Unisend", group: false, icon, note: &note, alert: true, quiet: false });
     // Android has decoded the picture by now; desktop removes it with the notification.
     if cfg!(target_os = "android")
         && let Some(file) = file
@@ -1401,10 +1407,7 @@ impl State {
             ChatAction::Pin(on) => room.set_is_favourite(on, Some(1.0)).await?,
             ChatAction::LowPriority(on) => room.set_is_low_priority(on, Some(0.0)).await?,
             ChatAction::Unread(true) => room.set_unread_flag(true).await?,
-            ChatAction::Unread(false) => {
-                let resp = room.messages(MessagesOptions::backward()).await?;
-                mark_read(room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned), self.incognito.load(Ordering::Relaxed)).await?;
-            }
+            ChatAction::Unread(false) => read_newest(room, self.incognito.load(Ordering::Relaxed)).await?,
             ChatAction::Mute(mode) => {
                 let notif = self.notif.as_ref().context(t!("Not signed in"))?;
                 if mode == RoomNotificationMode::AllMessages {
@@ -1808,6 +1811,23 @@ impl State {
                         let _ = ev.send(Ev::Error(t!("Attachment not sent: {error}", error = format!("{e:#}")))).await;
                     }
                     let _ = ev.send(Ev::Attached).await;
+                });
+            }
+            Cmd::ReadAll(ids) => {
+                let (client, ev, incognito) = (self.client()?.clone(), self.ev.clone(), self.incognito.clone());
+                // One chat at a time: two requests each, and the command loop stays free meanwhile.
+                tokio::spawn(async move {
+                    let mut failed = 0u32;
+                    for id in ids {
+                        let Some(room) = client.get_room(&id) else { continue };
+                        if let Err(e) = read_newest(&room, incognito.load(Ordering::Relaxed)).await {
+                            log::warn!("read all: {e:#}");
+                            failed += 1;
+                        }
+                    }
+                    if failed > 0 {
+                        let _ = ev.send(Ev::Error(tn!(failed, "{n} chat could not be marked as read", "{n} chats could not be marked as read"))).await;
+                    }
                 });
             }
             Cmd::Incognito(on) => self.incognito.store(on, Ordering::Relaxed),
@@ -2843,7 +2863,7 @@ fn amend_notes(dir: &Path, summary: &RoomSummary, amends: &[Msg]) {
     for m in amends.iter().filter(|m| recent(m, now)) {
         let chat = crate::accounts::key(crate::accounts::slot_of(dir), summary.id.as_str());
         let note = Note { id: m.id.clone(), sender: m.sender.clone(), text: m.summary(), ts: m.ts, mention: false };
-        crate::amend_notification(&crate::Notice { chat: &chat, name: &summary.name, group: !summary.dm, icon: "", note: &note, alert: false }, m.deleted);
+        crate::amend_notification(&crate::Notice { chat: &chat, name: &summary.name, group: !summary.dm, icon: "", note: &note, alert: false, quiet: false }, m.deleted);
     }
 }
 
@@ -2925,6 +2945,14 @@ fn announce(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, p
 
 /// Shows the notes as the chat's notification while `waiting` still holds for it.
 fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, notes: Vec<Note>, waiting: impl Fn(&RoomSummary) -> bool + Send + Sync + 'static) {
+    // The chat's own settings and the notification profiles, on this device only.
+    let loud = match crate::quiet::judge(&summary.id, summary.muted, !summary.dm, notes.iter().any(|n| n.mention)) {
+        crate::quiet::Verdict::Show { alert } => alert,
+        held => {
+            log::info!(target: "notify", "not shown: {held:?}");
+            return;
+        }
+    };
     let (client, dir, rooms, summary) = (client.clone(), dir.to_owned(), rooms.clone(), summary.clone());
     let generation = media_generation();
     // Off the sync loop: the picture may have to be fetched.
@@ -2951,7 +2979,7 @@ fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary,
                 let chat = crate::accounts::key(crate::accounts::slot_of(&dir), summary.id.as_str());
                 for (n, note) in notes.iter().enumerate() {
                     let alert = n + 1 == notes.len();
-                    crate::notify(&crate::Notice { chat: &chat, name: &summary.name, group: !summary.dm, icon, note, alert });
+                    crate::notify(&crate::Notice { chat: &chat, name: &summary.name, group: !summary.dm, icon, note, alert, quiet: !loud });
                 }
             }
         }
@@ -3037,6 +3065,7 @@ async fn invitation(room: &Room, prev: Option<&RoomSummary>, live: bool) -> Room
         muted: false,
         marked_unread: false,
         archived: false,
+        archive_mark: false,
         order: 0,
         dated: true,
         pending: Some(Pending::Invite { by, name: inviter }),
@@ -3182,6 +3211,12 @@ struct Done {
 /// again without the unread line.
 /// Nothing is sent before the user takes the chat: an invitation or a message request is not
 /// told it was seen.
+/// Marks the chat read up to its newest event.
+async fn read_newest(room: &Room, private: bool) -> Result<()> {
+    let resp = room.messages(MessagesOptions::backward()).await?;
+    mark_read(room, resp.chunk.first().and_then(|e| e.event_id()).map(ToOwned::to_owned), private).await
+}
+
 async fn mark_read(room: &Room, newest: Option<OwnedEventId>, private: bool) -> Result<()> {
     if room.state() != RoomState::Joined {
         return Ok(());
@@ -3250,6 +3285,13 @@ fn hs_order(event: &TimelineEvent) -> Option<i64> {
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+impl Done {
+    /// Archived at some point and not unarchived since, which writes `{}`.
+    fn marked(&self) -> bool {
+        self.at_order.is_some_and(|o| o != 0) || self.updated_ts.is_some_and(|t| t > 0)
+    }
 }
 
 /// Same rule as Beeper Desktop: a pinned chat is never archived, and a message newer than the mark
@@ -3333,7 +3375,7 @@ async fn recount(client: Client, notif: NotificationSettings, rooms: Rooms, ev: 
         let Some(seen) = rooms.lock().unwrap().get(&id).cloned().filter(|s| (encrypted || s.muted) && s.unread != counted(s)) else { continue };
         let fresh = summarize(&room, &notif, other_person(&room).await, seen).await;
         let changed = rooms.lock().unwrap().get_mut(&id).map(|r| {
-            (r.unread, r.mentions, r.archived) = (fresh.unread, fresh.mentions, fresh.archived);
+            (r.unread, r.mentions, r.archived, r.archive_mark) = (fresh.unread, fresh.mentions, fresh.archived, fresh.archive_mark);
             r.clone()
         });
         if let Some(summary) = changed {
@@ -3424,6 +3466,7 @@ async fn summarize(
         ..seen
     };
     s.archived = is_done(&done, &s, now_ms());
+    s.archive_mark = !s.archived && !s.pinned && done.marked();
     s.pending = request(room).await.then_some(Pending::Request);
     s.net_blocked = s.network.is_some() && block::on_network(room).await;
     s.moved_to = room.successor_room().map(|next| next.room_id);
@@ -3663,6 +3706,7 @@ async fn sync_loop(client: Client, notif: NotificationSettings, dir: PathBuf, se
                 muted: false,
                 marked_unread: false,
                 archived: false,
+                archive_mark: false,
                 dated,
                 pending: None,
                 moved_to: None,

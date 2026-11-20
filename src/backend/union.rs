@@ -602,6 +602,7 @@ mod tests {
             union: None,
             net_blocked: false,
             peer: None,
+            archive_mark: false,
         }
     }
 

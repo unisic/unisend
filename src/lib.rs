@@ -18,6 +18,7 @@ mod ime;
 mod instance;
 #[cfg(not(target_os = "android"))]
 mod notify;
+mod quiet;
 mod share;
 mod ui;
 mod vault;
@@ -97,6 +98,8 @@ gpui_kit::assets::icon_assets!(
         UserMinus,
         UserCheck,
         CheckCheck,
+        Palette,
+        Moon,
         Circle,
         CircleCheck,
         CircleAlert,
@@ -130,6 +133,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
         cx.set_reduce_motion(true);
     }
     settings.notify_shows.apply();
+    quiet::apply(&settings.chat_notify, &settings.profiles);
     apply_language(&mut settings, &dir);
     let own = emoji::apply(&mut settings, &dir, cx);
     if !own {
@@ -427,6 +431,18 @@ pub(crate) struct Settings {
     /// Kept messages, media auto-download and playback.
     #[serde(default)]
     pub media: ui::storage::MediaSettings,
+    /// Chats with notification settings of their own, kept on this device only.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub chat_notify: std::collections::BTreeMap<matrix_sdk::ruma::OwnedRoomId, quiet::ChatNotify>,
+    /// Notification profiles, kept on this device only.
+    #[serde(default, skip_serializing_if = "quiet::Profiles::is_empty")]
+    pub profiles: quiet::Profiles,
+    /// Chats with a colour or wallpaper of their own, kept on this device only.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub chat_looks: std::collections::BTreeMap<matrix_sdk::ruma::OwnedRoomId, ui::chatlook::ChatLook>,
+    /// A muted chat stays archived when a message arrives, as Signal's setting of that name.
+    #[serde(default)]
+    pub keep_muted_archived: bool,
 }
 
 impl Settings {
@@ -444,7 +460,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), send_typing: true, enter_sends: true, reduce_motion: false, large_emoji: true, mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new(), reactions: Vec::new(), double_tap: None, media: Default::default() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), send_typing: true, enter_sends: true, reduce_motion: false, large_emoji: true, mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new(), reactions: Vec::new(), double_tap: None, media: Default::default(), keep_muted_archived: false, chat_looks: Default::default(), chat_notify: Default::default(), profiles: Default::default() })
     }
 
     /// The ends of the timed mutes of the account in `slot`.
@@ -529,7 +545,7 @@ impl Palette {
 }
 
 /// Sets `Palette` for the current mode and lays it over the component library's theme.
-fn apply_palette(cx: &mut App) {
+pub(crate) fn apply_palette(cx: &mut App) {
     let c = |hex: u32| -> Hsla { rgb(hex).into() };
     let chosen = cx.try_global::<ChatColour>().copied().unwrap_or_default().fill();
     let dark = Theme::global(cx).is_dark();
@@ -937,6 +953,8 @@ pub(crate) struct Notice<'a> {
     pub note: &'a backend::Note,
     /// False for all but the last of messages that arrive together: one sound for them.
     pub alert: bool,
+    /// Shown without sound or vibration: the chat's own setting.
+    pub quiet: bool,
 }
 
 /// What stands for a chat or a person without a picture: the first letter or digit of each of the
@@ -1373,7 +1391,7 @@ mod android_files {
                     JValue::Bool(notice.note.mention),
                     JValue::Object(&icon),
                     JValue::Object(&initials),
-                    JValue::Bool(notice.alert),
+                    JValue::Bool(notice.alert && !notice.quiet),
                     JValue::Int(crate::NotifyShows::current() as i32),
                 ],
             )
@@ -1594,7 +1612,7 @@ mod tests {
     fn a_notification_shows_only_what_the_setting_lets_it() {
         use super::{Notice, NotifyShows, backend::Note};
         let note = Note { id: "$e".into(), sender: "Ann".into(), text: "secret".into(), ts: 1, mention: true };
-        let notice = Notice { chat: "!a:x", name: "Book club", group: true, icon: "/pic.png", note: &note, alert: true };
+        let notice = Notice { chat: "!a:x", name: "Book club", group: true, icon: "/pic.png", note: &note, alert: true, quiet: false };
         let seen = |shows: NotifyShows| {
             let mut out = None;
             shows.redact(&notice, |n| out = Some((n.chat.to_owned(), n.name.to_owned(), n.icon.to_owned(), n.note.sender.clone(), n.note.text.clone(), n.note.mention)));

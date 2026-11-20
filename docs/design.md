@@ -88,7 +88,9 @@ height through `fs()`; paddings, rows and icons keep their size. The chat wallpa
 gradient is allowed: behind the messages only, never behind the bars or the composer. Presets are
 tones of `Palette` no lighter than `raised` at 85%; a photo is darkened to 60% when imported and
 dimmed at least 30% more, so its brightest point is `#6b6b6b`. Text that sits straight on a photo is
-`text`, not `faint`. The light theme has no wallpaper.
+`text`, not `faint`. The light theme has no wallpaper. A chat's own colour and wallpaper
+(`ui/chatlook.rs`) follow the same rules; the own bubbles take the open chat's colour everywhere but
+Settings, whose preview shows the one for all chats.
 
 Own messages can take a chat colour from Settings: Default (`raised`) or one of Beeper's nine
 (blue, indigo, purple, pink, red, orange, green, teal, slate), the same in dark and light, kept on this
