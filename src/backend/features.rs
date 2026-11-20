@@ -268,7 +268,7 @@ mod tests {
         assert!(f.editable(0, 899_999) && !f.editable(0, 900_000));
         assert!(f.deletable(0, u64::MAX));
         assert!(f.block_user && !f.no_unblock);
-        assert!(!Features::ALL.block_user, "a plain Matrix room has no network to block on");
+        const { assert!(!Features::ALL.block_user, "a plain Matrix room has no network to block on") };
     }
 
     #[test]

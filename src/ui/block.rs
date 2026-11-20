@@ -63,6 +63,7 @@ impl BeeperApp {
 
     /// The Block or Unblock row of a person's sheet or panel; Block asks first. `dm`: the
     /// one-to-one chat with them, which may block on its network.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn block_row(&self, user: OwnedUserId, name: String, network: Option<String>, dm: Option<OwnedRoomId>, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let p = Palette::of(cx);
         let on_network = dm.filter(|room| self.network_block(room).is_some());
