@@ -44,6 +44,8 @@ N impossible over Matrix or bridges.
 | Note to self | Y | Y | N | ? | done, Beeper's `com.beeper.rooms.note_to_self` | Y |
 | Drafts | Y | Y | Y | Y | local only | Y |
 | Notifications, quick reply | Y | Y | Y | Y | `src/notify/*` | Y |
+| Per-chat notification settings (sound, mentions) | Y | Y | P | P | `src/quiet.rs`, `ui/quiet.rs` (local) | Y (local; push rules possible) |
+| Notification profiles (schedule, exceptions) | Y | N | N | N | `src/quiet.rs`, `ui/quiet.rs` (local) | Y (local) |
 | Notifications with the app in background | Y (own server) | Y (FCM) | Y | Y | Android: own background connection (`stay_connected`); desktop: runs on with the window closed (`src/desktop.rs`) | Y; UnifiedPush possible, FCM excluded |
 | Message requests | Y | Y | Y | Y | `backend/rooms.rs` | B |
 | Block a person | Y | Y | Y | Y | only by ignoring an invite's sender (`backend/rooms.rs`) | Y (Matrix ignore list) |

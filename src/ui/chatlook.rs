@@ -40,6 +40,7 @@ impl ChatLook {
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum ChatPage {
     Look,
+    Notify,
 }
 
 /// A fresh name for a chat's photo: hex of the time in nanoseconds, so two never meet.
@@ -153,6 +154,7 @@ impl BeeperApp {
     pub(super) fn chat_page_sheet(&self, room: &RoomSummary, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<(usize, String, Vec<Stateful<Div>>)> {
         match self.look.chat_page? {
             ChatPage::Look => Some((6, t!("Chat colour and wallpaper").to_owned(), self.look_rows(&room.id, live, window, cx))),
+            ChatPage::Notify => Some((7, t!("Notifications").to_owned(), self.chat_notify_rows(room, live, cx))),
         }
     }
 

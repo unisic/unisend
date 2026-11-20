@@ -61,6 +61,7 @@ mod press;
 mod slide;
 mod people;
 mod pollnew;
+mod quiet;
 pub(crate) mod receipt;
 mod readall;
 mod rich;
@@ -470,6 +471,7 @@ pub struct BeeperApp {
     /// The user's own name and picture.
     profile: profile::Ui,
     folders: folders::Ui,
+    quiet: quiet::Ui,
     info: info::Info,
     _subs: Vec<Subscription>,
     accounts: accounts::Accounts,
@@ -548,6 +550,7 @@ impl BeeperApp {
         let verify = verify::Ui::new(window, cx, &mut subs);
         let profile = profile::Ui::new(window, cx, &mut subs);
         let folders = folders::Ui::new(settings.folder.clone(), window, cx, &mut subs);
+        let quiet = quiet::Ui::new(window, cx, &mut subs);
         let find = search::Find::new(window, cx, &mut subs);
         subs.push(cx.subscribe_in(&cookie_paste, window, |_, _, ev: &InputEvent, _, cx| keyboard_follows(ev, Keyboard::Key, cx)));
         subs.push(cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, _, cx| {
@@ -799,6 +802,7 @@ impl BeeperApp {
             verify,
             profile,
             folders,
+            quiet,
             info: info::Info::default(),
             _subs: subs,
             accounts,

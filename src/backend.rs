@@ -2653,6 +2653,14 @@ fn announce(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, p
 
 /// Shows the notes as the chat's notification while `waiting` still holds for it.
 fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary, notes: Vec<Note>, waiting: impl Fn(&RoomSummary) -> bool + Send + Sync + 'static) {
+    // The chat's own settings and the notification profiles, on this device only.
+    let loud = match crate::quiet::judge(&summary.id, summary.muted, !summary.dm, notes.iter().any(|n| n.mention)) {
+        crate::quiet::Verdict::Show { alert } => alert,
+        held => {
+            log::info!(target: "notify", "not shown: {held:?}");
+            return;
+        }
+    };
     let (client, dir, rooms, summary) = (client.clone(), dir.to_owned(), rooms.clone(), summary.clone());
     let generation = media_generation();
     // Off the sync loop: the picture may have to be fetched.
@@ -2678,7 +2686,7 @@ fn show_notes(client: &Client, dir: &Path, rooms: &Rooms, summary: &RoomSummary,
                 log::info!(target: "notify", "shown ({})", counts(&client, &summary.id));
                 let chat = crate::accounts::key(crate::accounts::slot_of(&dir), summary.id.as_str());
                 for (n, note) in notes.iter().enumerate() {
-                    let alert = n + 1 == notes.len();
+                    let alert = loud && n + 1 == notes.len();
                     crate::notify(&crate::Notice { chat: &chat, name: &summary.name, group: !summary.dm, icon, note, alert });
                 }
             }

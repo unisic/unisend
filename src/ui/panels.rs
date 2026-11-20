@@ -52,6 +52,7 @@ pub(super) enum Page {
     LockAfter,
     NotifyShows,
     Folders,
+    Profiles,
 }
 
 impl Page {
@@ -74,6 +75,7 @@ impl Page {
             Self::LockAfter => t!("Auto-lock"),
             Self::NotifyShows => t!("Show|notification"),
             Self::Folders => t!("Chat folders"),
+            Self::Profiles => t!("Notification profiles"),
         }
     }
 
@@ -614,6 +616,7 @@ impl BeeperApp {
             Page::Updates => self.render_updates(cx).map_or_else(|| div().into_any_element(), IntoElement::into_any_element),
             Page::Emoji => self.render_emoji(cx),
             Page::Folders => self.render_folders(cx),
+            Page::Profiles => self.render_profiles(cx),
             Page::NotifyShows => pick("notify-shows", crate::NotifyShows::ALL, s.notify_shows, crate::NotifyShows::label, |s, shows| {
                 s.notify_shows = shows;
                 shows.apply();
@@ -874,7 +877,7 @@ impl BeeperApp {
         let shows = Page::NotifyShows;
         let shows = link(shows.id(), shows.title(), self.settings.notify_shows.label().into(), None, Some(IconName::ChevronRight), cx)
             .on_click(cx.listener(move |this, _, _, cx| this.open_page(shows, cx)));
-        let page = v_flex().gap(px(GAP * 2.)).child(card(cx).child(shows)).child(card(cx).child(test));
+        let page = v_flex().gap(px(GAP * 2.)).child(card(cx).child(shows).child(self.profiles_entry(cx))).child(card(cx).child(test));
         // Sounds and the connection are Android's; desktop has the system's own settings.
         #[cfg(not(target_os = "android"))]
         if crate::desktop::CAN_KEEP_RUNNING {
