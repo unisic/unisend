@@ -3,7 +3,7 @@
 //!
 //! Cost of a loop: the clip (at most `MAX_LOOP_SOURCE`) is fetched once, written to `media/` for
 //! the decoder and deleted after it; decoding and encoding take up to `MAX_LOOP_FRAMES` frames of
-//! at most `LOOP_PX` on one blocking thread, about a second; the GIF stays within
+//! at most `LOOP_PX` on one blocking thread, one clip at a time, about a second; the GIF stays within
 //! `linkprev::MAX_MOVING` decoded, and the last `KEPT_LOOPS` are kept in memory.
 
 use std::collections::VecDeque;
@@ -26,6 +26,8 @@ const STEP_MS: u32 = 100;
 const MAX_LOOP_FRAMES: u32 = 50;
 /// A larger clip keeps its poster: it is downloaded whole to be decoded.
 pub(super) const MAX_LOOP_SOURCE: u64 = 8 * 1024 * 1024;
+/// One clip is decoded at a time, so frames of several never sit in memory together.
+pub(super) static DECODING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 /// Loops made, so one scrolled away and back is not decoded again.
 const KEPT_LOOPS: usize = 8;
 

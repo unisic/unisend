@@ -2458,6 +2458,7 @@ async fn looping(client: &Client, media: &Media, id: &str, dir: &Path, generatio
         return Ok(None);
     }
     let (dir, key, name, duration) = (dir.to_owned(), format!("{id}#loop"), media.name.clone(), media.duration);
+    let _one = video::DECODING.acquire().await?;
     // The decoders read a file: it is there in `media/` only while they do.
     let gif = tokio::task::spawn_blocking(move || {
         let path = save_media(&dir, generation, &key, &name, &bytes)?;
