@@ -97,7 +97,12 @@ gpui_kit::assets::icon_assets!(
         CheckCheck,
         Circle,
         CircleCheck,
-        CircleAlert
+        CircleAlert,
+        Crop,
+        Type,
+        Droplets,
+        Undo2,
+        Scissors
     ]
 );
 
