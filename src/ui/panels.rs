@@ -1577,7 +1577,11 @@ pub(super) fn row(label: &str, detail: &str, cx: &App) -> Div {
 }
 
 /// The code as a picture: 8 pixels a module, with the 4-module margin scanners expect.
-fn qr_image(data: &str) -> Option<Arc<Image>> {
+pub(super) fn qr_image(data: &str) -> Option<Arc<Image>> {
+    Some(Arc::new(Image::from_bytes(ImageFormat::Png, qr_png(data)?)))
+}
+
+pub(super) fn qr_png(data: &str) -> Option<Vec<u8>> {
     let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
     let (modules, scale, margin) = (code.width() as u32, 8, 4);
     let dark = code.to_colors();
@@ -1588,7 +1592,7 @@ fn qr_image(data: &str) -> Option<Arc<Image>> {
     });
     let mut png = std::io::Cursor::new(Vec::new());
     picture.write_to(&mut png, image::ImageFormat::Png).ok()?;
-    Some(Arc::new(Image::from_bytes(ImageFormat::Png, png.into_inner())))
+    Some(png.into_inner())
 }
 
 /// The Emoji setting: a colour emoji font of the user's own (a file, or one of `emoji::SETS`

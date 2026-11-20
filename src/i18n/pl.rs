@@ -808,6 +808,10 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Note", "Notatka"),
     ("{n} characters left", "Zostało znaków: {n}"),
     ("Nicknames and notes stay on this device. Only you see them; the person and the server do not.", "Pseudonimy i notatki zostają na tym urządzeniu. Widzisz je tylko Ty, ani ta osoba, ani serwer."),
+    ("Your QR code", "Twój kod QR"),
+    ("QR code of your Matrix ID", "Kod QR Twojego Matrix ID"),
+    ("Copy link", "Kopiuj link"),
+    ("Whoever scans this code or opens the link can start a chat with you. It holds only your Matrix ID; matrix.to's page reads it in the browser and is not sent it.", "Kto zeskanuje ten kod albo otworzy link, może zacząć z Tobą czat. Zawiera tylko Twoje Matrix ID; strona matrix.to odczytuje je w przeglądarce i go nie dostaje."),
 ];
 
 /// Keyed by the English singular; the forms are one (1), few (2-4, 22-24) and many (0, 5-21, 25...).
