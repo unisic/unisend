@@ -42,6 +42,10 @@ pub struct Features {
     pub max_text: usize,
     /// The most options of a poll; 0 when it names no limit.
     pub poll_max: usize,
+    /// A one-to-one chat whose bridge blocks the other person on the network
+    /// (`com.beeper.block_user`), and whether it can unblock them again.
+    pub block_user: bool,
+    pub no_unblock: bool,
 }
 
 impl Features {
@@ -64,6 +68,8 @@ impl Features {
         post: true,
         max_text: 0,
         poll_max: 0,
+        block_user: false,
+        no_unblock: false,
     };
 
     /// `as_file`: the GIF goes as an `image/gif` (Meta's networks, see `gifs::wants_gif_file`).
@@ -118,6 +124,8 @@ struct Wire {
     delete_max_age: Option<f64>,
     reaction: i64,
     allowed_reactions: Vec<String>,
+    block_user: bool,
+    no_unblock: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -177,6 +185,8 @@ pub fn parse(content: &Value) -> Features {
         post: true,
         max_text: usize::try_from(wire.max_text_length).unwrap_or(0),
         poll_max: usize::try_from(wire.poll_max_options).unwrap_or(0),
+        block_user: wire.block_user,
+        no_unblock: wire.no_unblock,
     }
 }
 
@@ -257,6 +267,8 @@ mod tests {
         assert!(f.gif(true) && !f.gif(false));
         assert!(f.editable(0, 899_999) && !f.editable(0, 900_000));
         assert!(f.deletable(0, u64::MAX));
+        assert!(f.block_user && !f.no_unblock);
+        assert!(!Features::ALL.block_user, "a plain Matrix room has no network to block on");
     }
 
     #[test]

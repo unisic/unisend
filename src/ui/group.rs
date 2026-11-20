@@ -120,7 +120,7 @@ impl BeeperApp {
         let mention = sheet_row("member-mention", IconName::AtSign, t!("Mention"), p.text, window, cx);
         let remove = (details.can.remove && m.removable).then(|| sheet_row("member-remove", IconName::UserMinus, t!("Remove from group"), p.negative, window, cx));
         let network = self.rooms.iter().find(|r| r.id == room).and_then(|r| r.network.clone());
-        let block = (self.user.as_ref() != Some(&m.id)).then(|| self.block_row(m.id.clone(), m.name.clone(), network, live, window, cx));
+        let block = (self.user.as_ref() != Some(&m.id)).then(|| self.block_row(m.id.clone(), m.name.clone(), network, None, live, window, cx)).flatten();
         if !live {
             rows.extend([message, mention]);
             rows.extend(block);

@@ -978,6 +978,7 @@ fn archive_rule_matches_beeper() {
         mentions: 0,
         dm: false,
         note: false,
+        net_blocked: false,
         pinned,
         low_priority: false,
         muted: false,

@@ -32,8 +32,9 @@ pub(super) enum Confirming {
     /// A chat the user asked to leave; drawn once the backend says whether its bridge can delete it.
     /// `block`: block the person behind an invitation or a message request, then leave.
     Leave { room: OwnedRoomId, dm: bool, delete: Option<bool>, block: bool },
-    /// Blocking a person: the Matrix ignore list, not their chat network.
-    Person { user: OwnedUserId },
+    /// Blocking a person: the Matrix ignore list, or on their chat network through `dm`, the
+    /// one-to-one chat whose bridge blocks there.
+    Person { user: OwnedUserId, dm: Option<OwnedRoomId> },
     /// Signing an account out of a network; `name` is the account's.
     SignOut { bridge: String, login: String },
     /// Turning a Discord server off; `name` is the server's.
@@ -128,8 +129,9 @@ fn wording(c: &Confirm) -> (String, String, &'static str) {
     let network = c.network.as_deref().unwrap_or(t!("the network"));
     let (delete, dm, block) = match &c.what {
         Confirming::Leave { delete, dm, block, .. } => (*delete, *dm, *block),
-        Confirming::Person { .. } => {
+        Confirming::Person { dm, .. } => {
             let body = match &c.network {
+                Some(network) if dm.is_some() => t!("{network} blocks {name} for you: they can no longer write to you there. They are not told.", name = c.name, network = network),
                 Some(network) => t!("You stop getting messages from {name} in Unisend. They are not blocked on {network}: they can still write to you there. They are not told.", name = c.name, network = network),
                 None => t!("{name} can no longer send you messages or invitations. They are not told.", name = c.name),
             };
@@ -286,8 +288,8 @@ impl BeeperApp {
     }
 
     /// Asks before a person is put on the ignore list.
-    pub(super) fn ask_block_person(&mut self, user: OwnedUserId, name: String, network: Option<String>, cx: &mut Context<Self>) {
-        self.people.confirm = Some(Confirm { name, network, what: Confirming::Person { user } });
+    pub(super) fn ask_block_person(&mut self, user: OwnedUserId, name: String, network: Option<String>, dm: Option<OwnedRoomId>, cx: &mut Context<Self>) {
+        self.people.confirm = Some(Confirm { name, network, what: Confirming::Person { user, dm } });
         cx.notify();
     }
 
@@ -328,7 +330,11 @@ impl BeeperApp {
         let Some(c) = self.people.confirm.take() else { return };
         let (room, delete, block) = match c.what {
             Confirming::Leave { room, delete, block, .. } => (room, delete == Some(true), block),
-            Confirming::Person { user } => {
+            Confirming::Person { dm: Some(room), .. } => {
+                self.block_on_network(room, true, cx);
+                return;
+            }
+            Confirming::Person { user, dm: None } => {
                 self.send(Cmd::SetBlocked(user, true), cx);
                 return;
             }
@@ -901,6 +907,17 @@ mod tests {
         assert!(body.contains("invitation is declined"));
         c.network = Some("Instagram".into());
         assert!(wording(&c).1.starts_with("Instagram blocks them"));
+    }
+
+    #[test]
+    fn blocking_a_person_says_where_it_holds() {
+        let user: matrix_sdk::ruma::OwnedUserId = "@ann:x".try_into().unwrap();
+        let mut c = Confirm { name: "Ann".into(), network: Some("Signal".into()), what: Confirming::Person { user: user.clone(), dm: None } };
+        assert!(wording(&c).1.contains("not blocked on Signal"));
+        c.what = Confirming::Person { user, dm: Some("!a:b".try_into().unwrap()) };
+        let (title, body, act) = wording(&c);
+        assert_eq!((title.as_str(), act), ("Block Ann?", "Block"));
+        assert!(body.starts_with("Signal blocks Ann for you"));
     }
 
     #[test]

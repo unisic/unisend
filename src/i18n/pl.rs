@@ -283,7 +283,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("No one is blocked", "Nikogo nie zablokowano"),
     ("People on Matrix see this name and picture.", "Tę nazwę i zdjęcie widzą osoby w sieci Matrix."),
     ("People you block cannot send you messages on Matrix.", "Zablokowane osoby nie mogą wysyłać Ci wiadomości przez Matrix."),
-    ("People you block cannot send you messages on Matrix. On a chat network they are not blocked.", "Zablokowane osoby nie mogą wysyłać Ci wiadomości przez Matrix. W samej sieci, np. w WhatsAppie czy Messengerze, nie są zablokowane."),
+    ("People you block cannot send you messages on Matrix. On a chat network they are blocked only where it says so.", "Zablokowane osoby nie mogą wysyłać Ci wiadomości przez Matrix. W samej sieci, np. w WhatsAppie czy Messengerze, są zablokowane tylko tam, gdzie to napisano."),
     ("Profile", "Profil"),
     ("Reduce motion", "Ogranicz animacje"),
     ("Remove", "Usuń"),
@@ -800,6 +800,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("The old code stops working in every app, Beeper too. Keep the new one somewhere safe.", "Stary kod przestanie działać we wszystkich aplikacjach, także w Beeperze. Zapisz nowy w bezpiecznym miejscu."),
     ("This device does not hold all of the account's keys, so it cannot make a new recovery code.", "To urządzenie nie ma wszystkich kluczy konta, więc nie może utworzyć nowego kodu odzyskiwania."),
     ("Unlocks encrypted messages on another device. Copy it here, paste it there.", "Odblokowuje zaszyfrowane wiadomości na innym urządzeniu. Skopiuj go tutaj, wklej tam."),
+    ("Blocked on {network}", "Zablokowano w {network}"),
+    ("{network} blocks {name} for you: they can no longer write to you there. They are not told.", "{network} zablokuje dla Ciebie {name}: nie będzie już mógł(a) do Ciebie tam pisać. Ta osoba nie dostanie powiadomienia."),
 ];
 
 /// Keyed by the English singular; the forms are one (1), few (2-4, 22-24) and many (0, 5-21, 25...).
