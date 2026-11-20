@@ -8,7 +8,6 @@ import android.app.ActivityOptions;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ActivityInfo;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
@@ -51,8 +50,6 @@ public final class Player extends Activity {
     private static final String PATH = "path";
     private static final String MIME = "mime";
     private static final String LOOP = "loop";
-    private static final String WIDTH = "width";
-    private static final String HEIGHT = "height";
     private static final String POSITION = "position";
     private static final String PLAYING = "playing";
     private static final String MUTED = "muted";
@@ -88,13 +85,11 @@ public final class Player extends Activity {
     private ValueAnimator settle;
 
     /** Opens the player for a file in the app's media cache. False when it cannot start. */
-    public static boolean play(Activity activity, String path, String mime, boolean loop, int width, int height) {
+    public static boolean play(Activity activity, String path, String mime, boolean loop) {
         Intent intent = new Intent(activity, Player.class)
                 .putExtra(PATH, path)
                 .putExtra(MIME, mime)
-                .putExtra(LOOP, loop)
-                .putExtra(WIDTH, width)
-                .putExtra(HEIGHT, height);
+                .putExtra(LOOP, loop);
         Bundle fade = ActivityOptions.makeCustomAnimation(activity, R.anim.player_in, R.anim.hold).toBundle();
         try {
             activity.startActivity(intent, fade);
@@ -123,7 +118,6 @@ public final class Player extends Activity {
             muted = state.getBoolean(MUTED, muted);
         }
         immersive();
-        orient(intent.getIntExtra(WIDTH, 0), intent.getIntExtra(HEIGHT, 0));
 
         Stage stage = new Stage(this);
         stage.setBackgroundColor(Color.BLACK);
@@ -184,22 +178,10 @@ public final class Player extends Activity {
         bars.hide(WindowInsetsCompat.Type.systemBars());
     }
 
-    /** Turns the screen to the video's shape; a square or unknown one follows the phone. */
-    private void orient(int width, int height) {
-        if (width <= 0 || height <= 0) {
-            return;
-        }
-        setRequestedOrientation(width > height
-                ? ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
-                : height > width ? ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT : ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
-    }
-
     private void prepared(MediaPlayer mp) {
         player = mp;
         mp.setLooping(loop);
         volume();
-        // The event's size may leave out the rotation the file asks for; the decoder's does not.
-        orient(mp.getVideoWidth(), mp.getVideoHeight());
         seek.setMax(Math.max(0, video.getDuration()));
         total.setText(clock(video.getDuration()));
         if (position > 0) {

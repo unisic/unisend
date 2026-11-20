@@ -13,9 +13,8 @@ pub(super) fn play(path: &Path, media: &Media) -> bool {
     }
     #[cfg(target_os = "android")]
     {
-        let (width, height) = media.dims.unwrap_or_default();
         let mime = media.mime.as_deref().unwrap_or("video/*");
-        player(&path.to_string_lossy(), mime, media.looped, width, height).unwrap_or_else(|e| {
+        player(&path.to_string_lossy(), mime, media.looped).unwrap_or_else(|e| {
             log::warn!("video player: {e}");
             false
         })
@@ -28,11 +27,10 @@ pub(super) fn play(path: &Path, media: &Media) -> bool {
 }
 
 #[cfg(target_os = "android")]
-fn player(path: &str, mime: &str, looped: bool, width: u32, height: u32) -> Result<bool, String> {
+fn player(path: &str, mime: &str, looped: bool) -> Result<bool, String> {
     use gpui_mobile::android::jni as helpers;
     use jni::objects::JValue;
 
-    let side = |n: u32| i32::try_from(n).unwrap_or(0);
     helpers::with_env(|env| {
         let activity = helpers::activity(env)?;
         let class = helpers::find_app_class(env, "dev.gpui.beeper.Player")?;
@@ -41,14 +39,12 @@ fn player(path: &str, mime: &str, looped: bool, width: u32, height: u32) -> Resu
         env.call_static_method(
             &class,
             jni::jni_str!("play"),
-            jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;ZII)Z"),
+            jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Z)Z"),
             &[
                 JValue::Object(&activity),
                 JValue::Object(&path),
                 JValue::Object(&mime),
                 JValue::Bool(looped),
-                JValue::Int(side(width)),
-                JValue::Int(side(height)),
             ],
         )
         .and_then(|v| v.z())
