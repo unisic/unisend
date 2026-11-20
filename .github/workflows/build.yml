@@ -1,5 +1,5 @@
-# Release artifacts on GitHub's runners. Written on Linux and never run: every step is unverified
-# until the first run; details that could not be checked offline are marked "unverified".
+# Release artifacts on GitHub's runners. Every job passed for v0.1.0; the Windows and macOS files
+# have not been run. Details that could not be checked offline are marked "unverified".
 name: build
 
 on:

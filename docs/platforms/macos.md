@@ -2,7 +2,7 @@
 
 Status: in progress. The universal `.app` (arm64 and x86_64, both built for macOS 11.0) builds
 and runs on Apple silicon (macOS 27; the x86_64 half under Rosetta), and the unit tests pass
-there. There is no released package, and the CI job that makes the same `.app` has never run.
+there. CI's `.app` (the `build` workflow) is in the releases; it has not been opened on a Mac yet.
 
 ## Build, run, bundle
 

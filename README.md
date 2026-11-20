@@ -120,17 +120,18 @@ There are no Google services, no telemetry, no crash reporting and no push servi
 ## Status
 
 - Android (the main target) and the Linux desktop are where it is built and tested.
-- macOS is in progress: it builds from source as a universal app for macOS 11 and later and runs,
-  but has no released package yet. Windows passes a compile check only and has never been run.
+- macOS is in progress: a universal app for macOS 11 and later, which runs on Apple silicon.
+  Windows builds, but has never been run.
 - Creating a new account is not supported: sign in to an existing one.
 - Some things bridges cannot carry at all, such as calls and view-once media: see
   [docs/parity-apps.md](docs/parity-apps.md).
 
 ## Install
 
-There are no released packages and no app store listing yet. The `build` workflow
-(`.github/workflows/build.yml`, run by hand or by a `v*` tag) makes an AppImage for Linux, a zip
-for Windows and macOS, and a debug APK; it has not been run yet. The app is called Unisend, but the
+Download the [latest release](https://github.com/unisic/unisend/releases/latest): an APK for
+Android, an AppImage for Linux, and zips for macOS and Windows. There is no app store listing. The
+`build` workflow (`.github/workflows/build.yml`, run by hand or by a `v*` tag) makes the desktop
+files and a debug APK; the release APK is signed outside CI. The app is called Unisend, but the
 crate and binary are still named `beeper-gpui`, and the Android app id is `dev.gpui.beeper`.
 
 ### Linux

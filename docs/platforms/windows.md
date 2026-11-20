@@ -1,7 +1,7 @@
 # Windows
 
-Status: a compile check only. It has never been run, and the CI job that would build it has never
-run either. Everything below is read from the source, with no Windows machine behind it.
+Status: builds on CI (the `build` workflow; its `.exe` is in the releases), never run. Everything
+below is read from the source, with no Windows machine behind it.
 
 ## Check and build
 
