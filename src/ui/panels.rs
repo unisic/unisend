@@ -9,6 +9,7 @@ use crate::applock::{Goal, LockMode};
 use crate::i18n::LanguageChoice;
 use super::receipt::{IncomingStatus, ReceiptStyle};
 use super::rowswipe::SwipeAction;
+use crate::tones::{Kind, Tone};
 use crate::{ChatColour, ThemeChoice};
 
 /// A settings row, and the widest a settings page grows.
@@ -57,6 +58,9 @@ pub(super) enum Page {
     DownloadWifi,
     DownloadRoaming,
     Profiles,
+    SoundDirect,
+    SoundGroup,
+    SoundMention,
 }
 
 impl Page {
@@ -84,6 +88,9 @@ impl Page {
             Self::DownloadWifi => t!("When using Wi-Fi"),
             Self::DownloadRoaming => t!("When roaming"),
             Self::Profiles => t!("Notification profiles"),
+            Self::SoundDirect => Kind::Direct.label(),
+            Self::SoundGroup => Kind::Group.label(),
+            Self::SoundMention => Kind::Mention.label(),
         }
     }
 
@@ -631,6 +638,9 @@ impl BeeperApp {
             Page::DownloadWifi => self.render_download(super::download::Net::Wifi, cx),
             Page::DownloadRoaming => self.render_download(super::download::Net::Roaming, cx),
             Page::Profiles => self.render_profiles(cx),
+            Page::SoundDirect => self.render_sound(Kind::Direct, cx),
+            Page::SoundGroup => self.render_sound(Kind::Group, cx),
+            Page::SoundMention => self.render_sound(Kind::Mention, cx),
             Page::NotifyShows => pick("notify-shows", crate::NotifyShows::ALL, s.notify_shows, crate::NotifyShows::label, |s, shows| {
                 s.notify_shows = shows;
                 shows.apply();
@@ -876,6 +886,68 @@ impl BeeperApp {
             .child(footnote(t!("The reaction bar shows these six in this order. Tap one to choose another."), cx))
     }
 
+    /// A kind of chat's notification sound: the app's tones, then the user's own with a button
+    /// that removes one, then a row that adds one. A tap plays the sound tapped and keeps it.
+    fn render_sound(&mut self, kind: Kind, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.settings.sounds.get(kind).clone();
+        let own = self.settings.sounds.own.iter().map(|file| Tone::Own(file.clone()));
+        let rows = Tone::BUILT_IN.into_iter().chain(own).enumerate().map(|(ix, tone)| {
+            let file = match &tone {
+                Tone::Own(file) => Some(file.clone()),
+                _ => None,
+            };
+            let on = current == tone;
+            option(("sound", ix), &tone.label(), "", on, cx)
+                .when_some(file, |el, file| {
+                    el.child(round_button(("sound-remove", ix), IconName::Trash, cx).on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.settings.sounds.remove_own(&this.dir, &file);
+                        this.settings.sounds.apply();
+                        this.settings.save(&this.dir);
+                        cx.notify();
+                    })))
+                })
+                .on_click(cx.listener(move |this, _, _, cx| this.choose_sound(kind, tone.clone(), cx)))
+        });
+        let full = self.settings.sounds.own.len() >= crate::tones::MAX_OWN;
+        let add = link("sound-add", t!("Add your own sound"), SharedString::default(), Some(IconName::Plus), None, cx)
+            .when(!full, |el| el.on_click(cx.listener(move |this, _, _, cx| this.add_sound(kind, cx))));
+        v_flex()
+            .gap(px(8.))
+            .child(card(cx).children(rows).child(add))
+            .child(footnote(t!("Tap a sound to hear it. Your own: an audio file up to 1 MB, at most 16. A chat's own setting can still keep it quiet."), cx))
+            .into_any_element()
+    }
+
+    fn choose_sound(&mut self, kind: Kind, tone: Tone, cx: &mut Context<Self>) {
+        crate::tones::preview(&tone);
+        if *self.settings.sounds.get(kind) != tone {
+            self.settings.sounds.set(kind, tone);
+            self.settings.sounds.apply();
+            self.settings.save(&self.dir);
+            cx.notify();
+        }
+    }
+
+    /// Picks an audio file, copies it in as an own sound, and makes it the kind's.
+    fn add_sound(&mut self, kind: Kind, cx: &mut Context<Self>) {
+        let picked = crate::pick_file(cx);
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                match this.settings.sounds.add_own(&this.dir, &path) {
+                    Ok(tone) => this.choose_sound(kind, tone, cx),
+                    Err(e) => this.error = Some(e.into()),
+                }
+                // Android's picker hands over a copy in the cache.
+                #[cfg(target_os = "android")]
+                let _ = std::fs::remove_file(&path);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn render_notifications(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let weak = cx.entity().downgrade();
         let stay = Switch::new("stay-connected").checked(self.settings.stay_connected).on_click(move |on, _, cx| {
@@ -891,8 +963,16 @@ impl BeeperApp {
         let shows = Page::NotifyShows;
         let shows = link(shows.id(), shows.title(), self.settings.notify_shows.label().into(), None, Some(IconName::ChevronRight), cx)
             .on_click(cx.listener(move |this, _, _, cx| this.open_page(shows, cx)));
-        let page = v_flex().gap(px(GAP * 2.)).child(card(cx).child(shows).child(self.profiles_entry(cx))).child(card(cx).child(test));
-        // Sounds and the connection are Android's; desktop has the system's own settings.
+        let page = v_flex().gap(px(GAP * 2.)).child(card(cx).child(shows).child(self.profiles_entry(cx)));
+        // Windows and macOS play the system's sound, which their own settings choose.
+        let page = page.when(cfg!(any(target_os = "android", target_os = "linux")), |page| {
+            page.child(section(t!("Sounds"), cx).child(card(cx).children([(Page::SoundDirect, Kind::Direct), (Page::SoundGroup, Kind::Group), (Page::SoundMention, Kind::Mention)].map(|(sound, kind)| {
+                link(sound.id(), sound.title(), self.settings.sounds.get(kind).label().into(), None, Some(IconName::ChevronRight), cx)
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_page(sound, cx)))
+            }))))
+        });
+        let page = page.child(card(cx).child(test));
+        // Importance and the connection are Android's; desktop has the system's own settings.
         #[cfg(not(target_os = "android"))]
         if crate::desktop::CAN_KEEP_RUNNING {
             return page
@@ -909,7 +989,7 @@ impl BeeperApp {
         }
         page.child(card(cx).child(android(
                 "notification-settings",
-                t!("Sounds and importance"),
+                t!("Importance and vibration"),
                 t!("Direct messages, group chats and mentions each have their own."),
                 crate::notification_settings,
                 cx,

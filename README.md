@@ -68,8 +68,8 @@ bridges bring WhatsApp, Signal, Messenger, Instagram, Telegram and other network
 ### Notifications
 
 - Android: one notification per chat, with reply and mark as read
-- The app's own sounds: one for direct messages, one for groups, one for mentions (Android); the
-  direct-message one on Linux
+- Six soft notification sounds of the app's own, or your own audio files, chosen in Settings for
+  direct messages, groups and mentions apart, or none (Android and Linux)
 - Android keeps its own background connection to the homeserver, with no push service
 - Linux desktop notifications with reply, mark as read and mute
 - Choose what notifications show: name and message, name only, or neither

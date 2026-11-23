@@ -2,6 +2,8 @@
 <paths>
     <!-- Attachments downloaded to be opened by other apps; see media_dir in src/backend.rs. -->
     <files-path name="media" path="beeper/media/" />
+    <!-- The user's own notification sounds, read by SystemUI; see src/tones.rs. -->
+    <files-path name="sounds" path="beeper/sounds/own/" />
     <!-- Where the system camera writes a photo or video to send; see CameraCapture. -->
     <cache-path name="camera" path="camera/" />
 </paths>

@@ -20,6 +20,7 @@ mod instance;
 mod notify;
 mod quiet;
 mod share;
+mod tones;
 mod ui;
 mod vault;
 mod vcard;
@@ -138,6 +139,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
         cx.set_reduce_motion(true);
     }
     settings.notify_shows.apply();
+    settings.sounds.apply();
     quiet::apply(&settings.chat_notify, &settings.profiles);
     apply_language(&mut settings, &dir);
     let own = emoji::apply(&mut settings, &dir, cx);
@@ -418,6 +420,9 @@ pub(crate) struct Settings {
     /// What a message's notification shows.
     #[serde(default)]
     pub notify_shows: NotifyShows,
+    /// The sound each kind of chat's notification plays.
+    #[serde(default)]
+    pub sounds: tones::Sounds,
     /// The chip over the chat list chosen last, kept across restarts.
     #[serde(default)]
     pub folder: ui::folders::Pick,
@@ -465,7 +470,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), send_typing: true, enter_sends: true, reduce_motion: false, large_emoji: true, mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new(), reactions: Vec::new(), double_tap: None, media: Default::default(), keep_muted_archived: false, chat_looks: Default::default(), chat_notify: Default::default(), profiles: Default::default() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), send_typing: true, enter_sends: true, reduce_motion: false, large_emoji: true, mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), sounds: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new(), reactions: Vec::new(), double_tap: None, media: Default::default(), keep_muted_archived: false, chat_looks: Default::default(), chat_notify: Default::default(), profiles: Default::default() })
     }
 
     /// The ends of the timed mutes of the account in `slot`.

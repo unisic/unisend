@@ -29,9 +29,11 @@ import androidx.core.app.NotificationCompat;
 import androidx.core.app.Person;
 import androidx.core.app.RemoteInput;
 import androidx.core.content.ContextCompat;
+import androidx.core.content.FileProvider;
 import androidx.core.content.pm.ShortcutInfoCompat;
 import androidx.core.content.pm.ShortcutManagerCompat;
 import androidx.core.graphics.drawable.IconCompat;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -47,11 +49,15 @@ import java.util.Map;
  * Android is showing, so a dismissed chat starts afresh.
  */
 public final class Notify {
-    /** Android fixes a channel's sound when it is made: these carry the app's own, the old ones go. */
-    static final String MESSAGES = "messages-2";
-    static final String GROUPS = "groups-2";
-    static final String MENTIONS = "mentions-2";
-    private static final String[] OLD_CHANNELS = {"messages", "groups", "mentions"};
+    /**
+     * The message channels, one per kind of chat. Android fixes a channel's sound when it is made,
+     * so each is named by its kind and tone ({@code messages-dew}): a new tone is a new channel, and
+     * the kind's others go. {@code SOUNDS} holds the tone of each kind, chosen in the app's settings.
+     */
+    static final String MESSAGES = "messages";
+    static final String GROUPS = "groups";
+    static final String MENTIONS = "mentions";
+    private static final String SOUNDS = "notify-sounds";
     static final String CONNECTION = "connection";
     static final String EXTRA_CHAT = "chat";
     /** A message line's event ID, in its extras, by which an edit or deletion finds it. */
@@ -96,12 +102,9 @@ public final class Notify {
 
     static void channels(Context context) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
-        for (String old : OLD_CHANNELS) {
-            manager.deleteNotificationChannel(old);
-        }
-        manager.createNotificationChannel(sounding(channel(MESSAGES, context.getString(R.string.channel_direct), NotificationManager.IMPORTANCE_HIGH), context, R.raw.notify_direct));
-        manager.createNotificationChannel(sounding(channel(GROUPS, context.getString(R.string.channel_groups), NotificationManager.IMPORTANCE_DEFAULT), context, R.raw.notify_group));
-        manager.createNotificationChannel(sounding(channel(MENTIONS, context.getString(R.string.channel_mentions), NotificationManager.IMPORTANCE_HIGH), context, R.raw.notify_mention));
+        message(context, manager, MESSAGES, R.string.channel_direct, NotificationManager.IMPORTANCE_HIGH);
+        message(context, manager, GROUPS, R.string.channel_groups, NotificationManager.IMPORTANCE_DEFAULT);
+        message(context, manager, MENTIONS, R.string.channel_mentions, NotificationManager.IMPORTANCE_HIGH);
         NotificationChannel connection = channel(CONNECTION, context.getString(R.string.channel_connection), NotificationManager.IMPORTANCE_MIN);
         connection.setShowBadge(false);
         manager.createNotificationChannel(connection);
@@ -144,14 +147,106 @@ public final class Notify {
         return text == null ? "" : text.toString();
     }
 
-    /** The app's own sound for a message channel, played as a messaging app's notification. */
-    private static NotificationChannel sounding(NotificationChannel channel, Context context, int sound) {
-        AudioAttributes attributes = new AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                .build();
-        channel.setSound(Uri.parse("android.resource://" + context.getPackageName() + "/" + sound), attributes);
-        return channel;
+    /** The channel a kind of chat posts to now: its kind and its tone. */
+    static String channelOf(Context context, String kind) {
+        String fallback = kind.equals(MESSAGES) ? "dew" : kind.equals(GROUPS) ? "pebble" : "chime";
+        return kind + "-" + context.getSharedPreferences(SOUNDS, Context.MODE_PRIVATE).getString(kind, fallback);
+    }
+
+    /**
+     * Makes a kind's channel with its tone, unless it is there. A kind's earlier channel (another
+     * tone, or an older build's) hands the new one what the user set in it, then goes.
+     */
+    private static void message(Context context, NotificationManager manager, String kind, int name, int importance) {
+        String id = channelOf(context, kind);
+        NotificationChannel before = null;
+        for (NotificationChannel old : manager.getNotificationChannels()) {
+            String other = old.getId();
+            if (!other.equals(id) && (other.equals(kind) || other.startsWith(kind + "-"))) {
+                before = old;
+                manager.deleteNotificationChannel(other);
+            }
+        }
+        NotificationChannel channel = channel(id, context.getString(name), before == null ? importance : before.getImportance());
+        if (before != null) {
+            channel.enableVibration(before.shouldVibrate());
+            channel.setVibrationPattern(before.getVibrationPattern());
+            channel.enableLights(before.shouldShowLights());
+            channel.setShowBadge(before.canShowBadge());
+            channel.setLockscreenVisibility(before.getLockscreenVisibility());
+        }
+        String tone = id.substring(kind.length() + 1);
+        Uri sound = sound(context, tone);
+        if (sound != null && tone.startsWith(OWN)) {
+            // SystemUI plays a channel's sound; the grant lasts until reboot, so every start gives it.
+            context.grantUriPermission("com.android.systemui", sound, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        }
+        channel.setSound(sound, sound == null ? null : ATTRIBUTES);
+        manager.createNotificationChannel(channel);
+    }
+
+    /** Played as a messaging app's notification. */
+    private static final AudioAttributes ATTRIBUTES = new AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build();
+
+    /** The prefix {@code tones.rs} names an own sound with: {@code own:<file in sounds/own/>}. */
+    private static final String OWN = "own:";
+
+    /**
+     * A sound named by {@code tones.rs}: a tone in {@code res/raw}, or an own sound's file through
+     * the app's FileProvider; null for none or an own sound whose file is gone.
+     */
+    private static Uri sound(Context context, String name) {
+        if (name.startsWith(OWN)) {
+            String file = name.substring(OWN.length());
+            File path = new File(context.getFilesDir(), "beeper/sounds/own/" + file);
+            if (file.isEmpty() || file.contains("/") || file.startsWith(".") || !path.isFile()) {
+                return null;
+            }
+            return FileProvider.getUriForFile(context, context.getPackageName() + ".files", path);
+        }
+        int raw;
+        switch (name) {
+            case "dew": raw = R.raw.tone_dew; break;
+            case "pebble": raw = R.raw.tone_pebble; break;
+            case "chime": raw = R.raw.tone_chime; break;
+            case "ripple": raw = R.raw.tone_ripple; break;
+            case "bloom": raw = R.raw.tone_bloom; break;
+            case "pop": raw = R.raw.tone_pop; break;
+            default: return null;
+        }
+        return Uri.parse("android.resource://" + context.getPackageName() + "/" + raw);
+    }
+
+    /** The tones each kind plays, from the app's settings: channels for any that changed. */
+    public static void sounds(Activity activity, String direct, String group, String mention) {
+        activity.getSharedPreferences(SOUNDS, Context.MODE_PRIVATE).edit()
+                .putString(MESSAGES, direct)
+                .putString(GROUPS, group)
+                .putString(MENTIONS, mention)
+                .apply();
+        channels(activity);
+    }
+
+    private static android.media.Ringtone playing;
+
+    /** Plays a tone once, as the settings offer it, stopping the one before. */
+    public static synchronized void preview(Activity activity, String name) {
+        if (playing != null) {
+            playing.stop();
+            playing = null;
+        }
+        Uri sound = sound(activity, name);
+        if (sound == null) {
+            return;
+        }
+        playing = android.media.RingtoneManager.getRingtone(activity, sound);
+        if (playing != null) {
+            playing.setAudioAttributes(ATTRIBUTES);
+            playing.play();
+        }
     }
 
     private static NotificationChannel channel(String id, String name, int importance) {
@@ -317,8 +412,8 @@ public final class Notify {
         // Once a chat has been mentioned in, its notification stays on the mentions channel until
         // it is read, so the sound of a later message is the mention's.
         boolean mentioned = mention || (active(manager, chat) != null
-                && MENTIONS.equals(active(manager, chat).getNotification().getChannelId()));
-        String channel = mentioned ? MENTIONS : group ? GROUPS : MESSAGES;
+                && active(manager, chat).getNotification().getChannelId().startsWith(MENTIONS + "-"));
+        String channel = channelOf(context, mentioned ? MENTIONS : group ? GROUPS : MESSAGES);
         post(context, manager, chat, name, channel, picture, style, text, time, alert, bare);
         summarize(context, manager, chat, true);
     }
@@ -547,14 +642,14 @@ public final class Notify {
         PendingIntent open = PendingIntent.getActivity(context, 0, new Intent(context, activityClass(context))
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP),
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        manager.notify(SUMMARY, 0, new NotificationCompat.Builder(context, MESSAGES)
+        manager.notify(SUMMARY, 0, new NotificationCompat.Builder(context, channelOf(context, MESSAGES))
                 .setSmallIcon(android.R.drawable.stat_notify_chat)
                 .setContentTitle("Unisend")
                 .setContentText(context.getResources().getQuantityString(R.plurals.chats_with_new, chats, chats))
                 .setGroup(GROUP)
                 .setGroupSummary(true)
                 .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-                .setPublicVersion(locked(context, MESSAGES))
+                .setPublicVersion(locked(context, channelOf(context, MESSAGES)))
                 // The chats alert on their own; the line over them stays quiet.
                 .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
                 .setAutoCancel(true)

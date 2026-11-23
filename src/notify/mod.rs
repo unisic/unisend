@@ -51,7 +51,7 @@ const RETRY_SOON: Duration = Duration::from_secs(5);
 const APP_ID: &str = "dev.gpui.beeper";
 
 enum Req {
-    Show { chat: String, name: String, icon: String, id: String, line: String, alert: bool, quiet: bool },
+    Show { chat: String, name: String, icon: String, id: String, line: String, alert: bool, quiet: bool, kind: crate::tones::Kind },
     /// Message `id` was edited to `line`, or deleted (`None`).
     Amend { chat: String, id: String, line: Option<String> },
     Close(String),
@@ -118,7 +118,7 @@ fn to_ui(msg: ToUi) {
 }
 
 pub(crate) fn show(notice: &crate::Notice) {
-    request(Req::Show { chat: notice.chat.into(), name: notice.name.into(), icon: notice.icon.into(), id: notice.note.id.clone(), line: line(notice), alert: notice.alert, quiet: notice.quiet });
+    request(Req::Show { chat: notice.chat.into(), name: notice.name.into(), icon: notice.icon.into(), id: notice.note.id.clone(), line: line(notice), alert: notice.alert, quiet: notice.quiet, kind: crate::tones::Kind::of(notice.group, notice.note.mention) });
 }
 
 /// The notice's message as its notification shows it again, edited, or with `gone` deleted.
@@ -204,6 +204,9 @@ struct Entry {
     lines: VecDeque<(String, String)>,
     /// The chat's picture on disk, removed with the notification.
     icon: String,
+    /// What its last message was, for the sound (Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    kind: crate::tones::Kind,
 }
 
 impl Entry {
@@ -242,7 +245,7 @@ impl Shown {
     /// Adds a line to the chat's notification and moves it to the back. Returns the entry dropped
     /// to stay within `MAX_CHATS`.
     fn add(&mut self, chat: &str, name: &str, id: &str, line: &str, icon: String) -> Option<Entry> {
-        let mut entry = self.remove(chat).unwrap_or_else(|| Entry { chat: chat.into(), name: String::new(), id: 0, lines: VecDeque::new(), icon: String::new() });
+        let mut entry = self.remove(chat).unwrap_or_else(|| Entry { chat: chat.into(), name: String::new(), id: 0, lines: VecDeque::new(), icon: String::new(), kind: crate::tones::Kind::Direct });
         entry.name = kept(name);
         entry.push(id, line);
         if !icon.is_empty() {
@@ -365,7 +368,7 @@ pub(crate) async fn serve(dir: PathBuf) {
     #[cfg(target_os = "windows")]
     windows::register(&dir);
     #[cfg(target_os = "linux")]
-    linux::keep_sound(&dir);
+    crate::tones::keep(&dir);
     let mut service = Service { sink: None, tried: Instant::now(), wait: RETRY_FIRST };
     service.open().await;
     let mut shown = Shown::default();
@@ -381,9 +384,12 @@ pub(crate) async fn serve(dir: PathBuf) {
             }
             () = tokio::time::sleep_until((service.tried + service.wait).into()), if service.sink.is_none() => service.open().await,
             req = requests.recv() => match req {
-                Some(Req::Show { chat, name, icon, id, line, alert, quiet }) => {
+                Some(Req::Show { chat, name, icon, id, line, alert, quiet, kind }) => {
                     if let Some(old) = shown.add(&chat, &name, &id, &line, icon) {
                         drop_entry(service.sink.as_mut(), old).await;
+                    }
+                    if let Some(entry) = shown.get(&chat) {
+                        entry.kind = kind;
                     }
                     // Earlier messages of one sync only add their lines: the last one posts them all.
                     if alert && let Some(sink) = service.sink().await {

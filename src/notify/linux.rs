@@ -1,8 +1,7 @@
 //! `org.freedesktop.Notifications` on the session bus (spec 1.2; KDE adds the reply box).
 
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
@@ -12,20 +11,6 @@ use super::{APP_ID, Act, Entry, Event, MAX_CHATS, Target, act, event, file_uri};
 use crate::i18n::t;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The app's own message sound, the phone's direct-message one: written to the data directory at
-/// start (9 KB) for the server to play by path. `None` leaves the theme's sound.
-static SOUND: OnceLock<PathBuf> = OnceLock::new();
-const SOUND_BYTES: &[u8] = include_bytes!("../../android/app/src/main/res/raw/notify_direct.ogg");
-
-pub(super) fn keep_sound(dir: &Path) {
-    let folder = dir.join("sounds");
-    let path = folder.join("message.ogg");
-    match std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(&path, SOUND_BYTES)) {
-        Ok(()) => drop(SOUND.set(path)),
-        Err(e) => log::warn!("notification sound: {}", e.kind()),
-    }
-}
 
 /// The numbers of the notifications this app has showing. A server sends its signals to every
 /// listener: other apps' would otherwise fill the button queue.
@@ -92,8 +77,10 @@ impl Sink {
         if !entry.icon.is_empty() {
             hints.insert("image-path", file_uri(&entry.icon).into());
         }
-        if alert {
-            match SOUND.get() {
+        let tone = crate::tones::current(entry.kind);
+        if alert && tone != crate::tones::Tone::None {
+            // The tone's file once written; the theme's message sound before.
+            match crate::tones::file(&tone) {
                 Some(path) => hints.insert("sound-file", path.to_string_lossy().into_owned().into()),
                 None => hints.insert("sound-name", "message-new-instant".into()),
             };

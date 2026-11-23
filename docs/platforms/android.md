@@ -51,7 +51,7 @@ and small static helpers through which Rust reaches the rest of the Android API.
 | Keyboard: composing text, autocorrect, spell check | `src/ime.rs`, `GpuiInputActivity.java` |
 | Space under system bars and the keyboard | `crate::insets()` in `src/lib.rs` |
 | Notifications, reply and mark as read | `Notify.java`, `NotifyReceiver.java`; in `src/lib.rs`, `android_files` calls out and `from_java` is called back |
-| Notification sounds (channels `messages-2`, `groups-2`, `mentions-2`; a channel's sound is fixed when it is made) | `res/raw/notify_*.ogg`, made by `scripts/sounds.py` |
+| Notification sounds (channels `<kind>-<tone>` such as `messages-dew`, since a channel's sound is fixed when it is made; the choice in the `notify-sounds` preferences) | `res/raw/tone_*.ogg`, made by `scripts/sounds.py`; `Notify.channels`, `src/tones.rs` |
 | Video trim, and the MP4 made of a video a network refuses | `VideoTrim.java`, `VideoConvert.java` (MediaCodec); called from `src/ui/caption/trim.rs` and `src/backend/mp4.rs` |
 | Background connection (no push service) | `SyncService.java` |
 | Share sheet, Direct Share | `src/share.rs`, `Share.java`, `src/ui/sharein.rs` |
