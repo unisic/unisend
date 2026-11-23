@@ -68,6 +68,7 @@ mod slide;
 pub(crate) mod storage;
 mod people;
 mod pollnew;
+mod portable;
 mod quiet;
 pub(crate) mod receipt;
 mod readall;
@@ -278,6 +279,8 @@ pub struct BeeperApp {
     focus: FocusHandle,
     dir: PathBuf,
     settings: crate::Settings,
+    /// Settings read from a file, waiting for the user to confirm they replace these.
+    pending_settings: Option<crate::Settings>,
     system_reduce_motion: bool,
     emoji: panels::EmojiChoice,
     look: appearance::Look,
@@ -706,6 +709,7 @@ impl BeeperApp {
             focus: cx.focus_handle(),
             dir,
             system_reduce_motion,
+            pending_settings: None,
             emoji: Default::default(),
             look,
             settings,

@@ -112,6 +112,7 @@ impl BeeperApp {
             self.load_devices(cx);
             self.send(Cmd::Profile, cx);
             self.refresh_storage(cx);
+            (self.storage.moved, self.pending_settings) = (None, None);
         }
         self.panel = Some(panel);
         cx.notify();
@@ -187,7 +188,7 @@ impl BeeperApp {
     }
 
     /// Builds again what was made in the previous language: placeholders, previews, the open chat's rows.
-    fn relabel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn relabel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Placeholders are set once when an input is created, so they are set again here.
         let fields = [
             (&self.cookie_paste, t!("Paste cookies or a cURL command")),

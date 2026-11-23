@@ -71,18 +71,21 @@ public final class Files {
     }
 
     /**
-     * Copies a file into the gallery: Pictures/Unisend, or Movies/Unisend for a video. Returns the
-     * folder it went to, or null when it could not be saved.
+     * Copies a file into the gallery: Pictures/Unisend, or Movies/Unisend for a video, and any other
+     * file into Download/Unisend. Returns the folder it went to, or null when it could not be saved.
      */
     public static String save(Activity activity, String path, String name, String mime) {
         if (!canSave()) {
             return null;
         }
         boolean video = mime.startsWith("video/");
-        String folder = (video ? Environment.DIRECTORY_MOVIES : Environment.DIRECTORY_PICTURES) + "/Unisend";
+        boolean image = mime.startsWith("image/");
+        String folder = (video ? Environment.DIRECTORY_MOVIES : image ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS) + "/Unisend";
         Uri collection = video
                 ? MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-                : MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+                : image
+                ? MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                : MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
         ContentValues values = new ContentValues();
         values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
         values.put(MediaStore.MediaColumns.MIME_TYPE, mime);

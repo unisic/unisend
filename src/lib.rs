@@ -842,9 +842,9 @@ pub(crate) fn share_file(path: &std::path::Path, mime: Option<&str>) {
     let _ = (path, mime);
 }
 
-/// Copies a downloaded file into the user's pictures: on Android `Pictures/Unisend` (`Movies/Unisend`
-/// for a video) in the gallery, on desktops `Pictures/Unisend` in the home folder. Returns where it
-/// went, for the user to read. Blocking.
+/// Copies a file out to the user: a photo or video into `Pictures/Unisend` (`Movies/Unisend` for a
+/// video on Android, in the gallery), any other kind into `Download/Unisend` (`Downloads/Unisend`
+/// on desktops). Returns where it went, for the user to read. Blocking.
 pub(crate) fn save_file(path: &std::path::Path, name: &str, mime: Option<&str>) -> Result<String, String> {
     #[cfg(target_os = "android")]
     {
@@ -853,8 +853,10 @@ pub(crate) fn save_file(path: &std::path::Path, name: &str, mime: Option<&str>) 
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = mime;
-        let folder = dirs::picture_dir().or_else(|| dirs::home_dir().map(|h| h.join("Pictures"))).ok_or("no pictures folder")?.join("Unisend");
+        let media = mime.is_none_or(|m| m.starts_with("image/") || m.starts_with("video/"));
+        let folder = if media { dirs::picture_dir().or_else(|| dirs::home_dir().map(|h| h.join("Pictures"))) } else { dirs::download_dir().or_else(|| dirs::home_dir().map(|h| h.join("Downloads"))) }
+            .ok_or("no folder to save in")?
+            .join("Unisend");
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         let target = free_name(&folder, name);
         std::fs::copy(path, &target).map_err(|e| e.to_string())?;

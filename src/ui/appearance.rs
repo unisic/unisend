@@ -38,7 +38,7 @@ impl TextSize {
     }
 }
 
-static SCALE: AtomicU32 = AtomicU32::new(100);
+pub(super) static SCALE: AtomicU32 = AtomicU32::new(100);
 
 /// A font size or line height of the design, at the chosen text size.
 pub(crate) fn fs(size: f32) -> Pixels {

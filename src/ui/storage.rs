@@ -1,6 +1,7 @@
 //! Settings, Data and storage, after Signal's: what the account takes on this device and a button
 //! that empties the media cache, and how long messages stay in this device's caches. The sizes
 //! are read when the page opens (`backend/storage.rs`); nothing here changes the server.
+//! The settings file's export and import sit here too (`portable.rs`).
 
 use super::panels::{card, footnote, option, row, section};
 use super::*;
@@ -23,6 +24,8 @@ pub(super) struct Storage {
     /// A size or a clean-up asked for and not answered yet.
     asked: bool,
     pub(super) held: super::download::Held,
+    /// What the last settings export or import came to, for the user to read.
+    pub(super) moved: Option<SharedString>,
 }
 
 fn keep_label(keep: Keep) -> &'static str {
@@ -95,6 +98,7 @@ impl BeeperApp {
                     .child(footnote(t!("Clearing removes the photos, videos and files kept on this device. They download again when shown. Nothing is deleted from the server."), cx)),
             )
             .child(self.render_download_section(cx))
+            .child(self.render_portable(cx))
             .child(
                 section(t!("Keep messages"), cx)
                     .child(card(cx).children(Keep::ALL.into_iter().enumerate().map(|(ix, choice)| {
@@ -104,5 +108,31 @@ impl BeeperApp {
                     .child(footnote(t!("Older messages leave this device's search index, and media not opened for that long leaves its cache. The server keeps everything."), cx)),
             )
             .into_any_element()
+    }
+
+    /// Export and import of the settings, with the confirmation an import waits for.
+    fn render_portable(&mut self, cx: &mut Context<Self>) -> Div {
+        let link = |id: &'static str, label: &'static str, icon: IconName, cx: &App| super::panels::link(id, label, "".into(), Some(icon), None, cx);
+        let actions = if self.pending_settings.is_some() {
+            card(cx)
+                .child(row(t!("Replace your settings with the imported ones?"), "", cx))
+                .child(link("settings-import-yes", t!("Replace"), IconName::Check, cx).on_click(cx.listener(|this, _, window, cx| {
+                    if let Some(new) = this.pending_settings.take() {
+                        this.apply_settings(new, window, cx);
+                    }
+                })))
+                .child(link("settings-import-no", t!("Cancel"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
+                    this.pending_settings = None;
+                    cx.notify();
+                })))
+        } else {
+            card(cx)
+                .child(link("settings-export", t!("Export settings"), IconName::ArrowUp, cx).on_click(cx.listener(|this, _, _, cx| this.export_settings(cx))))
+                .child(link("settings-import", t!("Import settings"), IconName::ArrowDown, cx).on_click(cx.listener(|this, _, _, cx| this.import_settings(cx))))
+        };
+        section(t!("Settings file"), cx)
+            .child(actions)
+            .when_some(self.storage.moved.clone(), |el, text| el.child(footnote(&text, cx)))
+            .child(footnote(t!("The file holds this app's settings for moving them to another device. The app lock, your own emoji font, sounds and photos stay on each device. Settings for one chat name it by its Matrix room id; no messages, keys or passwords go into the file."), cx))
     }
 }
