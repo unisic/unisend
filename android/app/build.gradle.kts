@@ -20,7 +20,7 @@ android {
         targetSdk = 34
         // Each release must raise the code (scripts/release.sh passes the commit count); a lower one is refused.
         versionCode = System.getenv("UNISEND_VERSION_CODE")?.toInt() ?: 1
-        versionName = System.getenv("UNISEND_VERSION_NAME") ?: "0.1.0"
+        versionName = System.getenv("UNISEND_VERSION_NAME") ?: "0.1.1"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
