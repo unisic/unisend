@@ -1,8 +1,11 @@
 //! The account's devices and interactive verification between them: emoji comparison (`m.sas.v1`,
 //! Matrix spec "Short Authentication String (SAS) verification"), driven by matrix-sdk's
 //! `VerificationRequest` and `SasVerification`. Also signing out another device, which the server
-//! guards with user-interactive auth.
+//! guards with user-interactive auth. Other people are verified the same way, in a one-to-one chat
+//! with them, and the open chat's people whose keys changed since this device first saw them are
+//! followed, as Element X warns of them.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,8 +14,9 @@ use futures_util::StreamExt as _;
 use matrix_sdk::{
     Client,
     encryption::verification::{CancelInfo, SasState, SasVerification, VerificationRequest, VerificationRequestState},
+    Room,
     ruma::{
-        OwnedDeviceId,
+        OwnedDeviceId, OwnedUserId, UserId,
         api::client::uiaa::{AuthData, MatrixUserIdentifier, Password, UiaaInfo, UserIdentifier},
         api::error::ErrorKind,
         events::{
@@ -90,6 +94,23 @@ pub enum Verify {
     Done,
     Failed(String),
 }
+
+/// Someone in the open chat whose keys changed since this device first saw them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Changed {
+    pub user: OwnedUserId,
+    pub name: String,
+    /// The user had verified them, which makes the change serious.
+    pub was_verified: bool,
+}
+
+/// How long the end of a person's verification waits for their keys to read as verified.
+const SIGNED_TRIES: usize = 50;
+const SIGNED_STEP: Duration = Duration::from_millis(100);
+/// People named in a chat's warning; more changes at once say nothing more useful.
+const MAX_CHANGED: usize = 20;
+/// People followed per chat; past it a new change is not tracked.
+const MAX_TRACKED: usize = 200;
 
 /// What signing out another device asks of the user.
 #[derive(Clone, Debug, PartialEq)]
@@ -202,19 +223,17 @@ impl Verifier {
         self.pending = None;
     }
 
-    /// Asks the user's other devices to verify this one.
-    pub async fn start(&self, client: &Client, ev: &mpsc::Sender<Ev>) -> Result<()> {
+    /// Asks the user's other devices to verify this one, or with `person` asks them, in the
+    /// one-to-one chat with them (which the SDK makes when there is none).
+    pub async fn start(&self, client: &Client, ev: &mpsc::Sender<Ev>, person: Option<&UserId>) -> Result<()> {
         if self.slot.lock().unwrap().is_some() {
             return Err(anyhow!(t!("A verification is already running")));
         }
         let own = client.user_id().context(t!("Not signed in"))?;
-        let enc = client.encryption();
-        // Right after sign-in the account's keys may not have been fetched yet.
-        let identity = match enc.get_user_identity(own).await? {
-            Some(identity) => Some(identity),
-            None => enc.request_user_identity(own).await?,
-        };
-        let identity = identity.ok_or_else(|| anyhow!(t!("This account has no cross-signing keys yet, so another device cannot vouch for this one")))?;
+        let identity = identity_of(client, person.unwrap_or(own)).await?.ok_or_else(|| match person {
+            Some(_) => anyhow!(t!("They have no keys to verify: their app does not support it")),
+            None => anyhow!(t!("This account has no cross-signing keys yet, so another device cannot vouch for this one")),
+        })?;
         let request = identity.request_verification().await?;
         follow(client.clone(), request, self.slot.clone(), ev.clone());
         Ok(())
@@ -417,6 +436,16 @@ fn follow(client: Client, request: VerificationRequest, slot: Slot, ev: mpsc::Se
         let (slot, flow_id) = (slot.clone(), flow_id.clone());
         async move {
             let end = drive(&request, &slot, &ev).await;
+            // A person counts as verified once the signature on their keys is stored, a moment after
+            // the end; the chat's screen asks right after `Done`.
+            if end == Verify::Done && !request.is_self_verification() {
+                for _ in 0..SIGNED_TRIES {
+                    if verified(&client, request.other_user_id()).await == Some(true) {
+                        break;
+                    }
+                    tokio::time::sleep(SIGNED_STEP).await;
+                }
+            }
             {
                 let mut slot = slot.lock().unwrap();
                 if slot.as_ref().is_some_and(|f| f.request.flow_id() == flow_id) {
@@ -518,6 +547,71 @@ async fn emoji(sas: &SasVerification, ev: &mpsc::Sender<Ev>) -> Verify {
             Some(s) => s,
             None => return lost(),
         };
+    }
+}
+
+/// A person's keys, fetched from the server when this device does not hold them yet (right after
+/// sign-in, or a person never met).
+async fn identity_of(client: &Client, user: &UserId) -> Result<Option<matrix_sdk::encryption::identities::UserIdentity>> {
+    let enc = client.encryption();
+    Ok(match enc.get_user_identity(user).await? {
+        Some(identity) => Some(identity),
+        None => enc.request_user_identity(user).await?,
+    })
+}
+
+/// Whether the user verified `user`; `None` when they have no keys to verify (a bridged contact, an
+/// app without cross-signing).
+pub async fn verified(client: &Client, user: &UserId) -> Option<bool> {
+    identity_of(client, user).await.inspect_err(|e| log::debug!("identity: {e:#}")).ok().flatten().map(|i| i.is_verified())
+}
+
+/// Takes a person's new keys as theirs, Element X's OK on a changed identity. For someone the user
+/// had verified, the verification is withdrawn, as only a new one can bring it back.
+pub async fn accept_identity(client: &Client, user: &UserId) -> Result<()> {
+    let identity = identity_of(client, user).await?.context(t!("They have no keys to verify: their app does not support it"))?;
+    if identity.has_verification_violation() {
+        identity.withdraw_verification().await?;
+    } else {
+        identity.pin().await?;
+    }
+    Ok(())
+}
+
+/// Follows the people of the open chat whose keys changed, as `Ev::Identities`, until aborted.
+pub(super) async fn watch_identities(room: Room, ev: mpsc::Sender<Ev>) {
+    use matrix_sdk_crypto::IdentityState;
+    let stream = match room.subscribe_to_identity_status_changes().await {
+        Ok(stream) => stream,
+        Err(e) => return log::debug!("identity changes: {e:#}"),
+    };
+    let mut stream = std::pin::pin!(stream);
+    let mut changed: BTreeMap<OwnedUserId, bool> = BTreeMap::new();
+    while let Some(batch) = stream.next().await {
+        for c in batch {
+            let was_verified = match c.changed_to {
+                IdentityState::PinViolation => false,
+                IdentityState::VerificationViolation => true,
+                _ => {
+                    changed.remove(&c.user_id);
+                    continue;
+                }
+            };
+            if changed.len() < MAX_TRACKED || changed.contains_key(&c.user_id) {
+                changed.insert(c.user_id, was_verified);
+            }
+        }
+        let mut list = Vec::new();
+        for (user, &was_verified) in changed.iter().take(MAX_CHANGED) {
+            let name = match room.get_member_no_sync(user).await {
+                Ok(Some(member)) => member.name().to_owned(),
+                _ => user.localpart().to_owned(),
+            };
+            list.push(Changed { user: user.clone(), name, was_verified });
+        }
+        if ev.send(Ev::Identities(room.room_id().to_owned(), list)).await.is_err() {
+            break;
+        }
     }
 }
 

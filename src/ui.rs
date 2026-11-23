@@ -1205,7 +1205,7 @@ impl BeeperApp {
             Ev::Stickers { room, packs } => self.stickers_arrived(room, packs, cx),
             Ev::StickerThumb(url, bytes) => self.sticker_thumb(url, bytes, cx),
             Ev::Forwarded(chats) => self.forwarded(chats, cx),
-            ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::SignOutStep(_) | Ev::RecoveryCode(_)) => self.on_verify_event(ev, cx),
+            ev @ (Ev::Devices(_) | Ev::DevicesFailed(_) | Ev::Verify(_) | Ev::Identities(..) | Ev::SignOutStep(_) | Ev::RecoveryCode(_)) => self.on_verify_event(ev, cx),
             Ev::Disappear { room, setting } => self.on_disappear(room, setting),
             Ev::Features { room, features, moderate } => {
                 if self.open.as_ref() == Some(&room) {
@@ -3313,6 +3313,7 @@ impl BeeperApp {
             )
             .children(self.selection_bar(window, cx))
             .children(self.pin_bar(end, cx))
+            .children(self.identity_bar(end, cx))
             .child(
                 div()
                     .relative()

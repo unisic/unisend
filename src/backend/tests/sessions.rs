@@ -124,6 +124,124 @@ async fn two_devices_compare_emoji() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Two people in a one-to-one chat verify each other, as the chat's screen starts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn two_people_verify_each_other() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-people-{tag}"));
+    let mut seats = Vec::new();
+    for name in [format!("ola{tag}"), format!("ula{tag}")] {
+        let (mut st, mut rx) = state(root.join(&name), &hs);
+        st.login_jwt(jwt(&secret, &name)).await.unwrap();
+        wait_for(&mut rx, "ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+        st.client().unwrap().encryption().bootstrap_cross_signing_if_needed(None).await.unwrap();
+        seats.push((st, rx));
+    }
+    let (mut b, mut b_rx) = seats.pop().unwrap();
+    let (mut a, mut a_rx) = seats.pop().unwrap();
+    let b_id = b.client().unwrap().user_id().unwrap().to_owned();
+    let a_id = a.client().unwrap().user_id().unwrap().to_owned();
+
+    // Unverified, with keys: the chat's screen offers Verify. B fetching A's keys stands for a chat
+    // they have shared for a while; the SDK drops a request from a device it has no keys for.
+    assert_eq!(verify::verified(a.client().unwrap(), &b_id).await, Some(false));
+    assert_eq!(verify::verified(b.client().unwrap(), &a_id).await, Some(false));
+    let dm = a.client().unwrap().create_dm(&b_id).await.unwrap();
+    b.client().unwrap().join_room_by_id(dm.room_id()).await.unwrap();
+    // A shares the room's key only with members it knows have joined.
+    for _ in 0..100 {
+        if dm.joined_members_count() == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(dm.joined_members_count(), 2, "A never saw B join");
+
+    a.handle(Cmd::VerifyPerson(b_id.clone())).await.unwrap();
+    match settled(&mut b_rx, "B asked").await {
+        Verify::Incoming { who } => assert_eq!(who, a_id.as_str()),
+        other => panic!("B got {other:?}"),
+    }
+    b.handle(Cmd::VerifyAccept).await.unwrap();
+    let (Verify::Emoji(on_a), Verify::Emoji(on_b)) = (settled(&mut a_rx, "emoji on A").await, settled(&mut b_rx, "emoji on B").await) else { panic!("no emoji") };
+    assert_eq!(on_a, on_b);
+    a.handle(Cmd::VerifyMatch(true)).await.unwrap();
+    b.handle(Cmd::VerifyMatch(true)).await.unwrap();
+    assert_eq!(settled(&mut a_rx, "A done").await, Verify::Done);
+    assert_eq!(settled(&mut b_rx, "B done").await, Verify::Done);
+    // `Done` waits until it reads as verified, so the chat's screen shows it at once.
+    assert_eq!(verify::verified(a.client().unwrap(), &b_id).await, Some(true));
+    assert_eq!(verify::verified(b.client().unwrap(), &a_id).await, Some(true));
+
+    for st in [&mut a, &mut b] {
+        st.verify.stop();
+        for task in st.tasks.drain(..) {
+            task.abort();
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A person who resets their keys is named in the open chat until the user takes the new keys.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local Synapse with JWT login; also MATRIX_TEST_REGISTRATION_SECRET"]
+async fn a_reset_identity_is_shown_until_accepted() {
+    use matrix_sdk::ruma::api::client::uiaa::{AuthData, MatrixUserIdentifier, Password, UserIdentifier};
+    use matrix_sdk::encryption::CrossSigningResetAuthType;
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let jwt_secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let reg_secret = std::env::var("MATRIX_TEST_REGISTRATION_SECRET").expect("MATRIX_TEST_REGISTRATION_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-reset-{tag}"));
+    let (name, password) = (format!("ida{tag}"), format!("pw-{tag}-not-for-production"));
+    register_with_password(&hs, &reg_secret, &name, &password).await;
+    let b = Client::builder().homeserver_url(&hs).sqlite_store(root.join("b"), None).build().await.unwrap();
+    b.matrix_auth().login_username(&name, &password).await.unwrap();
+    b.sync_once(Default::default()).await.unwrap();
+    b.encryption().bootstrap_cross_signing_if_needed(None).await.unwrap();
+    let b_id = b.user_id().unwrap().to_owned();
+
+    let (mut a, mut a_rx) = state(root.join("a"), &hs);
+    a.login_jwt(jwt(&jwt_secret, &format!("eva{tag}"))).await.unwrap();
+    wait_for(&mut a_rx, "A ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    assert_eq!(verify::verified(a.client().unwrap(), &b_id).await, Some(false), "A has B's first keys");
+    let dm = a.client().unwrap().create_dm(&b_id).await.unwrap();
+    b.join_room_by_id(dm.room_id()).await.unwrap();
+    let room = dm.room_id().to_owned();
+    a.handle(Cmd::Open(room.clone())).await.unwrap();
+
+    let reset = b.encryption().reset_cross_signing().await.unwrap().expect("B had keys to reset");
+    if let CrossSigningResetAuthType::Uiaa(uiaa) = reset.auth_type() {
+        let mut auth = Password::new(UserIdentifier::Matrix(MatrixUserIdentifier::new(b_id.to_string())), password.clone());
+        auth.session = uiaa.session.clone();
+        reset.auth(Some(AuthData::Password(auth))).await.unwrap();
+    }
+    let changed = wait_for(&mut a_rx, "B named", |e| match e {
+        Ev::Identities(r, list) if r == room && !list.is_empty() => Some(list),
+        _ => None,
+    })
+    .await;
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].user, b_id);
+    assert!(!changed[0].was_verified);
+
+    a.handle(Cmd::AcceptIdentity(b_id.clone())).await.unwrap();
+    wait_for(&mut a_rx, "B no longer named", |e| match e {
+        Ev::Identities(r, list) if r == room && list.is_empty() => Some(()),
+        _ => None,
+    })
+    .await;
+
+    a.verify.stop();
+    for task in a.tasks.drain(..) {
+        task.abort();
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a local Synapse; also MATRIX_TEST_REGISTRATION_SECRET, see register_with_password"]
 async fn another_device_is_signed_out_with_the_password() {

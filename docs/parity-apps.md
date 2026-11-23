@@ -40,9 +40,9 @@ N impossible over Matrix or bridges.
 | Keep muted chats archived | Y | ? | N | ? | `ui/mute.rs` (local setting) | Y (local) |
 | Mark all read | Y | Y | N | ? | `ui/readall.rs` | Y |
 | Pin chats | Y | Y | Y | Y | tag `m.favourite`; no manual order | Y |
-| Pin messages in a chat | Y | Y | N | Y | missing | B |
+| Pin messages in a chat | Y | Y | N | Y | `ui/pins.rs` (`m.room.pinned_events`) | B |
 | Mute with durations | Y | Y | Y | Y | `ui/mute.rs` | Y |
-| Folders / lists | N | Y | P | N | missing | Y (local) |
+| Folders / lists | N | Y | P | N | `ui/folders.rs` (local) | Y (local) |
 | Starred / saved messages | N | Y | N | N | missing | Y (local) |
 | Note to self | Y | Y | N | ? | done, Beeper's `com.beeper.rooms.note_to_self` | Y |
 | Drafts | Y | Y | Y | Y | local only | Y |
@@ -92,8 +92,8 @@ Effort: S small, M medium, L large.
    draws pictures, not a video surface, so each frame would be decoded, converted and uploaded
    as a new image, with sound kept in step by hand, per bubble on screen.
 4. Voice notes on desktop (record and play in the bubble). Medium-high, M.
-5. Chat folders and filters: DMs, Groups, user lists. Medium-high, M. Local.
-6. Pinned messages in a chat (`m.room.pinned_events`). Medium, S-M.
+5. Chat folders and filters: DMs, Groups, user lists. Medium-high, M. Local. Done (`ui/folders.rs`).
+6. Pinned messages in a chat (`m.room.pinned_events`). Medium, S-M. Done (`ui/pins.rs`).
 7. Starred or saved messages (local list). Medium, S.
 8. Search filters (media, links, date, sender) on the local index. Medium, M. Done in a chat's
    search; the chat list's search has none.

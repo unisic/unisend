@@ -48,6 +48,8 @@ pub struct Details {
     pub encrypted: Option<bool>,
     /// The other person in a one-to-one chat.
     pub peer: Option<OwnedUserId>,
+    /// Whether the user verified `peer`; `None` when they have no keys to verify.
+    pub verified: Option<bool>,
     /// How the network knows the other person (`tel:+48...`, `signal:name`), from the bridge's
     /// profile fields; empty when it does not say.
     pub identifiers: Vec<String>,
@@ -85,6 +87,7 @@ pub(super) async fn run(room: Room, ev: mpsc::Sender<Ev>) {
     }
     if let Some(peer) = &peer {
         details.identifiers = identifiers_of(&room, peer).await;
+        details.verified = super::verify::verified(&room.client(), peer).await;
     } else {
         let (can, levels) = group::can(&room).await;
         details.members = members(&room, levels.as_ref()).await;

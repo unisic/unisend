@@ -71,7 +71,7 @@ pub(super) struct Open {
     pub timeline: Arc<Timeline>,
     /// Builds every row again, as after a change of the interface language.
     pub relabel: Arc<tokio::sync::Notify>,
-    _tasks: [AbortOnDrop; 4],
+    _tasks: [AbortOnDrop; 5],
     _features: EventHandlerDropGuard,
     _pins: EventHandlerDropGuard,
 }
@@ -249,9 +249,11 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>) -> Result<Open> {
             }
         }
     });
+    let identities = tokio::spawn(super::verify::watch_identities(room.clone(), ev.clone()));
     let _features = follow_features(room, ev).await;
     let _pins = super::pins::follow(room, ev).await;
-    Ok(Open { room: id, timeline, relabel, _tasks: [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing), AbortOnDrop(reads)], _features, _pins })
+    let _tasks = [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing), AbortOnDrop(reads), AbortOnDrop(identities)];
+    Ok(Open { room: id, timeline, relabel, _tasks, _features, _pins })
 }
 
 /// Reads only what the SDK keeps; never sends a receipt.

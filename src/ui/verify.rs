@@ -1,6 +1,7 @@
-//! Settings' Devices section and the sheet that verifies this device by comparing emoji.
+//! Settings' Devices section and the sheet that verifies this device, or another person, by
+//! comparing emoji; the bar that warns of a person in the open chat whose keys changed.
 
-use crate::backend::verify::{Auth, CrossSigning, Devices, NAME_MAX, Proof, Trust, Verify};
+use crate::backend::verify::{Auth, Changed, CrossSigning, Devices, NAME_MAX, Proof, Trust, Verify};
 
 use super::sheet::{self, SheetMotion};
 use super::*;
@@ -44,6 +45,10 @@ pub(super) struct Ui {
     sheet_last: Option<Verify>,
     motion: SheetMotion,
     recovery: Recovery,
+    /// The person the sheet verifies; `None` for one of the user's own devices.
+    person: Option<String>,
+    /// The open chat's people whose keys changed.
+    changed: Option<(OwnedRoomId, Vec<Changed>)>,
 }
 
 impl Ui {
@@ -62,7 +67,7 @@ impl Ui {
                 other => keyboard_follows(other, Keyboard::Key, cx),
             }));
         }
-        Self { devices: None, loading: false, failed: None, renaming: false, name, out: None, password, code, sheet: None, sheet_last: None, motion: SheetMotion::default(), recovery: Recovery::Hidden }
+        Self { devices: None, loading: false, failed: None, renaming: false, name, out: None, password, code, sheet: None, sheet_last: None, motion: SheetMotion::default(), recovery: Recovery::Hidden, person: None, changed: None }
     }
 }
 
@@ -107,8 +112,19 @@ impl BeeperApp {
                 if v.sheet.is_some() {
                     v.sheet = Some(state);
                 }
+                // The chat's screen shows whether its person is verified.
+                if let Some(room) = self.info.room.clone().filter(|_| self.verify.person.is_some()) {
+                    self.send(Cmd::Info(room), cx);
+                }
             }
-            Ev::Verify(state) => v.sheet = Some(state),
+            Ev::Verify(state) => {
+                // Another person's request names them by their Matrix ID, a device of the user's by name.
+                if let Verify::Incoming { who } = &state {
+                    v.person = who.starts_with('@').then(|| who.clone());
+                }
+                v.sheet = Some(state);
+            }
+            Ev::Identities(room, list) => v.changed = Some((room, list)),
             Ev::SignOutStep(step) => {
                 if let Some(out) = &mut v.out {
                     out.busy = false;
@@ -140,7 +156,60 @@ impl BeeperApp {
 
     fn start_verify(&mut self, cx: &mut Context<Self>) {
         if self.send(Cmd::VerifyStart, cx) {
-            self.verify.sheet = Some(Verify::Waiting);
+            (self.verify.sheet, self.verify.person) = (Some(Verify::Waiting), None);
+        }
+    }
+
+    /// Asks `user` to verify each other, in the one-to-one chat with them.
+    pub(super) fn verify_person(&mut self, user: OwnedUserId, name: String, cx: &mut Context<Self>) {
+        if self.send(Cmd::VerifyPerson(user), cx) {
+            (self.verify.sheet, self.verify.person) = (Some(Verify::Waiting), Some(name));
+            cx.notify();
+        }
+    }
+
+    /// The first of the open chat's people whose keys changed, as Element X shows them: what it
+    /// means, OK to take the new keys, and Verify for someone the user had verified.
+    pub(super) fn identity_bar(&self, end: f32, cx: &mut Context<Self>) -> Option<Div> {
+        let (room, list) = self.verify.changed.as_ref()?;
+        let c = list.first().filter(|_| self.open.as_ref() == Some(room) && !self.find.open)?;
+        let p = Palette::of(cx);
+        let text = if c.was_verified {
+            t!("{name}'s verified identity was reset. Verify them again, or accept the change.", name = c.name)
+        } else {
+            t!("{name}'s identity was reset. A new phone or app does this; if unsure, ask them in person.", name = c.name)
+        };
+        let button = |id: &'static str, label: &'static str| {
+            div().id(id).flex_none().px(px(12.)).h(px(32.)).flex().items_center().rounded_full().bg(p.lifted).text_size(fs(14.)).font_weight(FontWeight::MEDIUM).cursor_pointer().active(|el| el.opacity(0.8)).child(label)
+        };
+        let (user, name) = (c.user.clone(), c.name.clone());
+        let ok = {
+            let user = user.clone();
+            button("identity-ok", t!("OK")).on_click(cx.listener(move |this, _, _, cx| this.accept_identity(user.clone(), cx)))
+        };
+        let again = c.was_verified.then(|| button("identity-verify", t!("Verify")).on_click(cx.listener(move |this, _, _, cx| this.verify_person(user.clone(), name.clone(), cx))));
+        Some(
+            h_flex()
+                .flex_none()
+                .py(px(8.))
+                .pl(px(GUTTER))
+                .pr(px(GUTTER + end))
+                .gap(px(8.))
+                .bg(p.surface)
+                .child(Icon::new(IconName::CircleAlert).size_4().flex_none().text_color(if c.was_verified { p.negative } else { p.muted }))
+                .child(div().flex_1().min_w_0().text_size(fs(14.)).line_height(fs(20.)).text_color(p.text).child(text))
+                .children(again)
+                .child(ok),
+        )
+    }
+
+    fn accept_identity(&mut self, user: OwnedUserId, cx: &mut Context<Self>) {
+        if self.send(Cmd::AcceptIdentity(user.clone()), cx)
+            && let Some((_, list)) = self.verify.changed.as_mut()
+        {
+            // The backend's next list says the same; until then the bar shows the next person.
+            list.retain(|c| c.user != user);
+            cx.notify();
         }
     }
 
@@ -424,6 +493,7 @@ impl BeeperApp {
         };
         let live = frame.live;
         let state = self.verify.sheet_last.clone()?;
+        let person = self.verify.person.clone();
         let p = Palette::of(cx);
         let (_, bottom) = crate::insets();
         let (title, body, primary, secondary): (&str, String, Option<Primary>, (&str, Option<Cmd>)) = match &state {
@@ -433,6 +503,9 @@ impl BeeperApp {
                 Some((t!("Accept"), Cmd::VerifyAccept, Some(Verify::Waiting))),
                 (t!("Decline"), Some(Cmd::VerifyCancel)),
             ),
+            Verify::Waiting if let Some(name) = &person => {
+                (t!("Waiting for the other person"), t!("{name} accepts the request in their app.", name = name), None, (t!("Cancel"), Some(Cmd::VerifyCancel)))
+            }
             Verify::Waiting => (
                 t!("Waiting for the other device"),
                 t!("Open Beeper, Element or Unisend where you are signed in and accept the request there.").into(),
@@ -441,12 +514,21 @@ impl BeeperApp {
             ),
             Verify::Emoji(_) => (
                 t!("Compare emoji"),
-                t!("Check that the other device shows the same emoji in the same order.").into(),
+                match &person {
+                    Some(name) => t!("Check that {name} sees the same emoji in the same order. Compare them in person or on a call you trust.", name = name),
+                    None => t!("Check that the other device shows the same emoji in the same order.").into(),
+                },
                 Some((t!("They match"), Cmd::VerifyMatch(true), Some(Verify::Confirmed))),
                 (t!("They don't match"), Some(Cmd::VerifyMatch(false))),
             ),
+            Verify::Confirmed if let Some(name) = &person => {
+                (t!("Waiting for the other person"), t!("{name} confirms that the emoji match.", name = name), None, (t!("Cancel"), Some(Cmd::VerifyCancel)))
+            }
             Verify::Confirmed => {
                 (t!("Waiting for the other device"), t!("Confirm on the other device that the emoji match.").into(), None, (t!("Cancel"), Some(Cmd::VerifyCancel)))
+            }
+            Verify::Done if let Some(name) = &person => {
+                (t!("Verified"), t!("You verified {name}. If their keys change, the chat warns you.", name = name), None, (t!("Done"), None))
             }
             Verify::Done => {
                 (t!("Verified"), t!("Both sides confirmed the same emoji. Messages this device could not read may now unlock.").into(), None, (t!("Done"), None))

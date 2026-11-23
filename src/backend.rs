@@ -226,6 +226,10 @@ pub enum Cmd {
     RenameDevice(String),
     /// Asks the user's other devices to verify this one.
     VerifyStart,
+    /// Asks this person to verify each other.
+    VerifyPerson(OwnedUserId),
+    /// Takes this person's changed keys as theirs.
+    AcceptIdentity(OwnedUserId),
     VerifyAccept,
     /// The emoji match (true) or do not.
     VerifyMatch(bool),
@@ -381,6 +385,9 @@ pub enum Ev {
     /// Loading or renaming the devices failed, with the reason.
     DevicesFailed(String),
     Verify(verify::Verify),
+    /// The people of this chat whose keys changed since this device first saw them; empty when
+    /// none (any more).
+    Identities(OwnedRoomId, Vec<verify::Changed>),
     /// What signing out a device needs next; `Ok(None)` when it is signed out.
     SignOutStep(Result<Option<verify::Auth>, String>),
     /// The open chat's disappearing messages, when it opens and whenever its timer changes.
@@ -2122,9 +2129,18 @@ impl State {
                 };
                 self.emit(done.unwrap_or_else(|e| Ev::DevicesFailed(format!("{e:#}")))).await;
             }
-            Cmd::VerifyStart | Cmd::VerifyAccept | Cmd::VerifyMatch(_) | Cmd::VerifyCancel => {
+            Cmd::AcceptIdentity(user) => {
+                let client = self.client()?.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = verify::accept_identity(&client, &user).await {
+                        log::warn!("accept identity: {e:#}");
+                    }
+                });
+            }
+            Cmd::VerifyStart | Cmd::VerifyPerson(_) | Cmd::VerifyAccept | Cmd::VerifyMatch(_) | Cmd::VerifyCancel => {
                 let done = match cmd {
-                    Cmd::VerifyStart => self.verify.start(self.client()?, &self.ev).await,
+                    Cmd::VerifyStart => self.verify.start(self.client()?, &self.ev, None).await,
+                    Cmd::VerifyPerson(user) => self.verify.start(self.client()?, &self.ev, Some(&user)).await,
                     Cmd::VerifyAccept => self.verify.accept().await,
                     Cmd::VerifyMatch(matched) => self.verify.answer(matched).await,
                     _ => self.verify.cancel().await,

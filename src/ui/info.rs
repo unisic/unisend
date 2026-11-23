@@ -541,6 +541,18 @@ impl BeeperApp {
                     let name = self.people_real_name(&r.id).unwrap_or(&r.name).to_owned();
                     self.nickname_row(peer, name, window, cx).px(px(GAP))
                 });
+                // Someone with keys to verify, as Signal's safety number and Element's verification.
+                let trust = summary.as_ref().filter(|r| r.dm).zip(details.as_ref().and_then(|d| d.peer.clone().zip(d.verified))).map(|(r, (peer, verified))| {
+                    let name = r.name.clone();
+                    if verified {
+                        fact(IconName::CircleCheck, t!("You verified {name}.", name = name).into()).into_any_element()
+                    } else {
+                        sheet_row("info-verify", IconName::Shield, t!("Verify {name}", name = name), p.text, window, cx)
+                            .px(px(GAP))
+                            .on_click(cx.listener(move |this, _, _, cx| this.verify_person(peer.clone(), name.clone(), cx)))
+                            .into_any_element()
+                    }
+                });
                 let room = summary.map(|r| r.id);
                 let timer = room.as_ref().and_then(|id| self.disappear_entry(id, true, cx)).map(|row| row.px(px(GAP)));
                 let look = room.as_ref().map(|id| self.look_entry(id, cx).px(px(GAP)));
@@ -561,6 +573,7 @@ impl BeeperApp {
                             .children(topic.map(|t| fact(IconName::Info, t.into())))
                             .children(note)
                             .child(fact(icon, text.into()))
+                            .children(trust)
                             .children(open)
                             .children(nickname)
                             .children(edit)
