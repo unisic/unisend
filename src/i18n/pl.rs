@@ -903,6 +903,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("{name} invited you to this group", "{name} zaprasza Cię do tej grupy"),
     ("{name} is connected.", "Połączono: {name}."),
     ("{name} joined the call", "{name} dołącza do połączenia"),
+    ("You asked to verify each other", "Prosisz o wzajemną weryfikację"),
+    ("{name} asked to verify each other", "{name} prosi o wzajemną weryfikację"),
     ("{name} is signed out of {network} in every Beeper app. Its chats stop updating and may disappear from the list. To bring them back, you sign in and pair again.", "Konto {name} zostanie wylogowane z {network} we wszystkich aplikacjach Beepera. Jego czaty przestaną się aktualizować i mogą zniknąć z listy. Aby je przywrócić, trzeba zalogować się i sparować ponownie."),
     ("{name}, shown now", "{name}, wyświetlane teraz"),
     ("{name}. Applies after restart.", "{name}. Zadziała po ponownym uruchomieniu."),

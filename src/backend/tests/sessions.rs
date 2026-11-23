@@ -160,6 +160,7 @@ async fn two_people_verify_each_other() {
     }
     assert_eq!(dm.joined_members_count(), 2, "A never saw B join");
 
+    a.handle(Cmd::Open(dm.room_id().to_owned())).await.unwrap();
     a.handle(Cmd::VerifyPerson(b_id.clone())).await.unwrap();
     match settled(&mut b_rx, "B asked").await {
         Verify::Incoming { who } => assert_eq!(who, a_id.as_str()),
@@ -172,6 +173,13 @@ async fn two_people_verify_each_other() {
     b.handle(Cmd::VerifyMatch(true)).await.unwrap();
     assert_eq!(settled(&mut a_rx, "A done").await, Verify::Done);
     assert_eq!(settled(&mut b_rx, "B done").await, Verify::Done);
+    // The request's fallback body is not shown as a message.
+    let asked = |rows: &[Msg]| rows.iter().any(|m| m.kind == Kind::Notice && m.body == "You asked to verify each other");
+    let started = tokio::time::Instant::now();
+    while !asked(&a_rx.rows) {
+        let _ = a_rx.next("request row", started + std::time::Duration::from_secs(10)).await;
+    }
+    assert!(!a_rx.rows.iter().any(|m| m.body.contains("does not support")));
     // `Done` waits until it reads as verified, so the chat's screen shows it at once.
     assert_eq!(verify::verified(a.client().unwrap(), &b_id).await, Some(true));
     assert_eq!(verify::verified(b.client().unwrap(), &a_id).await, Some(true));

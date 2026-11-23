@@ -514,6 +514,11 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
             m.disappear = timer.map_or(0, |(ms, _)| ms);
             match &like.kind {
                 MsgLikeKind::Message(_) if json.as_ref().is_some_and(disappear::repeats_state) => m.kind = Kind::Hidden,
+                // Its body is a fallback for apps without in-chat verification.
+                MsgLikeKind::Message(message) if matches!(message.msgtype(), MessageType::VerificationRequest(_)) => {
+                    let line = if m.own { t!("You asked to verify each other").to_owned() } else { t!("{name} asked to verify each other", name = m.sender) };
+                    (m.kind, m.body) = (Kind::Notice, line);
+                }
                 MsgLikeKind::Message(_) => {
                     m.link = json.as_ref().and_then(link_preview);
                     m.undecryptable = json.as_ref().is_some_and(|c| c.get("fi.mau.meta.undecryptable").and_then(serde_json::Value::as_bool) == Some(true));

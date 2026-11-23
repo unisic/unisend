@@ -4021,6 +4021,10 @@ async fn to_msgs(room: &Room, events: &[TimelineEvent]) -> (Vec<Msg>, Vec<Msg>) 
                         }
                         relation => (&e.content.msgtype, e.content.mentions.as_ref(), matches!(relation, Some(Relation::Reply(_)))),
                     };
+                    // A verification request's body is a fallback, not words for the list.
+                    if matches!(msgtype, MessageType::VerificationRequest(_)) {
+                        continue;
+                    }
                     let (media, text) = content(msgtype);
                     m.media = media;
                     if let MessageType::Location(l) = msgtype {
