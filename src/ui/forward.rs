@@ -249,7 +249,7 @@ impl BeeperApp {
         }
         self.fwd.hidden.add(ids.iter().cloned());
         self.fwd.hidden.save();
-        // A hidden row and its neighbours change height: a run's corners and time move.
+        // A hidden row and its neighbors change height: a run's corners and time move.
         self.timeline.remeasure();
         let text = tn!(ids.len(), "{n} message deleted for you", "{n} messages deleted for you").into();
         self.toast(text, Some(ids), cx);

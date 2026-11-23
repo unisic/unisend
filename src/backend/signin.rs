@@ -189,7 +189,7 @@ impl State {
 
     /// The browser came back to `back` at `url`, or gave up (none).
     pub(super) async fn browser_done(&mut self, back: &str, url: Option<String>) -> Result<()> {
-        // An answer to a sign-in that was cancelled or replaced since.
+        // An answer to a sign-in that was canceled or replaced since.
         if self.browser.as_ref().is_none_or(|p| p.back != back) {
             return Ok(());
         }

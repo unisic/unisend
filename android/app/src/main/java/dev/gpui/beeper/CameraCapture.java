@@ -41,7 +41,7 @@ public class CameraCapture extends Activity {
     private File file;
     private boolean video;
 
-    /** The captured file's path, or null when cancelled or no camera app answered. */
+    /** The captured file's path, or null when canceled or no camera app answered. */
     public static String capture(Activity activity, boolean video) {
         File dir = new File(activity.getCacheDir(), "camera");
         long now = System.currentTimeMillis();

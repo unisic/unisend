@@ -1,5 +1,5 @@
 //! A formatted message body drawn inside a bubble: styled runs, quotes, code, lists. A spoiler is
-//! covered by a block of its colour until a tap on it uncovers the message's spoilers, as Signal
+//! covered by a block of its color until a tap on it uncovers the message's spoilers, as Signal
 //! does; uncovered messages are remembered for the session, at most `MAX_SHOWN`.
 
 use std::collections::VecDeque;
@@ -110,7 +110,7 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
         let seg = pair[0]..pair[1];
         let Some(run) = runs.iter().rev().find(|r| r.at - base <= seg.start) else { continue };
         if run.spoiler && !look.shown {
-            // Text and fill in one colour: the words take their room but cannot be read.
+            // Text and fill in one color: the words take their room but cannot be read.
             let cover = look.p.muted;
             marks.push((seg.clone(), HighlightStyle { color: Some(cover), background_color: Some(cover), ..Default::default() }));
             hidden.push(seg);

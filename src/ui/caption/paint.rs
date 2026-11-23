@@ -131,7 +131,7 @@ impl Stroke {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Label {
     pub text: String,
-    /// Its centre in the original.
+    /// Its center in the original.
     pub at: [f32; 2],
     /// Font size as a share of the original's long side.
     pub size: f32,
@@ -223,12 +223,12 @@ impl Edits {
     }
 }
 
-/// Draws a label into the picture at its centre in px, at its font size in px.
+/// Draws a label into the picture at its center in px, at its font size in px.
 pub type DrawLabel<'a> = dyn FnMut(&mut RgbImage, &Label, [f32; 2], f32) + 'a;
 
 /// `base`, the upright original at any scale, framed and drawn on: at most `max` px on the long
 /// side once cropped. Labels are left to `labels`, called last with the picture, each label, its
-/// centre in px and its font size in px.
+/// center in px and its font size in px.
 pub fn render(base: RgbImage, edits: &Edits, max: u32, labels: &mut DrawLabel) -> RgbImage {
     let (w, h) = (base.width() as f32, base.height() as f32);
     let [x0, y0, x1, y1] = edits.frame.crop_in_original();
@@ -487,8 +487,8 @@ mod tests {
         let mut edits = Edits::default();
         edits.add_stroke(Stroke { ink: Ink::Blur, width: 0.3, points: vec![[0.25, 0.5], [0.3, 0.5]] });
         let out = render(checker(200, 200), &edits, CANVAS_PX, &mut |_, _, _, _| {});
-        let grey = |p: &image::Rgb<u8>| p.0.iter().all(|&c| (90..=165).contains(&c));
-        assert!(grey(out.get_pixel(55, 100)), "{:?}", out.get_pixel(55, 100));
+        let gray = |p: &image::Rgb<u8>| p.0.iter().all(|&c| (90..=165).contains(&c));
+        assert!(gray(out.get_pixel(55, 100)), "{:?}", out.get_pixel(55, 100));
         assert_eq!(out.get_pixel(190, 190), checker(200, 200).get_pixel(190, 190));
     }
 

@@ -1184,7 +1184,7 @@ fn link_previews_are_read_from_the_message() {
     let link = link_preview(&content).expect("the second preview is usable");
     assert_eq!((link.url.as_str(), link.title.as_str(), link.description.as_str()), ("https://www.example.org/a?b=1", "A title", "About it"));
     assert_eq!(link.site, "example.org", "the host stands in for a missing site name");
-    assert_eq!((link.colour, link.video), (None, false));
+    assert_eq!((link.color, link.video), (None, false));
     let image = link.image.expect("a picture");
     assert_eq!((image.dims, image.looped), (Some((1200, 630)), false));
     let moving = serde_json::json!({ "com.beeper.linkpreviews": [{
@@ -1192,9 +1192,9 @@ fn link_previews_are_read_from_the_message() {
         "og:image": "mxc://example.org/gif", "og:image:type": "image/gif",
     }] });
     let link = link_preview(&moving).unwrap();
-    assert_eq!((link.colour, link.video, link.image.unwrap().looped), (Some(0xff0000), true, true));
+    assert_eq!((link.color, link.video, link.image.unwrap().looped), (Some(0xff0000), true, true));
     let odd = serde_json::json!({ "com.beeper.linkpreviews": [{ "matched_url": "https://x.example", "og:title": "X", "unisend:theme_color": "red; x" }] });
-    assert_eq!(link_preview(&odd).unwrap().colour, None);
+    assert_eq!(link_preview(&odd).unwrap().color, None);
 
     assert!(link_preview(&serde_json::json!({ "body": "no previews" })).is_none());
     let bare = serde_json::json!({ "com.beeper.linkpreviews": [{ "matched_url": "https://example.org" }] });
@@ -2227,7 +2227,7 @@ async fn encrypted_messages_are_found_with_edits_and_deletions() {
 }
 
 #[test]
-fn previews_are_relabelled_in_the_current_language() {
+fn previews_are_relabeled_in_the_current_language() {
     let pl = |p: &str| relabel(p, true);
     let en = |p: &str| relabel(p, false);
     assert_eq!(pl("You: 📷 Photo: at the lake"), "Ty: 📷 Zdjęcie: at the lake");
@@ -2238,7 +2238,7 @@ fn previews_are_relabelled_in_the_current_language() {
     assert_eq!(en("📊 Ankieta: Pizza?"), "📊 Poll: Pizza?");
     assert_eq!(en("Ola: Nie można jeszcze odszyfrować tej wiadomości"), "Ola: Unable to decrypt this message yet");
     assert_eq!(pl("You: Message deleted"), "Ty: Wiadomość usunięta");
-    assert_eq!(pl("📷 Photo"), "📷 Zdjęcie", "already relabelled ones stay");
+    assert_eq!(pl("📷 Photo"), "📷 Zdjęcie", "already relabeled ones stay");
     assert_eq!(pl("📷 Zdjęcie"), "📷 Zdjęcie");
     // What people wrote stays as written.
     assert_eq!(pl("Message deleted by mistake"), "Message deleted by mistake");
@@ -2248,7 +2248,7 @@ fn previews_are_relabelled_in_the_current_language() {
 }
 
 #[test]
-fn cached_previews_in_another_language_are_relabelled_on_load() {
+fn cached_previews_in_another_language_are_relabeled_on_load() {
     let dir = std::env::temp_dir().join(format!("unisend-rooms-lang-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let rooms = serde_json::json!({
@@ -2263,7 +2263,7 @@ fn cached_previews_in_another_language_are_relabelled_on_load() {
     let loaded = load_rooms(&dir, &Seal::Plain).unwrap();
     let a = &loaded[<&RoomId>::try_from("!a:x").unwrap()];
     assert_eq!(a.preview.as_deref(), Some("You: 📷 Photo"));
-    assert!(a.dated, "relabelled locally, not looked up again");
+    assert!(a.dated, "relabeled locally, not looked up again");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

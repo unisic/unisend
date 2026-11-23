@@ -22,7 +22,7 @@ pub(crate) const MAX_ALLOWED: usize = 64;
 pub(crate) const MAX_CHATS: usize = 256;
 pub(crate) const NAME_MAX: usize = 32;
 
-/// One chat's own notification settings; the default is the app's behaviour.
+/// One chat's own notification settings; the default is the app's behavior.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ChatNotify {
     /// The chat's notifications make no sound and do not vibrate.

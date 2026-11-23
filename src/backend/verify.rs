@@ -622,8 +622,8 @@ fn lost() -> Verify {
 fn failed(info: &CancelInfo) -> Verify {
     Verify::Failed(match (info.cancel_code(), info.cancelled_by_us()) {
         (CancelCode::MismatchedSas, _) => t!("The emoji did not match, so nothing was verified.").into(),
-        (CancelCode::User, true) => t!("You cancelled the verification.").into(),
-        (CancelCode::User, false) => t!("The other side cancelled the verification.").into(),
+        (CancelCode::User, true) => t!("You canceled the verification.").into(),
+        (CancelCode::User, false) => t!("The other side canceled the verification.").into(),
         (CancelCode::Timeout, _) => t!("The other side did not answer in time.").into(),
         (CancelCode::Accepted, _) => t!("Another of your devices answered this request.").into(),
         (_, _) => t!("Verification stopped: {reason}", reason = info.reason()),

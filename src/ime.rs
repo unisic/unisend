@@ -231,10 +231,10 @@ fn paint_marks(input: &Field, window: &mut Window, cx: &mut App) {
 }
 
 /// A dotted line from `x0` to `x1`: round 2 px dots, 2 px apart, as a spell checker marks a word.
-fn dots(x0: Pixels, x1: Pixels, y: Pixels, colour: Hsla) -> impl Iterator<Item = gpui_kit::PaintQuad> {
+fn dots(x0: Pixels, x1: Pixels, y: Pixels, color: Hsla) -> impl Iterator<Item = gpui_kit::PaintQuad> {
     const DOT: f32 = 2.;
     let count = (f32::from(x1 - x0) / (DOT * 2.)).ceil() as usize;
-    (0..count).map(move |i| fill(gpui_kit::Bounds::new(point(x0 + px(i as f32 * DOT * 2.), y - px(DOT / 2.)), size(px(DOT), px(DOT))), colour).corner_radii(px(DOT / 2.)))
+    (0..count).map(move |i| fill(gpui_kit::Bounds::new(point(x0 + px(i as f32 * DOT * 2.), y - px(DOT / 2.)), size(px(DOT), px(DOT))), color).corner_radii(px(DOT / 2.)))
 }
 
 #[cfg(target_os = "android")]

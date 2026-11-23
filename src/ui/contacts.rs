@@ -190,7 +190,7 @@ mod android {
 
     const CLASS: &str = "dev.gpui.beeper.ContactPick";
 
-    /// Path of the chosen contact's `.vcf` in the cache, or `None` when cancelled or unreadable.
+    /// Path of the chosen contact's `.vcf` in the cache, or `None` when canceled or unreadable.
     pub fn pick() -> Result<Option<String>, String> {
         helpers::with_env(|env| {
             let activity = helpers::activity(env)?;

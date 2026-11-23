@@ -148,7 +148,7 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     }
     fonts(cx);
     cx.set_global(settings.theme);
-    cx.set_global(settings.chat_colour);
+    cx.set_global(settings.chat_color);
     sync_theme(None, cx);
     let mut backends = vec![(0, backend::start(dir.clone()))];
     for slot in accounts::added(&dir) {
@@ -227,7 +227,7 @@ pub(crate) fn set_platform_language(choice: i18n::LanguageChoice) {
     let _ = choice;
 }
 
-/// Follows the chosen or the system's light or dark mode and puts the app's colours over the library's.
+/// Follows the chosen or the system's light or dark mode and puts the app's colors over the library's.
 pub(crate) fn sync_theme(window: Option<&mut Window>, cx: &mut App) {
     use gpui_kit::component::ThemeMode;
     match cx.try_global::<ThemeChoice>().copied().unwrap_or_default() {
@@ -257,9 +257,9 @@ pub(crate) enum ThemeChoice {
 
 impl Global for ThemeChoice {}
 
-/// The colour of the user's own bubbles: Beeper's nine, or the Night design's `raised` grey.
+/// The color of the user's own bubbles: Beeper's nine, or the Night design's `raised` gray.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) enum ChatColour {
+pub(crate) enum ChatColor {
     #[default]
     Default,
     Blue,
@@ -273,9 +273,9 @@ pub(crate) enum ChatColour {
     Slate,
 }
 
-impl Global for ChatColour {}
+impl Global for ChatColor {}
 
-impl ChatColour {
+impl ChatColor {
     pub const ALL: [Self; 10] = [
         Self::Default,
         Self::Blue,
@@ -304,7 +304,7 @@ impl ChatColour {
         }
     }
 
-    /// Beeper's swatch, the same in both modes; `None` for the design's own grey. Blue is Beeper's
+    /// Beeper's swatch, the same in both modes; `None` for the design's own gray. Blue is Beeper's
     /// #3478F6 darkened a little: neither white nor dark text reaches 4.5:1 on the original.
     pub fn fill(self) -> Option<u32> {
         Some(match self {
@@ -322,7 +322,7 @@ impl ChatColour {
     }
 }
 
-/// WCAG relative luminance of an sRGB colour.
+/// WCAG relative luminance of an sRGB color.
 fn luminance(hex: u32) -> f32 {
     let lin = |shift: u32| {
         let c = ((hex >> shift) & 0xff) as f32 / 255.;
@@ -331,7 +331,7 @@ fn luminance(hex: u32) -> f32 {
     0.2126 * lin(16) + 0.7152 * lin(8) + 0.0722 * lin(0)
 }
 
-/// WCAG contrast ratio of two sRGB colours.
+/// WCAG contrast ratio of two sRGB colors.
 fn contrast(a: u32, b: u32) -> f32 {
     let (a, b) = (luminance(a), luminance(b));
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
@@ -365,9 +365,10 @@ pub(crate) struct Settings {
     /// Read receipts stay private: others do not see what has been read.
     #[serde(default = "Settings::private_by_default")]
     pub incognito: bool,
-    /// Own bubbles' colour, kept on this device like the rest.
-    #[serde(default)]
-    pub chat_colour: ChatColour,
+    /// Own bubbles' color, kept on this device like the rest.
+    /// Stored under its first, British name, which settings files already hold.
+    #[serde(default, rename = "chat_colour")]
+    pub chat_color: ChatColor,
     /// Family name of the user's own emoji font, kept as `emoji::FILE`; `None` for the system's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emoji_font: Option<String>,
@@ -457,7 +458,7 @@ pub(crate) struct Settings {
     /// Notification profiles, kept on this device only.
     #[serde(default, skip_serializing_if = "quiet::Profiles::is_empty")]
     pub profiles: quiet::Profiles,
-    /// Chats with a colour or wallpaper of their own, kept on this device only.
+    /// Chats with a color or wallpaper of their own, kept on this device only.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub chat_looks: std::collections::BTreeMap<matrix_sdk::ruma::OwnedRoomId, ui::chatlook::ChatLook>,
     /// A muted chat stays archived when a message arrives, as Signal's setting of that name.
@@ -480,7 +481,7 @@ impl Settings {
 
     fn load(dir: &std::path::Path) -> Self {
         let stored = std::fs::read(Self::path(dir)).ok().and_then(|raw| Self::parse(&raw));
-        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_colour: ChatColour::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), send_typing: true, enter_sends: true, reduce_motion: false, large_emoji: true, mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), sounds: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new(), reactions: Vec::new(), double_tap: None, media: Default::default(), keep_muted_archived: false, chat_looks: Default::default(), chat_notify: Default::default(), profiles: Default::default() })
+        stored.unwrap_or(Self { theme: ThemeChoice::default(), language: Default::default(), incognito: true, chat_color: ChatColor::default(), emoji_font: None, text_size: Default::default(), wallpaper: Default::default(), wallpaper_dim: ui::appearance::default_dim(), lock: Default::default(), stay_connected: true, swipe_left: ui::rowswipe::SwipeAction::left_default(), swipe_right: ui::rowswipe::SwipeAction::right_default(), incognito_keyboard: true, link_previews: true, receipts: Default::default(), incoming: Default::default(), send_typing: true, enter_sends: true, reduce_motion: false, large_emoji: true, mute_until: Default::default(), mute_until_added: Default::default(), account: 0, shared_inbox: Vec::new(), notify_shows: Default::default(), sounds: Default::default(), folder: Default::default(), folders: Vec::new(), folders_hidden: Vec::new(), reactions: Vec::new(), double_tap: None, media: Default::default(), keep_muted_archived: false, chat_looks: Default::default(), chat_notify: Default::default(), profiles: Default::default() })
     }
 
     /// The ends of the timed mutes of the account in `slot`.
@@ -504,7 +505,7 @@ impl Settings {
     }
 }
 
-/// The app's colours, by role; `docs/design.md` says what each is for.
+/// The app's colors, by role; `docs/design.md` says what each is for.
 #[derive(Clone, Copy)]
 pub(crate) struct Palette {
     pub ground: Hsla,
@@ -529,8 +530,8 @@ pub(crate) struct Palette {
     /// An own bubble's fill and the text on it.
     pub own: Hsla,
     pub on_own: Hsla,
-    /// Whether the user chose a colour, so what is drawn inside the bubble must follow it.
-    pub own_coloured: bool,
+    /// Whether the user chose a color, so what is drawn inside the bubble must follow it.
+    pub own_colored: bool,
     /// Behind a chat row swiped to archive, mark read or unread, pin, mute, set low priority.
     /// The ground is the icon on each, as on `negative`.
     pub swipe_archive: Hsla,
@@ -543,7 +544,7 @@ pub(crate) struct Palette {
 /// The `swipe_*` fills, dark then light: muted, so a row being moved does not shout.
 const SWIPE: [[u32; 5]; 2] = [[0x4fae79, 0x6290dc, 0xd29a45, 0xa87fe2, 0x8796ab], [0x237a4b, 0x2d5cbf, 0x9a5c12, 0x6c34b8, 0x4e5c73]];
 
-/// The `brand` icon colour, dark then light: #8006da is 2.7:1 on the dark `surface`, so dark takes a
+/// The `brand` icon color, dark then light: #8006da is 2.7:1 on the dark `surface`, so dark takes a
 /// lighter step of the same hue.
 const BRAND: [u32; 2] = [0x9b3cf0, 0x8006da];
 
@@ -554,10 +555,10 @@ impl Palette {
         *cx.global()
     }
 
-    /// The palette for what is drawn inside an own bubble: on a chosen colour every text role is
-    /// the bubble's ink (a lighter grey would miss 4.5:1 on blue and teal) and insets are tints of it.
+    /// The palette for what is drawn inside an own bubble: on a chosen color every text role is
+    /// the bubble's ink (a lighter gray would miss 4.5:1 on blue and teal) and insets are tints of it.
     pub fn in_own_bubble(self) -> Self {
-        if !self.own_coloured {
+        if !self.own_colored {
             return self;
         }
         Self { text: self.on_own, muted: self.on_own, faint: self.on_own, accent_ink: self.on_own, lifted: self.on_own.opacity(0.28), ..self }
@@ -567,7 +568,7 @@ impl Palette {
 /// Sets `Palette` for the current mode and lays it over the component library's theme.
 pub(crate) fn apply_palette(cx: &mut App) {
     let c = |hex: u32| -> Hsla { rgb(hex).into() };
-    let chosen = cx.try_global::<ChatColour>().copied().unwrap_or_default().fill();
+    let chosen = cx.try_global::<ChatColor>().copied().unwrap_or_default().fill();
     let dark = Theme::global(cx).is_dark();
     let [swipe_archive, swipe_read, swipe_pin, swipe_mute, swipe_later] = SWIPE[usize::from(!dark)].map(c);
     let mut p = if dark {
@@ -589,7 +590,7 @@ pub(crate) fn apply_palette(cx: &mut App) {
             warning_bg: c(0x2b2414),
             own: c(0x2a2a2a),
             on_own: c(0xffffff),
-            own_coloured: false,
+            own_colored: false,
             swipe_archive,
             swipe_read,
             swipe_pin,
@@ -615,7 +616,7 @@ pub(crate) fn apply_palette(cx: &mut App) {
             warning_bg: c(0xfbefd2),
             own: c(0xe2e2e2),
             on_own: c(0x000000),
-            own_coloured: false,
+            own_colored: false,
             swipe_archive,
             swipe_read,
             swipe_pin,
@@ -624,7 +625,7 @@ pub(crate) fn apply_palette(cx: &mut App) {
         }
     };
     if let Some(fill) = chosen {
-        (p.own, p.on_own, p.own_coloured) = (c(fill), c(ink_on(fill)), true);
+        (p.own, p.on_own, p.own_colored) = (c(fill), c(ink_on(fill)), true);
         // A chosen color is the accent too: unread counts, mentions and the new-message mark follow it.
         let ground = if dark { 0x000000 } else { 0xffffff };
         let accent = lift(fill, ground, 3.);
@@ -920,7 +921,7 @@ pub(crate) fn open_place(cx: &mut gpui_kit::App, place: &crate::backend::Place) 
     open_link(cx, &place.web_url());
 }
 
-/// Lets the user choose a file to send. `None` when cancelled or unreadable.
+/// Lets the user choose a file to send. `None` when canceled or unreadable.
 pub(crate) fn pick_file(cx: &mut gpui_kit::App) -> gpui_kit::Task<Option<PathBuf>> {
     #[cfg(not(target_os = "android"))]
     {
@@ -1779,19 +1780,19 @@ mod tests {
     }
 
     #[test]
-    fn text_on_every_chat_colour_reaches_4_5() {
-        for colour in super::ChatColour::ALL {
-            let Some(fill) = colour.fill() else { continue };
+    fn text_on_every_chat_color_reaches_4_5() {
+        for color in super::ChatColor::ALL {
+            let Some(fill) = color.fill() else { continue };
             let ratio = super::contrast(fill, super::ink_on(fill));
-            assert!(ratio >= 4.5, "{}: {ratio}", colour.label());
+            assert!(ratio >= 4.5, "{}: {ratio}", color.label());
         }
-        assert_eq!(super::ink_on(super::ChatColour::Orange.fill().unwrap()), 0x1a1a1a);
-        assert_eq!(super::ink_on(super::ChatColour::Indigo.fill().unwrap()), 0xffffff);
+        assert_eq!(super::ink_on(super::ChatColor::Orange.fill().unwrap()), 0x1a1a1a);
+        assert_eq!(super::ink_on(super::ChatColor::Indigo.fill().unwrap()), 0xffffff);
     }
 
     #[test]
     fn a_chosen_accent_reads_on_both_grounds() {
-        for color in super::ChatColour::ALL {
+        for color in super::ChatColor::ALL {
             let Some(fill) = color.fill() else { continue };
             for ground in [0x000000, 0xffffff] {
                 let ink = super::lift(fill, ground, 4.5);
@@ -1822,9 +1823,9 @@ mod tests {
     }
 
     #[test]
-    fn old_settings_file_loads_with_the_default_colour() {
+    fn old_settings_file_loads_with_the_default_color() {
         let old = super::Settings::parse(br#"{"theme":"Light","incognito":false}"#).unwrap();
-        assert_eq!((old.theme, old.incognito, old.chat_colour), (super::ThemeChoice::Light, false, super::ChatColour::Default));
+        assert_eq!((old.theme, old.incognito, old.chat_color), (super::ThemeChoice::Light, false, super::ChatColor::Default));
         assert!(old.stay_connected, "files from before the switch keep the background connection");
         assert!(old.send_typing, "files from before the switch keep sending typing notices");
         assert!(old.enter_sends);
@@ -1835,7 +1836,7 @@ mod tests {
         assert!(super::Settings::parse(br#"{"send_typing":false,"enter_sends":false,"large_emoji":false,"reduce_motion":true}"#).unwrap().reduce_motion);
         assert!(!super::Settings::parse(br#"{"stay_connected":false}"#).unwrap().stay_connected);
         let new = super::Settings::parse(br#"{"chat_colour":"Teal"}"#).unwrap();
-        assert_eq!(new.chat_colour, super::ChatColour::Teal);
+        assert_eq!(new.chat_color, super::ChatColor::Teal);
     }
 
     #[test]

@@ -218,7 +218,7 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let read_ink = self.on_wallpaper(p.text, cx);
         let faint = self.on_wallpaper(p.faint, cx);
-        // On a photo both are the text colour; in flight then stays a step back.
+        // On a photo both are the text color; in flight then stays a step back.
         let soft = if faint == read_ink { faint.opacity(0.6) } else { faint };
         let draw = |mark: &Mark| -> AnyElement {
             match mark {
@@ -285,7 +285,7 @@ impl BeeperApp {
 }
 
 /// Lucide's stroke at the size of 12 px text; the filled ones are its circle, filled, with the
-/// ticks in the ground's colour.
+/// ticks in the ground's color.
 fn glyph_el(glyph: Glyph, ink: Hsla, ground: Hsla) -> AnyElement {
     let icon = |name: IconName| Icon::new(name).size(fs(13.)).text_color(ink).into_any_element();
     let disc = |name: IconName, size: f32| {

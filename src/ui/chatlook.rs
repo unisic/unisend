@@ -1,4 +1,4 @@
-//! A chat's own colour and wallpaper, as Signal's "Chat color & wallpaper" in a chat's settings:
+//! A chat's own color and wallpaper, as Signal's "Chat color & wallpaper" in a chat's settings:
 //! either may be left to follow the one chosen for all chats in Settings, Appearance. Kept on this
 //! device in `settings.json`, as Beeper Desktop keeps them per chat in its local prefs
 //! (`chat_appearance.perChat`), never in account data. A chat's photo is its own file under
@@ -7,7 +7,7 @@
 use super::appearance::{Wallpaper, swatch};
 use super::disappear::{plain_row, timer_row};
 use super::*;
-use crate::ChatColour;
+use crate::ChatColor;
 use gpui_kit::component::Theme;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,8 +21,9 @@ const PHOTOS: &str = "wallpapers";
 /// What one chat changes; `None` follows the choice for all chats.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ChatLook {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub colour: Option<ChatColour>,
+    /// Stored under its first, British name, which settings files already hold.
+    #[serde(default, rename = "colour", skip_serializing_if = "Option::is_none")]
+    pub color: Option<ChatColor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallpaper: Option<Wallpaper>,
     /// The file under `wallpapers/` of a `Wallpaper::Photo`.
@@ -32,7 +33,7 @@ pub(crate) struct ChatLook {
 
 impl ChatLook {
     fn is_empty(&self) -> bool {
-        self.colour.is_none() && self.wallpaper.is_none()
+        self.color.is_none() && self.wallpaper.is_none()
     }
 }
 
@@ -74,13 +75,13 @@ fn make_room(looks: &mut BTreeMap<OwnedRoomId, ChatLook>, keep: &OwnedRoomId, li
 }
 
 impl BeeperApp {
-    /// Once per frame: the own bubbles take the open chat's colour, and its photo is read. Settings
-    /// and the other panels keep the colour for all chats, so their preview shows that one.
+    /// Once per frame: the own bubbles take the open chat's color, and its photo is read. Settings
+    /// and the other panels keep the color for all chats, so their preview shows that one.
     pub(super) fn follow_chat_look(&mut self, cx: &mut Context<Self>) {
         let look = self.open.as_ref().filter(|_| self.panel.is_none()).and_then(|id| self.settings.chat_looks.get(id));
-        let colour = look.and_then(|l| l.colour).unwrap_or(self.settings.chat_colour);
-        if cx.try_global::<ChatColour>().copied().unwrap_or_default() != colour {
-            cx.set_global(colour);
+        let color = look.and_then(|l| l.color).unwrap_or(self.settings.chat_color);
+        if cx.try_global::<ChatColor>().copied().unwrap_or_default() != color {
+            cx.set_global(color);
             crate::apply_palette(cx);
         }
         let want = self.open.as_ref().filter(|id| self.settings.chat_looks.get(*id).is_some_and(|l| l.wallpaper == Some(Wallpaper::Photo)));
@@ -133,10 +134,10 @@ impl BeeperApp {
         self.look.chat_photo = Some((room, image));
     }
 
-    /// The chat's entry to its colour and wallpaper, on its info screen.
+    /// The chat's entry to its color and wallpaper, on its info screen.
     pub(super) fn look_entry(&self, room: &OwnedRoomId, cx: &mut Context<Self>) -> Stateful<Div> {
         let room = room.clone();
-        timer_row("look-entry", Some(IconName::Palette), t!("Chat colour and wallpaper"), cx).on_click(cx.listener(move |this, _, _, cx| {
+        timer_row("look-entry", Some(IconName::Palette), t!("Chat color and wallpaper"), cx).on_click(cx.listener(move |this, _, _, cx| {
             this.open_chat_page(room.clone(), ChatPage::Look, cx);
         }))
     }
@@ -153,7 +154,7 @@ impl BeeperApp {
     /// The sheet of the chat's own settings page, while one is open.
     pub(super) fn chat_page_sheet(&self, room: &RoomSummary, live: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<(usize, String, Vec<Stateful<Div>>)> {
         match self.look.chat_page? {
-            ChatPage::Look => Some((6, t!("Chat colour and wallpaper").to_owned(), self.look_rows(&room.id, live, window, cx))),
+            ChatPage::Look => Some((6, t!("Chat color and wallpaper").to_owned(), self.look_rows(&room.id, live, window, cx))),
             ChatPage::Notify => Some((7, t!("Notifications").to_owned(), self.chat_notify_rows(room, live, cx))),
         }
     }
@@ -162,12 +163,12 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let look = self.settings.chat_looks.get(room).cloned().unwrap_or_default();
         let label = |id: &'static str, text: &'static str| h_flex().id(id).px(px(GUTTER + 4.)).pt(px(8.)).text_size(fs(13.)).text_color(p.faint).child(text);
-        let colours = h_flex().id("look-colours").flex_wrap().px(px(GUTTER)).children(ChatColour::ALL.map(|colour| {
-            let fill = div().bg(colour.fill().map_or(p.raised, |hex| rgb(hex).into()));
-            let name = t!("Chat colour: {colour}", colour = colour.label());
+        let colors = h_flex().id("look-colors").flex_wrap().px(px(GUTTER)).children(ChatColor::ALL.map(|color| {
+            let fill = div().bg(color.fill().map_or(p.raised, |hex| rgb(hex).into()));
+            let name = t!("Chat color: {color}", color = color.label());
             let room = room.clone();
-            swatch(&name, look.colour.unwrap_or(self.settings.chat_colour) == colour, fill, cx).when(live, |el| {
-                el.on_click(cx.listener(move |this, _, _, cx| this.change_look(&room, |l| l.colour = Some(colour), cx)))
+            swatch(&name, look.color.unwrap_or(self.settings.chat_color) == color, fill, cx).when(live, |el| {
+                el.on_click(cx.listener(move |this, _, _, cx| this.change_look(&room, |l| l.color = Some(color), cx)))
             })
         }));
         let mut papers = h_flex().id("look-papers").flex_wrap().px(px(GUTTER));
@@ -182,7 +183,7 @@ impl BeeperApp {
             let fill = div().child(img(photo.clone()).size_full().object_fit(ObjectFit::Cover));
             papers = papers.child(swatch(t!("Photo"), look.wallpaper == Some(Wallpaper::Photo), fill, cx));
         }
-        let mut rows = vec![label("look-colour-label", t!("Your messages")), colours, label("look-paper-label", t!("Wallpaper")), papers];
+        let mut rows = vec![label("look-color-label", t!("Your messages")), colors, label("look-paper-label", t!("Wallpaper")), papers];
         if !Theme::global(cx).is_dark() {
             rows.push(label("look-dark-note", t!("Wallpapers show with the dark theme.")));
         }
@@ -200,7 +201,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{BTreeMap, ChatColour, ChatLook, MAX_LOOKS, OwnedRoomId, PHOTOS, Path, make_room, new_photo_name, photo_path};
+    use super::{BTreeMap, ChatColor, ChatLook, MAX_LOOKS, OwnedRoomId, PHOTOS, Path, make_room, new_photo_name, photo_path};
 
     #[test]
     fn photo_names_stay_inside_their_folder() {
@@ -215,7 +216,7 @@ mod tests {
     #[test]
     fn looks_stay_bounded_and_let_gone_chats_go_first() {
         let id = |n: usize| OwnedRoomId::try_from(format!("!r{n:04}:x")).unwrap();
-        let look = || ChatLook { colour: Some(ChatColour::Teal), ..Default::default() };
+        let look = || ChatLook { color: Some(ChatColor::Teal), ..Default::default() };
         let mut looks: BTreeMap<_, _> = (0..MAX_LOOKS).map(|n| (id(n), look())).collect();
         assert!(make_room(&mut looks, &id(3), |_| true).is_empty());
         assert_eq!(make_room(&mut looks, &id(9999), |r| r != &id(7) && r != &id(8)).len(), 2);

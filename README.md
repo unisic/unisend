@@ -13,7 +13,7 @@ bridges bring WhatsApp, Signal, Messenger, Instagram, Telegram and other network
 <p align="center">
   <img src="docs/screenshots/chat-list.png" alt="Chat list" width="250">
   <img src="docs/screenshots/chat.png" alt="A group chat with a photo, a reply, reactions and a poll" width="250">
-  <img src="docs/screenshots/settings.png" alt="Appearance settings: theme, language, chat colour, text size" width="250">
+  <img src="docs/screenshots/settings.png" alt="Appearance settings: theme, language, chat color, text size" width="250">
 </p>
 
 <p align="center">
@@ -83,7 +83,7 @@ bridges bring WhatsApp, Signal, Messenger, Instagram, Telegram and other network
 - Typing goes straight into the open chat's message field, without clicking it first
 - Its own title bar and window controls on Linux, where the compositor allows it
 
-Also: dark, light or system theme, chat colours, a chat wallpaper, text size, English and Polish.
+Also: dark, light or system theme, chat colors, a chat wallpaper, text size, English and Polish.
 
 ## Privacy
 

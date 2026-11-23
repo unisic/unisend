@@ -59,7 +59,7 @@ fn text_of(v: &Value) -> String {
 }
 
 impl Poll {
-    /// From the content of a start event of either flavour.
+    /// From the content of a start event of either flavor.
     pub(super) fn parse(content: &Value, unstable: bool) -> Option<Self> {
         let block = content.get(if unstable { "org.matrix.msc3381.poll.start" } else { "m.poll" })?;
         let question = text_of(block.get("question")?);
@@ -192,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_both_flavours() {
+    fn reads_both_flavors() {
         for unstable in [false, true] {
             let p = poll(1, unstable);
             assert_eq!((p.question.as_str(), p.answers.len(), p.max_selections, p.unstable), ("Lunch?", 3, 1, unstable));
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn response_has_the_polls_flavour() {
+    fn response_has_the_polls_flavor() {
         let (ty, body) = response(true, "$p", vec!["a".into()]);
         assert_eq!((ty, body["org.matrix.msc3381.poll.response"]["answers"][0].as_str()), ("org.matrix.msc3381.poll.response", Some("a")));
         let (ty, body) = response(false, "$p", vec![]);

@@ -1,5 +1,5 @@
 //! The photo editor Signal has before a picture leaves: crop and quarter turns, drawing in a few
-//! colours and widths, text, a blur brush, and undo. It opens from a photo's pencil in the
+//! colors and widths, text, a blur brush, and undo. It opens from a photo's pencil in the
 //! preview or in the desktop's tray. Done writes the edited picture as a new JPEG (q85, no
 //! metadata, at most `paint::CANVAS_PX` on the long side) in the account's `pasted` folder, which
 //! the send deletes, and the item sends it in place of the original; HD then decides its size
@@ -27,7 +27,7 @@ use image::{DynamicImage, RgbImage, imageops::FilterType};
 use super::paint::{self, Edits, Frame, Ink, Label, Stroke};
 use super::*;
 
-/// Signal's pen colours, roughly: white, black and six hues.
+/// Signal's pen colors, roughly: white, black and six hues.
 const COLORS: [[u8; 3]; 8] = [[255, 255, 255], [0, 0, 0], [229, 72, 77], [245, 140, 35], [250, 204, 21], [52, 199, 89], [46, 110, 240], [175, 82, 222]];
 /// Widths as shares of the long side, thin to thick.
 const PEN: [f32; 3] = [0.006, 0.012, 0.024];
@@ -54,7 +54,7 @@ enum Drag {
     Corner(usize, Frame),
     /// The whole crop, from where the finger went down.
     Crop([f32; 2], Frame),
-    /// A label, where it was, and the finger's offset from its centre.
+    /// A label, where it was, and the finger's offset from its center.
     Label(usize, [f32; 2], [f32; 2]),
 }
 
@@ -127,8 +127,8 @@ fn shape(label: &Label, window: &Window) -> Shaped {
     Shaped { glyphs, width: f32::from(line.width), ascent: f32::from(line.ascent), descent: f32::from(line.descent) }
 }
 
-/// Draws a label's glyphs into `picture`, centred on `at`, one glyph raster at a time. The box
-/// of ascent and descent is centred, as a line of that height lays it out on screen.
+/// Draws a label's glyphs into `picture`, centerd on `at`, one glyph raster at a time. The box
+/// of ascent and descent is centerd, as a line of that height lays it out on screen.
 fn draw_label(text_system: &TextSystem, picture: &mut RgbImage, shaped: &Shaped, color: [u8; 3], at: [f32; 2], size: f32) {
     let k = size / SHAPED_PX;
     let left = at[0] - shaped.width * k / 2.;
@@ -216,7 +216,7 @@ fn bmp(picture: RgbImage) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Faces as Android's detector reports them (the eyes' midpoint and the distance between the eyes,
-/// in px of a `w` x `h` picture) turned into blur strokes: a disc from brow to chin, centred a
+/// in px of a `w` x `h` picture) turned into blur strokes: a disc from brow to chin, centerd a
 /// little below the eyes as Signal places its face box.
 #[cfg(any(target_os = "android", test))]
 fn face_strokes(found: &[f32], w: f32, h: f32) -> Vec<Stroke> {

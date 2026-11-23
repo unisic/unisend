@@ -644,7 +644,7 @@ impl BeeperApp {
 /// The sheet's main button: its label, what it sends, and what the sheet shows next.
 type Primary = (&'static str, Cmd, Option<Verify>);
 
-/// A small labelled control inside a settings row, at a finger's height.
+/// A small labeled control inside a settings row, at a finger's height.
 fn pill(id: impl Into<ElementId>, label: &'static str, ink: Hsla, cx: &App) -> Stateful<Div> {
     let p = Palette::of(cx);
     h_flex().id(id).flex_none().h(px(TAP)).px(px(GAP)).rounded_full().bg(p.raised).text_size(fs(14.)).text_color(ink).cursor_pointer().child(label)

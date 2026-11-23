@@ -16,7 +16,7 @@ pub(super) struct ShareIn {
     pub open: bool,
     target: Option<OwnedRoomId>,
     text: String,
-    /// Copies in the cache with their sizes; deleted again when the share is cancelled.
+    /// Copies in the cache with their sizes; deleted again when the share is canceled.
     files: Vec<(PathBuf, u64)>,
     /// Files still being copied; 0 once the copy is done.
     copying: usize,

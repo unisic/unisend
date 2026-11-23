@@ -29,7 +29,7 @@ def env(t, attack, tau):
 
 
 def lowpass(x, cutoff):
-    """One pole: takes the edge off without colouring the tone."""
+    """One pole: takes the edge off without coloring the tone."""
     a = np.exp(-2 * np.pi * cutoff / SR)
     y = np.empty_like(x)
     acc = 0.0

@@ -34,8 +34,8 @@ const MAX_FRAMES: usize = 150;
 /// Longest title or description kept from a page.
 const TEXT_MAX: usize = 300;
 const AGENT: &str = "Mozilla/5.0 (compatible; Unisend link preview)";
-/// The page's colour, which the card's bar takes, as only Unisend writes and reads it.
-pub(crate) const COLOUR_KEY: &str = "unisend:theme_color";
+/// The page's color, which the card's bar takes, as only Unisend writes and reads it.
+pub(crate) const COLOR_KEY: &str = "unisend:theme_color";
 
 /// What a page says about itself in its head.
 #[derive(Debug, Default, PartialEq)]
@@ -46,7 +46,7 @@ pub(crate) struct Meta {
     /// The picture's address, made absolute.
     pub image: Option<String>,
     /// `#rrggbb`, from the page's `theme-color`.
-    pub colour: Option<String>,
+    pub color: Option<String>,
     /// A video page: the card's picture gets a play mark.
     pub video: bool,
 }
@@ -203,7 +203,7 @@ pub(crate) fn parse(html: &str, base: &Url) -> Meta {
         description: clean(&tag(&["og:description", "twitter:description", "description"]).unwrap_or_default()),
         site: clean(&tag(&["og:site_name", "application-name"]).unwrap_or_default()),
         image,
-        colour: tag(&["theme-color"]).and_then(|c| colour(&c)),
+        color: tag(&["theme-color"]).and_then(|c| color(&c)),
         video,
     }
 }
@@ -214,7 +214,7 @@ fn clean(text: &str) -> String {
 }
 
 /// `#rgb` or `#rrggbb` as `#rrggbb`; anything else is not taken.
-pub(crate) fn colour(text: &str) -> Option<String> {
+pub(crate) fn color(text: &str) -> Option<String> {
     let hex = text.trim().strip_prefix('#')?;
     if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
@@ -310,8 +310,8 @@ pub(super) async fn entry(room: &Room, preview: &Preview) -> Value {
     if meta.video {
         entry["og:type"] = "video".into();
     }
-    if let Some(colour) = &meta.colour {
-        entry[COLOUR_KEY] = colour.as_str().into();
+    if let Some(color) = &meta.color {
+        entry[COLOR_KEY] = color.as_str().into();
     }
     if let Some(picture) = &preview.picture {
         // Unknown: encrypted, so the picture never sits in the clear where the chat is not.
@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(meta.title, "OG & title");
         assert_eq!(meta.description, "plain description");
         assert_eq!(meta.image.as_deref(), Some("https://www.example.org/img/cover.jpg"));
-        assert_eq!(meta.colour.as_deref(), Some("#aa00ff"));
+        assert_eq!(meta.color.as_deref(), Some("#aa00ff"));
         assert!(meta.video);
         assert_eq!(meta.site, "");
         let bare = parse("<title>Only\n a title</title>", &base());
@@ -381,12 +381,12 @@ mod tests {
     }
 
     #[test]
-    fn colours_are_hex_only() {
-        assert_eq!(colour("#1E90FF").as_deref(), Some("#1e90ff"));
-        assert_eq!(colour(" #fff ").as_deref(), Some("#ffffff"));
-        assert_eq!(colour("red"), None);
-        assert_eq!(colour("#12345"), None);
-        assert_eq!(colour("#ggg"), None);
+    fn colors_are_hex_only() {
+        assert_eq!(color("#1E90FF").as_deref(), Some("#1e90ff"));
+        assert_eq!(color(" #fff ").as_deref(), Some("#ffffff"));
+        assert_eq!(color("red"), None);
+        assert_eq!(color("#12345"), None);
+        assert_eq!(color("#ggg"), None);
     }
 
     fn gif(frames: usize, side: u32) -> Vec<u8> {

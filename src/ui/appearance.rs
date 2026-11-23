@@ -1,5 +1,5 @@
 //! Settings, Appearance: the text size and the wallpaper behind the messages of every chat. A chat
-//! may have its own wallpaper and colour (`chatlook`), which is drawn in its place.
+//! may have its own wallpaper and color (`chatlook`), which is drawn in its place.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -174,7 +174,7 @@ impl BeeperApp {
         }
     }
 
-    /// The colour of small text that sits straight on the open chat's wallpaper (day labels, times
+    /// The color of small text that sits straight on the open chat's wallpaper (day labels, times
     /// beneath a message): `fallback` where there is none or it is a preset, white on a photo, whose
     /// brightest point is only bounded, not dark.
     pub(super) fn on_wallpaper(&self, fallback: Hsla, cx: &App) -> Hsla {

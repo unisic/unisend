@@ -11,7 +11,7 @@ X11 is compiled in too.
     packaging/linux/appimage.sh target/release Unisend-x86_64.AppImage   # or one AppImage, system libraries outside it
 
 A test install takes `cargo build --profile fast` and `packaging/linux/install.sh
-target/fast/beeper-gpui`: as optimised, but without LTO and incremental, so after a change only
+target/fast/beeper-gpui`: as optimized, but without LTO and incremental, so after a change only
 the app's own crate compiles again, in parallel (`Cargo.toml` says how). Shipped builds use
 `--release`.
 

@@ -421,7 +421,7 @@ impl BeeperApp {
     }
 }
 
-/// The snippet after `prefix`, with its matches set in the text colour; for media without a
+/// The snippet after `prefix`, with its matches set in the text color; for media without a
 /// caption, what it is.
 fn with_prefix(prefix: &str, hit: &Hit, p: Palette) -> (String, Vec<(std::ops::Range<usize>, HighlightStyle)>) {
     let style = HighlightStyle { color: Some(p.text), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };

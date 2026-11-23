@@ -9,7 +9,7 @@
 //!
 //! Memory: one full picture is decoded at a time, on a background thread. A 160 px thumbnail is
 //! kept per item (at most `MAX_SELECTED`, 0.1 MB each); the 1280 px picture only for the item
-//! shown and its neighbours (at most 3, 6 MB each decoded).
+//! shown and its neighbors (at most 3, 6 MB each decoded).
 
 use std::path::{Path, PathBuf};
 
@@ -25,7 +25,7 @@ use crate::i18n::t;
 /// A sideways pan this long (px), or one let go this fast (px/s), turns the page.
 const PAN_PAGE: f32 = 48.;
 const PAN_SPEED: f32 = 500.;
-/// Between neighbouring pages while they slide.
+/// Between neighboring pages while they slide.
 const PAGE_GAP: f32 = 16.;
 /// How far the stage follows a pan past the first or the last item.
 const EDGE_GIVE: f32 = 0.3;
@@ -176,7 +176,7 @@ fn page_turn(total: f32, speed: f32) -> isize {
     }
 }
 
-/// How far the stage follows a pan: 1:1 toward a neighbour, with resistance past the ends.
+/// How far the stage follows a pan: 1:1 toward a neighbor, with resistance past the ends.
 fn give(total: f32, previous: bool, next: bool) -> f32 {
     let open = if total > 0. { previous } else { next };
     if open { total } else { total * EDGE_GIVE }
@@ -223,7 +223,7 @@ impl BeeperApp {
         rest
     }
 
-    /// Loads what is missing, one picture at a time: the one shown, its neighbours, then the rest.
+    /// Loads what is missing, one picture at a time: the one shown, its neighbors, then the rest.
     fn pump_preview(&mut self, cx: &mut Context<Self>) {
         let p = &mut self.preview;
         if p.loading || !p.open {
@@ -311,7 +311,7 @@ impl BeeperApp {
                 p.slide.hold(give(pan.total, previous, next));
                 cx.notify();
             } else if held {
-                // Cancelled: back where it was, without a fling.
+                // Canceled: back where it was, without a fling.
                 p.slide.release(0., 0., Instant::now());
                 cx.notify();
             }
@@ -509,7 +509,7 @@ impl BeeperApp {
             .justify_center()
             .overflow_hidden()
             .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, cx| this.pan_preview(e, window, cx)))
-            // The neighbour a pan brings in waits a gap beside the page.
+            // The neighbor a pan brings in waits a gap beside the page.
             .when_some(pv.cur.checked_sub(1).and_then(|ix| pv.entries.get(ix)).filter(|_| shift > 0.), |el, e| el.child(page(e, shift - width - PAGE_GAP, width, p)))
             .child(page(entry, shift, width, p))
             .when_some(pv.entries.get(pv.cur + 1).filter(|_| shift < 0.), |el, e| el.child(page(e, shift + width + PAGE_GAP, width, p)))
@@ -863,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn short_vertical_wheel_and_cancelled_pans_stay_put() {
+    fn short_vertical_wheel_and_canceled_pans_stay_put() {
         let far = PAN_PAGE / 2. + 1.;
         assert_eq!(run(&[(0., 0., Started), (far, 0., Moved), (0., 0., Ended)], SLOW), Some(0));
         assert_eq!(run(&[(0., 0., Started), (2., 300., Moved), (2., 300., Moved), (0., 0., Ended)], SLOW), Some(0));

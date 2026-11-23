@@ -1,5 +1,5 @@
 //! A chat row swiped sideways acts on the chat, Gmail style: the row follows the finger once the pan
-//! is sideways, the action's colour and icon show behind it, and letting go past the arm point (or
+//! is sideways, the action's color and icon show behind it, and letting go past the arm point (or
 //! flicking) runs it. Archive and delete carry the row off and the rows below close the gap.
 
 use std::collections::VecDeque;
@@ -16,7 +16,7 @@ const FLICK_SPEED: f32 = 1000.;
 const FLICK_MIN: f32 = 32.;
 /// Rows below a removed one that slide up into its place: more than a phone shows.
 const GAP_ROWS: usize = 24;
-/// The fill behind the row brightens to the action's colour this fast when it arms.
+/// The fill behind the row brightens to the action's color this fast when it arms.
 const LIGHT: Duration = Duration::from_millis(150);
 /// The fill's opacity before it arms.
 const FAINT: f32 = 0.2;
@@ -119,7 +119,7 @@ pub(super) struct Release<T> {
     pub id: T,
     pub dx: f32,
     pub vel: f32,
-    /// False for a cancelled touch, which never acts.
+    /// False for a canceled touch, which never acts.
     pub ended: bool,
 }
 
@@ -371,7 +371,7 @@ impl BeeperApp {
         (dx, lit)
     }
 
-    /// The colour and icon behind a row moved `dx`, lit when letting go would act.
+    /// The color and icon behind a row moved `dx`, lit when letting go would act.
     pub(super) fn row_backdrop(&self, room: &RoomSummary, dx: f32, armed: bool, window: &mut Window, cx: &mut App) -> Option<Div> {
         let side = if dx < 0. { self.settings.swipe_left } else { self.settings.swipe_right };
         let (icon, act) = resolve(side, room)?;

@@ -94,7 +94,7 @@ fn frac(elapsed: Duration, of: Duration) -> f32 {
 }
 
 /// Where a picture of `dims` sits: as large as fits the screen inside the bars and margins,
-/// centred, aspect kept; unknown dims make a square. x, y, width, height.
+/// centerd, aspect kept; unknown dims make a square. x, y, width, height.
 fn fit_rect(view: (f32, f32), top: f32, bottom: f32, dims: (f32, f32)) -> (f32, f32, f32, f32) {
     let (room_w, room_h) = ((view.0 - 2. * MARGIN).max(1.), (view.1 - top - bottom - 2. * MARGIN).max(1.));
     let (w, h) = if dims.0 > 0. && dims.1 > 0. { dims } else { (1., 1.) };

@@ -705,8 +705,8 @@ pub struct Link {
     pub site: String,
     /// For a GIF, `looped`: it may move.
     pub image: Option<Media>,
-    /// The page's colour as `0xrrggbb`, which the card's bar takes.
-    pub colour: Option<u32>,
+    /// The page's color as `0xrrggbb`, which the card's bar takes.
+    pub color: Option<u32>,
     /// A video page: its picture gets a play mark.
     pub video: bool,
 }
@@ -1931,7 +1931,7 @@ impl State {
                 self.login = None;
                 let api = self.api()?;
                 tokio::spawn(async move {
-                    // Unknown to the bridge by now (finished, timed out) is as good as cancelled.
+                    // Unknown to the bridge by now (finished, timed out) is as good as canceled.
                     if let Err(e) = api.cancel(&step.bridge, &step.login_id).await {
                         log::debug!("login cancel: {e:#}");
                     }
@@ -3645,7 +3645,7 @@ fn list_typing(client: &Client, ev: &mpsc::Sender<Ev>) {
 /// server counts every event it cannot read, reactions and edits too, and cannot see mentions or
 /// mutes; the SDK's own count from the decrypted events is used once it has found the user's read
 /// receipt among them. A muted chat notifies of nothing, so it counts every unread message
-/// instead, from the SDK's count, as Signal shows it: still there, but grey.
+/// instead, from the SDK's count, as Signal shows it: still there, but gray.
 /// `client`: the SDK's (messages, notifying, mentions).
 fn unread(encrypted: bool, muted: bool, server: (u64, u64), client: Option<(u64, u64, u64)>) -> (u64, u64) {
     let (notifying, mentions) = match client {
@@ -4096,7 +4096,7 @@ fn sticker(content: &StickerEventContent) -> Media {
     }
 }
 
-/// A poll's start, whichever flavour of event type.
+/// A poll's start, whichever flavor of event type.
 fn poll_start(event: &TimelineEvent) -> Option<Poll> {
     let kind = event.raw().get_field::<String>("type").ok().flatten().filter(|k| polls::is_start(k))?;
     let content = event.raw().get_field::<serde_json::Value>("content").ok().flatten()?;
@@ -4151,9 +4151,9 @@ fn link_preview(content: &serde_json::Value) -> Option<Link> {
             once: false,
             waveform: Vec::new(),
         });
-        let colour = p.get(linkprev::COLOUR_KEY).and_then(Value::as_str).and_then(linkprev::colour).and_then(|hex| u32::from_str_radix(&hex[1..], 16).ok());
+        let color = p.get(linkprev::COLOR_KEY).and_then(Value::as_str).and_then(linkprev::color).and_then(|hex| u32::from_str_radix(&hex[1..], 16).ok());
         let video = text("og:type").starts_with("video") || ["og:video", "og:video:url", "og:video:secure_url"].iter().any(|k| !text(k).is_empty());
-        Some(Link { url, title, description, site, image, colour, video })
+        Some(Link { url, title, description, site, image, color, video })
     })
 }
 

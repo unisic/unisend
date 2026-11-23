@@ -107,7 +107,7 @@ const AVATAR: f32 = 48.;
 const ACCOUNT_BADGE: f32 = 16.;
 /// From the screen edge to content.
 const GUTTER: f32 = 16.;
-/// Between neighbouring things.
+/// Between neighboring things.
 const GAP: f32 = 14.;
 const BAR_H: f32 = 56.;
 const NAV_H: f32 = 64.;
@@ -126,7 +126,7 @@ const TABLET_RAIL_W: f32 = 80.;
 /// From this width a touch screen's navigation is the rail, also beside one pane (Material's
 /// medium width); a phone keeps the bar under the screen.
 const MEDIUM: f32 = 600.;
-/// Where the labelled navigation would leave the conversation under about 800 wide.
+/// Where the labeled navigation would leave the conversation under about 800 wide.
 const RAIL_BELOW: f32 = 1400.;
 /// Widest a message and a sheet grow on a wide window.
 const BUBBLE_W: f32 = 560.;
@@ -377,7 +377,7 @@ pub struct BeeperApp {
     menu: Option<menu::MessageMenu>,
     /// A mouse button held on a message, on its way to being a long press.
     press: Option<menu::Press>,
-    /// A horizontal pan in progress over a message, with how far it has travelled.
+    /// A horizontal pan in progress over a message, with how far it has traveled.
     swipe: Option<Swipe>,
     /// The message a finger let go of, springing back into place since then.
     swipe_back: Option<(String, motion::Glide, Instant)>,
@@ -2296,7 +2296,7 @@ impl BeeperApp {
     }
 
     /// The destinations: a bar under a phone's screen, a column beside a wide window's.
-    /// A desktop window too narrow for the labelled navigation beside a usable conversation.
+    /// A desktop window too narrow for the labeled navigation beside a usable conversation.
     fn rail(window: &Window) -> bool {
         !gpui_kit::is_mobile() && frame::viewport(window).width < px(RAIL_BELOW)
     }
@@ -2887,7 +2887,7 @@ impl BeeperApp {
                 };
                 // The next message joining this one's run takes its time line; the line shrinks as it arrives.
                 let shrink = next.filter(|n| !last && state.is_none() && joined(m, n)).and_then(|n| this.arrival_level(&n.id, cx));
-                // What is drawn inside the bubble: an own one may carry a colour of the user's choosing.
+                // What is drawn inside the bubble: an own one may carry a color of the user's choosing.
                 let inside = inside_of(m, p);
                 let ink = HighlightStyle { color: Some(inside.accent_ink), font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
                 let underline = HighlightStyle { underline: Some(UnderlineStyle { thickness: px(1.), ..Default::default() }), ..Default::default() };
@@ -2899,12 +2899,12 @@ impl BeeperApp {
                 marks.extend(found.iter().map(|(r, _)| (r.clone(), underline)));
                 marks.sort_by_key(|(r, _)| r.start);
                 // The preview its sender attached to a link, drawn as Discord draws an embed: the
-                // page's colour down the side, its picture under the text. A touch opens the link.
+                // page's color down the side, its picture under the text. A touch opens the link.
                 let link_card = m.link.as_ref().filter(|_| !m.deleted).map(|link| {
                     let link_shown = link_fade.unwrap_or(1.);
                     let url = link.url.clone();
                     let width = room.min(LINK_W);
-                    let bar: Hsla = link.colour.map_or(inside.text.opacity(0.25), |c| rgb(c).into());
+                    let bar: Hsla = link.color.map_or(inside.text.opacity(0.25), |c| rgb(c).into());
                     let picture = link.image.as_ref().map(|image| {
                         let (w, h) = image.dims.unwrap_or((1200, 630));
                         // The picture's own shape; one taller than the limit is cut to it, since a
@@ -3030,7 +3030,7 @@ impl BeeperApp {
                     .children(link_card)
                     .children(poll_card)
                     .children(place_card);
-                // Badges pinned over the bubble's lower edge, ringed in the ground's colour: standing
+                // Badges pinned over the bubble's lower edge, ringed in the ground's color: standing
                 // free under it they read as small messages of their own.
                 let reactions = (!m.reactions.is_empty()).then(|| {
                     // A wall of badges is cut to a row or two; "+k" lists them all, as a tap on one does.
@@ -3169,7 +3169,7 @@ impl BeeperApp {
                                     .min_w_0()
                                     .items_stretch()
                                     .gap(px(6.))
-                                    // Addressed to the user: the one place a message carries colour.
+                                    // Addressed to the user: the one place a message carries color.
                                     .when(m.mentioned, |el| el.child(div().w(px(3.)).flex_none().rounded_full().bg(p.accent)))
                                     .when(leaving, |el| el.opacity(0.6))
                                     .child(this.lifted(bubble, &m.id, cx)),
@@ -4634,7 +4634,7 @@ fn quote_key(message: &str) -> String {
     format!("{message}#quote")
 }
 
-/// The palette of what is drawn inside a message's bubble: an own one may carry a colour of the
+/// The palette of what is drawn inside a message's bubble: an own one may carry a color of the
 /// user's choosing.
 fn inside_of(m: &Msg, p: Palette) -> Palette {
     if m.own { p.in_own_bubble() } else { p }
@@ -4676,7 +4676,7 @@ fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, ins
                 .gap(px(4.))
                 .min_w_0()
                 .text_color(inside.muted)
-                // Centred on the first line of text.
+                // Centerd on the first line of text.
                 .children(icon.map(|icon| Icon::new(icon).size_3p5().flex_none().mt(px(2.5))))
                 .child(line(14., 19.).flex_1().min_w_0().line_clamp(lines).text_ellipsis().child(text))
                 .into_any_element()
@@ -5158,7 +5158,7 @@ fn tabular() -> FontFeatures {
     FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
 }
 
-/// Unread count; a bare dot for a chat marked unread by hand, grey when muted.
+/// Unread count; a bare dot for a chat marked unread by hand, gray when muted.
 fn count_pill(n: u64, muted: bool, cx: &App) -> Div {
     let p = Palette::of(cx);
     div()

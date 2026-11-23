@@ -6,10 +6,10 @@ and the metrics at the top of `src/ui.rs`; this file says what they mean.
 ## The idea
 
 True black, flat. Depth is a lightness step and nothing else: no borders around cards, no shadows,
-no gradients. Colour is spent on what is addressed to you (unread, a mention) and nowhere on chrome.
+no gradients. Color is spent on what is addressed to you (unread, a mention) and nowhere on chrome.
 The one primary control on a screen is made primary by inversion: white with black text.
 
-## Colour (dark; the light set mirrors it)
+## Color (dark; the light set mirrors it)
 
 | Token | Dark | Used for |
 |---|---|---|
@@ -70,7 +70,7 @@ The folders and the chip last chosen are kept on this device only, in `settings.
 Rows 72 tall, avatar 48. Line one: the name, then the network and the time on the right in
 `faint`. Line two: the preview in `muted`, then what needs you: an accent count, an accent `@`
 when you were mentioned. Unread rows have a white bold name and a white preview. A muted chat
-counts every unread message (push rules count none there) in a grey `raised` pill, and stays out
+counts every unread message (push rules count none there) in a gray `raised` pill, and stays out
 of the counts over the list.
 
 A Telegram forum is one row: its picture and name, the newest topic before the preview, the
@@ -96,11 +96,11 @@ height through `fs()`; paddings, rows and icons keep their size. The chat wallpa
 gradient is allowed: behind the messages only, never behind the bars or the composer. Presets are
 tones of `Palette` no lighter than `raised` at 85%; a photo is darkened to 60% when imported and
 dimmed at least 30% more, so its brightest point is `#6b6b6b`. Text that sits straight on a photo is
-`text`, not `faint`. The light theme has no wallpaper. A chat's own colour and wallpaper
-(`ui/chatlook.rs`) follow the same rules; the own bubbles take the open chat's colour everywhere but
+`text`, not `faint`. The light theme has no wallpaper. A chat's own color and wallpaper
+(`ui/chatlook.rs`) follow the same rules; the own bubbles take the open chat's color everywhere but
 Settings, whose preview shows the one for all chats.
 
-Own messages can take a chat colour from Settings: Default (`raised`) or one of Beeper's nine
+Own messages can take a chat color from Settings: Default (`raised`) or one of Beeper's nine
 (blue, indigo, purple, pink, red, orange, green, teal, slate), the same in dark and light, kept on this
 device. Everything inside such a bubble (text, quote inset, link, mention, poll, place) is drawn in
 the bubble's ink, white or near-black (orange), chosen for 4.5:1. Blue is Beeper's #3478F6 darkened
@@ -109,7 +109,7 @@ new-message mark), blended toward the ground's opposite until a fill reaches 3:1
 Default keeps the lime.
 
 Reactions are badges pinned over the lower edge of their message, on `lifted` (`#3d3d3d`, one
-step above `raised`) with a ring in the ground's colour; your own reaction has a white ring. In
+step above `raised`) with a ring in the ground's color; your own reaction has a white ring. In
 the reaction bar the emoji under the pointer grows and rises, and its ring fades meanwhile.
 Standing free under a message they read as small messages of their own.
 
@@ -136,7 +136,7 @@ an answer votes for it; touching your only choice takes it back.
 A location is a card in the bubble: a map pin, the description when it says more than the
 coordinates, and the coordinates to five decimals. Touching it opens the place in maps.
 
-Lines about the chat itself (someone joined or left, a new name) are centred `faint` text with no
+Lines about the chat itself (someone joined or left, a new name) are centerd `faint` text with no
 bubble; joins that follow one another are one line. "New", in the accent, stands above what
 arrived since the chat was last read.
 
@@ -185,7 +185,7 @@ The common acts take one gesture, and each also has a slower way that can be fou
 - A long press or the right mouse button on a chat in the list, or the dots in a chat's header,
   opens that chat's sheet: rows 52 tall rising from the bottom, named after the chat.
 - The paperclip opens the attach sheet on a phone: the newest photos and videos in a grid, and
-  under it, where the thumb is, a row of labelled round buttons (52, on `raised`) for File, GIF,
+  under it, where the thumb is, a row of labeled round buttons (52, on `raised`) for File, GIF,
   Location, Contact and Poll, each shown only where it works. Choosing photos puts Send in that
   row's place. Without the sheet (desktop) the paperclip opens a sheet of the same entries as rows.
 - On desktop attached files wait in a tray over the composer (88 thumbnails on `surface`, an X in

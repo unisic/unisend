@@ -12,7 +12,7 @@ use std::ops::Range;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use image::metadata::Orientation;
 
-/// A picture without metadata: JPEG, PNG, WebP, GIF, HEIC or AVIF, recognised by content.
+/// A picture without metadata: JPEG, PNG, WebP, GIF, HEIC or AVIF, recognized by content.
 pub fn image(data: Vec<u8>) -> Result<Vec<u8>> {
     if data.starts_with(&[0xff, 0xd8, 0xff]) {
         jpeg(&data)
@@ -173,7 +173,7 @@ fn orientation_only(tiff: &[u8]) -> Option<Vec<u8>> {
     (turn != 1).then(|| [&b"MM\0\x2a\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01"[..], &[0, turn, 0, 0, 0, 0, 0, 0]].concat())
 }
 
-/// Keeps APP0 (JFIF), APP14 (Adobe colour transform), the ICC profile and every coding segment;
+/// Keeps APP0 (JFIF), APP14 (Adobe color transform), the ICC profile and every coding segment;
 /// drops EXIF and XMP (APP1), IPTC (APP13), MPF and other APP2, the other APPn, comments, and all
 /// after the end marker (Samsung trailers, motion-photo videos, HDR gain maps).
 fn jpeg(d: &[u8]) -> Result<Vec<u8>> {
@@ -324,7 +324,7 @@ fn gif_blocks(d: &[u8], mut at: usize) -> Result<usize> {
     }
 }
 
-/// Size of a GIF colour table announced by `flags`.
+/// Size of a GIF color table announced by `flags`.
 fn gif_table(flags: u8) -> usize {
     if flags & 0x80 != 0 { 3 << ((flags & 7) + 1) } else { 0 }
 }
@@ -859,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn a_jpeg_keeps_its_colours_scan_and_turn_and_loses_the_rest() {
+    fn a_jpeg_keeps_its_colors_scan_and_turn_and_loses_the_rest() {
         let sample = sample_jpeg(6);
         let clean = image(sample.clone()).unwrap();
         assert!(!has(&clean, GPS), "metadata survived");

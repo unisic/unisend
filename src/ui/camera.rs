@@ -9,7 +9,7 @@ use crate::i18n::t;
 pub(super) const TILES: usize = if cfg!(target_os = "android") { 2 } else { 0 };
 
 impl BeeperApp {
-    /// Closes the sheet, runs the camera off the UI thread and queues the shot. A cancelled
+    /// Closes the sheet, runs the camera off the UI thread and queues the shot. A canceled
     /// capture changes nothing: the reply being composed stays.
     pub(super) fn capture(&mut self, video: bool, cx: &mut Context<Self>) {
         let Some(room) = self.open.clone() else { return };

@@ -32,7 +32,7 @@ const NOTE_MS: u64 = 3000;
 const WHEEL_ZOOM: f32 = 0.005;
 /// Black between two pictures side by side while one slides in.
 const PAGE_GAP: f32 = 24.;
-/// A release faster than this (px/s) toward a neighbour turns to it, however short the pull.
+/// A release faster than this (px/s) toward a neighbor turns to it, however short the pull.
 const TURN_SPEED: f32 = 500.;
 /// How far a pull on a fitted picture goes before it is known to be sideways or up and down.
 const PULL_SLOP: f32 = 10.;
@@ -58,7 +58,7 @@ const NOTE_RISE: f32 = 8.;
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct View {
     scale: f32,
-    /// Where the picture's centre is from the screen's centre.
+    /// Where the picture's center is from the screen's center.
     off: (f32, f32),
 }
 
@@ -75,7 +75,7 @@ fn fitted(screen: (f32, f32), dims: Option<(f32, f32)>) -> (f32, f32) {
     }
 }
 
-/// How far the centre may move from the screen's centre: until the edge of the picture meets the
+/// How far the center may move from the screen's center: until the edge of the picture meets the
 /// edge of the screen, and not at all along a side that is still smaller than the screen.
 fn reach(scale: f32, screen: (f32, f32), fit: (f32, f32)) -> (f32, f32) {
     (((fit.0 * scale - screen.0) / 2.).max(0.), ((fit.1 * scale - screen.1) / 2.).max(0.))
@@ -87,7 +87,7 @@ fn clamped(view: View, screen: (f32, f32), fit: (f32, f32)) -> View {
     View { scale, off: (view.off.0.clamp(-rx, rx), view.off.1.clamp(-ry, ry)) }
 }
 
-/// Zooms to `scale` keeping the picture point under `at` (from the screen's centre) where it is.
+/// Zooms to `scale` keeping the picture point under `at` (from the screen's center) where it is.
 fn zoomed_about(view: View, at: (f32, f32), scale: f32, screen: (f32, f32), fit: (f32, f32)) -> View {
     let scale = scale.clamp(1., MAX_SCALE);
     let k = scale / view.scale;
@@ -102,7 +102,7 @@ fn zoomed_to(view: View, at: (f32, f32), scale: f32, screen: (f32, f32), fit: (f
     clamped(View { scale, off: (-(at.0 - view.off.0) * k, -(at.1 - view.off.1) * k) }, screen, fit)
 }
 
-/// A picture's place on screen: its centre and size.
+/// A picture's place on screen: its center and size.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 struct Rect {
     x: f32,
@@ -129,7 +129,7 @@ fn shrink(dy: f32, height: f32) -> f32 {
 }
 
 /// Where the picture is drawn: `view`, moved by `drift` and shrunk to `s` about `grab`, the point
-/// the finger took (offsets from the screen's centre), so that point stays under the finger.
+/// the finger took (offsets from the screen's center), so that point stays under the finger.
 fn placed(view: View, screen: (f32, f32), fit: (f32, f32), drift: (f32, f32), grab: (f32, f32), s: f32) -> Rect {
     Rect {
         x: screen.0 / 2. + view.off.0 + drift.0 + grab.0 * (1. - s),
@@ -214,7 +214,7 @@ enum Exit {
 /// A picture let go of on its way out: into its bubble when that is on screen, else off the
 /// screen while it fades.
 struct Throw {
-    /// Centre x, y, width, height.
+    /// Center x, y, width, height.
     rect: [Glide; 4],
     from: Rect,
     /// How much backdrop there was when the finger let go.
@@ -259,7 +259,7 @@ pub(super) struct Zoom {
     /// A finger moving the fitted picture.
     pull: Option<Pull>,
     drift: Drift,
-    /// Where the finger took a fitted picture it pulls, from the screen's centre.
+    /// Where the finger took a fitted picture it pulls, from the screen's center.
     grip: (f32, f32),
     pan: Option<Pan>,
     /// When the last step of a zoomed picture's fling arrived, while the fling coasts on.
@@ -345,7 +345,7 @@ fn dismisses(offset: f32, speed: f32, height: f32) -> bool {
     far || (speed.abs() > DISMISS_SPEED && speed.signum() == offset.signum())
 }
 
-/// How far the picture follows a sideways pull: 1:1 toward a neighbour, with resistance past the end.
+/// How far the picture follows a sideways pull: 1:1 toward a neighbor, with resistance past the end.
 fn give(offset: f32, width: f32, older: bool, newer: bool) -> f32 {
     let open = if offset > 0. { older } else { newer };
     if open { offset } else { motion::rubber_band(offset, width) }
@@ -395,15 +395,15 @@ impl Zoom {
         self.view = Some(clamped(view, self.screen, self.fit));
     }
 
-    /// A pointer position from the screen's centre.
-    fn centred(&self, at: Point<Pixels>) -> (f32, f32) {
+    /// A pointer position from the screen's center.
+    fn centerd(&self, at: Point<Pixels>) -> (f32, f32) {
         let at = at - self.origin;
         (f32::from(at.x) - self.screen.0 / 2., f32::from(at.y) - self.screen.1 / 2.)
     }
 
     fn zoom_by(&mut self, at: Point<Pixels>, factor: f32, reduce_motion: bool) {
         let now = self.grab(reduce_motion);
-        let at = self.centred(at);
+        let at = self.centerd(at);
         self.view = Some(zoomed_about(now, at, now.scale * factor, self.screen, self.fit));
     }
 
@@ -426,7 +426,7 @@ impl Zoom {
         let to = if from.scale > 1.05 {
             FIT
         } else {
-            zoomed_to(from, self.centred(at), DOUBLE_TAP_SCALE, self.screen, self.fit)
+            zoomed_to(from, self.centerd(at), DOUBLE_TAP_SCALE, self.screen, self.fit)
         };
         self.view = Some(to);
         self.glide = Some((from, now));
@@ -500,7 +500,7 @@ impl BeeperApp {
         self.fill_near(cx);
     }
 
-    /// The full picture for the one on screen or a neighbour; an answer for neither is dropped.
+    /// The full picture for the one on screen or a neighbor; an answer for neither is dropped.
     pub(super) fn viewed(&mut self, id: String, bytes: Vec<u8>) {
         let Some(format) = image_format(&bytes) else { return };
         let slot = match &mut self.viewer {
@@ -524,16 +524,16 @@ impl BeeperApp {
     }
 
     /// The pictures before and after the one on screen, among those of the open chat.
-    fn neighbours(&self) -> (Option<String>, Option<String>) {
+    fn neighbors(&self) -> (Option<String>, Option<String>) {
         let Some((id, _)) = &self.viewer else { return (None, None) };
         let set = pictures(self.msgs.iter().filter(|m| !self.is_hidden(&m.id)).map(|m| (m.id.as_str(), m.media.as_ref().map(|media| media.kind), m.deleted || m.media.as_ref().is_some_and(|media| media.once))));
         let (older, newer) = beside(&set, id);
         (older.map(str::to_owned), newer.map(str::to_owned))
     }
 
-    /// Keeps the neighbours' full pictures, frees any other, and asks for the missing ones.
+    /// Keeps the neighbors' full pictures, frees any other, and asks for the missing ones.
     fn fill_near(&mut self, cx: &mut Context<Self>) {
-        let (older, newer) = self.neighbours();
+        let (older, newer) = self.neighbors();
         let wanted = [older, newer];
         let mut kept = Vec::with_capacity(2);
         for (id, image) in std::mem::take(&mut self.zoom.near) {
@@ -563,7 +563,7 @@ impl BeeperApp {
     /// Shows the next newer or older picture of the chat. At the oldest loaded one, asks once for
     /// older history, whose pictures then join the row.
     fn turn(&mut self, newer: bool, cx: &mut Context<Self>) -> bool {
-        let (before, after) = self.neighbours();
+        let (before, after) = self.neighbors();
         let Some(to) = (if newer { after } else { before }) else {
             self.reached_oldest(cx);
             return false;
@@ -591,7 +591,7 @@ impl BeeperApp {
         if is_picture(id) {
             return;
         }
-        if self.neighbours().0.is_none() && self.zoom.older_from.as_ref() != Some(id) {
+        if self.neighbors().0.is_none() && self.zoom.older_from.as_ref() != Some(id) {
             self.zoom.older_from = Some(id.clone());
             self.load_older(cx);
         }
@@ -678,7 +678,7 @@ impl BeeperApp {
                 // A finger that rested before lifting has no speed left.
                 pull.samples.push_back((now, pull.offset));
                 let speed = super::gallery::speed(&pull.samples);
-                let (older, newer) = self.neighbours();
+                let (older, newer) = self.neighbors();
                 let (width, height) = self.zoom.screen;
                 match pull.across {
                     Some(true) => {
@@ -961,7 +961,7 @@ impl BeeperApp {
 
     fn viewer_pinch(&mut self, e: &PinchEvent, cx: &mut Context<Self>) {
         let reduce = cx.reduce_motion();
-        let at = self.zoom.centred(e.position);
+        let at = self.zoom.centerd(e.position);
         match e.phase {
             TouchPhase::Started => {
                 self.zoom.pinching = true;
@@ -1124,8 +1124,8 @@ impl BeeperApp {
             self.zoom.glide = None;
         }
 
-        let (older, newer) = if live { self.neighbours() } else { (None, None) };
-        // History paged in while the picture is open brings a neighbour that is not asked for yet.
+        let (older, newer) = if live { self.neighbors() } else { (None, None) };
+        // History paged in while the picture is open brings a neighbor that is not asked for yet.
         if [&older, &newer].into_iter().flatten().any(|n| self.zoom.near.iter().all(|(k, _)| k != n)) {
             self.fill_near(cx);
         }
@@ -1450,12 +1450,12 @@ mod tests {
     }
 
     #[test]
-    fn only_the_neighbours_on_each_side_are_kept() {
+    fn only_the_neighbors_on_each_side_are_kept() {
         let set = ["$a", "$b", "$c", "$d"];
         assert_eq!(beside(&set, "$b"), (Some("$a"), Some("$c")));
         assert_eq!(beside(&set, "$a"), (None, Some("$b")));
         assert_eq!(beside(&set, "$d"), (Some("$c"), None));
-        assert_eq!(beside(&set, "$x"), (None, None), "a picture not in the chat has no neighbours");
+        assert_eq!(beside(&set, "$x"), (None, None), "a picture not in the chat has no neighbors");
         assert_eq!(beside(&["$a"], "$a"), (None, None));
     }
 
@@ -1510,12 +1510,12 @@ mod tests {
         assert_eq!(shrink(0., h), 1.);
         assert!(near(shrink(0.15 * h, h), 0.95), "at the closing threshold");
         assert!(near(shrink(-2. * h, h), 0.8), "no smaller, up or down");
-        // The point the finger took stays under it: grab (100, 200) from the centre, pulled 90 down.
+        // The point the finger took stays under it: grab (100, 200) from the center, pulled 90 down.
         let (grab, dy) = ((100., 200.), 90.);
         let s = shrink(dy, h);
         let r = placed(FIT, PHONE, PHONE, (0., dy), grab, s);
         let finger = (PHONE.0 / 2. + grab.0, PHONE.1 / 2. + grab.1 + dy);
-        // The picture point under the finger, as a share of the picture from its centre, is unchanged.
+        // The picture point under the finger, as a share of the picture from its center, is unchanged.
         assert!(near((finger.0 - r.x) / r.w, grab.0 / PHONE.0));
         assert!(near((finger.1 - r.y) / r.h, grab.1 / PHONE.1));
         assert!(near(r.w, PHONE.0 * s));

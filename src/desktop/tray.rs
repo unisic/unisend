@@ -24,7 +24,7 @@ const QUIT: i32 = 2;
 /// Shown when the icon theme has no `dev.gpui.beeper` (the app not installed): 64 x 64 x 4 bytes.
 const ICON: &[u8] = include_bytes!("../../packaging/linux/icons/hicolor/64x64/apps/dev.gpui.beeper.png");
 
-/// The dot: centre and radius in the icon's 64 x 64, the clear ring around it, and `Palette::accent`.
+/// The dot: center and radius in the icon's 64 x 64, the clear ring around it, and `Palette::accent`.
 const DOT: (f32, f32, f32) = (49.0, 15.0, 12.0);
 const RING: f32 = 4.0;
 const ACCENT: [u8; 3] = [0xc6, 0xf2, 0x4e];

@@ -510,7 +510,7 @@ impl BeeperApp {
         self.settings.save(&self.dir);
         let s = &self.settings;
         cx.set_global(s.theme);
-        cx.set_global(s.chat_colour);
+        cx.set_global(s.chat_color);
         crate::sync_theme(Some(window), cx);
         appearance::SCALE.store(s.text_size.percent(), std::sync::atomic::Ordering::Relaxed);
         s.notify_shows.apply();
@@ -615,13 +615,13 @@ mod tests {
     fn only_the_parts_sent_and_taken_change() {
         let here = settings();
         let mut there = settings();
-        (there.chat_colour, there.enter_sends, there.incognito) = (crate::ChatColour::Blue, false, !here.incognito);
+        (there.chat_color, there.enter_sends, there.incognito) = (crate::ChatColor::Blue, false, !here.incognito);
         // Appearance and chats sent, chats then switched off here.
         let mut got = Pending::read(&to_file_with(&there, 0b11)).unwrap();
         assert_eq!(got.has, 0b11);
         got.take = 0b01;
         let after = got.onto(&here);
-        assert_eq!((after.chat_colour, after.enter_sends, after.incognito), (crate::ChatColour::Blue, here.enter_sends, here.incognito));
+        assert_eq!((after.chat_color, after.enter_sends, after.incognito), (crate::ChatColor::Blue, here.enter_sends, here.incognito));
         let mut all = Pending::read(&to_file(&there)).unwrap();
         // No chat has settings of its own there, so that part is not offered.
         assert_eq!(all.has, ALL & !(1 << 5));

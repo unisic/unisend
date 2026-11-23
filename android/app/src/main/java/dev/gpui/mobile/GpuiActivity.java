@@ -110,12 +110,12 @@ public class GpuiActivity extends GpuiInputActivity {
 
             @Override
             public void onBackCancelled() {
-                back(BACK_CANCELLED, null);
+                back(BACK_CANCELED, null);
             }
         });
     }
 
-    private static final int BACK_STARTED = 0, BACK_MOVED = 1, BACK_INVOKED = 2, BACK_CANCELLED = 3;
+    private static final int BACK_STARTED = 0, BACK_MOVED = 1, BACK_INVOKED = 2, BACK_CANCELED = 3;
 
     private void back(int phase, BackEvent e) {
         try {

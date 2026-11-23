@@ -35,7 +35,7 @@ public class GpuiPickerActivity extends Activity {
 
     /** Latch that the calling thread waits on. */
     static CountDownLatch sLatch;
-    /** Result URIs from the picker. Null means cancelled. */
+    /** Result URIs from the picker. Null means canceled. */
     static AtomicReference<ArrayList<String>> sResult = new AtomicReference<>(null);
     /** The intent to launch. Set before starting this Activity. */
     static Intent sPendingIntent;

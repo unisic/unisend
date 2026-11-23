@@ -1,6 +1,6 @@
-//! The window's own controls where the compositor lets the app draw them (Linux): minimise,
-//! maximise and close at the right end of the top row, and the top rows themselves as the title
-//! bar: a drag moves the window, a double click maximises it, the right button opens the window
+//! The window's own controls where the compositor lets the app draw them (Linux): minimize,
+//! maximize and close at the right end of the top row, and the top rows themselves as the title
+//! bar: a drag moves the window, a double click maximizes it, the right button opens the window
 //! menu. The component library's root already draws the rest of the frame (resize edges, shadow, a
 //! hairline edge) under client decorations. Under server decorations, and on phones, nothing here
 //! draws or moves anything.
@@ -56,7 +56,7 @@ pub(super) fn reserve(window: &Window) -> f32 {
 pub(super) fn controls(window: &Window, cx: &App) -> Option<AnyElement> {
     insets(window)?;
     let offered = window.window_controls();
-    let maximised = window.is_maximized();
+    let maximized = window.is_maximized();
     Some(
         h_flex()
             .absolute()
@@ -64,8 +64,8 @@ pub(super) fn controls(window: &Window, cx: &App) -> Option<AnyElement> {
             .right_0()
             .h(px(BAR_H))
             .pr(px(END_PAD))
-            .when(offered.minimize, |el| el.child(control(Control::Minimise, cx)))
-            .when(offered.maximize, |el| el.child(control(if maximised { Control::Restore } else { Control::Maximise }, cx)))
+            .when(offered.minimize, |el| el.child(control(Control::Minimize, cx)))
+            .when(offered.maximize, |el| el.child(control(if maximized { Control::Restore } else { Control::Maximize }, cx)))
             .child(control(Control::Close, cx))
             .into_any_element(),
     )
@@ -118,8 +118,8 @@ pub(super) fn wrap(content: AnyElement, window: &mut Window, cx: &mut App) -> An
 
 #[derive(Clone, Copy)]
 enum Control {
-    Minimise,
-    Maximise,
+    Minimize,
+    Maximize,
     Restore,
     Close,
 }
@@ -127,8 +127,8 @@ enum Control {
 fn control(kind: Control, cx: &App) -> impl IntoElement {
     let p = Palette::of(cx);
     let (id, icon, label) = match kind {
-        Control::Minimise => ("window-minimise", IconName::Minus, t!("Minimise")),
-        Control::Maximise => ("window-maximise", IconName::Square, t!("Maximise")),
+        Control::Minimize => ("window-minimize", IconName::Minus, t!("Minimize")),
+        Control::Maximize => ("window-maximize", IconName::Square, t!("Maximize")),
         Control::Restore => ("window-restore", IconName::Copy, t!("Restore")),
         Control::Close => ("window-close", IconName::X, t!("Close")),
     };
@@ -155,8 +155,8 @@ fn control(kind: Control, cx: &App) -> impl IntoElement {
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             match kind {
-                Control::Minimise => window.minimize_window(),
-                Control::Maximise | Control::Restore => window.zoom_window(),
+                Control::Minimize => window.minimize_window(),
+                Control::Maximize | Control::Restore => window.zoom_window(),
                 #[cfg(not(target_os = "android"))]
                 Control::Close => crate::desktop::close(window, cx),
                 #[cfg(target_os = "android")]

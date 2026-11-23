@@ -56,7 +56,7 @@ public final class Update extends BroadcastReceiver {
         PackageInstaller installer = context.getPackageManager().getPackageInstaller();
         PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
         params.setAppPackageName(context.getPackageName());
-        // Honoured only once this app is the installer of record; before that the system asks.
+        // Honored only once this app is the installer of record; before that the system asks.
         if (Build.VERSION.SDK_INT >= 31) {
             params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED);
         }

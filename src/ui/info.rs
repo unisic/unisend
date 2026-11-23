@@ -660,7 +660,7 @@ impl BeeperApp {
             }
             Row::Shelves => {
                 let current = self.info.shelf;
-                // The pill glides to the chosen third; the labels switch colour at once.
+                // The pill glides to the chosen third; the labels switch color at once.
                 let slot = transition("shelf-pill", current as usize as f32, motion::enter(), window, cx);
                 let choice = |label: &'static str, shelf: Shelf, cx: &mut Context<Self>| {
                     let on = current == shelf;
@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn links_come_from_preview_text_and_markup_once() {
         let mut m = msg("$1", "see https://a.example/x and https://b.example.");
-        m.link = Some(Link { url: "https://a.example/x".into(), title: "A".into(), description: String::new(), site: "a".into(), image: None, colour: None, video: false });
+        m.link = Some(Link { url: "https://a.example/x".into(), title: "A".into(), description: String::new(), site: "a".into(), image: None, color: None, video: false });
         let run = |href: &str| Run { text: "here".into(), href: Some(href.into()), ..Run::default() };
         m.rich = Some(Rich { blocks: vec![Block::Para(vec![run("https://c.example"), run("https://matrix.to/#/@ann:x"), run("mailto:a@b")])] });
         let urls: Vec<String> = links(&m).into_iter().map(|l| l.url).collect();

@@ -246,7 +246,7 @@ pub(super) async fn run_install(http: reqwest::Client, ev: tokio::sync::mpsc::Se
 fn status_text(status: i32, message: &str) -> String {
     use crate::i18n::t;
     match status {
-        3 => t!("cancelled").to_owned(),
+        3 => t!("canceled").to_owned(),
         // STATUS_FAILURE_CONFLICT: most often an APK signed with another key.
         5 => t!("signed with a different key than the installed app").to_owned(),
         4 | 7 => t!("Android cannot install this file on this phone").to_owned(),

@@ -7,7 +7,7 @@
   which caused a visible black flash on startup:
 
     1. Activity starts → system shows the theme's windowBackground
-    2. Native surface is created → wgpu renderer initialises
+    2. Native surface is created → wgpu renderer initializes
     3. First real GPUI frame is drawn
 
   Between steps 1 and 3 the user saw black (the old theme's default).

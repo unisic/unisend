@@ -156,7 +156,7 @@ public final class AppLock {
         });
     }
 
-    /** Shows the system prompt; the lock screen's button calls this after a cancelled prompt. */
+    /** Shows the system prompt; the lock screen's button calls this after a canceled prompt. */
     public static void authenticate(Activity activity) {
         activity.runOnUiThread(() -> ask(activity, false));
     }
@@ -172,7 +172,7 @@ public final class AppLock {
         activity.runOnUiThread(() -> ask(activity, true));
     }
 
-    /** 0 nothing asked, 1 waiting, 2 passed, 3 failed or cancelled; an answer is given once. */
+    /** 0 nothing asked, 1 waiting, 2 passed, 3 failed or canceled; an answer is given once. */
     public static synchronized int takeConfirm() {
         int answer = confirmed;
         if (answer == PASSED || answer == FAILED) {

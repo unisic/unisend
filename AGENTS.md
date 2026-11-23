@@ -52,7 +52,7 @@ the platform's file before changing its code or building for it.
 
 ## Read before you change
 
-- What a screen looks like, a colour, a size, a gesture: `docs/design.md`. Colours come from
+- What a screen looks like, a color, a size, a gesture: `docs/design.md`. Colors come from
   `Palette::of(cx)` and font sizes go through `fs()`.
 - A text the user reads: `docs/i18n.md`. It is `t!("English")` plus its Polish in
   `src/i18n/pl.rs`, and `cargo test --lib i18n` fails on a missing one.

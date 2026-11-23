@@ -1,7 +1,7 @@
-//! A colour emoji font of the user's own in place of the bundled or system one, where GPUI draws
+//! A color emoji font of the user's own in place of the bundled or system one, where GPUI draws
 //! text itself (Linux and Android; macOS and iOS shape with CoreText, which uses the system's).
 //!
-//! GPUI's text system draws a glyph in colour only from a face whose PostScript name is
+//! GPUI's text system draws a glyph in color only from a face whose PostScript name is
 //! "NotoColorEmoji", cosmic-text's own fallback looks for the family "Noto Color Emoji" on Linux,
 //! and GPUI drops a face without a Latin 'm' when its family is requested. So the copy kept here
 //! is renamed to those names and given an 'm', which lets it also be the root text style's
@@ -38,7 +38,7 @@ pub(crate) struct Set {
     pub name: &'static str,
     /// The family `finish` reads from the file, which `Settings::emoji_font` keeps.
     pub family: &'static str,
-    /// Who made it and under what licence.
+    /// Who made it and under what license.
     pub credit: &'static str,
     pub url: &'static str,
     pub sha256: &'static str,
@@ -117,7 +117,7 @@ pub(crate) fn apply(settings: &mut Settings, dir: &Path, cx: &mut gpui_kit::App)
     take_family(bytes, Some(dir), cx)
 }
 
-/// Adds the device's own colour emoji font on Android when GPUI can draw it (see `system`), else
+/// Adds the device's own color emoji font on Android when GPUI can draw it (see `system`), else
 /// the bundled copy (already named and given an 'm', see `assets/fonts/README`) and makes it
 /// the emoji family, for systems whose own emoji font is COLRv1, which GPUI cannot draw (Fedora,
 /// Android 13+). Where Android's NotoColorEmoji is CBDT, gpui-mobile has loaded it and it stays.
@@ -268,7 +268,7 @@ pub(crate) fn drawable(emoji: &str) -> bool {
 
 const SYSTEM_PREFIX: &str = "emoji-system-v1-";
 
-/// Whether the font's table directory has bitmap colour glyphs GPUI can draw (CBDT with CBLC, or
+/// Whether the font's table directory has bitmap color glyphs GPUI can draw (CBDT with CBLC, or
 /// sbix). Reads only the directory, as the fonts are tens of MB.
 fn has_bitmaps(path: &Path) -> bool {
     let Ok(mut file) = File::open(path) else { return false };
@@ -279,7 +279,7 @@ fn has_bitmaps(path: &Path) -> bool {
     has(b"sbix") || (has(b"CBDT") && has(b"CBLC"))
 }
 
-/// The device's colour emoji fonts in `fonts`, best first: Samsung's, then any other `*Emoji*`
+/// The device's color emoji fonts in `fonts`, best first: Samsung's, then any other `*Emoji*`
 /// font with bitmaps. NotoColorEmoji is left to gpui-mobile, flag-only subsets are not emoji fonts.
 fn candidates(fonts: &Path) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = fs::read_dir(fonts)
@@ -540,20 +540,20 @@ fn rename(file: &mut File, family: &str) -> Result<(), String> {
     };
     if table(b"sbix").is_none() && (table(b"CBDT").is_none() || table(b"CBLC").is_none()) && !colr_v0 {
         return Err(if table(b"COLR").is_some() {
-            t!("This font's colour format (COLRv1) cannot be drawn yet. Choose one with bitmap emoji.").into()
+            t!("This font's color format (COLRv1) cannot be drawn yet. Choose one with bitmap emoji.").into()
         } else {
-            t!("Not a colour emoji font.").into()
+            t!("Not a color emoji font.").into()
         });
     }
     let (names, cmap) = (table(b"name").ok_or_else(not_font)?, table(b"cmap").ok_or_else(not_font)?);
     let renamed = renamed(&read_table(names)?, family).ok_or_else(not_font)?;
-    let with_m = with_m(&read_table(cmap)?).ok_or_else(|| t!("Not a colour emoji font.").to_owned())?;
+    let with_m = with_m(&read_table(cmap)?).ok_or_else(|| t!("Not a color emoji font.").to_owned())?;
     for (r, bytes) in [(names, renamed), (cmap, with_m)] {
         append_table(file, u64::from(face) + 12 + r as u64, bytes).map_err(io)?;
     }
     if collection {
         // Version 1, one font: the other faces keep their own names, which the text system
-        // would otherwise find as fonts it does not draw in colour.
+        // would otherwise find as fonts it does not draw in color.
         write_at(file, 4, &[0, 1, 0, 0, 0, 0, 0, 1]).map_err(io)?;
     }
     Ok(())
@@ -758,7 +758,7 @@ fn families(text: &str) -> Vec<(Range<usize>, &'static str)> {
 }
 
 /// `text` with `marks` (sorted, apart) as `StyledText`, and each sequence of `families` set in its
-/// family. Marks are cut at the sequences' edges so a link or mention keeps its colour around them.
+/// family. Marks are cut at the sequences' edges so a link or mention keeps its color around them.
 pub(crate) fn styled(text: impl Into<gpui_kit::SharedString>, marks: Vec<(Range<usize>, gpui_kit::HighlightStyle)>) -> gpui_kit::StyledText {
     let text = text.into();
     let found = families(&text);
@@ -929,7 +929,7 @@ mod tests {
     fn refuses_what_it_cannot_draw() {
         let dir = dir("refuse");
         let inter = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/Inter-Regular.ttf");
-        assert_eq!(import(&inter, &dir).unwrap_err(), "Not a colour emoji font.");
+        assert_eq!(import(&inter, &dir).unwrap_err(), "Not a color emoji font.");
         let text = dir.join("notes.txt");
         fs::write(&text, "not a font").unwrap();
         assert_eq!(import(&text, &dir).unwrap_err(), "Not a font file.");

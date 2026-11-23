@@ -10,7 +10,7 @@ use crate::i18n::LanguageChoice;
 use super::receipt::{IncomingStatus, ReceiptStyle};
 use super::rowswipe::SwipeAction;
 use crate::tones::{Kind, Tone};
-use crate::{ChatColour, ThemeChoice};
+use crate::{ChatColor, ThemeChoice};
 
 /// A settings row, and the widest a settings page grows.
 pub(super) const ROW_H: f32 = 52.;
@@ -206,10 +206,10 @@ impl BeeperApp {
         cx.refresh_windows();
     }
 
-    fn set_chat_colour(&mut self, colour: ChatColour, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings.chat_colour = colour;
+    fn set_chat_color(&mut self, color: ChatColor, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.chat_color = color;
         self.settings.save(&self.dir);
-        cx.set_global(colour);
+        cx.set_global(color);
         crate::sync_theme(Some(window), cx);
         cx.notify();
     }
@@ -471,7 +471,7 @@ impl BeeperApp {
 
     /// The settings list: one row per category, each with what is set in it now.
     /// Settings on a wide window, laid out as the chats are: the categories where the chat list
-    /// stands, the chosen one beside them in a centred column.
+    /// stands, the chosen one beside them in a centerd column.
     fn render_settings_split(&mut self, banners: Option<AnyElement>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = Palette::of(cx);
         let edge = GUTTER + 6.;
@@ -711,10 +711,10 @@ impl BeeperApp {
         let themes = Self::segmented("themes", "themes-pill", &themes, self.settings.theme, Self::set_theme, window, cx);
         let languages = [(LanguageChoice::System, t!("System")), (LanguageChoice::English, "English"), (LanguageChoice::Polish, "Polski")];
         let languages = Self::segmented("languages", "languages-pill", &languages, self.settings.language, Self::set_language, window, cx);
-        let swatches = h_flex().flex_wrap().gap_x(px(4.)).pb(px(8.)).children(ChatColour::ALL.map(|colour| {
-            let on = self.settings.chat_colour == colour;
-            let name = t!("Chat colour: {colour}", colour = colour.label());
-            let fill = colour.fill().map_or(p.raised, |hex| rgb(hex).into());
+        let swatches = h_flex().flex_wrap().gap_x(px(4.)).pb(px(8.)).children(ChatColor::ALL.map(|color| {
+            let on = self.settings.chat_color == color;
+            let name = t!("Chat color: {color}", color = color.label());
+            let fill = color.fill().map_or(p.raised, |hex| rgb(hex).into());
             div()
                 .id(SharedString::from(name.clone()))
                 .size(px(TAP))
@@ -725,7 +725,7 @@ impl BeeperApp {
                 .aria_label(name)
                 .aria_toggled(on.into())
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, window, cx| this.set_chat_colour(colour, window, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| this.set_chat_color(color, window, cx)))
                 .child(
                     div()
                         .size(px(32.))
@@ -746,7 +746,7 @@ impl BeeperApp {
                     .child(row(t!("Language"), "", cx))
                     .child(div().pb(px(8.)).child(languages)),
             )
-            .child(card(cx).child(row(t!("Chat colour"), &t!("{colour}. Your own messages, on this device.", colour = self.settings.chat_colour.label()), cx)).child(swatches))
+            .child(card(cx).child(row(t!("Chat color"), &t!("{color}. Your own messages, on this device.", color = self.settings.chat_color.label()), cx)).child(swatches))
             .child(card(cx).children(self.render_look(cx)))
             .child({
                 let weak = cx.entity().downgrade();
@@ -1694,7 +1694,7 @@ pub(super) fn qr_png(data: &str) -> Option<Vec<u8>> {
     Some(png.into_inner())
 }
 
-/// The Emoji setting: a colour emoji font of the user's own (a file, or one of `emoji::SETS`
+/// The Emoji setting: a color emoji font of the user's own (a file, or one of `emoji::SETS`
 /// downloaded), or the system's.
 #[derive(Default)]
 pub(super) struct EmojiChoice {

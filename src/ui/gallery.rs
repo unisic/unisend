@@ -284,7 +284,7 @@ impl Attach {
         Icon::new(icon).size_5().into_any_element()
     }
 
-    /// A labelled round button of the attach sheet.
+    /// A labeled round button of the attach sheet.
     fn button(self, cx: &App) -> Stateful<Div> {
         let p = Palette::of(cx);
         let group = SharedString::from(self.id());
@@ -808,7 +808,7 @@ impl BeeperApp {
         let pick = transition(key("gallery-pick"), number.is_some() as u8 as f32, if number.is_some() { motion::enter() } else { motion::exit() }, window, cx);
         let shade = transition(key("gallery-lock"), if blocked { 0.4 } else { 1. }, fade(), window, cx);
         let loaded = transition(key("gallery-thumb"), thumb.is_some() as u8 as f32, fade(), window, cx);
-        // The badge grows and settles back once, about a fixed centre, only on the way in.
+        // The badge grows and settles back once, about a fixed center, only on the way in.
         let badge = 24. + if number.is_some() { PICK_POP * (std::f32::consts::PI * pick).sin() } else { 0. };
         let marker = div()
             .absolute()

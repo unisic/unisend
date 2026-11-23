@@ -35,7 +35,7 @@ public final class ContactPick extends Activity {
 
     private Uri picked;
 
-    /** Returns the path of the saved ".vcf", or null when cancelled or unreadable. */
+    /** Returns the path of the saved ".vcf", or null when canceled or unreadable. */
     public static String pick(Activity activity) {
         CountDownLatch wait = new CountDownLatch(1);
         latch = wait;

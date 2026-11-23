@@ -21,7 +21,7 @@ public final class GpuiFilePicker {
      *
      * @param activity The current Activity.
      * @param mimeTypes Pipe-separated MIME types (e.g. "image/jpeg|image/png") or "*\/*" for all.
-     * @return The selected file URI as a string, or null if cancelled.
+     * @return The selected file URI as a string, or null if canceled.
      */
     public static String openFile(final Activity activity, final String mimeTypes) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -40,7 +40,7 @@ public final class GpuiFilePicker {
      *
      * @param activity The current Activity.
      * @param mimeTypes Pipe-separated MIME types.
-     * @return Array of selected file URIs, or null if cancelled.
+     * @return Array of selected file URIs, or null if canceled.
      */
     public static String[] openFiles(final Activity activity, final String mimeTypes) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -61,7 +61,7 @@ public final class GpuiFilePicker {
      * @param activity The current Activity.
      * @param mimeType MIME type for the file to create.
      * @param suggestedName Suggested file name.
-     * @return The chosen save URI as a string, or null if cancelled.
+     * @return The chosen save URI as a string, or null if canceled.
      */
     public static String getSavePath(final Activity activity, final String mimeType, final String suggestedName) {
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
@@ -82,7 +82,7 @@ public final class GpuiFilePicker {
      * Open a directory picker (ACTION_OPEN_DOCUMENT_TREE).
      *
      * @param activity The current Activity.
-     * @return The chosen directory URI as a string, or null if cancelled.
+     * @return The chosen directory URI as a string, or null if canceled.
      */
     public static String getDirectoryPath(final Activity activity) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);

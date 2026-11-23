@@ -626,7 +626,7 @@ mod tests {
 
     #[test]
     fn whatsapp_capabilities_offer_phone_contacts_and_a_group() {
-        // mautrix-whatsapp pkg/connector/capabilities.go, as bridgev2 serialises it.
+        // mautrix-whatsapp pkg/connector/capabilities.go, as bridgev2 serializes it.
         let v = json!({
             "resolve_identifier": { "create_dm": true, "lookup_phone": true, "lookup_email": false, "lookup_username": false,
                                     "any_phone": false, "contact_list": true, "search": false },

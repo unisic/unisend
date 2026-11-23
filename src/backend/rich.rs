@@ -361,7 +361,7 @@ fn walk(node: &NodeRef, st: &Style, depth: usize, blocks: &mut Vec<Block>, cur: 
             inner.spoiler = true;
             kids(&inner, blocks, cur, b)
         }
-        // Unknown tags and spans (colours, mention pills) keep their text.
+        // Unknown tags and spans (colors, mention pills) keep their text.
         _ => kids(&inner, blocks, cur, b),
     }
 }

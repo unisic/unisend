@@ -249,7 +249,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// mautrix-meta `metaCaps` (a Messenger or Instagram DM), as bridgev2 serialises it.
+    /// mautrix-meta `metaCaps` (a Messenger or Instagram DM), as bridgev2 serializes it.
     fn meta_dm() -> Value {
         json!({
             "id": "fi.mau.meta.capabilities.2026_11_02+ffmpeg",
