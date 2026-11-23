@@ -147,10 +147,18 @@ impl Thumbs {
     }
 }
 
-/// Speed in px/s over the last 100 ms of a drag.
+/// Speed in px/s over the 100 ms before the finger stopped where it let go. The release lands a
+/// frame or more after the last move, at the same place, so it must not count as a rest; a finger
+/// held still for longer than that before lifting has no speed left.
 pub(super) fn speed(samples: &VecDeque<(Instant, f32)>) -> f32 {
-    let Some(&(end, at)) = samples.back() else { return 0. };
-    let Some(&(start, from)) = samples.iter().find(|(t, _)| end.duration_since(*t) <= Duration::from_millis(100)) else { return 0. };
+    const WINDOW: Duration = Duration::from_millis(100);
+    let Some(&(last, at)) = samples.back() else { return 0. };
+    let stopped = samples.iter().rposition(|&(_, v)| v != at).map_or(0, |i| i + 1);
+    let end = samples[stopped].0;
+    if last.duration_since(end) > WINDOW {
+        return 0.;
+    }
+    let Some(&(start, from)) = samples.iter().find(|(t, _)| end.duration_since(*t) <= WINDOW) else { return 0. };
     let dt = end.duration_since(start).as_secs_f32();
     if dt < 0.001 { 0. } else { (at - from) / dt }
 }
@@ -765,8 +773,8 @@ impl BeeperApp {
                         .relative()
                         .top(px(frame.y))
                         .w(px(width))
-                        .h(px(height + bottom))
-                        .pb(px(bottom + 8.))
+                        .h(px(height + bottom + frame.lift()))
+                        .pb(px(bottom + 8. + frame.lift()))
                         .rounded_t(px(RADIUS))
                         .overflow_hidden()
                         .bg(p.surface)
@@ -1159,5 +1167,9 @@ mod tests {
         assert!((speed(&flick) - 1250.).abs() < 1.);
         let rested = VecDeque::from([at(0, 0.), at(500, 30.), at(1000, 60.)]);
         assert_eq!(speed(&rested), 0., "no samples in the last 100 ms but the end");
+        let late_release = VecDeque::from([at(0, 25.), at(30, 63.), at(64, 86.), at(119, 129.), at(173, 129.)]);
+        assert!((speed(&late_release) - 741.6).abs() < 1., "a release 54 ms after the last move keeps the flick");
+        let held = VecDeque::from([at(0, 0.), at(16, 20.), at(32, 40.), at(200, 40.)]);
+        assert_eq!(speed(&held), 0., "held still past the window before lifting");
     }
 }

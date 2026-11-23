@@ -24,7 +24,9 @@ const DOUBLE_TAP: Duration = Duration::from_millis(300);
 const DOUBLE_TAP_SLOP: f32 = 48.;
 /// A press that moved less than this (px) is still a tap.
 const DRAG_SLOP: f32 = 4.;
-const ZOOM_MS: u64 = 220;
+/// A zoom's landing: UIKit's spring response (s), and how long until it is drawn at rest.
+const ZOOM_RESPONSE: f32 = 0.3;
+const ZOOM_MS: u64 = 400;
 const NOTE_MS: u64 = 3000;
 /// One wheel notch with ctrl held zooms by about this much per pixel of delta.
 const WHEEL_ZOOM: f32 = 0.005;
@@ -32,17 +34,18 @@ const WHEEL_ZOOM: f32 = 0.005;
 const PAGE_GAP: f32 = 24.;
 /// A release faster than this (px/s) toward a neighbour turns to it, however short the pull.
 const TURN_SPEED: f32 = 500.;
+/// How far a pull on a fitted picture goes before it is known to be sideways or up and down.
+const PULL_SLOP: f32 = 10.;
 /// Past this share of the screen's height a pull up or down closes the picture.
 const DISMISS_SHARE: f32 = 0.15;
 const DISMISS_SPEED: f32 = 800.;
-/// Past the last picture a pull moves the picture this share of the finger's travel.
+/// Past an edge a released picture keeps this share of the finger's speed, as the rubber band let it move.
 const EDGE_GIVE: f32 = 0.3;
 /// The bars' height: a row of buttons with room for a label under each icon.
 const ACTIONS_H: f32 = 64.;
-/// Past the edge of a zoomed picture a finger moves it `EDGE_GIVE` of its travel, at most this share of the screen.
-const OVERPAN: f32 = 0.15;
-/// A picture pulled up or down shrinks by this share at most, reached at `SHRINK_AT` of the screen's height.
-const SHRINK: f32 = 0.3;
+/// A picture pulled up or down shrinks by this share at most, reached at `SHRINK_AT` of the screen's
+/// height: to 0.8, as in iOS Photos.
+const SHRINK: f32 = 0.2;
 const SHRINK_AT: f32 = 0.6;
 /// A pinch below the fitted size stops shrinking here; let go below `PINCH_CLOSE`, the picture closes.
 const PINCH_MIN: f32 = 0.6;
@@ -91,6 +94,14 @@ fn zoomed_about(view: View, at: (f32, f32), scale: f32, screen: (f32, f32), fit:
     clamped(View { scale, off: (at.0 - (at.0 - view.off.0) * k, at.1 - (at.1 - view.off.1) * k) }, screen, fit)
 }
 
+/// Zooms to `scale` bringing the picture point under `at` (from the screen's center) toward the
+/// center, as a double tap zooms in iOS Photos, as far as the picture's edges allow.
+fn zoomed_to(view: View, at: (f32, f32), scale: f32, screen: (f32, f32), fit: (f32, f32)) -> View {
+    let scale = scale.clamp(1., MAX_SCALE);
+    let k = scale / view.scale;
+    clamped(View { scale, off: (-(at.0 - view.off.0) * k, -(at.1 - view.off.1) * k) }, screen, fit)
+}
+
 /// A picture's place on screen: its centre and size.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 struct Rect {
@@ -129,10 +140,10 @@ fn placed(view: View, screen: (f32, f32), fit: (f32, f32), drift: (f32, f32), gr
 }
 
 /// A zoomed picture's offset along one axis for a finger's `raw` one: 1:1 up to the edge, past it
-/// `EDGE_GIVE` of the travel, at most `OVERPAN` of the screen.
+/// rubber-banded against the `screen`.
 fn rubber(raw: f32, reach: f32, screen: f32) -> f32 {
     let over = raw.abs() - reach;
-    if over <= 0. { raw } else { raw.signum() * (reach + (over * EDGE_GIVE).min(screen * OVERPAN)) }
+    if over <= 0. { raw } else { raw.signum() * (reach + motion::rubber_band(over, screen)) }
 }
 
 /// The scale drawn for a pinch's `raw` one: past the largest and below the fitted size it meets
@@ -293,8 +304,13 @@ fn is_picture(id: &str) -> bool {
 /// to it anyway.
 struct Pull {
     across: Option<bool>,
+    /// The pan so far, both ways, until it is past `PULL_SLOP` and its axis is known.
+    moved: (f32, f32),
     offset: f32,
     samples: VecDeque<(Instant, f32)>,
+    /// Sideways during a pull up or down, which the picture follows too, as in iOS Photos.
+    cross: f32,
+    cross_samples: VecDeque<(Instant, f32)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -307,7 +323,9 @@ enum Turn {
 /// Where a sideways pull lets go: `offset` is the drawn one, positive when the finger moved right,
 /// which brings the older picture in from the left.
 fn settle(offset: f32, speed: f32, width: f32, older: bool, newer: bool) -> Turn {
-    let far = offset.abs() > width * 0.5;
+    // Where the flick would carry it, as UIKit pages: a finger thrown back cancels a long pull.
+    let landing = offset + motion::project_fast(speed);
+    let far = landing.abs() > width * 0.5 && landing.signum() == offset.signum();
     let flung = speed.abs() > TURN_SPEED && speed.signum() == offset.signum();
     if !(far || flung) || offset == 0. {
         Turn::Stay
@@ -322,13 +340,15 @@ fn settle(offset: f32, speed: f32, width: f32, older: bool, newer: bool) -> Turn
 
 /// Whether a pull up or down lets go far or fast enough to close the picture.
 fn dismisses(offset: f32, speed: f32, height: f32) -> bool {
-    offset.abs() > height * DISMISS_SHARE || (speed.abs() > DISMISS_SPEED && speed.signum() == offset.signum())
+    let landing = offset + motion::project_fast(speed);
+    let far = landing.abs() > height * DISMISS_SHARE && landing.signum() == offset.signum();
+    far || (speed.abs() > DISMISS_SPEED && speed.signum() == offset.signum())
 }
 
 /// How far the picture follows a sideways pull: 1:1 toward a neighbour, with resistance past the end.
-fn give(offset: f32, older: bool, newer: bool) -> f32 {
+fn give(offset: f32, width: f32, older: bool, newer: bool) -> f32 {
     let open = if offset > 0. { older } else { newer };
-    if open { offset } else { offset * EDGE_GIVE }
+    if open { offset } else { motion::rubber_band(offset, width) }
 }
 
 /// The pictures of a chat that can be browsed, oldest first: images and stickers not deleted.
@@ -352,8 +372,10 @@ impl Zoom {
         let to = self.target();
         match self.glide {
             Some((from, at)) if !reduce_motion => {
-                let t = (at.elapsed().as_secs_f32() / (ZOOM_MS as f32 / 1000.)).min(1.);
-                let k = motion::ease_out(t);
+                let secs = at.elapsed().as_secs_f32();
+                let t = (secs / (ZOOM_MS as f32 / 1000.)).min(1.);
+                // A critically damped spring, as UIKit lands a zoom: quick to start, soft to rest.
+                let k = if t < 1. { motion::spring_at(secs, ZOOM_RESPONSE, 1.) } else { 1. };
                 let mix = |a: f32, b: f32| a + (b - a) * k;
                 (View { scale: mix(from.scale, to.scale), off: (mix(from.off.0, to.off.0), mix(from.off.1, to.off.1)) }, t < 1.)
             }
@@ -404,7 +426,7 @@ impl Zoom {
         let to = if from.scale > 1.05 {
             FIT
         } else {
-            zoomed_about(from, self.centred(at), DOUBLE_TAP_SCALE, self.screen, self.fit)
+            zoomed_to(from, self.centred(at), DOUBLE_TAP_SCALE, self.screen, self.fit)
         };
         self.view = Some(to);
         self.glide = Some((from, now));
@@ -614,7 +636,7 @@ impl BeeperApp {
 
     /// A finger let go of the picture to close it, at `vel` px/s: it lands in its bubble when that
     /// is on screen, else it moves on toward `dir` (up, down or nowhere: -1, 1, 0) while it fades.
-    fn throw_away(&mut self, vel: f32, dir: f32, cx: &mut Context<Self>) {
+    fn throw_away(&mut self, (side, vel): (f32, f32), dir: f32, cx: &mut Context<Self>) {
         let Some((id, _)) = &self.viewer else { return };
         if cx.reduce_motion() {
             self.zoom.exit = Exit::Instant;
@@ -623,9 +645,11 @@ impl BeeperApp {
         }
         let (from, now) = (self.zoom.drawn, Instant::now());
         let home = self.zoom.home_of(id).map(|h| Rect::of(h.bounds));
-        let to = home.unwrap_or(Rect { y: self.zoom.screen.1 / 2. + dir * (self.zoom.screen.1 + from.h) / 2., ..from });
+        // Off screen it keeps going sideways as far as the finger's speed takes it in the throw's time.
+        let drift = side * motion::THROW.0.as_secs_f32();
+        let to = home.unwrap_or(Rect { x: from.x + drift, y: self.zoom.screen.1 / 2. + dir * (self.zoom.screen.1 + from.h) / 2., ..from });
         let mut rect = [from.x, from.y, from.w, from.h].map(|v| glide(motion::THROW, v));
-        for (g, (target, v)) in rect.iter_mut().zip([(to.x, 0.), (to.y, vel), (to.w, 0.), (to.h, 0.)]) {
+        for (g, (target, v)) in rect.iter_mut().zip([(to.x, side), (to.y, vel), (to.w, 0.), (to.h, 0.)]) {
             g.release(target, v, now);
         }
         self.zoom.exit = Exit::Throw(Box::new(Throw { rect, from, shade: self.zoom.shade, at: now, home: home.is_some() }));
@@ -638,7 +662,7 @@ impl BeeperApp {
         let now = Instant::now();
         match phase {
             TouchPhase::Started => {
-                self.zoom.pull = Some(Pull { across: None, offset: 0., samples: VecDeque::new() });
+                self.zoom.pull = Some(Pull { across: None, moved: (0., 0.), offset: 0., samples: VecDeque::new(), cross: 0., cross_samples: VecDeque::new() });
                 self.zoom.tap = None;
                 // A finger catching a picture on its way back keeps the point it shrinks about.
                 if !self.zoom.drift.y.running() {
@@ -658,7 +682,7 @@ impl BeeperApp {
                 let (width, height) = self.zoom.screen;
                 match pull.across {
                     Some(true) => {
-                        let drawn = give(pull.offset, older.is_some(), newer.is_some());
+                        let drawn = give(pull.offset, width, older.is_some(), newer.is_some());
                         let turn = settle(drawn, speed, width, older.is_some(), newer.is_some());
                         let (from, vel) = if turn != Turn::Stay && self.turn(turn == Turn::Newer, cx) {
                             let page = width + PAGE_GAP;
@@ -672,10 +696,17 @@ impl BeeperApp {
                         self.zoom.drift.x = glide(motion::SETTLE, from);
                         self.zoom.drift.x.release(0., vel, now);
                     }
-                    Some(false) if dismisses(pull.offset, speed, height) => self.throw_away(speed, pull.offset.signum(), cx),
                     Some(false) => {
-                        self.zoom.drift.y = glide(motion::RETURN, pull.offset);
-                        self.zoom.drift.y.release(0., speed, now);
+                        pull.cross_samples.push_back((now, pull.cross));
+                        let side = super::gallery::speed(&pull.cross_samples);
+                        if dismisses(pull.offset, speed, height) {
+                            self.throw_away((side, speed), pull.offset.signum(), cx);
+                        } else {
+                            for (g, at, v) in [(&mut self.zoom.drift.x, pull.cross, side), (&mut self.zoom.drift.y, pull.offset, speed)] {
+                                *g = glide(motion::RETURN, at);
+                                g.release(0., v, now);
+                            }
+                        }
                     }
                     None => {}
                 }
@@ -691,18 +722,36 @@ impl BeeperApp {
 
     fn pull_by(&mut self, dx: f32, dy: f32, now: Instant) {
         let at = (self.zoom.drift.x.pos, self.zoom.drift.y.pos);
+        let caught = self.zoom.drift.x.running() || self.zoom.drift.y.running();
         let Some(pull) = &mut self.zoom.pull else { return };
-        if pull.across.is_none() && (dx != 0. || dy != 0.) {
-            let across = dx.abs() > dy.abs();
+        let (dx, dy) = if pull.across.is_none() {
+            pull.moved = (pull.moved.0 + dx, pull.moved.1 + dy);
+            let (x, y) = pull.moved;
+            // A picture caught mid-flight follows at once; a still one waits to know the axis.
+            if x.hypot(y) < PULL_SLOP && !caught {
+                return;
+            }
+            let across = x.abs() > y.abs();
             pull.across = Some(across);
             // Caught mid-flight: the finger takes the picture from where it is drawn.
-            pull.offset = if across { at.0 } else { at.1 };
-        }
+            (pull.offset, pull.cross) = if across { (at.0, 0.) } else { (at.1, at.0) };
+            // The picture catches up with the finger instead of losing the slop.
+            (x, y)
+        } else {
+            (dx, dy)
+        };
         let Some(across) = pull.across else { return };
         pull.offset += if across { dx } else { dy };
         pull.samples.push_back((now, pull.offset));
         if pull.samples.len() > 6 {
             pull.samples.pop_front();
+        }
+        if !across {
+            pull.cross += dx;
+            pull.cross_samples.push_back((now, pull.cross));
+            if pull.cross_samples.len() > 6 {
+                pull.cross_samples.pop_front();
+            }
         }
     }
 
@@ -942,7 +991,7 @@ impl BeeperApp {
                     let view = self.zoom.target();
                     self.zoom.tap = None;
                     if e.phase == TouchPhase::Ended && view.scale < PINCH_CLOSE {
-                        return self.throw_away(0., 0., cx);
+                        return self.throw_away((0., 0.), 0., cx);
                     }
                     let to = if view.scale > MAX_SCALE { zoomed_about(view, at, MAX_SCALE, self.zoom.screen, self.zoom.fit) } else { clamped(view, self.zoom.screen, self.zoom.fit) };
                     self.zoom.view = Some(to);
@@ -1083,8 +1132,11 @@ impl BeeperApp {
         // The finger's pull, 1:1; after it, a spring back to rest or to the picture turned to.
         if live && let Some(pull) = &self.zoom.pull {
             match pull.across {
-                Some(true) => self.zoom.drift.x.hold(give(pull.offset, older.is_some(), newer.is_some())),
-                Some(false) => self.zoom.drift.y.hold(pull.offset),
+                Some(true) => self.zoom.drift.x.hold(give(pull.offset, screen.0, older.is_some(), newer.is_some())),
+                Some(false) => {
+                    self.zoom.drift.x.hold(pull.cross);
+                    self.zoom.drift.y.hold(pull.offset);
+                }
                 None => {}
             }
         }
@@ -1333,8 +1385,8 @@ impl BeeperApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        EDGE_GIVE, FIT, MAX_SCALE, OVERPAN, PINCH_MIN, Rect, Turn, View, beside, clamped, dismisses, fitted, give, landed, pictures, pinch_shade, placed, reach, resist, rubber, settle, shrink,
-        zoomed_about,
+        FIT, MAX_SCALE, PINCH_MIN, Rect, Turn, View, beside, clamped, dismisses, fitted, give, landed, pictures, pinch_shade, placed, reach, resist, rubber, settle, shrink,
+        zoomed_about, zoomed_to,
     };
     use crate::backend::MediaKind;
 
@@ -1375,6 +1427,15 @@ mod tests {
     }
 
     #[test]
+    fn a_double_tap_brings_the_tapped_point_to_the_center() {
+        let v = zoomed_to(FIT, (20., -30.), 2.5, PHONE, PHONE);
+        assert!(near(v.off.0, -50.) && near(v.off.1, 75.), "{v:?}");
+        let edge = zoomed_to(FIT, (PHONE.0 / 2., 0.), 2.5, PHONE, PHONE);
+        assert_eq!(edge, clamped(edge, PHONE, PHONE), "kept inside the picture's edges");
+        assert!(edge.off.0 < 0.);
+    }
+
+    #[test]
     fn only_images_and_stickers_still_there_are_browsed_in_order() {
         let msgs = [
             ("$a", Some(MediaKind::Image), false),
@@ -1408,13 +1469,16 @@ mod tests {
         assert_eq!(settle(-40., 900., width, true, true), Turn::Stay, "a finger turning back cancels");
         assert_eq!(settle(-300., -900., width, true, false), Turn::Stay, "nothing newer to turn to");
         assert_eq!(settle(0., -900., width, true, true), Turn::Stay);
+        assert_eq!(settle(-250., 1500., width, true, true), Turn::Stay, "a long pull thrown back stays");
     }
 
     #[test]
     fn past_the_last_picture_the_pull_meets_resistance() {
-        assert_eq!(give(100., true, false), 100.);
-        assert_eq!(give(-100., true, false), -100. * EDGE_GIVE);
-        assert_eq!(give(100., false, true), 100. * EDGE_GIVE);
+        assert_eq!(give(100., 400., true, false), 100.);
+        let past = give(-100., 400., true, false);
+        assert!(past > -100. && past < 0., "{past}");
+        assert_eq!(give(100., 400., false, true), -past);
+        assert!(give(-4000., 400., true, false) > -400., "never as far as the screen");
     }
 
     #[test]
@@ -1425,6 +1489,7 @@ mod tests {
         assert!(!dismisses(60., 100., height), "a short slow pull springs back");
         assert!(dismisses(40., 1200., height), "a flick closes");
         assert!(!dismisses(40., -1200., height), "a flick back toward rest does not");
+        assert!(!dismisses(200., -1500., height), "nor one thrown back from far");
     }
 
     fn near(a: f32, b: f32) -> bool {
@@ -1440,11 +1505,11 @@ mod tests {
     }
 
     #[test]
-    fn a_pulled_picture_shrinks_to_seventy_percent_about_the_finger() {
+    fn a_pulled_picture_shrinks_to_eighty_percent_about_the_finger() {
         let h = PHONE.1;
         assert_eq!(shrink(0., h), 1.);
-        assert!(near(shrink(0.15 * h, h), 0.925), "at the closing threshold");
-        assert!(near(shrink(-2. * h, h), 0.7), "no smaller, up or down");
+        assert!(near(shrink(0.15 * h, h), 0.95), "at the closing threshold");
+        assert!(near(shrink(-2. * h, h), 0.8), "no smaller, up or down");
         // The point the finger took stays under it: grab (100, 200) from the centre, pulled 90 down.
         let (grab, dy) = ((100., 200.), 90.);
         let s = shrink(dy, h);
@@ -1460,8 +1525,9 @@ mod tests {
     fn past_a_zoomed_edge_the_picture_gives_a_little_and_no_more() {
         assert_eq!(rubber(50., 100., 400.), 50.);
         assert_eq!(rubber(-100., 100., 400.), -100.);
-        assert!(near(rubber(150., 100., 400.), 100. + 50. * EDGE_GIVE));
-        assert!(near(rubber(-1000., 100., 400.), -(100. + 400. * OVERPAN)), "capped at a share of the screen");
+        let past = rubber(150., 100., 400.);
+        assert!(past > 100. && past < 150., "{past}");
+        assert!(rubber(-4000., 100., 400.) > -500., "never a screen past the edge");
     }
 
     #[test]

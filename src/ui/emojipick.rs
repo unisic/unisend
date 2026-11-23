@@ -209,7 +209,7 @@ pub(super) struct Picker {
     /// The panel's width as last laid out: beside a wide window's chat list it is not the window's.
     width: Rc<Cell<f32>>,
     /// The skin tone menu is open.
-    tones: bool,
+    pub(super) tones: bool,
     /// Where the pointer opened the composer's picker: on a desktop it opens there, over the chat.
     pub at: Point<Pixels>,
     /// The composer's emoji button as last painted: the keyboard shortcut opens the picker there too.
@@ -412,8 +412,8 @@ impl BeeperApp {
             .relative()
             .top(px(frame.y))
             .w(px(width))
-            .h(px(height + sheet::HANDLE_H))
-            .pb(px(bottom))
+            .h(px(height + sheet::HANDLE_H + frame.lift()))
+            .pb(px(bottom + frame.lift()))
             .rounded_t(px(RADIUS))
             .bg(p.surface)
             .when(live, |el| el.occlude())

@@ -18,7 +18,7 @@ pub(super) const DIALOG_W: f32 = 340.;
 
 #[derive(Default)]
 pub(super) struct People {
-    confirm: Option<Confirm>,
+    pub(super) confirm: Option<Confirm>,
     new: Option<NewChat>,
 }
 

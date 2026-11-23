@@ -11,6 +11,9 @@ const HOLD_SLOP: f32 = 8.;
 /// How long a press rests before its full picture is read ahead: taps and scroll starts are
 /// shorter, so they read nothing, and the hold leaves the read time to finish.
 const READ_AHEAD: Duration = Duration::from_millis(150);
+/// The peek's rise: UIKit's response and damping, and how long until it rests.
+const PEEK_SPRING: (f32, f32) = (0.35, 0.8);
+const PEEK_SETTLE: Duration = Duration::from_millis(600);
 /// Room left around a peeked picture, inside the system bars.
 const MARGIN: f32 = 16.;
 const SCRIM: f32 = 0.55;
@@ -363,9 +366,11 @@ impl BeeperApp {
         let peek = g.peek.as_mut()?;
         let (id, veil, leaving) = (peek.id, peek.veil(now, still), peek.closing.is_some());
         let fitted = fit_rect((f32::from(view.width), f32::from(view.height)), top, bottom, peek.dims);
-        let (target, span) = if leaving { (peek.cell, motion::HERO_OUT) } else { (fitted, motion::HERO_IN) };
+        // Out it eases home; in it springs, overshooting a little as a peek does on iOS.
+        let (target, span) = if leaving { (peek.cell, motion::HERO_OUT) } else { (fitted, PEEK_SETTLE) };
         let moving = !still && now - peek.since < span;
-        let frame = if still { fitted } else { lerp(peek.from, target, motion::ease_out(frac(now - peek.since, span))) };
+        let t = if leaving { motion::ease_out(frac(now - peek.since, span)) } else { motion::spring_at((now - peek.since).as_secs_f32(), PEEK_SPRING.0, PEEK_SPRING.1) };
+        let frame = if still { fitted } else { lerp(peek.from, target, t) };
         let first = peek.since == peek.opened && peek.drawn == peek.from;
         peek.drawn = frame;
         let full = peek.full.as_mut().and_then(|(image, ready)| {

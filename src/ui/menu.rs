@@ -1,8 +1,9 @@
 //! A message's reactions and actions, after Signal: on touch a long press lifts the message over
 //! a dimmed screen with a reaction bar above it and a list of actions under it (Signal Android's
-//! reaction overlay); with a pointer, buttons beside the message and a menu at the pointer
-//! (Signal Desktop). Measurements and timings are Signal's; `docs/design.md` says what they mean
-//! here.
+//! reaction overlay), where the finger that pressed can slide onto a reaction or an action and
+//! lift to pick it, as in an iOS context menu; with a pointer, buttons beside the message and a
+//! menu at the pointer (Signal Desktop). Measurements and timings are Signal's; `docs/design.md`
+//! says what they mean here.
 
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,8 @@ const DEAD_ZONE: f32 = 40.;
 /// A reaction is chosen by sliding only between the bar's top and this far under the finger.
 const SCRUB_BELOW_FINGER: f32 = 30.;
 const ROW_H: f32 = 50.;
+/// Above the first action and under the last.
+const LIST_PAD: f32 = 8.;
 /// At 100% text; the lists widen with the text size so "Delete for everyone" fits.
 const LIST_W: f32 = 232.;
 
@@ -88,6 +91,8 @@ pub(super) struct MessageMenu {
     scrub: Option<usize>,
     scrub_prev: Option<usize>,
     scrub_at: Instant,
+    /// Touch: the action under the finger, which letting go picks.
+    pick: Option<usize>,
     /// Touch: where everything was put on the last frame.
     placed: Option<Placement>,
 }
@@ -261,6 +266,8 @@ pub(super) struct Placement {
     /// The bar's top-left corner and its number of reactions; `None` when it cannot react.
     bar: Option<(f32, f32, usize)>,
     list: (f32, f32),
+    /// How many actions the list holds, for a finger sliding onto one.
+    rows: usize,
 }
 
 fn bar_w(slots: usize) -> f32 {
@@ -295,7 +302,7 @@ fn place(view: Size<f32>, (top, bottom): (f32, f32), bubble: Bounds<f32>, finger
         let x = if own { bubble.origin.x + bubble.size.width - w } else { bubble.origin.x };
         x.clamp(GUTTER, (view.width - w - GUTTER).max(GUTTER))
     };
-    Placement { lift: end_y - y, bar: slots.map(|n| (side(bar_w(n)), bar_y, n)), list: (side(f32::from(fs(LIST_W))), list_y) }
+    Placement { lift: end_y - y, bar: slots.map(|n| (side(bar_w(n)), bar_y, n)), list: (side(f32::from(fs(LIST_W))), list_y), rows: 0 }
 }
 
 /// The reaction under a finger sliding over the bar: within the bar's width, from its top to a
@@ -305,6 +312,14 @@ fn slot_at(placed: &Placement, at: Point<f32>, down_y: f32) -> Option<usize> {
     let dx = at.x - x - BAR_PAD;
     let inside = at.y > y && at.y < (down_y + SCRUB_BELOW_FINGER).max(y + BAR_H) && dx > 0. && dx < n as f32 * TAP;
     inside.then(|| ((dx / TAP) as usize).min(n - 1))
+}
+
+/// The action under a finger slid onto the list, as iOS lets a held finger pick from a context menu.
+fn row_at(placed: &Placement, at: Point<f32>) -> Option<usize> {
+    let (x, y) = placed.list;
+    let (dx, dy) = (at.x - x, at.y - y - LIST_PAD);
+    let inside = dx > 0. && dx < f32::from(fs(LIST_W)) && dy > 0. && dy < ROW_H * placed.rows as f32;
+    inside.then(|| ((dy / ROW_H) as usize).min(placed.rows.saturating_sub(1)))
 }
 
 fn decelerate(t: f32) -> f32 {
@@ -402,7 +417,7 @@ impl BeeperApp {
         let now = Instant::now();
         #[cfg(target_os = "android")]
         if kind == MenuKind::Touch {
-            super::motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Heavy);
+            super::motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Medium);
         }
         self.menu = Some(MessageMenu {
             id,
@@ -416,6 +431,7 @@ impl BeeperApp {
             scrub: None,
             scrub_prev: None,
             scrub_at: now,
+            pick: None,
             placed: None,
         });
         cx.notify();
@@ -468,7 +484,17 @@ impl BeeperApp {
             return;
         }
         m.escaped = true;
-        let slot = m.placed.as_ref().and_then(|placed| slot_at(placed, point(f32::from(at.x), f32::from(at.y)), f32::from(m.at.y)));
+        let here = point(f32::from(at.x), f32::from(at.y));
+        let pick = m.placed.as_ref().and_then(|placed| row_at(placed, here));
+        if pick != m.pick {
+            m.pick = pick;
+            #[cfg(target_os = "android")]
+            if pick.is_some() {
+                super::motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Selection);
+            }
+            cx.notify();
+        }
+        let slot = m.placed.as_ref().and_then(|placed| slot_at(placed, here, f32::from(m.at.y)));
         if slot != m.scrub {
             (m.scrub_prev, m.scrub, m.scrub_at) = (m.scrub, slot, Instant::now());
             #[cfg(target_os = "android")]
@@ -479,9 +505,9 @@ impl BeeperApp {
         }
     }
 
-    /// The press that opened the overlay let go: on a reaction it reacts; having slid off the bar
-    /// it closes; never having moved it leaves the overlay open for a tap.
-    fn pointer_released(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+    /// The press that opened the overlay let go: on a reaction it reacts, on an action it does it;
+    /// anywhere else, as on iOS, it leaves the overlay open for a tap.
+    fn pointer_released(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.press = None;
         if !self.menu.as_ref().is_some_and(|m| m.pressing) {
             return;
@@ -493,7 +519,15 @@ impl BeeperApp {
             cx.notify();
             return;
         }
-        let (scrub, menu_id) = (m.scrub, m.id.clone());
+        let (scrub, pick, menu_id) = (m.scrub, m.pick.take(), m.id.clone());
+        if let Some(n) = pick
+            && let Some(msg) = self.msgs.iter().find(|msg| msg.id == menu_id)
+        {
+            let acts = self.with_pin(taken(acts(msg, MenuKind::Touch, false), msg, self.caps_for(&msg.id)), msg);
+            if let Some(act) = acts.into_iter().nth(n) {
+                return self.act(&menu_id, act, window, cx);
+            }
+        }
         let chosen = scrub.zip(self.msgs.iter().find(|msg| msg.id == menu_id)).map(|(n, msg)| (msg.id.clone(), bar_keys(msg, self.caps_for(&msg.id), &quick(&self.settings)).get(n).cloned()));
         match chosen {
             Some((id, Some(key))) => self.toggle_reaction(&id, &key, cx),
@@ -502,7 +536,7 @@ impl BeeperApp {
                 self.emoji_open = Some(super::emojipick::Target::React(id));
                 cx.notify();
             }
-            None => self.close_menu(cx),
+            None => cx.notify(),
         }
     }
 
@@ -522,19 +556,19 @@ impl BeeperApp {
                 });
                 window.on_mouse_event({
                     let weak = weak.clone();
-                    move |e: &MouseUpEvent, phase, _, cx| {
+                    move |e: &MouseUpEvent, phase, window, cx| {
                         if phase.bubble() && e.button == MouseButton::Left {
-                            let _ = weak.update(cx, |this, cx| this.pointer_released(e.position, cx));
+                            let _ = weak.update(cx, |this, cx| this.pointer_released(e.position, window, cx));
                         }
                     }
                 });
-                window.on_mouse_event(move |e: &LongPressEvent, phase, _, cx| {
+                window.on_mouse_event(move |e: &LongPressEvent, phase, window, cx| {
                     if !phase.bubble() {
                         return;
                     }
                     let _ = weak.update(cx, |this, cx| match e.phase {
                         TouchPhase::Moved => this.pointer_moved(e.position, cx),
-                        TouchPhase::Ended => this.pointer_released(e.position, cx),
+                        TouchPhase::Ended => this.pointer_released(e.position, window, cx),
                         TouchPhase::Cancelled if this.menu.as_ref().is_some_and(|m| m.pressing) => this.close_menu(cx),
                         _ => {}
                     });
@@ -623,7 +657,7 @@ impl BeeperApp {
         }
         // A tap shows or hides a message's status line, for the user's who has read it; the double
         // tap's second click undoes its first.
-        let swiped = self.swipe_back.as_ref().is_some_and(|(on, at)| on == id && at.elapsed() < Duration::from_millis(600));
+        let swiped = self.swipe_back.as_ref().is_some_and(|(on, _, at)| on == id && at.elapsed() < Duration::from_millis(600));
         if event.click_count() <= 2 && !swiped && !self.menu_open() && !self.fwd.selecting() {
             self.tapped = if self.tapped.as_deref() == Some(id) { None } else { Some(id.to_owned()) };
             cx.notify();
@@ -720,10 +754,12 @@ impl BeeperApp {
         self.close_menu(cx);
     }
 
-    fn act_rows(&self, id: &str, acts: Vec<Act>, h: f32, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+    /// The actions as rows; `picked` is lit, under a finger that will pick it on letting go.
+    fn act_rows(&self, id: &str, acts: Vec<Act>, h: f32, picked: Option<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
         let p = Palette::of(cx);
         acts.into_iter()
-            .map(|act| {
+            .enumerate()
+            .map(|(n, act)| {
                 let (name, icon, label) = act.look();
                 let ink = if act == Act::Delete { p.negative } else { p.text };
                 let id = id.to_owned();
@@ -737,6 +773,7 @@ impl BeeperApp {
                     .cursor_pointer()
                     .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.text.opacity(0.1))))
                     .active(|el| el.bg(p.text.opacity(0.1)))
+                    .when(picked == Some(n), |el| el.bg(p.text.opacity(0.1)))
                     .child(Icon::new(icon).size_5())
                     .child(label)
                     .on_click(cx.listener(move |this, _, window, cx| this.act(&id, act.clone(), window, cx)))
@@ -785,6 +822,7 @@ impl BeeperApp {
             reacts.then_some(keys.len() + more as usize),
             ROW_H * acts.len() as f32 + 16.,
         );
+        let placed = Placement { rows: acts.len(), ..placed };
         let menu = self.menu.as_mut()?;
         menu.placed = Some(placed);
         let menu = self.menu.as_ref()?;
@@ -834,7 +872,7 @@ impl BeeperApp {
             )
             .with_priority(OVER_LIFTED)
         });
-        let rows = self.act_rows(&id, acts, ROW_H, cx);
+        let rows = self.act_rows(&id, acts, ROW_H, menu.pick, cx);
         let (lx, ly) = placed.list;
         // Signal's list waits 150 ms for the message to settle, then fades in over 200 ms.
         let list = deferred(
@@ -842,7 +880,7 @@ impl BeeperApp {
                 v_flex()
                     .id("message-actions")
                     .w(fs(LIST_W))
-                    .py(px(8.))
+                    .py(px(LIST_PAD))
                     .rounded(px(RADIUS))
                     .bg(p.lifted)
                     .opacity(v_list)
@@ -961,7 +999,7 @@ impl BeeperApp {
         let y = if ay + h <= vh - bottom - GUTTER { ay } else { ay - h };
         let x = x.clamp(GUTTER, (vw - w - GUTTER).max(GUTTER));
         let y = y.clamp(top + GUTTER, (vh - bottom - h - GUTTER).max(top + GUTTER));
-        let rows = self.act_rows(&id, acts, POINTER_ROW_H, cx);
+        let rows = self.act_rows(&id, acts, POINTER_ROW_H, None, cx);
         let list = div()
             .absolute()
             .left(px(x))
@@ -1013,7 +1051,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Act, BAR_H, Delivery, Features, Kind, MenuKind, Msg, OVERLAY_GAP, Placement, QUICK_REACTIONS, TAP, acts, bar_keys, clip_key, ease_out_expo, more_offered, place, quick, same_emoji, set_quick, slot_at, taken};
+    use super::{Act, BAR_H, Delivery, Features, Kind, LIST_PAD, MenuKind, Msg, OVERLAY_GAP, Placement, QUICK_REACTIONS, ROW_H, TAP, acts, bar_keys, clip_key, ease_out_expo, more_offered, place, quick, row_at, same_emoji, set_quick, slot_at, taken};
     use gpui_kit::{Bounds, point, size};
 
     #[test]
@@ -1123,6 +1161,17 @@ mod tests {
             assert!(by + BAR_H <= top, "bar above the message: {p:?}");
             assert!(p.list.1 >= top + h, "list under the message: {p:?}");
         }
+    }
+
+    #[test]
+    fn a_finger_slid_onto_the_list_picks_the_row_under_it() {
+        let p = Placement { rows: 4, ..at(400., 60., false) };
+        let (x, y) = p.list;
+        assert_eq!(row_at(&p, point(x + 20., y + LIST_PAD + ROW_H * 1.5)), Some(1));
+        assert_eq!(row_at(&p, point(x + 20., y + LIST_PAD + 1.)), Some(0));
+        assert_eq!(row_at(&p, point(x + 20., y + LIST_PAD + ROW_H * 4. + 1.)), None, "under the last row");
+        assert_eq!(row_at(&p, point(x - 1., y + LIST_PAD + ROW_H)), None, "beside the list");
+        assert_eq!(row_at(&p, point(x + 20., y)), None, "above the first row");
     }
 
     #[test]

@@ -12,11 +12,10 @@ use super::gallery::speed;
 use super::motion::Glide;
 use super::*;
 
-/// A downward flick this fast (px/s) dismisses the sheet however short it was.
-const DISMISS_SPEED: f32 = 800.;
-/// Past this share of its height a sheet let go goes, unless flung back up faster than `KEEP_SPEED`.
-const DISMISS_SHARE: f32 = 0.3;
-const KEEP_SPEED: f32 = -300.;
+/// A sheet let go goes when its momentum would carry it past this share of its height.
+const DISMISS_SHARE: f32 = 0.5;
+/// Pulled up past its open position the sheet stretches toward this many px, never reaching it.
+const STRETCH: f32 = 60.;
 /// A thrown sheet aims this far past its height, so it leaves at speed instead of creeping to the edge.
 const THROW_PAST: f32 = 40.;
 /// Drawn this far down until the probe has measured it: one frame, out of sight.
@@ -25,18 +24,19 @@ const MAX_SAMPLES: usize = 6;
 const SCRIM: f32 = 0.6;
 pub(super) const HANDLE_H: f32 = 20.;
 
-/// Whether a sheet let go at `y` px below its open position, moving at `speed` px/s, closes.
+/// Whether a sheet let go at `y` px below its open position, moving at `speed` px/s, closes: where
+/// it would come to rest, as UIKit projects a flick, is past `DISMISS_SHARE` of its height.
 pub(super) fn dismisses(y: f32, speed: f32, h: f32) -> bool {
-    (y > 0. && speed > DISMISS_SPEED) || (y > h * DISMISS_SHARE && speed > KEEP_SPEED)
+    y > 0. && y + motion::project(speed) > h * DISMISS_SHARE
 }
 
-/// Up past the open position the sheet follows a fifth of the way, so it meets resistance.
+/// Up past the open position the sheet rubber-bands: slower the further the finger goes.
 pub(super) fn follow(raw: f32) -> f32 {
-    if raw >= 0. { raw } else { raw * 0.2 }
+    if raw >= 0. { raw } else { motion::rubber_band(raw, STRETCH) }
 }
 
 fn unfollow(y: f32) -> f32 {
-    if y >= 0. { y } else { y / 0.2 }
+    if y >= 0. { y } else { motion::unrubber_band(y, STRETCH) }
 }
 
 #[derive(Default)]
@@ -60,6 +60,16 @@ pub(super) struct SheetFrame {
     pub scrim: f32,
     /// Takes input; false while it falls.
     pub live: bool,
+    /// Reduced motion fades the sheet and its scrim in and out instead of sliding them.
+    pub alpha: f32,
+}
+
+impl SheetFrame {
+    /// How far the card is pulled up past its open position: it grows by this much at the bottom,
+    /// so no gap opens under it.
+    pub(super) fn lift(&self) -> f32 {
+        (-self.y).max(0.)
+    }
 }
 
 #[derive(Default)]
@@ -80,6 +90,8 @@ pub(super) struct SheetMotion {
     pub quiet: bool,
     /// When the rise began, for what staggers in with it.
     risen: Option<Instant>,
+    /// Reduced motion: how far faded out, 0 shown, 1 gone.
+    faded: f32,
 }
 
 impl SheetMotion {
@@ -98,7 +110,7 @@ impl SheetMotion {
         if self.moving() {
             window.request_animation_frame();
         }
-        Some(SheetFrame { y, scrim: self.scrim(y), live: self.live })
+        Some(SheetFrame { y, scrim: self.scrim(y), live: self.live, alpha: 1. - self.faded })
     }
 
     fn set_live(&mut self, live: bool) {
@@ -126,7 +138,7 @@ impl SheetMotion {
     }
 
     fn unmount(&mut self) {
-        (self.mounted, self.drive, self.quiet, self.handoff, self.risen, self.y) = (false, Drive::Still, false, false, None, 0.);
+        (self.mounted, self.drive, self.quiet, self.handoff, self.risen, self.y, self.faded) = (false, Drive::Still, false, false, None, 0., 0.);
         self.fit.set(0.);
         self.fit_key.set(None);
     }
@@ -149,10 +161,19 @@ impl SheetMotion {
             Drive::Tween { from, to, delay, dur, ease, start } => {
                 let start = *start.get_or_insert(now);
                 let (from, to, delay, dur, ease) = (*from, *to, *delay, *dur, *ease);
-                let t = if still { 1. } else { (now.saturating_duration_since(start).saturating_sub(delay).as_secs_f32() / dur.as_secs_f32()).min(1.) };
+                // Reduced motion: the sheet stands open and fades, in as a push fades in, out as things leave.
+                let dur = if !still {
+                    dur
+                } else if to == 0. {
+                    motion::PUSH_FADE
+                } else {
+                    motion::EXIT
+                };
+                let t = (now.saturating_duration_since(start).saturating_sub(delay).as_secs_f32() / dur.as_secs_f32()).min(1.);
                 if to == 0. && !still && now >= start + delay {
                     self.risen.get_or_insert(start + delay);
                 }
+                self.faded = if !still { 0. } else if to == 0. { 1. - t } else { t };
                 if t >= 1. {
                     self.drive = Drive::Still;
                     self.handoff = false;
@@ -161,19 +182,14 @@ impl SheetMotion {
                         return h;
                     }
                 }
-                (from + (to - from) * ease(t)) * h
+                if still { 0. } else { (from + (to - from) * ease(t)) * h }
             }
             Drive::Spring(glide) => {
                 if still {
                     glide.set(glide.target());
                 }
-                let was = self.y;
-                let mut y = glide.step(now);
-                // Flung up hard, even a critical spring passes the open position once; the edge stops it instead of showing a gap under the sheet.
-                if live && glide.target() == 0. && was >= 0. && y < 0. {
-                    glide.set(0.);
-                    y = 0.;
-                }
+                // Flung up hard, even a critical spring passes the open position once: it rubber-bands there.
+                let y = follow(glide.step(now));
                 if !live && y >= h {
                     self.unmount();
                     return h;
@@ -264,7 +280,7 @@ impl SheetMotion {
                     (self.live, self.drive) = (false, Drive::Spring(glide));
                     return true;
                 }
-                let mut glide = Glide::new(motion::SETTLE.0, motion::SETTLE.1, 0.5, y);
+                let mut glide = Glide::new(motion::SETTLE.0, motion::SETTLE.1, 0.5, from + moved);
                 glide.release(0., speed, now);
                 self.drive = Drive::Spring(glide);
             }
@@ -413,7 +429,17 @@ pub(super) fn handle(ink: Hsla) -> Div {
 
 /// The dimmed layer a sheet rises in; it blocks the screen under it only while the sheet is live.
 pub(super) fn scrim(id: &'static str, frame: SheetFrame) -> Stateful<Div> {
-    div().id(id).absolute().inset_0().flex().flex_col().justify_end().items_center().bg(black().opacity(frame.scrim)).when(frame.live, |el| el.occlude())
+    div()
+        .id(id)
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .justify_end()
+        .items_center()
+        .bg(black().opacity(frame.scrim))
+        .when(frame.alpha < 1., |el| el.opacity(frame.alpha))
+        .when(frame.live, |el| el.occlude())
 }
 
 /// Entry `i` of what rises with a sheet, 0 to 1: `ENTER` long, `first` after the rise began and
@@ -451,8 +477,10 @@ mod tests {
     fn a_long_drag_or_a_quick_flick_dismisses() {
         assert!(dismisses(40., 1000., 600.));
         assert!(!dismisses(60., 50., 600.), "short and slow springs back");
-        assert!(dismisses(200., 0., 600.), "past 30 %");
-        assert!(!dismisses(200., -500., 600.), "past 30 % but flung back up");
+        assert!(!dismisses(200., 0., 600.), "a third down and still springs back");
+        assert!(dismisses(320., 0., 600.), "past half");
+        assert!(dismisses(20., 700., 600.), "a light flick carries past half");
+        assert!(!dismisses(400., -1500., 600.), "past half but flung back up");
         assert!(!dismisses(-20., 2000., 600.), "above the open position");
     }
 
@@ -515,7 +543,7 @@ mod tests {
         s.touch(TouchPhase::Moved, -30., t + Duration::from_millis(516));
         assert!(!s.touch(TouchPhase::Ended, 0., t + Duration::from_millis(524)), "40 px down, moving up fast");
         for i in 1..100 {
-            assert!(s.advance(t + Duration::from_millis(524) + FRAME * i, false) >= 0.);
+            assert!(s.advance(t + Duration::from_millis(524) + FRAME * i, false) > -super::STRETCH, "rubber-bands past the open position");
         }
         assert!(!s.moving());
     }
@@ -525,7 +553,11 @@ mod tests {
         let (mut s, t) = up(500.);
         s.touch(TouchPhase::Started, 0., t);
         s.touch(TouchPhase::Moved, -100., t + FRAME);
-        assert_eq!(s.advance(t + FRAME, false), -20.);
+        let drawn = s.advance(t + FRAME, false);
+        assert!(drawn < -20. && drawn > -super::STRETCH, "{drawn}");
+        s.touch(TouchPhase::Moved, -400., t + FRAME * 2);
+        let further = s.advance(t + FRAME * 2, false);
+        assert!(further < drawn && drawn - further < 40., "resists more the further it goes: {further}");
         s.touch(TouchPhase::Ended, 0., t + FRAME * 30);
         let y = s.advance(t + FRAME * 31, false);
         s.touch(TouchPhase::Started, 0., t + FRAME * 31);
@@ -582,8 +614,13 @@ mod tests {
         let t0 = Instant::now();
         s.set_live(true);
         assert_eq!(s.advance(t0, true), 0.);
+        assert_eq!(s.faded, 1., "open in place, invisible");
+        assert_eq!(s.advance(t0 + motion::PUSH_FADE, true), 0.);
+        assert_eq!(s.faded, 0.);
+        let t = t0 + motion::PUSH_FADE;
         s.set_live(false);
-        s.advance(t0, true);
+        assert_eq!(s.advance(t, true), 0., "fades where it stands");
+        s.advance(t + motion::EXIT, true);
         assert!(!s.mounted);
     }
 

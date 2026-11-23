@@ -159,6 +159,8 @@ const SWIPE_FLICK: f32 = 24.;
 const SWIPE_SPEED: f32 = 500.;
 /// How far a pan goes before it is known to be a swipe or a scroll; until then nothing moves.
 const SWIPE_SLOP: f32 = 10.;
+/// Past the reply point a swiped message stretches toward this many px further, never reaching it.
+const SWIPE_STRETCH: f32 = 120.;
 /// Above the compose strip's tallest: its margin, padding and a quote with a picture.
 const STRIP_H: f32 = 80.;
 /// How far a message's reactions reach up over its bubble.
@@ -378,7 +380,7 @@ pub struct BeeperApp {
     /// A horizontal pan in progress over a message, with how far it has travelled.
     swipe: Option<Swipe>,
     /// The message a finger let go of, springing back into place since then.
-    swipe_back: Option<(String, Instant)>,
+    swipe_back: Option<(String, motion::Glide, Instant)>,
     /// Messages that just arrived at the end of the open chat, at most `2 * MAX_ARRIVALS`.
     arrivals: VecDeque<Arrival>,
     /// When the open chat was opened: what arrives in its first moments is history, not news.
@@ -548,6 +550,16 @@ impl BeeperApp {
         }
         crate::ime::set_incognito(settings.incognito_keyboard);
         crate::watch_insets(window, cx);
+        #[cfg(target_os = "android")]
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                crate::back_gesture::next().await;
+                if this.update_in(cx, |this, window, cx| this.on_back_gesture(window, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let ui = cx.weak_entity();
         crate::ime::on_picture(move |path, cx| {
             let taken = ui.update(cx, |this, cx| this.open.is_some().then(|| this.attach_paths(vec![path.clone()], cx))).ok().flatten();
@@ -1469,7 +1481,8 @@ impl BeeperApp {
     }
 
     /// Escape, which is also Android's back gesture: undoes the innermost thing on screen.
-    /// Returns whether there was anything to undo.
+    /// Returns whether there was anything to undo. A new branch ahead of the chat's pop belongs
+    /// in `back_pops_chat` too, or the back gesture would slide the chat away under it.
     fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let narrow = frame::viewport(window).width < px(NARROW);
         if self.verify_back(cx) {
@@ -2850,12 +2863,16 @@ impl BeeperApp {
                 // The finger's pan, followed 1:1 with resistance past the reply point; once it has let
                 // go, a spring brings the message back.
                 let dragged = this.swipe.as_ref().filter(|s| s.id == m.id && s.lock == Some(true)).map(|s| rubber(s.far));
-                let springing = this.swipe_back.as_ref().is_some_and(|(on, at)| *on == m.id && at.elapsed() < Duration::from_millis(600));
-                let swiped = if dragged.is_some() || springing {
-                    let release = motion::RELEASE.with_travel(dragged.is_none());
-                    spring((SharedString::from(m.id.clone()), "swipe"), dragged.unwrap_or(0.), release, window, cx)
-                } else {
-                    0.
+                let back = this.swipe_back.as_mut().filter(|(on, ..)| *on == m.id).map(|(_, g, _)| (g.step(Instant::now()), g.running()));
+                let swiped = match (dragged, back) {
+                    (Some(far), _) => far,
+                    (None, Some((at, running))) => {
+                        if running {
+                            window.request_animation_frame();
+                        }
+                        at
+                    }
+                    (None, None) => 0.,
                 };
                 let armed = dragged.is_some_and(|far| far >= SWIPE_REPLY);
                 let arrow_scale = if swiped > 0.5 {
@@ -3508,7 +3525,7 @@ impl BeeperApp {
                     .top(px(frame.y))
                     .w_full()
                     .max_w(px(SHEET_W))
-                    .pb(px(bottom + 8.))
+                    .pb(px(bottom + 8. + frame.lift()))
                     .rounded_t(px(RADIUS))
                     .bg(p.surface)
                     // A tap between the rows is not a tap outside the sheet.
@@ -3880,19 +3897,44 @@ impl BeeperApp {
             return;
         }
         let delta = event.delta.pixel_delta(px(20.));
+        let now = Instant::now();
         let far = |swipe: &Option<Swipe>| swipe.as_ref().filter(|s| s.lock == Some(true)).map(|s| s.far);
         let before = far(&self.swipe);
-        let reply = swipe_step(&mut self.swipe, id, f32::from(delta.x), f32::from(delta.y), event.touch_phase, Instant::now());
+        // A message springing back is caught where it is drawn instead of jumping under the finger.
+        let caught = match (event.touch_phase, self.swipe_back.as_mut()) {
+            (TouchPhase::Started, Some((on, g, _))) if on == id && g.running() => Some(g.step(now)),
+            _ => None,
+        };
+        if caught.is_some() {
+            self.swipe_back = None;
+        }
+        // Where the drawn message is and how fast, for the spring that takes it back.
+        let let_go = match event.touch_phase {
+            TouchPhase::Ended | TouchPhase::Cancelled => self.swipe.as_ref().filter(|s| s.lock == Some(true)).map(|s| {
+                let mut drawn: VecDeque<_> = s.samples.iter().map(|&(at, far)| (at, rubber(far))).collect();
+                drawn.push_back((now, rubber(s.far)));
+                (rubber(s.far), if event.touch_phase == TouchPhase::Ended { gallery::speed(&drawn) } else { 0. })
+            }),
+            _ => None,
+        };
+        let reply = swipe_step(&mut self.swipe, id, f32::from(delta.x), f32::from(delta.y), event.touch_phase, caught, now);
         let after = far(&self.swipe);
         // Following the finger sideways, the pan is the message's: the list must not scroll with it.
         if after.is_some() {
             cx.stop_propagation();
         }
-        if let (Some(_), None) = (before, after) {
-            self.swipe_back = Some((id.to_owned(), Instant::now()));
+        if let Some((at, speed)) = let_go {
+            // Reduced motion: home at once, still remembered so the release is no tap.
+            let (at, speed) = if cx.reduce_motion() { (0., 0.) } else { (at, speed) };
+            let mut g = motion::Glide::new(motion::RETURN.0, motion::RETURN.1, 0.5, at);
+            g.release(0., speed, now);
+            self.swipe_back = Some((id.to_owned(), g, now));
         }
+        // A tick each way across the reply point.
         #[cfg(target_os = "android")]
-        if before.is_some_and(|far| far < SWIPE_REPLY) && after.is_some_and(|far| far >= SWIPE_REPLY) {
+        if let (Some(b), Some(a)) = (before, after)
+            && (b >= SWIPE_REPLY) != (a >= SWIPE_REPLY)
+        {
             motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Light);
         }
         if let Some(target) = reply {
@@ -4705,7 +4747,11 @@ fn quote_label(q: &Quote) -> (Option<IconName>, String) {
 /// How far a message follows a sideways pan: all the way to the reply point, then a third of
 /// the rest, so the pan meets resistance instead of a wall.
 fn rubber(far: f32) -> f32 {
-    if far <= SWIPE_REPLY { far } else { SWIPE_REPLY + (far - SWIPE_REPLY) * 0.3 }
+    if far <= SWIPE_REPLY { far } else { SWIPE_REPLY + motion::rubber_band(far - SWIPE_REPLY, SWIPE_STRETCH) }
+}
+
+fn unrubber(drawn: f32) -> f32 {
+    if drawn <= SWIPE_REPLY { drawn } else { SWIPE_REPLY + motion::unrubber_band(drawn - SWIPE_REPLY, SWIPE_STRETCH) }
 }
 
 /// Whether messages added at the end of the open chat are news to show arriving: not the first
@@ -4795,10 +4841,13 @@ struct Swipe {
 /// ended far enough, or short of that but flicked. Nothing moves until the pan is `SWIPE_SLOP` long;
 /// then it follows only a pan mostly to the right, and any other is ignored until the finger lifts.
 /// Only a pan that begins on a message counts, so a mouse wheel and the glide after a fling (neither
-/// has a start) never reply.
-fn swipe_step(swipe: &mut Option<Swipe>, id: &str, dx: f32, dy: f32, phase: TouchPhase, now: Instant) -> Option<String> {
+/// has a start) never reply. A message still springing back is `caught` where it is drawn.
+fn swipe_step(swipe: &mut Option<Swipe>, id: &str, dx: f32, dy: f32, phase: TouchPhase, caught: Option<f32>, now: Instant) -> Option<String> {
     match phase {
-        TouchPhase::Started => *swipe = Some(Swipe { id: id.to_owned(), moved: (0., 0.), lock: None, far: 0., samples: VecDeque::new() }),
+        TouchPhase::Started => {
+            *swipe = Some(Swipe { id: id.to_owned(), moved: (0., 0.), lock: caught.map(|_| true), far: caught.map_or(0., unrubber), samples: VecDeque::new() });
+            return None;
+        }
         TouchPhase::Moved => {}
         TouchPhase::Ended => {
             let s = swipe.take().filter(|s| s.lock == Some(true))?;
@@ -5342,7 +5391,7 @@ impl BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{long, Duration, MAX_ARRIVALS, SWIPE_REPLY, arrived, emoji_only, list_state, rubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced, clip_chars, joined_line};
+    use super::{long, Duration, MAX_ARRIVALS, SWIPE_REPLY, SWIPE_STRETCH, arrived, emoji_only, list_state, rubber, unrubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced, clip_chars, joined_line};
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
 
     #[test]
@@ -5443,7 +5492,13 @@ mod tests {
     fn a_pan_past_the_reply_point_meets_resistance() {
         assert_eq!(rubber(0.), 0.);
         assert_eq!(rubber(SWIPE_REPLY), SWIPE_REPLY);
-        assert!((rubber(2. * SWIPE_REPLY) - 1.3 * SWIPE_REPLY).abs() < 1e-4);
+        let past = rubber(2. * SWIPE_REPLY);
+        assert!(past > SWIPE_REPLY && past < 2. * SWIPE_REPLY);
+        assert!(rubber(10_000.) < SWIPE_REPLY + SWIPE_STRETCH);
+        assert!((unrubber(past) - 2. * SWIPE_REPLY).abs() < 0.5);
+        let mut swipe = None;
+        swipe_step(&mut swipe, "$m", 0., 0., gpui_kit::TouchPhase::Started, Some(past), std::time::Instant::now());
+        assert!((swipe.unwrap().far - 2. * SWIPE_REPLY).abs() < 0.5, "caught where it is drawn");
     }
 
     #[test]
@@ -5469,7 +5524,7 @@ mod tests {
     /// Feeds `(dx, dy, phase)` events 8 ms apart, or `gap` apart, and returns the reply.
     fn pan(events: &[(f32, f32, gpui_kit::TouchPhase)], gap: Duration) -> Option<String> {
         let (t0, mut swipe) = (std::time::Instant::now(), None);
-        events.iter().zip(1..).find_map(|(&(dx, dy, phase), n)| swipe_step(&mut swipe, "$m", dx, dy, phase, t0 + gap * n))
+        events.iter().zip(1..).find_map(|(&(dx, dy, phase), n)| swipe_step(&mut swipe, "$m", dx, dy, phase, None, t0 + gap * n))
     }
 
     #[test]

@@ -156,7 +156,8 @@ The common acts take one gesture, and each also has a slower way that can be fou
   acts under it: Reply, Edit (your own), Open link, Copy, Save, Forward, Select multiple, Reactions
   (who reacted, when it has any), Info, each where it applies, and one Delete that asks whether for you or for everyone. The right mouse button, or the dots beside a message
   on a wide window, opens the same acts at the pointer; the heart and arrow there react and
-  reply. A tap anywhere else closes it.
+  reply. A tap anywhere else closes it. The finger that pressed may slide on, as on iOS: lifted
+  over a reaction it reacts, over an act it does it, anywhere else the overlay stays open.
 - The + after the reactions opens every emoji (search, categories): a sheet rising from the
   bottom on a phone, a card over the + on desktop, as the composer's emoji button opens it there.
 - A tap on someone's picture (beside their message in a group, in a chat's info, in a member's
@@ -164,6 +165,12 @@ The common acts take one gesture, and each also has a slower way that can be fou
 - A double tap likes the message (the heart, or the reaction chosen in Settings, Chats), and a
   second double tap takes it back. The six of the bar are chosen there too, each from the picker.
 - A sideways swipe on a message replies to it.
+- On a phone the open chat follows Android's back gesture from the left edge, as an iOS screen
+  follows the swipe back: let go short of the system's point, it slides back in.
+- Gestures feel as on iOS: what a finger drags follows it 1:1 and can be caught mid-flight, an
+  edge resists more the further it is pulled (UIKit's rubber band), and a release carries the
+  finger's speed, so a flick decides where it lands (a sheet closes once its throw would carry
+  it past half its height).
 - A long press or the right mouse button on a chat in the list, or the dots in a chat's header,
   opens that chat's sheet: rows 52 tall rising from the bottom, named after the chat.
 - The paperclip opens the attach sheet on a phone: the newest photos and videos in a grid, and

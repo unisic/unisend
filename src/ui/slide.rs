@@ -1,5 +1,6 @@
-//! A phone's screens stacked: the list underneath, a chat or a deep panel pushed over it, and the
-//! chat list's rows settling when a new message reorders them.
+//! A phone's screens stacked: the list underneath, a chat or a deep panel pushed over it, the chat
+//! following Android's back gesture as an iOS screen follows the swipe back, and the chat list's
+//! rows settling when a new message reorders them.
 
 use std::collections::HashMap;
 
@@ -23,6 +24,10 @@ pub(super) struct Slide {
     pub base: Option<Panel>,
     /// Reduced motion: where the crossfade is heading and since when.
     fade: (bool, Option<Instant>),
+    /// Android's back gesture under way over the open chat: where it holds the chat (0 to 1).
+    gesture: Option<f32>,
+    /// The gesture let go: the chat travels from where it was left, to 0 or back to 1.
+    settle: Option<(f32, f32, Instant, Duration)>,
 }
 
 pub(super) struct Layers {
@@ -64,11 +69,98 @@ impl Slide {
         } else {
             Transition::new(motion::PUSH).easing(motion::EASE_OUT)
         };
-        transition("nav", if wanted { 1.0f32 } else { 0. }, policy, window, cx)
+        let base = transition("nav", if wanted { 1.0f32 } else { 0. }, policy, window, cx);
+        if let Some(v) = self.gesture {
+            return v;
+        }
+        // A gesture let go goes on from where the finger left the chat, until the push has caught up.
+        if let Some((from, to, at, dur)) = self.settle {
+            let t = at.elapsed().as_secs_f32() / dur.as_secs_f32();
+            if t >= 1. && base == to {
+                self.settle = None;
+            } else {
+                window.request_animation_frame();
+                return if t >= 1. { to } else { from + (to - from) * motion::ease_out(t) };
+            }
+        }
+        base
     }
 }
 
+/// Where the chat is held for a back gesture whose finger, from the left edge, is at `x` of a
+/// window `w` wide: its left edge under the finger, as on iOS.
+#[cfg(any(target_os = "android", test))]
+fn held_at(x: f32, w: f32) -> f32 {
+    if w <= 0. { 1. } else { (1. - x / w).clamp(0., 1.) }
+}
+
 impl BeeperApp {
+    /// Whether back now pops the open chat on a phone, with nothing over it for back to close
+    /// first. Kept in step with `go_back`, whose earlier branches each rule it out here.
+    #[cfg(target_os = "android")]
+    fn back_pops_chat(&self, window: &Window) -> bool {
+        let narrow = frame::viewport(window).width < px(NARROW);
+        narrow
+            && self.open.is_some()
+            && self.slide.leaving.is_none()
+            && self.verify.sheet.is_none()
+            && !self.share.open
+            && self.viewer.is_none()
+            && self.people.confirm.is_none()
+            && self.fwd.deleting.is_none()
+            && !(self.preview.open() && !caption::tray())
+            && !self.menu_open()
+            && self.audience.open.is_none()
+            && self.chat_sheet.is_none()
+            && !self.gallery.menu
+            && !self.keys.open
+            && !self.location.open
+            && !self.poll_form.open
+            && self.fwd.picking.is_none()
+            && !self.gallery.open
+            && !self.gifs_open()
+            && !self.emoji_pick.tones
+            && self.emoji_open.is_none()
+            && !self.mention.open()
+            && !self.emoji_hint.open()
+            && self.fwd.selected.is_none()
+            && !self.info_open()
+            && self.compose == Compose::New
+            && self.panel.is_none()
+            && !self.find.open
+            && !self.searching
+    }
+
+    /// Android's back gesture moved or ended: over the open chat the chat follows the finger and
+    /// goes or comes back with it; anywhere else its end is back, as Escape.
+    #[cfg(target_os = "android")]
+    pub(super) fn on_back_gesture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        if let Some(back) = crate::back_gesture::take_end() {
+            let held = self.slide.gesture.take();
+            match (back, held) {
+                (true, Some(v)) => {
+                    self.slide.settle = Some((v, 0., now, motion::PUSH.mul_f32(v.max(0.3))));
+                    self.pop_room(cx);
+                }
+                (true, None) => {
+                    self.go_back(window, cx);
+                }
+                (false, Some(v)) => self.slide.settle = Some((v, 1., now, motion::PUSH.mul_f32((1. - v).max(0.3)))),
+                (false, None) => {}
+            }
+            cx.notify();
+            return;
+        }
+        let Some(left_x) = crate::back_gesture::tracking() else { return };
+        // Only the left edge has a place on iOS; from the right, back waits for the gesture's end.
+        let Some(x) = left_x.filter(|_| !cx.reduce_motion() && (self.slide.gesture.is_some() || self.back_pops_chat(window))) else { return };
+        let w = f32::from(frame::viewport(window).width);
+        self.slide.settle = None;
+        self.slide.gesture = Some(held_at(x / window.scale_factor(), w));
+        cx.notify();
+    }
+
     /// Pops the open chat: it slides off and closes where it lands. Reduced motion closes at once.
     pub(super) fn pop_room(&mut self, cx: &mut Context<Self>) {
         if cx.reduce_motion() || self.slide.leaving.is_some() {
@@ -180,7 +272,14 @@ impl Fly {
 
 #[cfg(test)]
 mod tests {
-    use super::{layers, reorder};
+    use super::{held_at, layers, reorder};
+
+    #[test]
+    fn a_back_gesture_holds_the_chat_under_the_finger() {
+        assert_eq!(held_at(0., 400.), 1.);
+        assert_eq!(held_at(100., 400.), 0.75);
+        assert_eq!(held_at(900., 400.), 0.);
+    }
 
     #[test]
     fn a_row_jumping_up_pushes_the_ones_above_it_down() {

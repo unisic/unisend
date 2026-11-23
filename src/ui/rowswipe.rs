@@ -126,9 +126,23 @@ pub(super) struct Release<T> {
 /// Advances a pan over a row by one scroll event. Nothing moves until the pan is `SWIPE_SLOP` long;
 /// then it follows only a pan mostly sideways toward a side that has an action (`allowed`: left,
 /// right), within `width`. A pan without a start (a mouse wheel, a fling's glide) never swipes.
-pub(super) fn pan_step<T: Clone + PartialEq>(pan: &mut Option<Pan<T>>, id: &T, (dx, dy): (f32, f32), phase: TouchPhase, allowed: (bool, bool), width: f32, now: Instant) -> Option<Release<T>> {
+/// A row still springing back is `caught` where it is drawn and follows at once.
+#[allow(clippy::too_many_arguments, reason = "one step of one gesture; a struct would only rename them")]
+pub(super) fn pan_step<T: Clone + PartialEq>(
+    pan: &mut Option<Pan<T>>,
+    id: &T,
+    (dx, dy): (f32, f32),
+    phase: TouchPhase,
+    allowed: (bool, bool),
+    width: f32,
+    caught: Option<f32>,
+    now: Instant,
+) -> Option<Release<T>> {
     match phase {
-        TouchPhase::Started => *pan = Some(Pan { id: id.clone(), moved: (0., 0.), lock: None, dx: 0., samples: VecDeque::new() }),
+        TouchPhase::Started => {
+            *pan = Some(Pan { id: id.clone(), moved: (0., 0.), lock: caught.map(|_| true), dx: caught.unwrap_or(0.), samples: VecDeque::new() });
+            return None;
+        }
         TouchPhase::Moved => {}
         TouchPhase::Ended | TouchPhase::Cancelled => {
             let mut p = pan.take().filter(|p| p.lock == Some(true) && p.id == *id)?;
@@ -198,14 +212,26 @@ impl BeeperApp {
         let delta = event.delta.pixel_delta(px(20.));
         let following = |pan: &Option<Pan<OwnedRoomId>>| pan.as_ref().filter(|p| p.lock == Some(true)).map(|p| p.dx);
         let before = following(&self.rows.pan);
-        let released = pan_step(&mut self.rows.pan, id, (f32::from(delta.x), f32::from(delta.y)), event.touch_phase, allowed, width, Instant::now());
+        let now = Instant::now();
+        // A row springing home is caught where it is drawn, as on iOS, instead of jumping under the finger.
+        let caught = match (event.touch_phase, self.rows.glide.as_mut()) {
+            (TouchPhase::Started, Some((on, g, false))) if on == id && g.running() => Some(g.step(now)),
+            _ => None,
+        };
+        if caught.is_some() {
+            self.rows.glide = None;
+        }
+        let released = pan_step(&mut self.rows.pan, id, (f32::from(delta.x), f32::from(delta.y)), event.touch_phase, allowed, width, caught, now);
         let after = following(&self.rows.pan);
         // Following the finger sideways, the pan is the row's: the list must not scroll with it.
         if after.is_some() || released.is_some() {
             cx.stop_propagation();
         }
+        // A tick each way across the arm point, as iOS ticks when a full swipe arms and disarms.
         #[cfg(target_os = "android")]
-        if before.is_some_and(|dx| dx.abs() < arm(width)) && after.is_some_and(|dx| dx.abs() >= arm(width)) {
+        if let (Some(b), Some(a)) = (before, after)
+            && (b.abs() >= arm(width)) != (a.abs() >= arm(width))
+        {
             motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Light);
         }
         if let Some(r) = released {
@@ -392,10 +418,10 @@ mod tests {
     fn pan(moves: &[(f32, f32)], allowed: (bool, bool)) -> (Option<super::Pan<u8>>, Instant) {
         let mut p = None;
         let mut t = Instant::now();
-        pan_step(&mut p, &1, (0., 0.), TouchPhase::Started, allowed, 400., t);
+        pan_step(&mut p, &1, (0., 0.), TouchPhase::Started, allowed, 400., None, t);
         for &m in moves {
             t += Duration::from_millis(16);
-            assert_eq!(pan_step(&mut p, &1, m, TouchPhase::Moved, allowed, 400., t), None);
+            assert_eq!(pan_step(&mut p, &1, m, TouchPhase::Moved, allowed, 400., None, t), None);
         }
         (p, t)
     }
@@ -423,10 +449,20 @@ mod tests {
     #[test]
     fn release_reports_offset_and_cancel_never_acts() {
         let (mut p, t) = pan(&[(-12., 0.), (-20., 0.)], BOTH);
-        let r = pan_step(&mut p, &1, (0., 0.), TouchPhase::Cancelled, BOTH, 400., t).unwrap();
+        let r = pan_step(&mut p, &1, (0., 0.), TouchPhase::Cancelled, BOTH, 400., None, t).unwrap();
         assert_eq!(r, Release { id: 1, dx: -32., vel: 0., ended: false });
         let (mut p, t) = pan(&[(0., 12.)], BOTH);
-        assert_eq!(pan_step(&mut p, &1, (0., 0.), TouchPhase::Ended, BOTH, 400., t), None);
+        assert_eq!(pan_step(&mut p, &1, (0., 0.), TouchPhase::Ended, BOTH, 400., None, t), None);
+    }
+
+    #[test]
+    fn a_row_springing_home_is_caught_where_it_is() {
+        let mut p = None;
+        let t = Instant::now();
+        pan_step(&mut p, &1, (0., 0.), TouchPhase::Started, BOTH, 400., Some(-80.), t);
+        assert_eq!(p.as_ref().unwrap().dx, -80., "no jump under the finger");
+        pan_step(&mut p, &1, (3., 0.), TouchPhase::Moved, BOTH, 400., None, t + Duration::from_millis(16));
+        assert_eq!(p.unwrap().dx, -77., "follows at once, without a new slop");
     }
 
     #[test]

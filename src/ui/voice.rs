@@ -33,6 +33,20 @@ const MIN_HOLD: Duration = Duration::from_millis(400);
 /// How far the finger slides left to throw the recording away, and up to keep it going.
 const CANCEL_X: f32 = 120.;
 const LOCK_Y: f32 = 80.;
+/// Under this far the held finger moves nothing; past it the hold follows one way only.
+const HOLD_SLOP: f32 = 10.;
+
+/// What a held mic button does with a finger moved `(x, y)` from where it came down: left toward
+/// cancel or up toward lock, whichever way it went more, never both, as in iOS chat apps.
+fn held_drag(x: f32, y: f32) -> (f32, f32) {
+    if x.hypot(y) < HOLD_SLOP {
+        (0., 0.)
+    } else if x.abs() > y.abs() {
+        (x.min(0.), 0.)
+    } else {
+        (0., y.min(0.))
+    }
+}
 /// Downloaded files kept for playing again, newest last.
 const MAX_FILES: usize = 8;
 const SPEEDS: [(f32, &str); 3] = [(1., "1×"), (1.5, "1.5×"), (2., "2×")];
@@ -249,15 +263,15 @@ impl BeeperApp {
 
     fn mic_moved(&mut self, by: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(rec) = self.voice.rec.as_mut().filter(|r| r.state == RecState::Holding) else { return };
-        rec.drag = (f32::from(by.x).min(0.), f32::from(by.y).min(0.));
+        rec.drag = held_drag(f32::from(by.x), f32::from(by.y));
         if -rec.drag.0 >= CANCEL_X {
             self.cancel_recording(cx);
             #[cfg(target_os = "android")]
-            motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Light);
+            motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Medium);
         } else if -rec.drag.1 >= LOCK_Y {
             (rec.state, rec.drag) = (RecState::Locked, (0., 0.));
             #[cfg(target_os = "android")]
-            motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Selection);
+            motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Medium);
         }
         cx.notify();
     }
@@ -1074,6 +1088,15 @@ mod native {
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
     use super::loudness;
+
+    #[test]
+    fn a_held_mic_follows_one_way_at_a_time() {
+        use super::held_drag;
+        assert_eq!(held_drag(-6., -4.), (0., 0.), "inside the slop");
+        assert_eq!(held_drag(-90., -40.), (-90., 0.), "mostly left: toward cancel only");
+        assert_eq!(held_drag(-30., -70.), (0., -70.), "mostly up: toward lock only");
+        assert_eq!(held_drag(50., 5.), (0., 0.), "right does nothing");
+    }
 
     #[test]
     fn loudness_is_on_a_50_db_scale() {

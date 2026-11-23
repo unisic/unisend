@@ -280,7 +280,7 @@ impl BeeperApp {
                         .w(px(width))
                         .gap(px(12.))
                         .px(px(GUTTER))
-                        .pb(px(bottom + 16.))
+                        .pb(px(bottom + 16. + frame.lift()))
                         .rounded_t(px(RADIUS))
                         .bg(p.surface)
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))

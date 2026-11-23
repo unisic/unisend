@@ -39,7 +39,7 @@ pub(super) struct Ui {
     password: Entity<InputState>,
     code: Entity<InputState>,
     /// What the sheet shows; `None` closes it.
-    sheet: Option<Verify>,
+    pub(super) sheet: Option<Verify>,
     /// Drawn while the sheet falls.
     sheet_last: Option<Verify>,
     motion: SheetMotion,
@@ -509,7 +509,6 @@ impl BeeperApp {
         let head = div()
             .id("verify-head")
             .h(px(44.))
-            .pt(px(8.))
             .flex()
             .items_center()
             .text_size(fs(16.))
@@ -520,6 +519,7 @@ impl BeeperApp {
             .child(title.to_owned());
         let view = cx.entity_id();
         let content = v_flex()
+            .child(sheet::handle(p.faint))
             .child(head)
             .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(body))
             .children(emoji)
@@ -542,7 +542,7 @@ impl BeeperApp {
                         .w_full()
                         .max_w(px(SHEET_W))
                         .px(px(GUTTER + 4.))
-                        .pb(px(bottom + 16.))
+                        .pb(px(bottom + 16. + frame.lift()))
                         .rounded_t(px(RADIUS))
                         .bg(p.surface)
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))

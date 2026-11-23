@@ -49,6 +49,49 @@ pub(crate) const EASE_OUT: Easing = Easing::CubicBezier { x1: 0.23, y1: 1., x2: 
 /// Vaul's iOS sheet curve, cubic-bezier(0.32, 0.72, 0, 1): steep start, so 400 ms still feels quick.
 pub(crate) const EASE_SHEET: Easing = Easing::CubicBezier { x1: 0.32, y1: 0.72, x2: 0., y2: 1. };
 
+/// UIKit's rubber band: `over` px past a bound moves this far, slower the further it goes and
+/// never past `dim` (the scrolled dimension).
+pub(crate) fn rubber_band(over: f32, dim: f32) -> f32 {
+    const C: f32 = 0.55;
+    if dim <= 0. {
+        return 0.;
+    }
+    over * dim * C / (dim + C * over.abs())
+}
+
+/// The inverse of `rubber_band`: how far a finger went past the bound to draw `drawn` there.
+pub(crate) fn unrubber_band(drawn: f32, dim: f32) -> f32 {
+    const C: f32 = 0.55;
+    let d = drawn.clamp(-dim * 0.999, dim * 0.999);
+    d * dim / (C * dim - C * d.abs())
+}
+
+/// A spring from 0 to 1 released at rest, `secs` after release: UIKit's `response` (the period)
+/// and `damping` ratio, under 1 overshooting once.
+pub(crate) fn spring_at(secs: f32, response: f32, damping: f32) -> f32 {
+    let w = std::f32::consts::TAU / response;
+    let decay = (-damping * w * secs).exp();
+    if damping >= 1. {
+        return 1. - decay * (1. + w * secs);
+    }
+    let wd = w * (1. - damping * damping).sqrt();
+    1. - decay * ((wd * secs).cos() + damping * w / wd * (wd * secs).sin())
+}
+
+/// UIKit's projected rest point under normal deceleration.
+pub(crate) fn project(speed: f32) -> f32 {
+    projected(speed, 0.998)
+}
+
+/// `project` under UIKit's fast deceleration (0.99), the one paging uses.
+pub(crate) fn project_fast(speed: f32) -> f32 {
+    projected(speed, 0.99)
+}
+
+fn projected(speed: f32, rate: f32) -> f32 {
+    speed / 1000. * rate / (1. - rate)
+}
+
 pub(crate) fn ease_out(t: f32) -> f32 {
     EASE_OUT.sample(t)
 }
@@ -117,10 +160,8 @@ fn animations_off() -> Result<bool, String> {
 }
 
 /// Lands a page or a sheet against an edge: 300 ms, critically damped, no overshoot.
-#[allow(dead_code, reason = "used by the motion wave that lands next")]
 pub(crate) const SETTLE: (Duration, f32) = (Duration::from_millis(300), 1.0);
 /// Throws something off screen at the finger's speed: 350 ms, critically damped.
-#[allow(dead_code, reason = "used by the motion wave that lands next")]
 pub(crate) const THROW: (Duration, f32) = (Duration::from_millis(350), 1.0);
 // Photo viewer and media bubbles.
 /// A picture flying from its bubble to full screen, and back into it.
@@ -136,7 +177,6 @@ pub(crate) const RETURN: (Duration, f32) = (Duration::from_millis(300), 0.8);
 /// A spring the app steps itself, so a released finger's speed carries into it.
 /// Call `step` and `window.request_animation_frame()` only during render: requesting a frame elsewhere panicked.
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code, reason = "used by the motion wave that lands next")]
 pub(crate) struct Glide {
     pub pos: f32,
     pub vel: f32,
@@ -146,7 +186,6 @@ pub(crate) struct Glide {
     last: Option<Instant>,
 }
 
-#[allow(dead_code, reason = "used by the motion wave that lands next")]
 impl Glide {
     /// response = period of the undamped spring, damping = ratio (1.0 critical). Mass 1: stiffness (2π/response)², damping coefficient 4π·ratio/response.
     pub(crate) fn new(response: Duration, damping: f32, epsilon: f32, pos: f32) -> Self {
@@ -242,6 +281,27 @@ mod tests {
         a.release(100.0, 0.0, t0);
         b.release(100.0, 0.0, t0);
         assert_eq!(a.step(t0 + Duration::from_millis(500)), b.step(t0 + Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn a_spring_overshoots_once_and_rests() {
+        assert_eq!(spring_at(0., 0.35, 0.8), 0.);
+        let peak = (1..60).map(|i| spring_at(i as f32 * 0.01, 0.35, 0.8)).fold(0., f32::max);
+        assert!(peak > 1. && peak < 1.05, "{peak}");
+        assert!((spring_at(0.6, 0.35, 0.8) - 1.).abs() < 0.01);
+        assert!((0..100).all(|i| spring_at(i as f32 * 0.01, 0.35, 1.) <= 1.), "critical never passes");
+    }
+
+    #[test]
+    fn rubber_band_resists_and_inverts() {
+        assert_eq!(rubber_band(0., 400.), 0.);
+        let near = rubber_band(10., 400.);
+        assert!(near > 5. && near < 10., "{near}");
+        assert!(rubber_band(10_000., 400.) < 400.);
+        assert_eq!(rubber_band(-50., 400.), -rubber_band(50., 400.));
+        for over in [-300., -40., 3., 120., 900.] {
+            assert!((unrubber_band(rubber_band(over, 400.), 400.) - over).abs() < 0.5, "{over}");
+        }
     }
 
     #[test]

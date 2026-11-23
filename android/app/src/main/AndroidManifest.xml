@@ -50,6 +50,7 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|locale|layoutDirection"
             android:exported="true"
             android:launchMode="singleTask"
+            android:enableOnBackInvokedCallback="true"
             android:theme="@style/GpuiSplashTheme"
             android:windowSoftInputMode="adjustResize">
             <meta-data android:name="android.app.lib_name" android:value="${nativeLibraryName}" />

@@ -87,13 +87,13 @@ struct Toast {
 
 pub(super) struct Forward {
     /// Selection mode in a chat, with the messages chosen in the order they were tapped.
-    selected: Option<(OwnedRoomId, Vec<String>)>,
+    pub(super) selected: Option<(OwnedRoomId, Vec<String>)>,
     /// The messages the delete dialog asks about.
-    deleting: Option<Vec<String>>,
+    pub(super) deleting: Option<Vec<String>>,
     /// What the dialog showed last, so it fades out as it was: how many, and for everyone too.
     deleting_last: Option<(usize, bool)>,
     /// The forward sheet: the chat the messages are in and the messages, oldest first.
-    picking: Option<(OwnedRoomId, Vec<String>)>,
+    pub(super) picking: Option<(OwnedRoomId, Vec<String>)>,
     picker_last: Option<(OwnedRoomId, Vec<String>)>,
     sheet: SheetMotion,
     chosen: Vec<OwnedRoomId>,
@@ -589,8 +589,8 @@ impl BeeperApp {
                         .top(px(frame.y))
                         .w_full()
                         .max_w(px(SHEET_W))
-                        .h(px(height))
-                        .pb(px(bottom + 8.))
+                        .h(px(height + frame.lift()))
+                        .pb(px(bottom + 8. + frame.lift()))
                         .rounded_t(px(RADIUS))
                         .bg(p.surface)
                         .when(live, |el| el.on_click(|_, _, cx| cx.stop_propagation()))

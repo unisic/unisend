@@ -19,7 +19,7 @@ struct Fields {
 /// Kept after closing until the next opening, so the sheet can finish falling.
 #[derive(Default)]
 pub(super) struct Form {
-    open: bool,
+    pub(super) open: bool,
     fields: Option<Fields>,
 }
 

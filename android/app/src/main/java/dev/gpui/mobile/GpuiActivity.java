@@ -9,6 +9,9 @@ import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.window.BackEvent;
+import android.window.OnBackAnimationCallback;
+import android.window.OnBackInvokedDispatcher;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.WindowInsets;
@@ -79,6 +82,51 @@ public class GpuiActivity extends GpuiInputActivity {
         // Runs after every layout pass, which a change of insets brings; NativeActivity's own
         // listener reports only a content rect, and gpui-mobile does not repaint for it.
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalLayoutListener(this::publishInsets);
+        registerBack();
+    }
+
+    /**
+     * Android 14's predictive back: the back gesture's progress reaches src/lib.rs as it happens, so
+     * the open chat follows the finger as on iOS and slides back if the gesture is let go. Before
+     * Android 14 back stays a key, which gpui-mobile turns into Escape.
+     */
+    private void registerBack() {
+        if (Build.VERSION.SDK_INT < 34) return;
+        getOnBackInvokedDispatcher().registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, new OnBackAnimationCallback() {
+            @Override
+            public void onBackStarted(BackEvent e) {
+                back(BACK_STARTED, e);
+            }
+
+            @Override
+            public void onBackProgressed(BackEvent e) {
+                back(BACK_MOVED, e);
+            }
+
+            @Override
+            public void onBackInvoked() {
+                back(BACK_INVOKED, null);
+            }
+
+            @Override
+            public void onBackCancelled() {
+                back(BACK_CANCELLED, null);
+            }
+        });
+    }
+
+    private static final int BACK_STARTED = 0, BACK_MOVED = 1, BACK_INVOKED = 2, BACK_CANCELLED = 3;
+
+    private void back(int phase, BackEvent e) {
+        try {
+            if (e == null) {
+                nativeBack(phase, 0f, 0f, false);
+            } else {
+                nativeBack(phase, e.getProgress(), e.getTouchX(), e.getSwipeEdge() == BackEvent.EDGE_LEFT);
+            }
+        } catch (UnsatisfiedLinkError err) {
+            Log.w("GpuiActivity", "nativeBack not available yet");
+        }
     }
 
     @Override
@@ -221,4 +269,6 @@ public class GpuiActivity extends GpuiInputActivity {
     private static native void nativeOnDeepLink(String url);
 
     private static native void nativeInsets(int bottom);
+
+    private static native void nativeBack(int phase, float progress, float touchX, boolean fromLeft);
 }

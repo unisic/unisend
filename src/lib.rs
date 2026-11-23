@@ -1520,6 +1520,70 @@ pub(crate) fn watch_insets(window: &mut Window, cx: &mut App) {
     let _ = (window, cx);
 }
 
+/// Android 14's predictive back gesture, as GpuiActivity reports it: the chat follows it while it
+/// is under way, and a gesture let go past the system's point is back, as Escape was before.
+#[cfg(target_os = "android")]
+pub(crate) mod back_gesture {
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+
+    /// Whether a gesture is under way.
+    static TRACKING: AtomicBool = AtomicBool::new(false);
+    /// The finger's x as f32 bits, `u32::MAX` when the gesture came from the right edge.
+    static LEFT_X: AtomicU32 = AtomicU32::new(u32::MAX);
+    /// 0 nothing, 1 went back, 2 let go short of it; taken once.
+    static ENDED: AtomicU8 = AtomicU8::new(0);
+    /// Holds at most one pending wakeup however often Java reports.
+    static KICK: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+    /// Some while a gesture is under way, with the finger's x in physical px when it came from the
+    /// left edge.
+    pub(crate) fn tracking() -> Option<Option<f32>> {
+        TRACKING.load(Ordering::Relaxed).then(|| {
+            let x = LEFT_X.load(Ordering::Relaxed);
+            (x != u32::MAX).then(|| f32::from_bits(x))
+        })
+    }
+
+    /// How the last gesture ended, once: `Some(true)` back, `Some(false)` let go short of it.
+    pub(crate) fn take_end() -> Option<bool> {
+            match ENDED.swap(0, Ordering::Relaxed) {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Waits for Java's next report.
+    pub(crate) async fn next() {
+        KICK.notified().await;
+    }
+
+    /// # Safety
+    /// Called by the JVM on the UI thread.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiActivity_nativeBack(
+        _env: *mut std::ffi::c_void,
+        _class: *mut std::ffi::c_void,
+        phase: i32,
+        _progress: f32,
+        touch_x: f32,
+        from_left: u8,
+    ) {
+        match phase {
+            0 | 1 => {
+                LEFT_X.store(if from_left != 0 { touch_x.max(0.).to_bits() } else { u32::MAX }, Ordering::Relaxed);
+                TRACKING.store(true, Ordering::Relaxed);
+            }
+            2 | 3 => {
+                TRACKING.store(false, Ordering::Relaxed);
+                ENDED.store(if phase == 2 { 1 } else { 2 }, Ordering::Relaxed);
+            }
+            _ => return,
+        }
+        KICK.notify_one();
+    }
+}
+
 /// The bottom inset as GpuiActivity reads it from the window's insets. gpui-mobile takes it from
 /// NativeActivity's content rect without asking for a frame, so a keyboard that went away while
 /// nothing was drawing (Unisend brought to the front over another app's keyboard) left its space
