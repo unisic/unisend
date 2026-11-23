@@ -22,12 +22,13 @@ sent and a random ID made once per app start.
 ## Updates outside an app store
 
 A build with `UNISEND_UPDATE_URL` (https) checks that address for an `update.json` (`versionCode`,
-`versionName`, `url`, `sha256`, `notes`) once a day while "Check for updates automatically" is on,
-and on "Check now". A newer release is downloaded only after the user taps Update, checked against
+`versionName`, `url`, `sha256`, `notes`) when the user taps Check now, and once a day only if they turn
+on "Check for updates automatically" (off by default). A newer release is downloaded only after the user taps Update, checked against
 its SHA-256 and handed to Android's installer, which refuses one signed with another key. The
 request is a plain GET without a user agent, cookie or identifier: the host (and, for GitHub, the
 download servers it redirects to) sees the phone's IP address, the time and the URL. Without the
-variable, Settings has no Updates section. `scripts/release.sh` builds a release signed with a key
+variable, Settings has no Updates section: a Google Play build leaves it out, since Play updates
+the app. `scripts/release.sh` builds a release signed with a key
 from the environment and writes `update.json`; a GitHub release can serve it at the stable
 `https://github.com/<owner>/<repo>/releases/latest/download/update.json`, any static host works.
 

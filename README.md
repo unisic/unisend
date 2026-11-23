@@ -107,7 +107,7 @@ What leaves the device, and who sees it:
 - **KLIPY**, only in builds with a KLIPY key and only when you open the GIF picker: your IP
   address, what you search for, the GIF you send and a random ID made once per app start.
 - **The update host**, only in Android builds made with `UNISEND_UPDATE_URL`: a plain request for
-  `update.json` with no identifier, once a day or when you tap Check now.
+  `update.json` with no identifier, when you tap Check now, or once a day if you turn that on.
 - **Maps**: a received location opens in your maps app on Android, or on openstreetmap.org in the
   browser on desktop, only when you tap it. The app loads no map tiles itself.
 - **A linked site**, when you type a link with link previews on (Settings, Privacy): this device

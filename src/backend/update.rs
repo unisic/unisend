@@ -77,26 +77,17 @@ pub(crate) fn parse(raw: &[u8]) -> Result<Release> {
 }
 
 /// The user's choice and when the app last looked, kept beside the settings.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Prefs {
-    #[serde(default = "Prefs::on")]
+    /// Off until the user turns it on: nothing leaves the device for updates without a tap.
+    #[serde(default)]
     pub auto: bool,
     /// Unix seconds of the last check, automatic or not.
     #[serde(default)]
     pub last_check: u64,
 }
 
-impl Default for Prefs {
-    fn default() -> Self {
-        Self { auto: true, last_check: 0 }
-    }
-}
-
 impl Prefs {
-    fn on() -> bool {
-        true
-    }
-
     fn path(dir: &Path) -> PathBuf {
         dir.join("update.json")
     }
@@ -397,15 +388,16 @@ mod tests {
 
     #[test]
     fn checks_at_most_once_a_day_and_only_when_on() {
-        let mut prefs = Prefs::default();
-        assert!(prefs.auto && prefs.due(1_000), "never checked");
+        assert!(!Prefs::default().due(1_000), "off until turned on");
+        let mut prefs = Prefs { auto: true, ..Prefs::default() };
+        assert!(prefs.due(1_000), "never checked");
         prefs.last_check = 1_000;
         assert!(!prefs.due(1_000 + EVERY - 1));
         assert!(prefs.due(1_000 + EVERY));
         assert!(prefs.due(999), "clock set back");
         prefs.auto = false;
         assert!(!prefs.due(1_000 + 10 * EVERY));
-        assert_eq!(serde_json::from_str::<Prefs>("{}").unwrap(), Prefs::default(), "missing fields default to on");
+        assert_eq!(serde_json::from_str::<Prefs>("{}").unwrap(), Prefs::default(), "missing fields default to off");
     }
 
     /// Answers each connection with `body` once, over plain http on this machine.
