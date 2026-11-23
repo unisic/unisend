@@ -639,9 +639,9 @@ impl BeeperApp {
             }
         }));
         subs.push(cx.observe_window_appearance(window, |_, window, cx| crate::sync_theme(Some(window), cx)));
-        subs.push(cx.observe_global_in::<Tapped>(window, |this, window, cx| {
-            let id = cx.global::<Tapped>().0.clone();
-            this.offer_chat(&id, window, cx);
+        subs.push(cx.observe_global_in::<Tapped>(window, |this, window, cx| match cx.global::<Tapped>().clone() {
+            Tapped::Chat(link) => this.offer_chat(&link, window, cx),
+            Tapped::Check { url, shown } => this.ask_link(url, shown, cx),
         }));
         subs.push(cx.observe_window_activation(window, |this, window, cx| {
             let active = window.is_window_active();
@@ -4831,8 +4831,14 @@ fn urls(text: &str) -> Vec<std::ops::Range<usize>> {
     out
 }
 
-/// A Matrix ID or room alias tapped in a message, which the view offers a chat with.
-pub(super) struct Tapped(pub String);
+/// What a tap in a message's text hands to the view.
+#[derive(Clone)]
+pub(super) enum Tapped {
+    /// A Matrix ID, room alias, `matrix.to` link or `matrix:` URI, which the view offers a chat with.
+    Chat(String),
+    /// A link whose text names another site than the one it opens (`misleading`).
+    Check { url: String, shown: String },
+}
 
 impl Global for Tapped {}
 
@@ -4850,6 +4856,20 @@ fn taps(text: &str) -> Vec<Tap> {
     }
     found.sort_by_key(|(r, _)| r.start);
     found
+}
+
+/// A link whose text reads as an address on another site than the one it opens, the way a phishing
+/// message hides where it goes; Element X asks before opening one. A subdomain of the site named is
+/// the same site.
+pub(super) fn misleading(shown: &str, href: &str) -> bool {
+    let host = |s: &str| {
+        let url = matrix_sdk::reqwest::Url::parse(s).ok()?;
+        url.host_str().map(|h| h.trim_start_matches("www.").to_ascii_lowercase())
+    };
+    let shown = shown.trim();
+    let Some(goes) = host(href) else { return false };
+    let read = taps(shown).into_iter().find(|(r, to)| r.len() == shown.len() && to.starts_with("http")).and_then(|(_, to)| host(&to));
+    read.is_some_and(|read| goes != read && !goes.ends_with(&format!(".{read}")))
 }
 
 /// The character before `at`, which tells whether a find starts a word.
@@ -5664,6 +5684,18 @@ mod tests {
             ("600700800", "tel:600700800"),
         ]));
         assert_eq!(tapped("+1 415 555 2671"), pairs(&[("+1 415 555 2671", "tel:+14155552671")]));
+    }
+
+    #[test]
+    fn a_link_naming_another_site_is_misleading() {
+        assert!(super::misleading("https://mbank.pl", "https://mbank.pl.evil.example/login"));
+        assert!(super::misleading("mbank.pl", "https://evil.example"));
+        assert!(super::misleading("www.mbank.pl", "https://mbank.pl@evil.example"));
+        assert!(!super::misleading("mbank.pl", "https://www.mbank.pl/login"));
+        assert!(!super::misleading("mbank.pl", "https://online.mbank.pl"));
+        assert!(!super::misleading("click here", "https://evil.example"));
+        assert!(!super::misleading("https://a.pl and more", "https://evil.example"));
+        assert!(!super::misleading("mail me", "mailto:a@b.pl"));
     }
 
     #[test]

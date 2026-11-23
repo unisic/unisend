@@ -121,7 +121,11 @@ without calling, and is copied on a computer; a Matrix ID or room alias (`@name:
 `#room:server`) opens New chat with it typed, so a second tap starts the chat or joins; a site named
 without `https://` (common endings only, or `www.`) opens in the browser; a code or other long number
 (4 digits or more, or groups like "123 456", a lone year aside) is copied, and Android confirms the
-copy itself. Dates, street addresses and flight numbers are not found: the systems do that with a
+copy itself. A `matrix.to` link or `matrix:` URI opens a chat the user is in, or the message it
+points to, inside the app; one to a person or a chat the user is not in opens New chat as above. A
+link whose text reads as an address on another site than the one it opens (a subdomain of the
+named site aside) asks first, "Double-check this link", as Element X does. The message menu has
+Copy link beside Open link. Dates, street addresses and flight numbers are not found: the systems do that with a
 model, and rules alone mistake too much.
 
 A poll is its question, then one row per answer, 44 tall, with the share of votes drawn as a `lifted`

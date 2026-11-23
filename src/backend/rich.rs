@@ -232,10 +232,12 @@ fn raw_text(node: &NodeRef, out: &mut String) {
     }
 }
 
-/// A link a bubble may open. Mentions (`matrix.to` links to users) stay marked by name instead.
+/// A link a bubble may open: web, mail, phone and Matrix ones. Mentions (links to users) stay marked
+/// by name instead.
 fn link(href: &str) -> Option<String> {
-    let web = href.starts_with("https://") || href.starts_with("http://");
-    (web && !href.contains("matrix.to/#/@")).then(|| href.to_owned())
+    let opens = ["https://", "http://", "mailto:", "tel:", "matrix:"].iter().any(|scheme| href.starts_with(scheme));
+    let mention = href.contains("matrix.to/#/@") || href.starts_with("matrix:u/");
+    (opens && !mention).then(|| href.to_owned())
 }
 
 fn walk(node: &NodeRef, st: &Style, depth: usize, blocks: &mut Vec<Block>, cur: &mut Vec<Run>, b: &mut Builder) {
@@ -415,6 +417,10 @@ mod tests {
         let hrefs: Vec<_> = para(&rich, 0).iter().map(|r| r.href.clone()).collect();
         assert_eq!(hrefs[0].as_deref(), Some("https://example.com/a"));
         assert_eq!(hrefs[1], None);
+        assert!(!hrefs.iter().flatten().any(|h| h.starts_with("javascript")));
+        let (_, rich) = parse("<a href=\"mailto:a@b.pl\">mail</a> <a href=\"tel:+48600\">call</a> <a href=\"matrix:u/bob:hs\">Bob</a>").unwrap();
+        let hrefs: Vec<_> = para(&rich, 0).iter().filter_map(|r| r.href.clone()).collect();
+        assert_eq!(hrefs, ["mailto:a@b.pl", "tel:+48600"]);
     }
 
     #[test]

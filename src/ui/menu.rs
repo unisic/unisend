@@ -111,6 +111,7 @@ pub(super) enum Act {
     React,
     Retry,
     Link(String),
+    CopyLink(String),
     Edit,
     Copy(String),
     Delete,
@@ -131,6 +132,7 @@ impl Act {
             Act::React => ("act-react", IconName::Heart, t!("React")),
             Act::Retry => ("act-retry", IconName::RotateCw, t!("Try again")),
             Act::Link(_) => ("act-link", IconName::ExternalLink, t!("Open link")),
+            Act::CopyLink(_) => ("act-copy-link", IconName::Link, t!("Copy link")),
             Act::Edit => ("act-edit", IconName::Pencil, t!("Edit")),
             Act::Copy(_) => ("act-copy", IconName::Copy, t!("Copy text")),
             Act::Delete => ("act-delete", IconName::Trash, t!("Delete")),
@@ -169,7 +171,7 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
     }
     out.extend(editable.then_some(Act::Edit));
     out.extend((!sent && failed).then_some(Act::Retry));
-    out.extend(link.map(Act::Link));
+    out.extend(link.into_iter().flat_map(|url| [Act::Link(url.clone()), Act::CopyLink(url)]));
     out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
     out.extend(ends.then_some(Act::EndPoll));
     out.extend(saveable.then_some(Act::Save));
@@ -733,6 +735,7 @@ impl BeeperApp {
                 }
             }
             Act::Link(url) => crate::open_link(cx, &url),
+            Act::CopyLink(url) => crate::copy(cx, url),
             Act::Copy(body) => crate::copy(cx, body),
             Act::Save => self.export_message(id, crate::backend::Export::Save, cx),
             Act::Forward => self.forward_start(vec![id.to_owned()], window, cx),

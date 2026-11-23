@@ -172,7 +172,7 @@ impl BeeperApp {
         }
     }
 
-    fn jump(&mut self, room: OwnedRoomId, id: String, cx: &mut Context<Self>) {
+    pub(super) fn jump(&mut self, room: OwnedRoomId, id: String, cx: &mut Context<Self>) {
         if self.open.as_ref() == Some(&room) {
             self.reveal_within(&id, JUMP_PAGES, cx);
             return;

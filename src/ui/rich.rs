@@ -139,8 +139,10 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
             style = HighlightStyle { color, font_weight: look.mention.font_weight, ..style };
         }
         if let Some(href) = &run.href {
+            let shown = link_text(runs, run);
             links.push(seg.clone());
-            targets.push(href.clone());
+            // A check travels in the target: after a newline, which no link this app opens holds.
+            targets.push(if super::misleading(&shown, href) { format!("\n{href}\n{shown}") } else { href.clone() });
         } else if let Some((_, to)) = bare.iter().find(|(r, _)| r.start <= seg.start && seg.end <= r.end) {
             links.push(seg.clone());
             targets.push(to.clone());
@@ -178,6 +180,16 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
         .into_any_element()
 }
 
+/// The whole text of the link `run` is part of: the runs beside it with the same address, as a link
+/// with bold words in it is cut into.
+fn link_text(runs: &[Run], run: &Run) -> String {
+    let Some(at) = runs.iter().position(|r| std::ptr::eq(r, run)) else { return run.text.clone() };
+    let same = |r: &&Run| r.href == run.href;
+    let first = at - runs[..at].iter().rev().take_while(same).count();
+    let last = at + runs[at + 1..].iter().take_while(same).count();
+    runs[first..=last].iter().map(|r| r.text.as_str()).collect()
+}
+
 /// Text whose `links` ranges open the matching `targets` on a click.
 pub(super) fn linked(id: String, styled: StyledText, links: Vec<Range<usize>>, targets: Vec<String>) -> AnyElement {
     if links.is_empty() {
@@ -204,12 +216,15 @@ pub(super) fn linked(id: String, styled: StyledText, links: Vec<Range<usize>>, t
         .into_any_element()
 }
 
-/// Follows a target of `taps` or a link's own: an address with a scheme opens in the app for it, a
-/// Matrix ID or room alias goes to the view to offer a chat, and digits are copied (Android shows
-/// that they were). A computer has no dialer, so a phone number is copied there.
+/// Follows a target of `taps` or a link's own: a misleading link goes to the view to be confirmed, a
+/// Matrix ID, alias or link to the view to offer a chat, another address with a scheme opens in the
+/// app for it, and digits are copied (Android shows that they were). A computer has no dialer, so a
+/// phone number is copied there.
 fn follow(cx: &mut App, target: &str) {
-    if target.starts_with(['@', '#']) {
-        cx.set_global(super::Tapped(target.to_owned()));
+    if let Some((url, shown)) = target.strip_prefix('\n').and_then(|t| t.split_once('\n')) {
+        cx.set_global(super::Tapped::Check { url: url.to_owned(), shown: shown.to_owned() });
+    } else if target.starts_with(['@', '#']) || target.starts_with("matrix:") || target.contains("://matrix.to/#/") {
+        cx.set_global(super::Tapped::Chat(target.to_owned()));
     } else if let Some(number) = target.strip_prefix("tel:").filter(|_| !cfg!(target_os = "android")) {
         crate::copy(cx, number.to_owned());
     } else if target.contains(':') {

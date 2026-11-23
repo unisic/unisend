@@ -88,6 +88,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Black", "Czarny"),
     ("Block", "Zablokuj"),
     ("Block {name}?", "Zablokować {name}?"),
+    ("Double-check this link", "Sprawdź ten link"),
+    ("The link {shown} takes you to another site, {site}. Open it?", "Link {shown} prowadzi na inną stronę, {site}. Otworzyć go?"),
     ("Blocked people", "Zablokowane osoby"),
     ("Blocks screenshots and hides the app in the recent apps list.", "Blokuje zrzuty ekranu i ukrywa aplikację na liście ostatnich."),
     ("Blue", "Niebieski"),

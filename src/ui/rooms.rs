@@ -40,6 +40,8 @@ pub(super) enum Confirming {
     SignOut { bridge: String, login: String },
     /// Turning a Discord server off; `name` is the server's.
     StopGuild { bridge: String, login: String, guild: String },
+    /// Opening a link whose text names another site; `name` is that text.
+    Link { url: String },
     /// Making an MP4 of a video that cannot go as it is (`Ev::OfferMp4`), then sending it.
     Mp4 { room: OwnedRoomId, path: PathBuf, reply_to: Option<String>, caption: String, why: Unfit },
 }
@@ -153,6 +155,14 @@ fn wording(c: &Confirm) -> (String, String, &'static str) {
                 t!("Turn off {name}?", name = c.name),
                 t!("Its channels are removed from your chats in every Beeper app. Turning it on again brings them back.").to_owned(),
                 t!("Turn off"),
+            );
+        }
+        Confirming::Link { url } => {
+            let site = matrix_sdk::reqwest::Url::parse(url).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default();
+            return (
+                t!("Double-check this link").to_owned(),
+                t!("The link {shown} takes you to another site, {site}. Open it?", shown = c.name, site = site),
+                t!("Open"),
             );
         }
         Confirming::Mp4 { why, .. } => {
@@ -374,6 +384,7 @@ impl BeeperApp {
     fn confirmed(&mut self, cx: &mut Context<Self>) {
         let Some(c) = self.people.confirm.take() else { return };
         let (room, delete, block) = match c.what {
+            Confirming::Link { url } => return crate::open_link(cx, &url),
             Confirming::Mp4 { room, path, reply_to, caption, .. } => {
                 self.uploads += 1;
                 self.attach_queue.push_back(Cmd::Mp4 { room, path, reply_to, caption });
@@ -420,7 +431,7 @@ impl BeeperApp {
         let last = window.use_keyed_state("leave-dialog-last", cx, |_, _| None::<((String, String, &'static str), bool)>);
         if let Some(c) = self.people.confirm.as_ref().filter(|c| c.ready()) {
             // Converting loses nothing: the primary button, not the red one.
-            let words = (wording(c), matches!(c.what, Confirming::Mp4 { .. }));
+            let words = (wording(c), matches!(c.what, Confirming::Mp4 { .. } | Confirming::Link { .. }));
             if last.read(cx).as_ref() != Some(&words) {
                 last.update(cx, |l, _| *l = Some(words));
             }
@@ -550,12 +561,39 @@ impl BeeperApp {
         }
     }
 
-    /// A Matrix ID or room alias tapped in a message: New chat opens with it typed, so its row
-    /// starts the chat or joins the room only on a second tap.
-    pub(super) fn offer_chat(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Asks before a link whose text names another site opens.
+    pub(super) fn ask_link(&mut self, url: String, shown: String, cx: &mut Context<Self>) {
+        self.people.confirm = Some(Confirm { name: shown, network: None, what: Confirming::Link { url } });
+        cx.notify();
+    }
+
+    /// A Matrix ID, room alias, `matrix.to` link or `matrix:` URI tapped in a message. A chat this
+    /// account is in, or a message in one, opens at once; anything else opens New chat with it typed,
+    /// so its row starts the chat or joins the room only on a second tap. A message in a chat this
+    /// account is not in goes to the browser, which can say no more.
+    pub(super) fn offer_chat(&mut self, link: &str, window: &mut Window, cx: &mut Context<Self>) {
+        use matrix_sdk::ruma::{MatrixToUri, MatrixUri, matrix_uri::MatrixId};
+        let id = MatrixToUri::parse(link).map(|u| u.id().clone()).or_else(|_| MatrixUri::parse(link).map(|u| u.id().clone())).ok();
+        let joined = |room: &matrix_sdk::ruma::OwnedRoomOrAliasId| self.rooms.iter().find(|r| r.id.as_str() == room.as_str()).map(|r| r.id.clone());
+        if let Some(MatrixId::Room(room)) = &id
+            && let Some(open) = joined(&room.clone().into())
+        {
+            return self.open_room(open, cx);
+        }
+        if let Some(MatrixId::Event(room, event)) = &id {
+            match joined(room) {
+                Some(open) => self.jump(open, event.to_string(), cx),
+                None => crate::open_link(cx, link),
+            }
+            return;
+        }
         self.open_new_chat(window, cx);
-        // New chat reads a room by its link, not by its bare alias.
-        let typed = if id.starts_with('#') { format!("https://matrix.to/#/{id}") } else { id.to_owned() };
+        // New chat reads a person by their ID and a room by its link, not by its bare alias.
+        let typed = match id {
+            Some(MatrixId::User(user)) => user.to_string(),
+            _ if link.starts_with('#') => format!("https://matrix.to/#/{link}"),
+            _ => link.to_owned(),
+        };
         if let Some(new) = &self.people.new {
             new.query.update(cx, |input, cx| input.set_value(typed, window, cx));
         }
