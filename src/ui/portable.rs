@@ -29,6 +29,8 @@ pub(super) struct Sync {
     asking: Option<String>,
     /// The local-network exchange, from its first step until closed.
     pub(super) lan: Option<Step>,
+    /// The settings waiting for confirmation came from a device, not a file: they are confirmed here.
+    pub(super) arrived: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -138,7 +140,7 @@ impl BeeperApp {
                 match incoming {
                     Ok(incoming) => {
                         let merged = adopt(&this.settings, incoming);
-                        (this.pending_settings, this.storage.moved) = (Some(merged), None);
+                        (this.pending_settings, this.storage.moved, this.storage.sync.arrived) = (Some(merged), None, false);
                     }
                     Err(e) => this.storage.moved = Some(e.into()),
                 }
@@ -151,11 +153,27 @@ impl BeeperApp {
     /// Settings another device sent: they wait for the same confirmation as an imported file.
     pub(super) fn settings_arrived(&mut self, raw: &[u8]) {
         let sync = &mut self.storage.sync;
-        (sync.asking, sync.lan, sync.picking) = (None, None, false);
+        (sync.asking, sync.lan, sync.picking, sync.arrived) = (None, None, false, true);
         match from_file(raw) {
             Ok(incoming) => (self.pending_settings, self.storage.moved) = (Some(adopt(&self.settings, incoming)), None),
             Err(e) => self.storage.moved = Some(e.into()),
         }
+    }
+
+    /// The question before settings from a file or a device replace these, with its answers.
+    pub(super) fn confirm_settings(&self, question: &'static str, cx: &mut Context<Self>) -> Div {
+        let link = |id: &'static str, label: &'static str, icon: IconName, cx: &App| super::panels::link(id, label, "".into(), Some(icon), None, cx);
+        super::panels::card(cx)
+            .child(super::panels::row(question, "", cx))
+            .child(link("settings-import-yes", t!("Replace"), IconName::Check, cx).on_click(cx.listener(|this, _, window, cx| {
+                if let Some(new) = this.pending_settings.take() {
+                    this.apply_settings(new, window, cx);
+                }
+            })))
+            .child(link("settings-import-no", t!("Cancel"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
+                this.pending_settings = None;
+                cx.notify();
+            })))
     }
 
     /// Asking another device, through the server or on the local network, and the steps between.
@@ -171,7 +189,9 @@ impl BeeperApp {
         };
         let sync = &self.storage.sync;
         let card = super::panels::card(cx);
-        let card = if let Some(step) = sync.lan.clone() {
+        let card = if sync.arrived && self.pending_settings.is_some() {
+            self.confirm_settings(t!("Replace your settings with the ones from your other device?"), cx)
+        } else if let Some(step) = sync.lan.clone() {
             match step {
                 Step::Offering => card.child(super::panels::row(t!("Waiting for the other device"), t!("On it, open Data and storage and choose Get over local network."), cx)).child(cancel_lan(cx)),
                 Step::Seeking(found) if found.is_empty() => card.child(super::panels::row(t!("Looking for a device"), t!("On the other device, choose Send over local network."), cx)).child(cancel_lan(cx)),

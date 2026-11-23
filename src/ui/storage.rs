@@ -116,18 +116,8 @@ impl BeeperApp {
     /// Export and import of the settings, with the confirmation an import waits for.
     fn render_portable(&mut self, cx: &mut Context<Self>) -> Div {
         let link = |id: &'static str, label: &'static str, icon: IconName, cx: &App| super::panels::link(id, label, "".into(), Some(icon), None, cx);
-        let actions = if self.pending_settings.is_some() {
-            card(cx)
-                .child(row(t!("Replace your settings with the imported ones?"), "", cx))
-                .child(link("settings-import-yes", t!("Replace"), IconName::Check, cx).on_click(cx.listener(|this, _, window, cx| {
-                    if let Some(new) = this.pending_settings.take() {
-                        this.apply_settings(new, window, cx);
-                    }
-                })))
-                .child(link("settings-import-no", t!("Cancel"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
-                    this.pending_settings = None;
-                    cx.notify();
-                })))
+        let actions = if self.pending_settings.is_some() && !self.storage.sync.arrived {
+            self.confirm_settings(t!("Replace your settings with the imported ones?"), cx)
         } else {
             card(cx)
                 .child(link("settings-export", t!("Export settings"), IconName::ArrowUp, cx).on_click(cx.listener(|this, _, _, cx| this.export_settings(cx))))
