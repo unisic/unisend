@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::backend::{Methods, Way};
-use crate::i18n::t;
+use crate::i18n::{n_, t, tr};
 
 pub(super) const STICKERS: usize = 9;
 
@@ -34,6 +34,39 @@ const SPOTS_WIDE: [(usize, f32, f32, f32); STICKERS] = [
     (5, 0.88, 0.64, 60.),
     (2, 0.80, 0.82, 64.),
 ];
+/// Servers that open accounts to anyone, as (server, country, sign-up page). No page: the server's
+/// OAuth service offers `prompt=create`, so the account is made through this app. A page: the
+/// server's own web app, for the older registration (email and captcha) this app does not carry,
+/// or the project's account page when its server signs in with that account.
+/// Checked November 2026 by asking each server; the country is its staff's, or its domain's.
+// shortcut: no public server found to open accounts in Poland or most of Europe and the world;
+// add one here once it is checked to.
+const SIGN_UP: [(&str, &str, Option<&str>); 19] = [
+    ("matrix.org", n_!("United Kingdom"), None),
+    ("glasgow.social", n_!("United Kingdom"), Some("https://matrix.glasgow.social/#/register")),
+    ("tchncs.de", n_!("Germany"), None),
+    ("nope.chat", n_!("Germany"), None),
+    ("quassel.io", n_!("Germany"), None),
+    ("synod.im", n_!("Germany"), None),
+    ("jonasled.de", n_!("Germany"), None),
+    ("kif.rocks", n_!("Germany"), None),
+    ("matrix.sp-codes.de", n_!("Germany"), None),
+    ("hot-chilli.im", n_!("Germany"), Some("https://element.hot-chilli.im/#/register")),
+    ("g24.at", n_!("Austria"), Some("https://element.g24.at/#/register")),
+    ("gemeinsam.jetzt", n_!("Austria"), Some("https://element.gemeinsam.jetzt/#/register")),
+    ("imagisphe.re", n_!("France"), Some("https://element.imagisphe.re/#/register")),
+    ("utwente.io", n_!("Netherlands"), Some("https://chat.utwente.io/#/register")),
+    ("grin.hu", n_!("Hungary"), Some("https://riot.grin.hu/#/register")),
+    ("unredacted.org", n_!("United States"), Some("https://element.unredacted.org/#/register")),
+    ("dewrito.net", n_!("United States"), Some("https://sable.dewrito.net/register")),
+    // These two sign in with the project's own account, made on its page.
+    ("fedora.im", n_!("United States"), Some("https://accounts.fedoraproject.org/")),
+    ("mozilla.org", n_!("United States"), Some("https://accounts.firefox.com/signup")),
+];
+
+/// Where Beeper's apps are, the only place its accounts are made: its API opens none for others.
+const BEEPER_SIGN_UP: &str = "https://www.beeper.com/download";
+
 const SPOTS_NARROW: [(usize, f32, f32, f32); 5] = [(0, 0.06, 0.05, 56.), (4, 0.76, 0.06, 60.), (6, 0.08, 0.87, 56.), (7, 0.44, 0.91, 52.), (3, 0.78, 0.88, 52.)];
 
 pub(super) struct Form {
@@ -44,6 +77,10 @@ pub(super) struct Form {
     methods: Option<Methods>,
     /// The browser sign-in under way, by the address its page sends the browser back to.
     pub(super) waiting: Option<String>,
+    /// Picking where a new account is made, in place of the form.
+    creating: bool,
+    /// The server whose own page was opened to make an account, until the field names another.
+    made_elsewhere: Option<&'static str>,
 }
 
 impl Form {
@@ -71,7 +108,7 @@ impl Form {
                 this.matrix.server.update(cx, |s, cx| s.set_value(server, window, cx));
             }
         }));
-        Self { server, user, password, methods: None, waiting: None }
+        Self { server, user, password, methods: None, waiting: None, creating: false, made_elsewhere: None }
     }
 }
 
@@ -172,6 +209,36 @@ impl BeeperApp {
         .detach();
     }
 
+    /// A new account on `server`: through this app when its OAuth service makes one, else on the
+    /// server's own `page`, with the form left ready to sign in once it is made.
+    fn create_on(&mut self, server: &'static str, page: Option<&'static str>, window: &mut Window, cx: &mut Context<Self>) {
+        self.matrix.server.update(cx, |s, cx| s.set_value(server, window, cx));
+        self.matrix.creating = false;
+        match page {
+            None => self.matrix_browser_login(Way::Create, cx),
+            Some(page) => {
+                crate::open_link(cx, page);
+                self.matrix.made_elsewhere = Some(server);
+                self.ask_methods(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Beeper makes accounts only in its own apps; its email code signs in here after.
+    fn create_on_beeper(&mut self, cx: &mut Context<Self>) {
+        crate::open_link(cx, BEEPER_SIGN_UP);
+        (self.matrix.creating, self.screen, self.error) = (false, Screen::Email, None);
+        cx.notify();
+    }
+
+    /// Back to the form for a server of the user's own, which offers a new account once asked.
+    fn create_elsewhere(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.matrix.creating = false;
+        self.matrix.server.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
     fn cancel_browser(&mut self, cx: &mut Context<Self>) {
         if self.matrix.waiting.take().is_some() {
             self.send(Cmd::BrowserCancel, cx);
@@ -229,7 +296,29 @@ impl BeeperApp {
         let busy = self.busy;
         let tall = |b: Button| b.h(px(TAP)).loading(busy).disabled(busy);
         let mut ways = v_flex().gap(px(GAP));
-        if waiting {
+        let creating = self.matrix.creating && !waiting;
+        if creating {
+            let row = |id: ElementId, name: SharedString, note: SharedString| {
+                h_flex()
+                    .id(id)
+                    .h(px(TAP))
+                    .px(px(GAP + 4.))
+                    .gap(px(GAP))
+                    .rounded_full()
+                    .bg(p.surface)
+                    .hover(|el| el.bg(p.raised))
+                    .cursor_pointer()
+                    .child(div().flex_1().min_w_0().truncate().text_size(fs(16.)).text_color(p.text).child(name))
+                    .child(div().flex_none().text_size(fs(14.)).text_color(p.muted).child(note))
+            };
+            ways = ways
+                .children(SIGN_UP.iter().enumerate().map(|(i, &(server, country, page))| {
+                    row(("sign-up", i).into(), server.into(), tr(country).into()).on_click(cx.listener(move |this, _, window, cx| this.create_on(server, page, window, cx)))
+                }))
+                .child(row("create-beeper".into(), "Beeper".into(), SharedString::default()).on_click(cx.listener(|this, _, _, cx| this.create_on_beeper(cx))))
+                .child(tall(Button::new("create-elsewhere")).label(t!("Another Matrix server")).on_click(cx.listener(|this, _, window, cx| this.create_elsewhere(window, cx))))
+                .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(t!("Beeper accounts are made in Beeper's app; then sign in here with the code from your email.")));
+        } else if waiting {
             ways = ways
                 .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(t!("Finish signing in on your server's page. This screen goes on by itself.")))
                 .child(tall(Button::new("matrix-cancel")).label(t!("Cancel")).on_click(cx.listener(|this, _, _, cx| this.cancel_browser(cx))));
@@ -263,8 +352,20 @@ impl BeeperApp {
                 ways = ways.child(div().text_size(fs(14.)).text_color(p.muted).child(t!("This server signs people in another way, which this app does not support yet.")));
             }
         } else {
-            ways = ways.child(tall(Button::new("matrix-next").primary()).label(t!("Continue")).on_click(cx.listener(|this, _, _, cx| this.ask_methods(cx))));
+            ways = ways
+                .child(tall(Button::new("matrix-next").primary()).label(t!("Continue")).on_click(cx.listener(|this, _, _, cx| this.ask_methods(cx))))
+                .child(tall(Button::new("matrix-new")).label(t!("Create an account")).on_click(cx.listener(|this, _, _, cx| {
+                    (this.matrix.creating, this.error) = (true, None);
+                    cx.notify();
+                })));
         }
+        if let Some(server) = self.matrix.made_elsewhere.filter(|&s| s == self.typed_server(cx) && !creating && !waiting) {
+            ways = ways.child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(t!("Make the account on {server}'s page in the browser, then sign in here.", server = server)));
+        }
+        let (title, hint) = match creating {
+            true => (t!("Create an account"), t!("Pick where your account lives.")),
+            false => (t!("Sign in with Matrix"), t!("Any Matrix server, like matrix.org.")),
+        };
         super::sign_in_screen(
             "matrix-screen",
                 v_flex()
@@ -272,15 +373,23 @@ impl BeeperApp {
                     .max_w(px(360.))
                     .gap(px(GAP))
                     .child(super::sign_in_brand(cx))
-                    .child(super::sign_in_heading(t!("Sign in with Matrix"), t!("Any Matrix server, like matrix.org."), cx))
-                    .child(Input::new(&self.matrix.server).large().disabled(waiting))
+                    .child(super::sign_in_heading(title, hint, cx))
+                    .when(!creating, |el| el.child(Input::new(&self.matrix.server).large().disabled(waiting)))
                     .child(ways)
-                    .child(Button::new("matrix-back").h(px(TAP)).label(t!("Sign in with Beeper")).on_click(cx.listener(|this, _, _, cx| {
-                        this.cancel_browser(cx);
-                        this.screen = Screen::Email;
-                        this.error = None;
-                        cx.notify();
-                    })))
+                    .when(creating, |el| {
+                        el.child(Button::new("create-back").h(px(TAP)).label(t!("Go back")).on_click(cx.listener(|this, _, _, cx| {
+                            this.matrix.creating = false;
+                            cx.notify();
+                        })))
+                    })
+                    .when(!creating, |el| {
+                        el.child(Button::new("matrix-back").h(px(TAP)).label(t!("Sign in with Beeper")).on_click(cx.listener(|this, _, _, cx| {
+                            this.cancel_browser(cx);
+                            this.screen = Screen::Email;
+                            this.error = None;
+                            cx.notify();
+                        })))
+                    })
                     .children(self.back_to_accounts(cx))
                     .children(self.error.clone().map(|e| div().text_size(fs(14.)).text_color(p.negative).child(e))),
             self.render_stickers(window, cx),
