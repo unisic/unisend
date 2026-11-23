@@ -76,3 +76,27 @@ the platform's file before changing its code or building for it.
   signed-in account.
 - The docs move with the code: a feature's row in `docs/parity.md`, the Privacy section of
   `README.md` when something new leaves the device, and the platform's status in its file.
+- The website moves with the app, by the section below.
+
+## Website
+
+The site is `unisic/unisend-website`, locally `~/Projects/Uni-websites/unisend-website`
+(`git pull --ff-only` there first). Its documentation is one Markdown file per page in
+`content/docs/`, front matter `title`, `description`, `order`, `group`; the landing page is
+`src/routes/+page.svelte`. Both describe the latest release: every fact on them is read in this
+repo's code or docs at that release's tag, and what only `dev` has waits for the release.
+
+- A change a user can see or set (a feature, a setting, a screen, a shortcut, a platform
+  difference, a party that sees data): its docs page says it, by the name the UI shows, and
+  under the Settings path where it lives. A feature with no page yet goes on the closest page,
+  or gets a new one.
+- A feature removed or changed: every line on the site that states it, found with `rg` over
+  `content/docs` and `src/routes`, says the new truth or goes.
+- A release: every user-visible change since the previous tag (`git log <previous>..<tag>`) is on
+  the site by the two rules above; the version on the landing page and in its Discord embed, the
+  version line of
+  `content/docs/introduction.md`, and the file names, minimum versions and signing notes of
+  `content/docs/install.md` match the release page. The landing page's feature list and
+  platform table match the README.
+- Done on the site: `npm run check` with 0 errors, `npm run build` passes, and every
+  `/docs/` link and anchor in `build/` resolves. The site is committed in its own repo.
