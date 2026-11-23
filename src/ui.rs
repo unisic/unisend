@@ -280,7 +280,7 @@ pub struct BeeperApp {
     dir: PathBuf,
     settings: crate::Settings,
     /// Settings read from a file, waiting for the user to confirm they replace these.
-    pending_settings: Option<crate::Settings>,
+    pending_settings: Option<portable::Pending>,
     system_reduce_motion: bool,
     emoji: panels::EmojiChoice,
     look: appearance::Look,

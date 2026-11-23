@@ -11,6 +11,7 @@ use crate::backend::verify::Trust;
 use crate::i18n::t;
 use crate::tones::Tone;
 use appearance::Wallpaper;
+use gpui_kit::component::switch::Switch;
 
 /// What an exported file says it is, and its layout's version.
 const KIND: &str = "unisend-settings";
@@ -31,16 +32,103 @@ pub(super) struct Sync {
     pub(super) lan: Option<Step>,
     /// The settings waiting for confirmation came from a device, not a file: they are confirmed here.
     pub(super) arrived: bool,
-    /// The downloadable emoji font the waiting settings chose, by its place in `emoji::SETS`, when
-    /// this device uses another; offered once they are applied, since the font is not in them.
-    emoji_with: Option<usize>,
-    /// That font, offered for download.
+    /// The downloadable emoji font the applied settings chose, by its place in `emoji::SETS`,
+    /// offered for download since the font is not in them.
     emoji_offer: Option<usize>,
+    /// The parts chosen to send over the local network, while they are being chosen.
+    sending: Option<u8>,
+}
+
+/// The parts of the settings a transfer can carry, each with the `Settings` fields it holds.
+/// The fields in none of them belong to the device, and `adopt` keeps this device's.
+const PARTS: [&[&str]; 6] = [
+    &["theme", "language", "chat_colour", "text_size", "wallpaper", "wallpaper_dim", "reduce_motion", "large_emoji", "emoji_font"],
+    &["swipe_left", "swipe_right", "enter_sends", "receipts", "incoming", "reactions", "double_tap", "folder", "folders", "folders_hidden", "keep_muted_archived"],
+    &["notify_shows", "sounds", "profiles"],
+    &["incognito", "incognito_keyboard", "link_previews", "send_typing"],
+    &["media"],
+    &["mute_until", "chat_notify", "chat_looks"],
+];
+const ALL: u8 = (1 << PARTS.len()) - 1;
+#[cfg(test)]
+const DEVICE: [&str; 6] = ["lock", "account", "shared_inbox", "mute_until_added", "stay_connected", "emoji_font"];
+
+fn part_name(part: usize) -> &'static str {
+    match part {
+        0 => t!("Appearance"),
+        1 => t!("Chats"),
+        2 => t!("Notifications"),
+        3 => t!("Privacy"),
+        4 => t!("Media"),
+        _ => t!("Settings for single chats"),
+    }
+}
+
+/// Settings from a file or a device, until the user takes the parts chosen or drops them.
+pub(super) struct Pending {
+    fields: serde_json::Map<String, serde_json::Value>,
+    /// The parts they hold, and the parts to take, a bit each in `PARTS` order.
+    has: u8,
+    take: u8,
+}
+
+impl Pending {
+    pub(super) fn read(raw: &[u8]) -> Result<Self, &'static str> {
+        from_file(raw)?;
+        let fields = match serde_json::from_slice::<serde_json::Value>(raw).map(|mut v| v["settings"].take()) {
+            Ok(serde_json::Value::Object(fields)) => fields,
+            _ => return Err(t!("This is not a Unisend settings file.")),
+        };
+        let has = (0..PARTS.len()).filter(|&i| PARTS[i].iter().any(|k| fields.contains_key(*k))).fold(0, |m, i| m | 1 << i);
+        Ok(Self { fields, has, take: has })
+    }
+
+    /// `here` with the chosen parts replaced.
+    fn onto(&self, here: &Settings) -> Settings {
+        let Ok(serde_json::Value::Object(mut mine)) = serde_json::to_value(here) else { return here.clone() };
+        for (_, keys) in PARTS.iter().enumerate().filter(|(i, _)| self.take & 1 << i != 0) {
+            for key in *keys {
+                match self.fields.get(*key) {
+                    Some(v) => mine.insert((*key).to_owned(), v.clone()),
+                    // Left out of a part taken: the field is at its default there.
+                    None => mine.remove(*key),
+                };
+            }
+        }
+        serde_json::from_value(serde_json::Value::Object(mine)).map_or_else(|_| here.clone(), |s| adopt(here, s))
+    }
+
+    /// The downloadable emoji font the appearance taken uses, when `here` uses a different one.
+    fn emoji(&self, here: &Settings) -> Option<usize> {
+        let family = self.fields.get("emoji_font").and_then(|f| f.as_str()).filter(|f| self.take & 1 != 0 && here.emoji_font.as_deref() != Some(*f))?;
+        crate::emoji::SETS.iter().position(|set| set.family == family).filter(|_| crate::emoji::SUPPORTED)
+    }
+}
+
+/// One switch a part, for choosing what to send or take.
+fn part_switches(id: &'static str, offered: u8, chosen: u8, set: fn(&mut BeeperApp, u8), cx: &mut Context<BeeperApp>) -> Vec<Div> {
+    (0..PARTS.len())
+        .filter(|i| offered & 1 << i != 0)
+        .map(|i| {
+            let weak = cx.entity().downgrade();
+            super::panels::row(part_name(i), "", cx).child(Switch::new((id, i)).checked(chosen & 1 << i != 0).on_click(move |_, _, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    set(this, 1 << i);
+                    cx.notify();
+                });
+            }))
+        })
+        .collect()
 }
 
 /// What the list of devices below it is for.
 fn choose_heading(cx: &App) -> Div {
-    div().pt(px(8.)).text_size(fs(13.)).text_color(Palette::of(cx).muted).child(t!("Choose the device to take the settings from:"))
+    choose_what(t!("Choose the device to take the settings from:"), cx)
+}
+
+/// What the choices below it are for.
+fn choose_what(text: &'static str, cx: &App) -> Div {
+    div().pt(px(8.)).text_size(fs(13.)).text_color(Palette::of(cx).muted).child(text)
 }
 
 /// A device to take the settings from: a button with the device's icon, so it reads as one.
@@ -64,12 +152,6 @@ fn choice(id: impl Into<ElementId>, label: &str, cx: &App) -> Stateful<Div> {
         .child(Icon::new(IconName::ChevronRight).size_4().flex_none().text_color(p.faint))
 }
 
-/// The downloadable font `incoming` uses, when `here` uses a different one.
-fn emoji_to_offer(here: &Settings, incoming: &Settings) -> Option<usize> {
-    let family = incoming.emoji_font.as_deref().filter(|f| here.emoji_font.as_deref() != Some(*f))?;
-    crate::emoji::SETS.iter().position(|set| set.family == family).filter(|_| crate::emoji::SUPPORTED)
-}
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Exported {
     kind: String,
@@ -79,7 +161,19 @@ struct Exported {
 
 /// The settings as an exported file.
 pub(super) fn to_file(settings: &Settings) -> Vec<u8> {
-    let file = Exported { kind: KIND.to_owned(), version: VERSION, settings: settings.clone() };
+    to_file_with(settings, ALL)
+}
+
+/// The same with only the fields of the parts in `parts`.
+fn to_file_with(settings: &Settings, parts: u8) -> Vec<u8> {
+    let Ok(mut file) = serde_json::to_value(Exported { kind: KIND.to_owned(), version: VERSION, settings: settings.clone() }) else { return Vec::new() };
+    if let Some(fields) = file["settings"].as_object_mut() {
+        for (_, keys) in PARTS.iter().enumerate().filter(|(i, _)| parts & 1 << i == 0) {
+            for key in *keys {
+                fields.remove(*key);
+            }
+        }
+    }
     serde_json::to_vec_pretty(&file).unwrap_or_default()
 }
 
@@ -168,18 +262,14 @@ impl BeeperApp {
             let _ = this.update(cx, |this, cx| {
                 let incoming = match raw {
                     Ok(raw) if raw.len() as u64 > MAX_FILE => Err(t!("This is not a Unisend settings file.")),
-                    Ok(raw) => from_file(&raw),
+                    Ok(raw) => Pending::read(&raw),
                     Err(e) => {
                         log::warn!("import settings: {e}");
                         Err(t!("Could not read the file."))
                     }
                 };
                 match incoming {
-                    Ok(incoming) => {
-                        this.storage.sync.emoji_with = emoji_to_offer(&this.settings, &incoming);
-                        let merged = adopt(&this.settings, incoming);
-                        (this.pending_settings, this.storage.moved, this.storage.sync.arrived) = (Some(merged), None, false);
-                    }
+                    Ok(incoming) => (this.pending_settings, this.storage.moved, this.storage.sync.arrived) = (Some(incoming), None, false),
                     Err(e) => this.storage.moved = Some(e.into()),
                 }
                 cx.notify();
@@ -192,11 +282,8 @@ impl BeeperApp {
     pub(super) fn settings_arrived(&mut self, raw: &[u8]) {
         let sync = &mut self.storage.sync;
         (sync.asking, sync.lan, sync.picking, sync.arrived) = (None, None, false, true);
-        match from_file(raw) {
-            Ok(incoming) => {
-                self.storage.sync.emoji_with = emoji_to_offer(&self.settings, &incoming);
-                (self.pending_settings, self.storage.moved) = (Some(adopt(&self.settings, incoming)), None);
-            }
+        match Pending::read(raw) {
+            Ok(incoming) => (self.pending_settings, self.storage.moved) = (Some(incoming), None),
             Err(e) => self.storage.moved = Some(e.into()),
         }
     }
@@ -204,16 +291,26 @@ impl BeeperApp {
     /// The question before settings from a file or a device replace these, with its answers.
     pub(super) fn confirm_settings(&self, question: &'static str, cx: &mut Context<Self>) -> Div {
         let link = |id: &'static str, label: &'static str, icon: IconName, cx: &App| super::panels::link(id, label, "".into(), Some(icon), None, cx);
+        let (has, take) = self.pending_settings.as_ref().map_or((0, 0), |p| (p.has, p.take));
+        let flip = |this: &mut Self, bit: u8| {
+            if let Some(p) = this.pending_settings.as_mut() {
+                p.take ^= bit;
+            }
+        };
         super::panels::card(cx)
-            .child(super::panels::row(question, "", cx))
-            .child(link("settings-import-yes", t!("Replace"), IconName::Check, cx).on_click(cx.listener(|this, _, window, cx| {
-                if let Some(new) = this.pending_settings.take() {
-                    this.apply_settings(new, window, cx);
-                    this.storage.sync.emoji_offer = this.storage.sync.emoji_with.take();
-                }
-            })))
+            .child(super::panels::row(question, t!("Only the parts switched on replace yours."), cx))
+            .children(part_switches("settings-take", has, take, flip, cx))
+            .child(link("settings-import-yes", t!("Replace"), IconName::Check, cx).when(take == 0, |el| el.text_color(Palette::of(cx).faint)).when(take != 0, |el| {
+                el.on_click(cx.listener(|this, _, window, cx| {
+                    if let Some(new) = this.pending_settings.take() {
+                        this.storage.sync.emoji_offer = new.emoji(&this.settings);
+                        let merged = new.onto(&this.settings);
+                        this.apply_settings(merged, window, cx);
+                    }
+                }))
+            }))
             .child(link("settings-import-no", t!("Cancel"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
-                (this.pending_settings, this.storage.sync.emoji_with) = (None, None);
+                this.pending_settings = None;
                 cx.notify();
             })))
     }
@@ -250,6 +347,26 @@ impl BeeperApp {
                 cx.notify();
             })))
             .child(div().pb(px(8.)).text_size(fs(13.)).text_color(p.muted).child(t!("A font is downloaded from GitHub only when tapped: GitHub sees the device's IP address and which font.")))
+        } else if let Some(chosen) = sync.sending {
+            let flip = |this: &mut Self, bit: u8| {
+                if let Some(chosen) = this.storage.sync.sending.as_mut() {
+                    *chosen ^= bit;
+                }
+            };
+            card.child(choose_what(t!("Choose what to send:"), cx))
+                .children(part_switches("settings-send", ALL, chosen, flip, cx))
+                .child(action("sync-lan-start", t!("Send over local network"), IconName::ArrowUp, cx).when(chosen == 0, |el| el.text_color(p.faint)).when(chosen != 0, |el| {
+                    el.on_click(cx.listener(move |this, _, _, cx| {
+                        if this.send(Cmd::HandoffOffer(to_file_with(&this.settings, chosen)), cx) {
+                            (this.storage.sync.lan, this.storage.sync.sending) = (Some(Step::Offering), None);
+                        }
+                        cx.notify();
+                    }))
+                }))
+                .child(action("sync-send-cancel", t!("Cancel"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
+                    this.storage.sync.sending = None;
+                    cx.notify();
+                })))
         } else if let Some(step) = sync.lan.clone() {
             match step {
                 Step::Offering => card.child(super::panels::row(t!("Waiting for the other device"), t!("On it, open Data and storage and choose Get over local network."), cx)).child(cancel_lan(cx)),
@@ -331,9 +448,7 @@ impl BeeperApp {
                 cx.notify();
             })))
             .child(action("sync-lan-offer", t!("Send over local network"), IconName::ArrowUp, cx).on_click(cx.listener(|this, _, _, cx| {
-                if this.send(Cmd::HandoffOffer(to_file(&this.settings)), cx) {
-                    this.storage.sync.lan = Some(Step::Offering);
-                }
+                this.storage.sync.sending = Some(ALL);
                 cx.notify();
             })))
         };
@@ -389,7 +504,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, Tone, Wallpaper, adopt, emoji_to_offer, from_file, to_file};
+    use super::{ALL, DEVICE, PARTS, Pending, Settings, Tone, Wallpaper, adopt, from_file, to_file, to_file_with};
 
     fn settings() -> Settings {
         from_file(&to_file(&serde_json::from_str::<Settings>("{}").unwrap())).unwrap()
@@ -429,12 +544,42 @@ mod tests {
     #[test]
     fn only_a_downloadable_emoji_font_this_device_lacks_is_offered() {
         let (mut here, mut there) = (settings(), settings());
-        assert_eq!(emoji_to_offer(&here, &there), None);
+        let offer = |here: &Settings, there: &Settings| Pending::read(&to_file(there)).unwrap().emoji(here);
+        assert_eq!(offer(&here, &there), None);
         there.emoji_font = Some("Twemoji Mozilla".into());
-        assert_eq!(emoji_to_offer(&here, &there), crate::emoji::SUPPORTED.then_some(1));
+        assert_eq!(offer(&here, &there), crate::emoji::SUPPORTED.then_some(1));
         here.emoji_font = Some("Twemoji Mozilla".into());
-        assert_eq!(emoji_to_offer(&here, &there), None);
+        assert_eq!(offer(&here, &there), None);
         there.emoji_font = Some("A file of their own".into());
-        assert_eq!(emoji_to_offer(&here, &there), None);
+        assert_eq!(offer(&here, &there), None);
+    }
+
+    #[test]
+    fn every_setting_is_in_one_part_or_stays_on_the_device() {
+        let mut s = settings();
+        (s.emoji_font, s.double_tap) = (Some("x".into()), Some("x".into()));
+        let serde_json::Value::Object(fields) = serde_json::to_value(&s).unwrap() else { panic!() };
+        for key in fields.keys() {
+            let n = PARTS.iter().filter(|keys| keys.contains(&key.as_str())).count();
+            assert!(n == 1 || (n == 0 && DEVICE.contains(&key.as_str())), "{key} is in {n} parts");
+        }
+    }
+
+    #[test]
+    fn only_the_parts_sent_and_taken_change() {
+        let here = settings();
+        let mut there = settings();
+        (there.chat_colour, there.enter_sends, there.incognito) = (crate::ChatColour::Blue, false, !here.incognito);
+        // Appearance and chats sent, chats then switched off here.
+        let mut got = Pending::read(&to_file_with(&there, 0b11)).unwrap();
+        assert_eq!(got.has, 0b11);
+        got.take = 0b01;
+        let after = got.onto(&here);
+        assert_eq!((after.chat_colour, after.enter_sends, after.incognito), (crate::ChatColour::Blue, here.enter_sends, here.incognito));
+        let mut all = Pending::read(&to_file(&there)).unwrap();
+        // No chat has settings of its own there, so that part is not offered.
+        assert_eq!(all.has, ALL & !(1 << 5));
+        all.take = ALL;
+        assert_eq!(all.onto(&here).incognito, there.incognito);
     }
 }
