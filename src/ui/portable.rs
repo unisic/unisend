@@ -234,7 +234,7 @@ pub(super) fn adopt(here: &Settings, mut incoming: Settings) -> Settings {
 impl BeeperApp {
     /// Writes the settings to a file in Downloads (Download/Unisend on Android).
     pub(super) fn export_settings(&mut self, cx: &mut Context<Self>) {
-        self.storage.moved = None;
+        (self.storage.moved, self.storage.sync.arrived) = (None, false);
         let raw = to_file(&self.settings);
         let tmp = self.dir.join(FILE_NAME);
         let saving = cx.background_spawn(async move {
@@ -497,7 +497,8 @@ impl BeeperApp {
                 cx.notify();
             })))
         };
-        super::panels::section(t!("Sync with another device"), cx).child(card).child(super::panels::footnote(
+        let said = self.storage.moved.clone().filter(|_| sync.arrived);
+        super::panels::section(t!("Sync with another device"), cx).child(card).when_some(said, |el, text| el.child(super::panels::footnote(&text, cx))).child(super::panels::footnote(
             t!("Get from another device: the settings come encrypted from one of your verified devices, through your server, which sees only that two of your devices exchanged a message. Over the local network no server takes part: both devices are on the same network with this page open, and you compare a number on both screens."),
             cx,
         ))
@@ -542,7 +543,7 @@ impl BeeperApp {
             }
         }
         self.timeline.remeasure();
-        self.storage.moved = Some(t!("Settings imported.").into());
+        self.storage.moved = Some(if self.storage.sync.arrived { t!("Settings taken from the other device.") } else { t!("Settings imported.") }.into());
         cx.notify();
     }
 }

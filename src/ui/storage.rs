@@ -125,7 +125,7 @@ impl BeeperApp {
         };
         section(t!("Settings file"), cx)
             .child(actions)
-            .when_some(self.storage.moved.clone(), |el, text| el.child(footnote(&text, cx)))
+            .when_some(self.storage.moved.clone().filter(|_| !self.storage.sync.arrived), |el, text| el.child(footnote(&text, cx)))
             .child(footnote(t!("The file holds this app's settings for moving them to another device. The app lock, your own emoji font, sounds and photos stay on each device. Settings for one chat name it by its Matrix room id; no messages, keys or passwords go into the file."), cx))
     }
 }

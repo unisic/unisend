@@ -616,6 +616,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Download the other device's emoji", "Pobierz emoji z drugiego urządzenia"),
     ("Choose the device to take the settings from:", "Wybierz urządzenie, z którego wziąć ustawienia:"),
     ("Choose what to send:", "Wybierz, co wysłać:"),
+    ("Settings taken from the other device.", "Ustawienia przejęte z drugiego urządzenia."),
     ("Only the parts switched on replace yours.", "Zastąpione zostaną tylko włączone części."),
     ("Privacy", "Prywatność"),
     ("Settings for single chats", "Ustawienia pojedynczych czatów"),
