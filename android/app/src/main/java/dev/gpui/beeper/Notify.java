@@ -191,6 +191,15 @@ public final class Notify {
             .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
             .build();
 
+    /**
+     * A tapped preview, on the media stream: the notification stream is silent while the phone is
+     * on silent or vibrate, and a sound the user asked to hear should still be heard.
+     */
+    private static final AudioAttributes PREVIEW = new AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build();
+
     /** The prefix {@code tones.rs} names an own sound with: {@code own:<file in sounds/own/>}. */
     private static final String OWN = "own:";
 
@@ -244,7 +253,7 @@ public final class Notify {
         }
         playing = android.media.RingtoneManager.getRingtone(activity, sound);
         if (playing != null) {
-            playing.setAudioAttributes(ATTRIBUTES);
+            playing.setAudioAttributes(PREVIEW);
             playing.play();
         }
     }
