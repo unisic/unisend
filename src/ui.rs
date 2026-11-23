@@ -2891,7 +2891,7 @@ impl BeeperApp {
                 let bold = HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
                 let mut marks: Vec<_> = m.mentions.iter().map(|r| (r.clone(), if m.mentioned && m.to_me.contains(r) { ink } else { bold })).collect();
                 let apart = |u: &std::ops::Range<usize>| m.mentions.iter().all(|r| r.end <= u.start || u.end <= r.start);
-                let found: Vec<_> = urls(&m.body).into_iter().filter(apart).collect();
+                let found: Vec<_> = taps(&m.body).into_iter().filter(apart).collect();
                 marks.extend(found.iter().map(|r| (r.clone(), underline)));
                 marks.sort_by_key(|(r, _)| r.start);
                 // The preview its sender attached to a link, drawn as Discord draws an embed: the
@@ -4824,6 +4824,51 @@ fn urls(text: &str) -> Vec<std::ops::Range<usize>> {
     out
 }
 
+/// Codes and other long numbers a tap copies: a run of at least 4 digits, or groups of 3 or 4 joined
+/// by single spaces or hyphens ("123 456"), not inside a word or a decimal. A lone year is left alone.
+fn codes(text: &str) -> Vec<std::ops::Range<usize>> {
+    let b = text.as_bytes();
+    let digits_from = |at: usize| b[at..].iter().take_while(|c| c.is_ascii_digit()).count();
+    // A letter or a decimal point with a digit beyond it means the digits belong to something else.
+    let glued = |c: Option<char>, beyond: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || matches!(c, '.' | ',') && beyond.is_some_and(|d| d.is_ascii_digit()));
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let mut groups = vec![(i, i + digits_from(i))];
+        while let Some(&(s, e)) = groups.last()
+            && (3..=4).contains(&(e - s))
+            && matches!(b.get(e), Some(b' ' | b'-'))
+            && (3..=4).contains(&digits_from(e + 1))
+        {
+            groups.push((e + 1, e + 1 + digits_from(e + 1)));
+        }
+        let (start, end) = (i, groups.last().map_or(i, |g| g.1));
+        let mut before = text[..start].chars().rev();
+        let mut after = text[end..].chars();
+        let apart = !glued(before.next(), before.next()) && !glued(after.next(), after.next());
+        let year = groups.len() == 1 && text[start..end].parse::<u16>().is_ok_and(|y| (1900..=2099).contains(&y));
+        let all_ok = groups.len() > 1 && groups.iter().all(|(s, e)| (3..=4).contains(&(e - s)));
+        if apart && !year && (all_ok || groups.len() == 1 && end - start >= 4) {
+            out.push(start..end);
+        }
+        i = end;
+    }
+    out
+}
+
+/// What a tap on a message's text follows: its web addresses, and the codes outside them.
+fn taps(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut found = urls(text);
+    let codes: Vec<_> = codes(text).into_iter().filter(|c| found.iter().all(|u| c.end <= u.start || u.end <= c.start)).collect();
+    found.extend(codes);
+    found.sort_by_key(|r| r.start);
+    found
+}
+
 /// A pan that began on a message, from its first event until the finger lifts.
 struct Swipe {
     id: String,
@@ -5391,7 +5436,7 @@ impl BeeperApp {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's own `test` attribute would shadow the standard one.
-    use super::{long, Duration, MAX_ARRIVALS, SWIPE_REPLY, SWIPE_STRETCH, arrived, emoji_only, list_state, rubber, unrubber, save_pasted, swipe_step, urls, RoomsView, Pending, RoomSummary, replaced, clip_chars, joined_line};
+    use super::{long, Duration, MAX_ARRIVALS, SWIPE_REPLY, SWIPE_STRETCH, arrived, emoji_only, list_state, rubber, unrubber, save_pasted, swipe_step, taps, urls, RoomsView, Pending, RoomSummary, replaced, clip_chars, joined_line};
     use gpui_kit::TouchPhase::{Cancelled, Ended, Moved, Started};
 
     #[test]
@@ -5477,6 +5522,16 @@ mod tests {
         assert_eq!(list_state(false, true, true), RoomsView::Filtered);
         assert_eq!(list_state(false, false, false), RoomsView::List);
         assert_eq!(list_state(true, false, true), RoomsView::List);
+    }
+
+    #[test]
+    fn codes_are_long_numbers_on_their_own() {
+        let found = |text: &'static str| taps(text).into_iter().map(|r| &text[r]).collect::<Vec<_>>();
+        assert_eq!(found("Twój kod: 482913. Nie podawaj go nikomu."), ["482913"]);
+        assert_eq!(found("Code 123 456 or 123-456, PIN 4821"), ["123 456", "123-456", "4821"]);
+        assert_eq!(found("w 2024 roku, 3.14159, 12345.67, abc12345, 12345abc, 12 apples"), Vec::<&str>::new());
+        assert_eq!(found("call +48 600 700 800 now"), ["600 700 800"]);
+        assert_eq!(found("https://x.pl/order/123456 and 98765"), ["https://x.pl/order/123456", "98765"]);
     }
 
     #[test]

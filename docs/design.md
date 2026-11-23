@@ -115,7 +115,8 @@ Standing free under a message they read as small messages of their own.
 
 A link is underlined. When its sender attached a preview, the message carries a card: the
 picture in its own shape, the site, the title, two lines about it. Touching the card opens the
-link.
+link. A code or other long number (4 digits or more, or groups like "123 456", a lone year aside) is
+underlined too, and a tap copies its digits; Android confirms the copy itself.
 
 A poll is its question, then one row per answer, 44 tall, with the share of votes drawn as a `lifted`
 bar behind the text, the count at the end, and a check before the answer you chose (no accent: a poll

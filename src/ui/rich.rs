@@ -9,7 +9,7 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
 
 use super::appearance::fs;
-use super::urls;
+use super::taps;
 use crate::Palette;
 use crate::backend::{Block, Msg, Rich, Run};
 
@@ -91,13 +91,13 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
     let text: String = runs.iter().map(|r| r.text.as_str()).collect();
     let Some(base) = runs.first().map(|r| r.at) else { return div().into_any_element() };
     let whole = base..base + text.len();
-    // Mentions and bare addresses are ranges of the whole message; here they are shifted to the paragraph.
+    // Mentions, bare addresses and codes are ranges of the whole message; here they are shifted to the paragraph.
     let inside = |r: &Range<usize>| r.start >= whole.start && r.end <= whole.end;
     let shift = |r: &Range<usize>| r.start - base..r.end - base;
     let mentions: Vec<_> = m.mentions.iter().filter(|r| inside(r)).map(shift).collect();
     let to_me: Vec<_> = m.to_me.iter().filter(|r| inside(r)).map(shift).collect();
     let apart = |u: &Range<usize>| mentions.iter().all(|r| r.end <= u.start || u.end <= r.start);
-    let bare: Vec<_> = urls(&m.body).iter().filter(|r| inside(r)).map(shift).filter(apart).collect();
+    let bare: Vec<_> = taps(&m.body).iter().filter(|r| inside(r)).map(shift).filter(apart).collect();
 
     let mut cuts: Vec<usize> = vec![0, text.len()];
     cuts.extend(runs.iter().map(|r| r.at - base));
@@ -193,13 +193,22 @@ pub(super) fn linked(id: String, styled: StyledText, links: Vec<Range<usize>>, t
                 && let Some(at) = ranges.iter().position(|r| r.contains(&ix))
             {
                 cx.stop_propagation();
-                crate::open_link(cx, &urls[at]);
+                follow(cx, &urls[at]);
             }
         })
         .child(InteractiveText::new(SharedString::from(id), styled).on_click(links, move |at, _, cx| {
             // The bubble under the text opens the message's menu on a click; a link does not.
             cx.stop_propagation();
-            crate::open_link(cx, &targets[at]);
+            follow(cx, &targets[at]);
         }))
         .into_any_element()
+}
+
+/// Opens a web address; anything else is a code, whose digits are copied (Android shows that it was).
+fn follow(cx: &mut App, target: &str) {
+    if target.starts_with("http") {
+        crate::open_link(cx, target);
+    } else {
+        crate::copy(cx, target.chars().filter(char::is_ascii_digit).collect());
+    }
 }
