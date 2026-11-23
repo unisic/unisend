@@ -1,9 +1,40 @@
 //! Signing in to a Matrix homeserver other than Beeper's: first the server, then the ways it
-//! offers (its own page in a browser, through OAuth or single sign-on, or a password).
+//! offers (its own page in a browser, through OAuth or single sign-on, or a password). Also the
+//! stickers both sign-in screens lie on, the website's (`packaging/stickers/stickers.py`).
 
 use super::*;
 use crate::backend::{Methods, Way};
 use crate::i18n::t;
+
+pub(super) const STICKERS: usize = 9;
+
+/// Voice, offline, search, lock, shield, quiet, palette, smile, poll: 168 px, 56 points at 3x.
+static STICKER_PNGS: [&[u8]; STICKERS] = [
+    include_bytes!("../../assets/stickers/voice.png"),
+    include_bytes!("../../assets/stickers/offline.png"),
+    include_bytes!("../../assets/stickers/search.png"),
+    include_bytes!("../../assets/stickers/lock.png"),
+    include_bytes!("../../assets/stickers/shield.png"),
+    include_bytes!("../../assets/stickers/quiet.png"),
+    include_bytes!("../../assets/stickers/palette.png"),
+    include_bytes!("../../assets/stickers/smile.png"),
+    include_bytes!("../../assets/stickers/poll.png"),
+];
+
+/// Where each sticker lies, as (sticker, left, top, size): left and top are shares of the screen,
+/// kept clear of the form's column. A wide window has them by the sides, a phone above and below.
+const SPOTS_WIDE: [(usize, f32, f32, f32); STICKERS] = [
+    (0, 0.07, 0.10, 72.),
+    (3, 0.16, 0.34, 64.),
+    (6, 0.06, 0.56, 68.),
+    (8, 0.15, 0.78, 60.),
+    (1, 0.80, 0.06, 64.),
+    (4, 0.87, 0.26, 72.),
+    (7, 0.79, 0.46, 68.),
+    (5, 0.88, 0.64, 60.),
+    (2, 0.80, 0.82, 64.),
+];
+const SPOTS_NARROW: [(usize, f32, f32, f32); 5] = [(0, 0.06, 0.05, 56.), (4, 0.76, 0.06, 60.), (6, 0.08, 0.87, 56.), (7, 0.44, 0.91, 52.), (3, 0.78, 0.88, 52.)];
 
 pub(super) struct Form {
     server: Entity<InputState>,
@@ -149,7 +180,49 @@ impl BeeperApp {
         cx.notify();
     }
 
-    pub(super) fn render_matrix_login(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The stickers under a sign-in screen's form. A tap makes one jump, and on a phone tick.
+    pub(super) fn render_stickers(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        static IMAGES: std::sync::LazyLock<Vec<Arc<Image>>> =
+            std::sync::LazyLock::new(|| STICKER_PNGS.iter().map(|png| Arc::new(Image::from_bytes(ImageFormat::Png, png.to_vec()))).collect());
+        let spots: &[_] = if frame::viewport(window).width < px(NARROW) { &SPOTS_NARROW } else { &SPOTS_WIDE };
+        let mut layer = div().absolute().inset_0();
+        for &(i, x, y, size) in spots {
+            // flex_none: the box keeps its size, and the jump grows past it.
+            let face = img(IMAGES[i].clone()).flex_none().size(px(size));
+            let pops = self.sticker_pops[i];
+            // Untapped, it draws still; each tap is a new animation, so it plays again.
+            let face = if pops == 0 {
+                face.into_any_element()
+            } else {
+                // Linear time: the sine is the curve, up and back down.
+                let jump = Animation::new(motion::STICKER_JUMP);
+                face.with_animation(SharedString::from(format!("sticker-{i}-{pops}")), jump, move |el, t| el.size(px(size * (1. + 0.18 * (t * std::f32::consts::PI).sin()))))
+                    .into_any_element()
+            };
+            layer = layer.child(
+                div()
+                    .id(("sticker", i))
+                    .absolute()
+                    .left(relative(x))
+                    .top(relative(y))
+                    .size(px(size))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.sticker_pops[i] = this.sticker_pops[i].wrapping_add(1);
+                        #[cfg(target_os = "android")]
+                        motion::haptic(gpui_mobile::packages::vibration::HapticFeedback::Light);
+                        cx.notify();
+                    }))
+                    .child(face),
+            );
+        }
+        layer
+    }
+
+    pub(super) fn render_matrix_login(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = Palette::of(cx);
         let methods = self.methods(cx).cloned();
         let waiting = self.matrix.waiting.is_some();
@@ -207,6 +280,7 @@ impl BeeperApp {
                     })))
                     .children(self.back_to_accounts(cx))
                     .children(self.error.clone().map(|e| div().text_size(fs(14.)).text_color(p.negative).child(e))),
-            )
+            self.render_stickers(window, cx),
+        )
     }
 }

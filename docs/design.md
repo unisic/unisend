@@ -43,6 +43,14 @@ What is still loading stands as a skeleton of its own shape in `surface`, still 
 chat list's rows, a chat's bubbles (after 300 ms, so a quick open shows none), a group's members.
 A row of chips or text cut by a scrolled edge fades into the ground over 24.
 
+## Sign-in
+
+The one screen with play in it, since nothing else is there yet. Over the form: the app's icon at
+80, its name as a screen title, and one muted line. Under it, in the room the form leaves: the
+website's die-cut stickers in the nine chat colors (`packaging/stickers/stickers.py`), nine by the
+sides of a wide window, five above and below on a phone. A tap makes one jump, 18% bigger and
+back in 320 ms, with a light tick on a phone. They are the only color on the screen.
+
 ## Navigation
 
 Four destinations with icon and label: Chats, Archive, Networks, Settings; an account on another

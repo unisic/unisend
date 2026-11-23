@@ -254,6 +254,8 @@ enum Screen {
 pub struct BeeperApp {
     cmd: mpsc::Sender<Cmd>,
     screen: Screen,
+    /// Taps on each sign-in sticker; a new count makes it jump again.
+    sticker_pops: [u32; signin::STICKERS],
     busy: bool,
     error: Option<SharedString>,
     email: Entity<InputState>,
@@ -686,6 +688,7 @@ impl BeeperApp {
         Self {
             cmd,
             screen: Screen::Starting,
+            sticker_pops: [0; signin::STICKERS],
             busy: false,
             error: None,
             email,
@@ -2079,7 +2082,7 @@ impl BeeperApp {
         }
     }
 
-    fn render_login(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_login(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let on_code = self.screen == Screen::Code;
         let (title, hint, input, label) = if on_code {
             (t!("Check your email"), t!("Enter the code from the email."), &self.code, t!("Sign in"))
@@ -2127,7 +2130,8 @@ impl BeeperApp {
                     })
                     .children(self.back_to_accounts(cx))
                     .children(self.error.clone().map(|e| div().text_size(fs(14.)).text_color(p.negative).child(e))),
-            )
+            self.render_stickers(window, cx),
+        )
     }
 
     fn tab(&self) -> Tab {
@@ -4323,8 +4327,9 @@ fn header() -> Div {
 
 /// A sign-in card in the middle of the screen, scrolled instead of cut when the keyboard leaves
 /// less room than it needs.
-fn sign_in_screen(id: &'static str, card: impl IntoElement) -> Stateful<Div> {
-    div().id(id).size_full().overflow_y_scroll().child(v_flex().w_full().min_h_full().items_center().justify_center().p(px(GUTTER + 8.)).child(card))
+/// `stickers` lie under the card, in the room it leaves.
+fn sign_in_screen(id: &'static str, card: impl IntoElement, stickers: impl IntoElement) -> Stateful<Div> {
+    div().id(id).size_full().overflow_y_scroll().child(v_flex().relative().w_full().min_h_full().items_center().justify_center().p(px(GUTTER + 8.)).child(stickers).child(card))
 }
 
 /// The app's face over each sign-in screen: its icon, its name and what it is.
@@ -5146,8 +5151,8 @@ impl BeeperApp {
                 .justify_center()
                 .child(div().text_size(fs(14.)).text_color(p.faint).child(t!("Connecting…")))
                 .into_any_element(),
-            Screen::Email | Screen::Code => root.child(self.render_login(cx)).into_any_element(),
-            Screen::Matrix => root.child(self.render_matrix_login(cx)).into_any_element(),
+            Screen::Email | Screen::Code => root.child(self.render_login(window, cx)).into_any_element(),
+            Screen::Matrix => root.child(self.render_matrix_login(window, cx)).into_any_element(),
             Screen::Main => {
                 let narrow = frame::viewport(window).width < px(NARROW);
                 // A wide desktop window keeps them to the column they are about, not its full width.

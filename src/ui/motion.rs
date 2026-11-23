@@ -26,6 +26,8 @@ pub(crate) const SHEET_HANDOFF: Duration = Duration::from_millis(200);
 pub(crate) const HANDOFF_DELAY: Duration = Duration::from_millis(60);
 /// New content inside a sheet, a thumbnail that finished loading.
 pub(crate) const FADE_IN: Duration = Duration::from_millis(150);
+/// A sign-in sticker jumping under a tap.
+pub(crate) const STICKER_JUMP: Duration = Duration::from_millis(320);
 
 // Navigation and the chat list.
 /// A chat or a deep panel sliding in; the way back is `PUSH`.
