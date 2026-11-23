@@ -133,6 +133,13 @@ impl Accounts {
         self.list.iter().filter(|a| a.user.is_some() && !a.duplicate).count()
     }
 
+    /// Sends to the account in `slot`, shown or not.
+    pub(super) fn tell(&self, slot: usize, cmd: Cmd) {
+        if let Some(a) = self.get(slot) {
+            let _ = a.cmd.try_send(cmd);
+        }
+    }
+
     /// Sends to every account; for settings that hold for all of them.
     pub(super) fn tell_all(&self, cmd: impl Fn() -> Cmd) {
         for a in &self.list {
@@ -317,10 +324,8 @@ impl BeeperApp {
             return;
         }
         // The settings are the app's: any signed-in account's other devices may ask for them.
-        if !shown && let Ev::SettingsAsked { device, request } = ev {
-            if let Some(a) = self.accounts.get(slot) {
-                let _ = a.cmd.try_send(Cmd::GiveSettings { device, request, settings: super::portable::to_file(&self.settings) });
-            }
+        if let Ev::SettingsAsked { device, request } = ev {
+            self.settings_asked(slot, device, request, cx);
             return;
         }
         let Some(a) = self.accounts.get_mut(slot) else { return };

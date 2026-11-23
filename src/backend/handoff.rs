@@ -1,6 +1,7 @@
 //! Settings handed from one of the account's own devices to another, with no file in between.
 //! Over the server: Olm-encrypted to-device messages, taken only from a device whose Olm key the
-//! account's cross-signing vouches for (as this device trusts it), and answered without asking.
+//! account's cross-signing vouches for (as this device trusts it), and answered once the user
+//! there picks what to send.
 //! Over the local network, with no server at all: the offering device announces itself by UDP
 //! broadcast, the other connects over TCP, and the two talk through a vodozemac ECIES channel
 //! whose check code the user compares on both screens; only then do they tell each other their

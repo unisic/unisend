@@ -37,6 +37,17 @@ pub(super) struct Sync {
     emoji_offer: Option<usize>,
     /// The parts chosen to send over the local network, while they are being chosen.
     sending: Option<u8>,
+    /// A device of an account here asking through the server, until the user sends or declines.
+    asked: Option<Asked>,
+}
+
+pub(super) struct Asked {
+    slot: usize,
+    device: String,
+    /// The device's name when the account shown knows it, else its id.
+    name: String,
+    request: String,
+    parts: u8,
 }
 
 /// The parts of the settings a transfer can carry, each with the `Settings` fields it holds.
@@ -278,6 +289,19 @@ impl BeeperApp {
         .detach();
     }
 
+    /// A device asked for the settings through the server: the user picks the parts and sends,
+    /// on the page where that is done, opened for it.
+    pub(super) fn settings_asked(&mut self, slot: usize, device: String, request: String, cx: &mut Context<Self>) {
+        let known = self.verify.devices.as_ref().filter(|_| slot == self.accounts.active()).and_then(|d| d.list.iter().find(|d| d.id == device));
+        let name = known.map_or_else(|| device.clone(), |d| d.name.clone());
+        self.storage.sync.asked = Some(Asked { slot, device, name, request, parts: ALL });
+        if self.panel != Some(Panel::Settings) || self.settings_pages.last() != Some(&super::panels::Page::Storage) {
+            self.open_panel(Panel::Settings, cx);
+            self.open_page(super::panels::Page::Storage, cx);
+        }
+        cx.notify();
+    }
+
     /// Settings another device sent: they wait for the same confirmation as an imported file.
     pub(super) fn settings_arrived(&mut self, raw: &[u8]) {
         let sync = &mut self.storage.sync;
@@ -347,6 +371,27 @@ impl BeeperApp {
                 cx.notify();
             })))
             .child(div().pb(px(8.)).text_size(fs(13.)).text_color(p.muted).child(t!("A font is downloaded from GitHub only when tapped: GitHub sees the device's IP address and which font.")))
+        } else if let Some(asked) = &sync.asked {
+            let flip = |this: &mut Self, bit: u8| {
+                if let Some(asked) = this.storage.sync.asked.as_mut() {
+                    asked.parts ^= bit;
+                }
+            };
+            let chosen = asked.parts;
+            card.child(super::panels::row(&t!("{device} asks for these settings", device = asked.name), t!("Choose what to send:"), cx))
+                .children(part_switches("settings-give", ALL, chosen, flip, cx))
+                .child(action("sync-give", t!("Send"), IconName::ArrowUp, cx).when(chosen == 0, |el| el.text_color(p.faint)).when(chosen != 0, |el| {
+                    el.on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(Asked { slot, device, request, .. }) = this.storage.sync.asked.take() {
+                            this.accounts.tell(slot, Cmd::GiveSettings { device, request, settings: to_file_with(&this.settings, chosen) });
+                        }
+                        cx.notify();
+                    }))
+                }))
+                .child(action("sync-give-no", t!("Decline"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
+                    this.storage.sync.asked = None;
+                    cx.notify();
+                })))
         } else if let Some(chosen) = sync.sending {
             let flip = |this: &mut Self, bit: u8| {
                 if let Some(chosen) = this.storage.sync.sending.as_mut() {
@@ -405,7 +450,7 @@ impl BeeperApp {
                 }
             }
         } else if let Some(name) = sync.asking.clone() {
-            card.child(super::panels::row(&t!("Waiting for {device}", device = name), t!("It needs Unisend running and online."), cx)).child(
+            card.child(super::panels::row(&t!("Waiting for {device}", device = name), t!("On it, Unisend asks what to send."), cx)).child(
                 action("sync-ask-cancel", t!("Cancel"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
                     let _ = this.cmd.try_send(Cmd::CancelAsk);
                     this.storage.sync.asking = None;
