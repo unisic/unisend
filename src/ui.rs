@@ -4537,9 +4537,10 @@ fn emoji_only(text: &str) -> bool {
     (1..=3).contains(&count)
 }
 
-/// An attachment drawn as its picture rather than as a file's row; a video without its size is a row.
+/// An attachment drawn as its picture rather than as a file's row. A video whose event leaves out
+/// its size, as bridges' often do, takes `picture_size`'s 4:3 and still plays.
 fn drawn_as_picture(media: &Media) -> bool {
-    matches!(media.kind, MediaKind::Image | MediaKind::Sticker) || (media.kind == MediaKind::Video && media.dims.is_some())
+    matches!(media.kind, MediaKind::Image | MediaKind::Sticker | MediaKind::Video)
 }
 
 /// Key of the thumbnail of the message a reply quotes, in the thumbnail cache.
