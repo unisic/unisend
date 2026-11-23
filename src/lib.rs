@@ -337,6 +337,16 @@ fn contrast(a: u32, b: u32) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
+/// `fill` blended toward white on a dark ground, or black on a light one, until it reaches `ratio` on it.
+fn lift(fill: u32, ground: u32, ratio: f32) -> u32 {
+    let toward = if luminance(ground) < 0.5 { 0xff } else { 0x00 };
+    let mix = |t: u32| (0..3).map(|i| i * 8).fold(0, |acc, s| {
+        let c = (fill >> s) & 0xff;
+        acc | (((c * (20 - t) + toward * t) / 20) << s)
+    });
+    (0..=20).map(mix).find(|&c| contrast(c, ground) >= ratio).unwrap_or(toward * 0x010101)
+}
+
 /// The text on a bubble of this fill: white, or Beeper's near-black where that reads better.
 fn ink_on(fill: u32) -> u32 {
     const WHITE: u32 = 0xffffff;
@@ -615,6 +625,10 @@ pub(crate) fn apply_palette(cx: &mut App) {
     };
     if let Some(fill) = chosen {
         (p.own, p.on_own, p.own_coloured) = (c(fill), c(ink_on(fill)), true);
+        // A chosen color is the accent too: unread counts, mentions and the new-message mark follow it.
+        let ground = if dark { 0x000000 } else { 0xffffff };
+        let accent = lift(fill, ground, 3.);
+        (p.accent, p.on_accent, p.accent_ink) = (c(accent), c(ink_on(accent)), c(lift(fill, ground, 4.5)));
     }
     cx.set_global(p);
     // The system bars share the ground, with their icons in the ink that shows on it.
@@ -1708,6 +1722,20 @@ mod tests {
         }
         assert_eq!(super::ink_on(super::ChatColour::Orange.fill().unwrap()), 0x1a1a1a);
         assert_eq!(super::ink_on(super::ChatColour::Indigo.fill().unwrap()), 0xffffff);
+    }
+
+    #[test]
+    fn a_chosen_accent_reads_on_both_grounds() {
+        for color in super::ChatColour::ALL {
+            let Some(fill) = color.fill() else { continue };
+            for ground in [0x000000, 0xffffff] {
+                let ink = super::lift(fill, ground, 4.5);
+                assert!(super::contrast(ink, ground) >= 4.5, "{}: {ink:06x}", color.label());
+                let dot = super::lift(fill, ground, 3.);
+                assert!(super::contrast(dot, super::ink_on(dot)) >= 4.5, "{}: {dot:06x}", color.label());
+            }
+        }
+        assert_eq!(super::lift(0x734ef3, 0xffffff, 4.5), 0x734ef3);
     }
 
     #[test]
