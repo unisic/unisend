@@ -10,6 +10,7 @@ use matrix_sdk::{
         registration::{ApplicationType, ClientMetadata, Localized, OAuthGrantType},
     },
     reqwest::Url,
+    ruma::api::client::discovery::get_authorization_server_metadata::v1::Prompt,
     utils::UrlOrQuery,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -33,6 +34,8 @@ pub struct Methods {
     /// The server as it was typed, so the form knows when the field changed since.
     pub typed: String,
     pub oauth: bool,
+    /// Its authorization service also opens a new account (`prompt=create`).
+    pub create: bool,
     /// Single sign-on, by identity provider (ID, name); empty when the server names none.
     pub sso: Option<Vec<(String, String)>>,
     pub password: bool,
@@ -41,6 +44,8 @@ pub struct Methods {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Way {
     OAuth,
+    /// A new account on the server's authorization service, signed in once made.
+    Create,
     /// Single sign-on, with the identity provider picked, if the server named any.
     Sso(Option<String>),
 }
@@ -80,19 +85,21 @@ impl State {
     pub(super) async fn methods(&self, typed: String) -> Result<Methods> {
         let server = server_from_input(&typed).map_err(|e| anyhow!(e))?;
         let client = self.find(Client::builder().http_client(self.http.clone()), &server).await?;
-        let oauth = match client.oauth().server_metadata().await {
-            Ok(_) => true,
-            Err(matrix_sdk::authentication::oauth::error::OAuthDiscoveryError::NotSupported) => false,
+        // shortcut: only OAuth servers open accounts here; the older registration (captcha, email and
+        // terms steps) would need its own forms, worth it if a server people pick lacks OAuth.
+        let (oauth, create) = match client.oauth().server_metadata().await {
+            Ok(m) => (true, m.prompt_values_supported.contains(&Prompt::Create)),
+            Err(matrix_sdk::authentication::oauth::error::OAuthDiscoveryError::NotSupported) => (false, false),
             Err(e) => {
                 log::warn!("oauth discovery: {e}");
-                false
+                (false, false)
             }
         };
         let types = client.matrix_auth().get_login_types().await.map_err(|e| match unreachable(&e) {
             true => anyhow!(t!("Could not reach {server}. Check your connection.", server = server)),
             false => anyhow!(t!("{server} did not answer like a Matrix server: {error}", server = server, error = plain(&e))),
         })?;
-        Ok(methods_of(typed, oauth, &types.flows))
+        Ok(Methods { create, ..methods_of(typed, oauth, &types.flows) })
     }
 
     /// Opens the server's sign-in page: the UI shows it, and the answer comes as `BrowserDone`.
@@ -105,6 +112,7 @@ impl State {
         let back = Url::parse(&format!("http://127.0.0.1:{}/", listener.local_addr()?.port()))?;
         let url = match &way {
             Way::OAuth => client.oauth().login(back.clone(), None, Some(registration(&back).into()), None).build().await?.url,
+            Way::Create => client.oauth().login(back.clone(), None, Some(registration(&back).into()), None).prompt(vec![Prompt::Create]).build().await?.url,
             Way::Sso(idp) => Url::parse(&client.matrix_auth().get_sso_login_url(back.as_str(), idp.as_deref()).await?)?,
         };
         let back = back.to_string();
@@ -133,7 +141,7 @@ impl State {
         let homeserver = client.homeserver().to_string();
         keep_tokens(&client, &self.dir, &self.seal, Some(homeserver.clone()))?;
         match way {
-            Way::OAuth => client.oauth().finish_login(url).await.map_err(|e| anyhow!(t!("Could not sign in: {error}", error = plain(&e))))?,
+            Way::OAuth | Way::Create => client.oauth().finish_login(url).await.map_err(|e| anyhow!(t!("Could not sign in: {error}", error = plain(&e))))?,
             Way::Sso(_) => {
                 client
                     .matrix_auth()
@@ -294,7 +302,7 @@ mod tests {
     fn oauth_hides_the_older_ways() {
         let flows = [LoginType::Password(PasswordLoginType::new()), LoginType::Sso(SsoLoginType::new()), LoginType::Token(TokenLoginType::new())];
         let m = methods_of("matrix.org".into(), true, &flows);
-        assert_eq!(m, Methods { typed: "matrix.org".into(), oauth: true, sso: None, password: false });
+        assert_eq!(m, Methods { typed: "matrix.org".into(), oauth: true, create: false, sso: None, password: false });
         let m = methods_of("a".into(), false, &flows);
         assert_eq!((m.password, m.sso), (true, Some(vec![])));
         let mut sso = SsoLoginType::new();

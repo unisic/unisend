@@ -237,6 +237,9 @@ impl BeeperApp {
             if m.oauth {
                 ways = ways.child(tall(Button::new("matrix-oauth").primary()).label(t!("Continue in the browser")).on_click(cx.listener(|this, _, _, cx| this.matrix_browser_login(Way::OAuth, cx))));
             }
+            if m.create {
+                ways = ways.child(tall(Button::new("matrix-create")).label(t!("Create an account")).on_click(cx.listener(|this, _, _, cx| this.matrix_browser_login(Way::Create, cx))));
+            }
             if let Some(providers) = &m.sso {
                 // One primary control per screen: the password's button, when there is one.
                 let first_primary = !m.password;

@@ -137,6 +137,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Contact", "Kontakt"),
     ("Continue", "Dalej"),
     ("Continue in the browser", "Dalej w przeglądarce"),
+    ("Create an account", "Załóż konto"),
     ("Continue with pasted cookies", "Dalej z wklejonymi ciasteczkami"),
     ("Continue with {provider}", "Dalej przez {provider}"),
     ("Copy number", "Kopiuj numer"),

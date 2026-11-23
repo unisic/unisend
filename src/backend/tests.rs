@@ -2433,7 +2433,15 @@ async fn oauth_browser_signin_refresh_restore() {
         _ => None,
     })
     .await;
-    assert_eq!(methods, Methods { typed: hs.clone(), oauth: true, sso: None, password: false });
+    assert_eq!(methods, Methods { typed: hs.clone(), oauth: true, create: true, sso: None, password: false });
+    // A new account asks the same service for its sign-up page; this one is left unfinished.
+    st.handle(Cmd::BrowserLogin { server: hs.clone(), way: Way::Create }).await.unwrap();
+    let url = wait_for(&mut rx, "sign-up page", |e| match e {
+        Ev::SignInPage { url, .. } => Some(url),
+        _ => None,
+    })
+    .await;
+    assert!(url.contains("prompt=create"), "{url}");
     st.handle(Cmd::BrowserLogin { server: hs.clone(), way: Way::OAuth }).await.unwrap();
     let (url, back) = wait_for(&mut rx, "sign-in page", |e| match e {
         Ev::SignInPage { url, back } => Some((url, back)),

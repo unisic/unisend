@@ -123,7 +123,7 @@ There are no Google services, no telemetry, no crash reporting and no push servi
 - Android (the main target) and the Linux desktop are where it is built and tested.
 - macOS is in progress: a universal app for macOS 11 and later, which runs on Apple silicon.
   Windows builds, but has never been run.
-- Creating a new account is not supported: sign in to an existing one.
+- A new account can be made only on a Matrix server with OAuth sign-in, such as matrix.org, on the server's own page. Beeper accounts and servers with the older registration are made elsewhere first.
 - Some things bridges cannot carry at all, such as calls and view-once media: see
   [docs/parity-apps.md](docs/parity-apps.md).
 
