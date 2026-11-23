@@ -36,6 +36,8 @@ static BUNDLED: &[u8] = include_bytes!("../assets/fonts/NotoColorEmoji.ttf");
 /// format GPUI draws (CBDT or COLRv0) with a full-Unicode `cmap`.
 pub(crate) struct Set {
     pub name: &'static str,
+    /// The family `finish` reads from the file, which `Settings::emoji_font` keeps.
+    pub family: &'static str,
     /// Who made it and under what licence.
     pub credit: &'static str,
     pub url: &'static str,
@@ -47,6 +49,7 @@ pub(crate) struct Set {
 pub(crate) const SETS: [Set; 4] = [
     Set {
         name: "Apple",
+        family: "Apple Color Emoji",
         credit: "© Apple Inc.",
         url: "https://github.com/samuelngs/apple-emoji-ttf/releases/download/macos-26-20260722-484daf4e/AppleColorEmoji-Linux.ttf",
         sha256: "e37c7af6265ac4a0af6d57bc65e86109a776d9966e8343334557f63da482516f",
@@ -54,6 +57,7 @@ pub(crate) const SETS: [Set; 4] = [
     },
     Set {
         name: "Twemoji",
+        family: "Twemoji Mozilla",
         credit: "Twitter, CC BY 4.0",
         url: "https://github.com/mozilla/twemoji-colr/releases/download/v0.7.0/Twemoji.Mozilla.ttf",
         sha256: "6d90152ee0d29e82fe2a87793af5aa4b7ad13e6538360889e141e81ed299ee8e",
@@ -61,6 +65,7 @@ pub(crate) const SETS: [Set; 4] = [
     },
     Set {
         name: "OpenMoji",
+        family: "OpenMoji",
         credit: "OpenMoji, CC BY-SA 4.0",
         url: "https://raw.githubusercontent.com/hfg-gmuend/openmoji/17.0.0/font/OpenMoji-color-cbdt/OpenMoji-color-cbdt.ttf",
         sha256: "a541ac344a05bf1aa12585790c86bb2a40649940866d317d492f944bbf139795",
@@ -68,6 +73,7 @@ pub(crate) const SETS: [Set; 4] = [
     },
     Set {
         name: "Blobmoji",
+        family: "Blobmoji",
         credit: "Google, Apache 2.0",
         url: "https://github.com/C1710/blobmoji/releases/download/v15.0/Blobmoji.ttf",
         sha256: "dcc3d6675036ba9b35ef574d2221532770b5bd9886cba23c645ef46947eb78f9",
@@ -880,7 +886,7 @@ mod tests {
             let data = dir(&format!("set-{}", set.name));
             fs::write(part(&data), &bytes).unwrap();
             let family = finish(&data).unwrap_or_else(|e| panic!("{}: {e}", set.name));
-            eprintln!("{}: {family}", set.name);
+            assert_eq!(family, set.family, "{}", set.name);
             assert!(load(&data).is_some() && !part(&data).exists());
             fs::remove_dir_all(data).unwrap();
         }

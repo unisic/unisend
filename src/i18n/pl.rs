@@ -612,6 +612,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("These settings come from a newer Unisend. Update the app first.", "Te ustawienia pochodzą z nowszej wersji Unisend. Najpierw zaktualizuj aplikację."),
     ("Replace your settings with the imported ones?", "Zastąpić Twoje ustawienia zaimportowanymi?"),
     ("Replace your settings with the ones from your other device?", "Zastąpić Twoje ustawienia tymi z drugiego urządzenia?"),
+    ("Download the other device's emoji", "Pobierz emoji z drugiego urządzenia"),
+    ("Choose the device to take the settings from:", "Wybierz urządzenie, z którego wziąć ustawienia:"),
     ("The file holds this app's settings for moving them to another device. The app lock, your own emoji font, sounds and photos stay on each device. Settings for one chat name it by its Matrix room id; no messages, keys or passwords go into the file.", "Plik zawiera ustawienia aplikacji, by przenieść je na inne urządzenie. Blokada aplikacji, własna czcionka emoji, dźwięki i zdjęcia zostają na każdym urządzeniu. Ustawienia pojedynczego czatu wskazują go po identyfikatorze pokoju Matrix; do pliku nie trafiają wiadomości, klucze ani hasła."),
     ("Screen security", "Ochrona ekranu"),
     ("Search KLIPY", "Szukaj w KLIPY"),

@@ -31,6 +31,43 @@ pub(super) struct Sync {
     pub(super) lan: Option<Step>,
     /// The settings waiting for confirmation came from a device, not a file: they are confirmed here.
     pub(super) arrived: bool,
+    /// The downloadable emoji font the waiting settings chose, by its place in `emoji::SETS`, when
+    /// this device uses another; offered once they are applied, since the font is not in them.
+    emoji_with: Option<usize>,
+    /// That font, offered for download.
+    emoji_offer: Option<usize>,
+}
+
+/// What the list of devices below it is for.
+fn choose_heading(cx: &App) -> Div {
+    div().pt(px(8.)).text_size(fs(13.)).text_color(Palette::of(cx).muted).child(t!("Choose the device to take the settings from:"))
+}
+
+/// A device to take the settings from: a button with the device's icon, so it reads as one.
+fn choice(id: impl Into<ElementId>, label: &str, cx: &App) -> Stateful<Div> {
+    let p = Palette::of(cx);
+    h_flex()
+        .id(id)
+        .min_h(px(super::panels::ROW_H))
+        .py(px(8.))
+        .mx(px(-8.))
+        .px(px(8.))
+        .gap(px(GAP))
+        .rounded(px(12.))
+        .role(Role::Button)
+        .aria_label(label.to_owned())
+        .cursor_pointer()
+        .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.raised)))
+        .active(|el| el.bg(p.raised))
+        .child(Icon::new(IconName::MonitorSmartphone).size_5().flex_none().text_color(p.brand))
+        .child(div().flex_1().min_w_0().text_size(fs(16.)).line_height(fs(22.)).child(label.to_owned()))
+        .child(Icon::new(IconName::ChevronRight).size_4().flex_none().text_color(p.faint))
+}
+
+/// The downloadable font `incoming` uses, when `here` uses a different one.
+fn emoji_to_offer(here: &Settings, incoming: &Settings) -> Option<usize> {
+    let family = incoming.emoji_font.as_deref().filter(|f| here.emoji_font.as_deref() != Some(*f))?;
+    crate::emoji::SETS.iter().position(|set| set.family == family).filter(|_| crate::emoji::SUPPORTED)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -139,6 +176,7 @@ impl BeeperApp {
                 };
                 match incoming {
                     Ok(incoming) => {
+                        this.storage.sync.emoji_with = emoji_to_offer(&this.settings, &incoming);
                         let merged = adopt(&this.settings, incoming);
                         (this.pending_settings, this.storage.moved, this.storage.sync.arrived) = (Some(merged), None, false);
                     }
@@ -155,7 +193,10 @@ impl BeeperApp {
         let sync = &mut self.storage.sync;
         (sync.asking, sync.lan, sync.picking, sync.arrived) = (None, None, false, true);
         match from_file(raw) {
-            Ok(incoming) => (self.pending_settings, self.storage.moved) = (Some(adopt(&self.settings, incoming)), None),
+            Ok(incoming) => {
+                self.storage.sync.emoji_with = emoji_to_offer(&self.settings, &incoming);
+                (self.pending_settings, self.storage.moved) = (Some(adopt(&self.settings, incoming)), None);
+            }
             Err(e) => self.storage.moved = Some(e.into()),
         }
     }
@@ -168,10 +209,11 @@ impl BeeperApp {
             .child(link("settings-import-yes", t!("Replace"), IconName::Check, cx).on_click(cx.listener(|this, _, window, cx| {
                 if let Some(new) = this.pending_settings.take() {
                     this.apply_settings(new, window, cx);
+                    this.storage.sync.emoji_offer = this.storage.sync.emoji_with.take();
                 }
             })))
             .child(link("settings-import-no", t!("Cancel"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
-                this.pending_settings = None;
+                (this.pending_settings, this.storage.sync.emoji_with) = (None, None);
                 cx.notify();
             })))
     }
@@ -191,13 +233,31 @@ impl BeeperApp {
         let card = super::panels::card(cx);
         let card = if sync.arrived && self.pending_settings.is_some() {
             self.confirm_settings(t!("Replace your settings with the ones from your other device?"), cx)
+        } else if let Some(n) = sync.emoji_offer {
+            let set = &crate::emoji::SETS[n];
+            let busy = self.emoji.busy() || self.emoji.pending;
+            let value = match &self.emoji.error {
+                _ if busy => self.emoji_value(),
+                Some(error) => error.clone(),
+                None => format!("{}, {}", set.name, file_size(set.size)),
+            };
+            card.child(
+                super::panels::link("sync-emoji", t!("Download the other device's emoji"), value.into(), Some(IconName::Download), None, cx)
+                    .when(!busy, |el| el.on_click(cx.listener(move |this, _, _, cx| this.download_emoji_set(n, cx)))),
+            )
+            .child(action("sync-emoji-close", t!("Close"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
+                this.storage.sync.emoji_offer = None;
+                cx.notify();
+            })))
+            .child(div().pb(px(8.)).text_size(fs(13.)).text_color(p.muted).child(t!("A font is downloaded from GitHub only when tapped: GitHub sees the device's IP address and which font.")))
         } else if let Some(step) = sync.lan.clone() {
             match step {
                 Step::Offering => card.child(super::panels::row(t!("Waiting for the other device"), t!("On it, open Data and storage and choose Get over local network."), cx)).child(cancel_lan(cx)),
                 Step::Seeking(found) if found.is_empty() => card.child(super::panels::row(t!("Looking for a device"), t!("On the other device, choose Send over local network."), cx)).child(cancel_lan(cx)),
                 Step::Seeking(found) => card
+                    .child(choose_heading(cx))
                     .children(found.into_iter().enumerate().map(|(ix, at)| {
-                        super::panels::option(("sync-peer", ix), &t!("Unisend at {address}", address = at), "", false, cx).on_click(cx.listener(move |this, _, _, cx| {
+                        choice(("sync-peer", ix), &t!("Unisend at {address}", address = at), cx).on_click(cx.listener(move |this, _, _, cx| {
                             let _ = this.cmd.try_send(Cmd::HandoffPick(ix));
                             cx.notify();
                         }))
@@ -246,8 +306,8 @@ impl BeeperApp {
             } else if others.is_empty() {
                 card.child(super::panels::row(t!("No other verified device of this account."), "", cx))
             } else {
-                card.children(others.into_iter().enumerate().map(|(ix, (id, name))| {
-                    super::panels::option(("sync-device", ix), &name, "", false, cx).on_click(cx.listener(move |this, _, _, cx| {
+                card.child(choose_heading(cx)).children(others.into_iter().enumerate().map(|(ix, (id, name))| {
+                    choice(("sync-device", ix), &name, cx).on_click(cx.listener(move |this, _, _, cx| {
                         if this.send(Cmd::AskSettings(id.clone()), cx) {
                             (this.storage.sync.asking, this.storage.sync.picking) = (Some(name.clone()), false);
                         }
@@ -329,7 +389,7 @@ impl BeeperApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, Tone, Wallpaper, adopt, from_file, to_file};
+    use super::{Settings, Tone, Wallpaper, adopt, emoji_to_offer, from_file, to_file};
 
     fn settings() -> Settings {
         from_file(&to_file(&serde_json::from_str::<Settings>("{}").unwrap())).unwrap()
@@ -364,5 +424,17 @@ mod tests {
         assert_eq!(got.wallpaper, here.wallpaper);
         // Their own sound is not here; one with the same file is.
         assert_eq!((got.sounds.direct, got.sounds.group), (Tone::Own("a.ogg".into()), Tone::Own("a.ogg".into())));
+    }
+
+    #[test]
+    fn only_a_downloadable_emoji_font_this_device_lacks_is_offered() {
+        let (mut here, mut there) = (settings(), settings());
+        assert_eq!(emoji_to_offer(&here, &there), None);
+        there.emoji_font = Some("Twemoji Mozilla".into());
+        assert_eq!(emoji_to_offer(&here, &there), crate::emoji::SUPPORTED.then_some(1));
+        here.emoji_font = Some("Twemoji Mozilla".into());
+        assert_eq!(emoji_to_offer(&here, &there), None);
+        there.emoji_font = Some("A file of their own".into());
+        assert_eq!(emoji_to_offer(&here, &there), None);
     }
 }

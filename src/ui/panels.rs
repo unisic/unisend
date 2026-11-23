@@ -1699,23 +1699,23 @@ pub(super) fn qr_png(data: &str) -> Option<Vec<u8>> {
 #[derive(Default)]
 pub(super) struct EmojiChoice {
     /// A font was chosen or dropped since start: fonts cannot be swapped live.
-    pending: bool,
+    pub(super) pending: bool,
     copying: bool,
     /// The set being downloaded, and how far, in percent.
     downloading: Option<(usize, u8)>,
-    error: Option<String>,
+    pub(super) error: Option<String>,
 }
 
 impl EmojiChoice {
     /// One font at a time: the import and the downloads share the file being written.
-    fn busy(&self) -> bool {
+    pub(super) fn busy(&self) -> bool {
         self.copying || self.downloading.is_some()
     }
 }
 
 impl BeeperApp {
     /// The font's name, or what is happening to it.
-    fn emoji_value(&self) -> String {
+    pub(super) fn emoji_value(&self) -> String {
         let name = self.settings.emoji_font.as_deref().unwrap_or(t!("System|emoji"));
         match () {
             _ if let Some((_, percent)) = self.emoji.downloading => t!("Downloading… {percent}%", percent = percent),
@@ -1768,7 +1768,7 @@ impl BeeperApp {
             .into_any_element()
     }
 
-    fn download_emoji_set(&mut self, set: usize, cx: &mut Context<Self>) {
+    pub(super) fn download_emoji_set(&mut self, set: usize, cx: &mut Context<Self>) {
         if self.emoji.busy() {
             return;
         }
