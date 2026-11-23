@@ -104,6 +104,8 @@ pub enum Cmd {
     SubmitCode(String),
     /// Sign in to any Matrix homeserver. `server` is a server name or URL, as typed.
     PasswordLogin { server: String, user: String, password: String },
+    /// Make an account with a user name and password, and an invite code when the server asks one.
+    Register { server: String, user: String, password: String, code: String },
     /// What the server typed in the sign-in form offers to sign in with.
     LoginMethods(String),
     /// Sign in on the server's own page, in a browser.
@@ -1511,6 +1513,7 @@ impl State {
                 self.login_jwt(jwt).await?;
             }
             Cmd::PasswordLogin { server, user, password } => self.login_password(&server, &user, &password).await?,
+            Cmd::Register { server, user, password, code } => self.register(&server, &user, &password, &code).await?,
             Cmd::LoginMethods(server) => {
                 let methods = self.methods(server).await?;
                 self.emit(Ev::LoginMethods(methods)).await;

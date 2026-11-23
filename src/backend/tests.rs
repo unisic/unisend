@@ -711,6 +711,25 @@ async fn register_with_password(hs: &str, secret: &str, name: &str, password: &s
     assert!(resp.status().is_success(), "registration: {}", resp.text().await.unwrap());
 }
 
+/// A new account through the client registration API, on a local Synapse with
+/// `enable_registration` and its one dummy step; the invite code step is a unit test in signin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local Synapse with enable_registration"]
+async fn register_signs_the_new_account_in() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-register-{tag}"));
+    let (name, password) = (format!("dave{tag}"), format!("pw-{tag}-not-for-production"));
+    let register = |name: &str| Cmd::Register { server: hs.clone(), user: name.to_owned(), password: password.clone(), code: String::new() };
+    let (mut st, mut rx) = state(root.clone(), beeper::HOMESERVER_URL);
+    st.handle(register(&name)).await.unwrap();
+    wait_for(&mut rx, "Ready", |e| matches!(e, Ev::Ready { beeper: false, .. }).then_some(())).await;
+    assert!(!std::fs::read_to_string(root.join("session.json")).unwrap().contains(&password));
+    // The same name again is taken, as a second state making it would hear.
+    let (mut again, _rx) = state(std::env::temp_dir().join(format!("beeper-gpui-register-{tag}-2")), beeper::HOMESERVER_URL);
+    assert_eq!(again.handle(register(&name)).await.unwrap_err().to_string(), "That user name is taken.");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a local Synapse; also MATRIX_TEST_REGISTRATION_SECRET, see register_with_password"]
 async fn password_login_restore_sign_out() {

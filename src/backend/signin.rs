@@ -10,6 +10,13 @@ use matrix_sdk::{
         registration::{ApplicationType, ClientMetadata, Localized, OAuthGrantType},
     },
     reqwest::Url,
+    ruma::{
+        api::client::{
+            account::register,
+            uiaa::{AuthData, AuthType, Dummy, RegistrationToken, UiaaInfo},
+        },
+        assign,
+    },
     ruma::api::client::discovery::get_authorization_server_metadata::v1::Prompt,
     utils::UrlOrQuery,
 };
@@ -79,6 +86,57 @@ impl State {
             return Err(anyhow!(t!("{server} does not offer an encrypted (https) connection, so this app will not send it a password.", server = server)));
         }
         Ok(client)
+    }
+
+    /// A new account with a user name and password on a server whose registration asks at most an
+    /// invite code (`m.login.registration_token`), signed in once made. Email and captcha steps are
+    /// left to the server's own page.
+    pub(super) async fn register(&mut self, typed: &str, user: &str, password: &str, code: &str) -> Result<()> {
+        let server = server_from_input(typed).map_err(|e| anyhow!(e))?;
+        let (user, code) = (user.trim().trim_start_matches('@'), code.trim());
+        if user.is_empty() || password.is_empty() {
+            return Err(anyhow!(t!("Enter a user name and a password.")));
+        }
+        self.browser = None;
+        self.fresh_store()?;
+        let client = self.find(self.client_builder(), &server).await?;
+        let auth = client.matrix_auth();
+        let mut request = register::v3::Request::new();
+        (request.username, request.password) = (Some(user.to_owned()), Some(password.to_owned()));
+        request.initial_device_display_name = Some("Unisend".to_owned());
+        // One answer per step: the opening question, the code, the dummy step, and a spare.
+        for _ in 0..4 {
+            let e = match auth.register(request.clone()).await {
+                Ok(_) => {
+                    let session = auth.session().ok_or_else(|| anyhow!(t!("Login returned no session")))?;
+                    (self.homeserver, self.beeper) = (client.homeserver().to_string(), false);
+                    let saved = SavedSession { session, homeserver: Some(self.homeserver.clone()), oauth: None };
+                    self.seal.write(&self.dir, vault::SESSION, &serde_json::to_vec(&saved)?)?;
+                    self.go_live(client).await;
+                    return Ok(());
+                }
+                Err(e) => e,
+            };
+            let Some(info) = e.as_uiaa_response() else {
+                return Err(match e.client_api_error_kind() {
+                    Some(ErrorKind::UserInUse) => anyhow!(t!("That user name is taken.")),
+                    Some(ErrorKind::InvalidUsername) => anyhow!(t!("A user name may use only small letters, digits and . _ = - /")),
+                    Some(ErrorKind::WeakPassword) => anyhow!(t!("{server} wants a stronger password.", server = server)),
+                    Some(ErrorKind::Forbidden) => anyhow!(t!("{server} does not open accounts here.", server = server)),
+                    Some(ErrorKind::LimitExceeded(_)) => anyhow!(t!("Too many attempts. Wait a minute and try again.")),
+                    _ if unreachable(&e) => anyhow!(t!("Could not reach {server}. Check your connection.", server = server)),
+                    _ => anyhow!(t!("Could not make the account: {error}", error = plain(&e))),
+                });
+            };
+            if let Some(error) = &info.auth_error {
+                return Err(match info.completed.contains(&AuthType::RegistrationToken) || code.is_empty() {
+                    false => anyhow!(t!("{server} did not take that invite code.", server = server)),
+                    true => anyhow!(t!("Not accepted: {error}", error = error.message)),
+                });
+            }
+            request.auth = Some(next_step(info, code, &server).map_err(|e| anyhow!(e))?);
+        }
+        Err(anyhow!(t!("{server} kept asking for more steps.", server = server)))
     }
 
     /// What the server at `typed` offers to sign in with. Nothing is stored.
@@ -177,6 +235,22 @@ fn methods_of(typed: String, oauth: bool, flows: &[LoginType]) -> Methods {
         }
     }
     methods
+}
+
+/// The answer to the next step of a registration flow made only of steps this app takes: the
+/// invite code and the dummy step.
+fn next_step(info: &UiaaInfo, code: &str, server: &str) -> std::result::Result<AuthData, String> {
+    let ours = |s: &AuthType| matches!(s, AuthType::Dummy | AuthType::RegistrationToken);
+    let flow = info.flows.iter().filter(|f| f.stages.iter().all(ours)).min_by_key(|f| f.stages.contains(&AuthType::RegistrationToken) && code.is_empty());
+    let Some(flow) = flow else {
+        return Err(t!("{server} asks for more to make an account, like an email or a captcha. Make it on the server's page, then sign in here.", server = server));
+    };
+    let session = info.session.clone();
+    match flow.stages.iter().find(|s| !info.completed.contains(s)) {
+        Some(AuthType::RegistrationToken) if code.is_empty() => Err(t!("{server} opens accounts only with an invite code from the people who run it.", server = server)),
+        Some(AuthType::RegistrationToken) => Ok(AuthData::RegistrationToken(assign!(RegistrationToken::new(code.to_owned()), { session }))),
+        _ => Ok(AuthData::Dummy(assign!(Dummy::new(), { session }))),
+    }
 }
 
 /// This app as it registers with the server's authorization service, which shows the user its name.
@@ -286,6 +360,24 @@ mod tests {
     use matrix_sdk::ruma::api::client::session::get_login_types::v3::{IdentityProvider, PasswordLoginType, SsoLoginType, TokenLoginType};
 
     use super::*;
+
+    #[test]
+    fn registration_answers_the_code_then_the_dummy_step() {
+        let info = |flows: &[&[&str]], done: &[&str]| {
+            let mut info = UiaaInfo::new(flows.iter().map(|f| matrix_sdk::ruma::api::client::uiaa::AuthFlow::new(f.iter().map(|s| AuthType::from(*s)).collect())).collect());
+            (info.session, info.completed) = (Some("s1".into()), done.iter().map(|s| AuthType::from(*s)).collect());
+            info
+        };
+        let body = |a: AuthData| serde_json::to_value(a).unwrap();
+        let reszka = [&["m.login.registration_token", "m.login.dummy"][..]];
+        assert!(next_step(&info(&reszka, &[]), "", "a").unwrap_err().contains("invite code"));
+        assert_eq!(body(next_step(&info(&reszka, &[]), "c0de", "a").unwrap()), serde_json::json!({ "type": "m.login.registration_token", "token": "c0de", "session": "s1" }));
+        assert_eq!(body(next_step(&info(&reszka, &["m.login.registration_token"]), "c0de", "a").unwrap()), serde_json::json!({ "type": "m.login.dummy", "session": "s1" }));
+        // Without a code, a flow that needs none goes first.
+        let both = [&["m.login.registration_token", "m.login.dummy"][..], &["m.login.dummy"][..]];
+        assert_eq!(body(next_step(&info(&both, &[]), "", "a").unwrap()), serde_json::json!({ "type": "m.login.dummy", "session": "s1" }));
+        assert!(next_step(&info(&[&["m.login.email.identity", "m.login.recaptcha"]], &[]), "c0de", "a").unwrap_err().contains("captcha"));
+    }
 
     #[test]
     fn request_url_takes_only_a_get_with_a_query() {

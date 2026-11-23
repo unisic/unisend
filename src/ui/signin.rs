@@ -34,35 +34,48 @@ const SPOTS_WIDE: [(usize, f32, f32, f32); STICKERS] = [
     (5, 0.88, 0.64, 60.),
     (2, 0.80, 0.82, 64.),
 ];
-/// Servers that open accounts to anyone, as (server, country, sign-up page). No page: the server's
-/// OAuth service offers `prompt=create`, so the account is made through this app. A page: the
-/// server's own web app, for the older registration (email and captcha) this app does not carry,
-/// or the project's account page when its server signs in with that account.
-/// Checked November 2026 by asking each server; the country is its staff's, or its domain's.
-// shortcut: no public server found to open accounts in Poland or most of Europe and the world;
-// add one here once it is checked to.
-const SIGN_UP: [(&str, &str, Option<&str>); 19] = [
-    ("matrix.org", n_!("United Kingdom"), None),
-    ("glasgow.social", n_!("United Kingdom"), Some("https://matrix.glasgow.social/#/register")),
-    ("tchncs.de", n_!("Germany"), None),
-    ("nope.chat", n_!("Germany"), None),
-    ("quassel.io", n_!("Germany"), None),
-    ("synod.im", n_!("Germany"), None),
-    ("jonasled.de", n_!("Germany"), None),
-    ("kif.rocks", n_!("Germany"), None),
-    ("matrix.sp-codes.de", n_!("Germany"), None),
-    ("hot-chilli.im", n_!("Germany"), Some("https://element.hot-chilli.im/#/register")),
-    ("g24.at", n_!("Austria"), Some("https://element.g24.at/#/register")),
-    ("gemeinsam.jetzt", n_!("Austria"), Some("https://element.gemeinsam.jetzt/#/register")),
-    ("imagisphe.re", n_!("France"), Some("https://element.imagisphe.re/#/register")),
-    ("utwente.io", n_!("Netherlands"), Some("https://chat.utwente.io/#/register")),
-    ("grin.hu", n_!("Hungary"), Some("https://riot.grin.hu/#/register")),
-    ("unredacted.org", n_!("United States"), Some("https://element.unredacted.org/#/register")),
-    ("dewrito.net", n_!("United States"), Some("https://sable.dewrito.net/register")),
+/// How a listed server makes an account.
+#[derive(Clone, Copy)]
+enum Join {
+    /// Through this app: its OAuth service offers `prompt=create`.
+    App,
+    /// Through this app with a user name, a password and an invite code from the people who run it.
+    Code,
+    /// On this page: the server's own web app, for the older registration (email and captcha) this
+    /// app does not carry, or the project's account page when its server signs in with that account.
+    Page(&'static str),
+}
+
+/// Servers that open accounts, as (server, country, how). Checked November 2026 by asking each
+/// server; the country is its staff's, or its domain's.
+// shortcut: most of Europe and the world have no server here, none found that opens accounts;
+// add one once it is checked to.
+const SIGN_UP: [(&str, &str, Join); 20] = [
+    ("matrix.org", n_!("United Kingdom"), Join::App),
+    ("reszka.org", n_!("Poland"), Join::Code),
+    ("glasgow.social", n_!("United Kingdom"), Join::Page("https://matrix.glasgow.social/#/register")),
+    ("tchncs.de", n_!("Germany"), Join::App),
+    ("nope.chat", n_!("Germany"), Join::App),
+    ("quassel.io", n_!("Germany"), Join::App),
+    ("synod.im", n_!("Germany"), Join::App),
+    ("jonasled.de", n_!("Germany"), Join::App),
+    ("kif.rocks", n_!("Germany"), Join::App),
+    ("matrix.sp-codes.de", n_!("Germany"), Join::App),
+    ("hot-chilli.im", n_!("Germany"), Join::Page("https://element.hot-chilli.im/#/register")),
+    ("g24.at", n_!("Austria"), Join::Page("https://element.g24.at/#/register")),
+    ("gemeinsam.jetzt", n_!("Austria"), Join::Page("https://element.gemeinsam.jetzt/#/register")),
+    ("imagisphe.re", n_!("France"), Join::Page("https://element.imagisphe.re/#/register")),
+    ("utwente.io", n_!("Netherlands"), Join::Page("https://chat.utwente.io/#/register")),
+    ("grin.hu", n_!("Hungary"), Join::Page("https://riot.grin.hu/#/register")),
+    ("unredacted.org", n_!("United States"), Join::Page("https://element.unredacted.org/#/register")),
+    ("dewrito.net", n_!("United States"), Join::Page("https://sable.dewrito.net/register")),
     // These two sign in with the project's own account, made on its page.
-    ("fedora.im", n_!("United States"), Some("https://accounts.fedoraproject.org/")),
-    ("mozilla.org", n_!("United States"), Some("https://accounts.firefox.com/signup")),
+    ("fedora.im", n_!("United States"), Join::Page("https://accounts.fedoraproject.org/")),
+    ("mozilla.org", n_!("United States"), Join::Page("https://accounts.firefox.com/signup")),
 ];
+
+/// The places a new account can be made: the listed servers, Beeper, and a server typed.
+const PLACES: usize = SIGN_UP.len() + 2;
 
 /// Where Beeper's apps are, the only place its accounts are made: its API opens none for others.
 const BEEPER_SIGN_UP: &str = "https://www.beeper.com/download";
@@ -73,12 +86,20 @@ pub(super) struct Form {
     server: Entity<InputState>,
     user: Entity<InputState>,
     password: Entity<InputState>,
+    /// The invite code a server's registration asks for.
+    code: Entity<InputState>,
+    /// Making an account with a user name, password and invite code, in place of signing in.
+    registering: bool,
     /// What the server last asked offers; stale once the field says another server.
     methods: Option<Methods>,
     /// The browser sign-in under way, by the address its page sends the browser back to.
     pub(super) waiting: Option<String>,
     /// Picking where a new account is made, in place of the form.
     creating: bool,
+    /// The place picked for a new account: a `SIGN_UP` index, then Beeper, then a server typed.
+    pick: usize,
+    /// The places' list is open under the picked one.
+    picking: bool,
     /// The server whose own page was opened to make an account, until the field names another.
     made_elsewhere: Option<&'static str>,
 }
@@ -88,7 +109,8 @@ impl Form {
         let server = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Server, like matrix.org")));
         let user = cx.new(|cx| InputState::new(window, cx).placeholder(t!("User name")));
         let password = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Password")).masked(true));
-        for input in [&server, &user, &password] {
+        let code = cx.new(|cx| InputState::new(window, cx).placeholder(t!("Invite code")));
+        for input in [&server, &user, &password, &code] {
             subs.push(cx.subscribe_in(input, window, |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { shift: false, .. } => this.matrix_submit(window, cx),
                 other => keyboard_follows(other, Keyboard::Key, cx),
@@ -108,7 +130,7 @@ impl Form {
                 this.matrix.server.update(cx, |s, cx| s.set_value(server, window, cx));
             }
         }));
-        Self { server, user, password, methods: None, waiting: None, creating: false, made_elsewhere: None }
+        Self { server, user, password, code, registering: false, methods: None, waiting: None, creating: false, pick: 0, picking: false, made_elsewhere: None }
     }
 }
 
@@ -130,6 +152,7 @@ impl BeeperApp {
     /// offers one.
     fn matrix_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.methods(cx) {
+            _ if self.matrix.registering => self.register(window, cx),
             Some(m) if m.password => self.password_login(window, cx),
             Some(_) => {}
             None => self.ask_methods(cx),
@@ -183,6 +206,26 @@ impl BeeperApp {
         }
     }
 
+    /// Makes the account the registration form describes; the server signs it in once made.
+    fn register(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let read = |input: &Entity<InputState>| input.read(cx).value().to_string();
+        let (user, password, code) = (read(&self.matrix.user), read(&self.matrix.password), read(&self.matrix.code));
+        if user.trim().is_empty() || password.is_empty() {
+            self.error = Some(t!("Enter a user name and a password.").into());
+            cx.notify();
+            return;
+        }
+        self.error = None;
+        self.busy = self.send(Cmd::Register { server: self.typed_server(cx), user, password, code }, cx);
+        // The password lives on only in the request just sent.
+        if self.busy {
+            self.matrix.password.update(cx, |p, cx| p.set_value("", window, cx));
+        }
+    }
+
     pub(super) fn on_login_methods(&mut self, methods: Methods) {
         self.matrix.methods = Some(methods);
         (self.busy, self.error) = (false, None);
@@ -209,14 +252,18 @@ impl BeeperApp {
         .detach();
     }
 
-    /// A new account on `server`: through this app when its OAuth service makes one, else on the
-    /// server's own `page`, with the form left ready to sign in once it is made.
-    fn create_on(&mut self, server: &'static str, page: Option<&'static str>, window: &mut Window, cx: &mut Context<Self>) {
+    /// A new account on `server`: through this app, or on the server's own page with the form left
+    /// ready to sign in once it is made.
+    fn create_on(&mut self, server: &'static str, join: Join, window: &mut Window, cx: &mut Context<Self>) {
         self.matrix.server.update(cx, |s, cx| s.set_value(server, window, cx));
         self.matrix.creating = false;
-        match page {
-            None => self.matrix_browser_login(Way::Create, cx),
-            Some(page) => {
+        match join {
+            Join::App => self.matrix_browser_login(Way::Create, cx),
+            Join::Code => {
+                (self.matrix.registering, self.error) = (true, None);
+                self.matrix.user.update(cx, |s, cx| s.focus(window, cx));
+            }
+            Join::Page(page) => {
                 crate::open_link(cx, page);
                 self.matrix.made_elsewhere = Some(server);
                 self.ask_methods(cx);
@@ -298,26 +345,77 @@ impl BeeperApp {
         let mut ways = v_flex().gap(px(GAP));
         let creating = self.matrix.creating && !waiting;
         if creating {
-            let row = |id: ElementId, name: SharedString, note: SharedString| {
-                h_flex()
-                    .id(id)
-                    .h(px(TAP))
-                    .px(px(GAP + 4.))
-                    .gap(px(GAP))
-                    .rounded_full()
-                    .bg(p.surface)
-                    .hover(|el| el.bg(p.raised))
-                    .cursor_pointer()
-                    .child(div().flex_1().min_w_0().truncate().text_size(fs(16.)).text_color(p.text).child(name))
-                    .child(div().flex_none().text_size(fs(14.)).text_color(p.muted).child(note))
+            let pick = self.matrix.pick;
+            let open = self.matrix.picking;
+            // The picked place as (name, country): a listed server, Beeper, or one the user types.
+            let label = |i: usize| -> (SharedString, SharedString) {
+                match SIGN_UP.get(i) {
+                    Some(&(server, country, _)) => (server.into(), tr(country).into()),
+                    None if i == SIGN_UP.len() => ("Beeper".into(), SharedString::default()),
+                    None => (t!("Another Matrix server").into(), SharedString::default()),
+                }
             };
+            let (name, country) = label(pick);
+            let field = h_flex()
+                .id("sign-up-pick")
+                .h(px(TAP))
+                .px(px(GAP + 4.))
+                .gap(px(GAP))
+                .rounded_full()
+                .bg(p.surface)
+                .cursor_pointer()
+                .child(div().flex_1().min_w_0().truncate().text_size(fs(16.)).text_color(p.text).child(name))
+                .child(div().flex_none().text_size(fs(14.)).text_color(p.muted).child(country))
+                .child(Icon::new(if open { IconName::ChevronUp } else { IconName::ChevronDown }).size_4().text_color(p.muted))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.matrix.picking = !this.matrix.picking;
+                    cx.notify();
+                }));
+            let options = open.then(|| {
+                v_flex()
+                    .id("sign-up-options")
+                    .max_h(px(TAP * 5.5))
+                    .overflow_y_scroll()
+                    .py(px(4.))
+                    .rounded(px(14.))
+                    .bg(p.surface)
+                    .children((0..PLACES).map(|i| {
+                        let (name, country) = label(i);
+                        h_flex()
+                            .id(("sign-up", i))
+                            .flex_none()
+                            .h(px(TAP))
+                            .px(px(GAP + 4.))
+                            .gap(px(GAP))
+                            .hover(|el| el.bg(p.raised))
+                            .cursor_pointer()
+                            .child(div().flex_1().min_w_0().truncate().text_size(fs(16.)).text_color(p.text).child(name))
+                            .child(div().flex_none().text_size(fs(14.)).text_color(p.muted).child(country))
+                            .child(div().flex_none().size_4().when(i == pick, |el| el.child(Icon::new(IconName::Check).size_4().text_color(p.text))))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                (this.matrix.pick, this.matrix.picking) = (i, false);
+                                cx.notify();
+                            }))
+                    }))
+            });
             ways = ways
-                .children(SIGN_UP.iter().enumerate().map(|(i, &(server, country, page))| {
-                    row(("sign-up", i).into(), server.into(), tr(country).into()).on_click(cx.listener(move |this, _, window, cx| this.create_on(server, page, window, cx)))
-                }))
-                .child(row("create-beeper".into(), "Beeper".into(), SharedString::default()).on_click(cx.listener(|this, _, _, cx| this.create_on_beeper(cx))))
-                .child(tall(Button::new("create-elsewhere")).label(t!("Another Matrix server")).on_click(cx.listener(|this, _, window, cx| this.create_elsewhere(window, cx))))
-                .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(t!("Beeper accounts are made in Beeper's app; then sign in here with the code from your email.")));
+                .child(field)
+                .children(options)
+                .when(pick == SIGN_UP.len(), |el| {
+                    el.child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(t!("Beeper accounts are made in Beeper's app; then sign in here with the code from your email.")))
+                })
+                .child(tall(Button::new("sign-up-go").primary()).label(t!("Continue")).on_click(cx.listener(move |this, _, window, cx| match SIGN_UP.get(pick) {
+                    Some(&(server, _, join)) => this.create_on(server, join, window, cx),
+                    None if pick == SIGN_UP.len() => this.create_on_beeper(cx),
+                    None => this.create_elsewhere(window, cx),
+                })));
+        } else if self.matrix.registering && !waiting {
+            ways = ways
+                .child(Input::new(&self.matrix.user).large())
+                .child(Input::new(&self.matrix.password).large().mask_toggle())
+                .child(Input::new(&self.matrix.code).large())
+                .child(tall(Button::new("register-go").primary()).label(t!("Create an account")).on_click(cx.listener(|this, _, window, cx| this.register(window, cx))))
+                .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(t!("The people who run the server give out invite codes.")));
         } else if waiting {
             ways = ways
                 .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(t!("Finish signing in on your server's page. This screen goes on by itself.")))
@@ -362,9 +460,11 @@ impl BeeperApp {
         if let Some(server) = self.matrix.made_elsewhere.filter(|&s| s == self.typed_server(cx) && !creating && !waiting) {
             ways = ways.child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(t!("Make the account on {server}'s page in the browser, then sign in here.", server = server)));
         }
-        let (title, hint) = match creating {
-            true => (t!("Create an account"), t!("Pick where your account lives.")),
-            false => (t!("Sign in with Matrix"), t!("Any Matrix server, like matrix.org.")),
+        let registering = self.matrix.registering && !creating;
+        let (title, hint) = match (creating, registering) {
+            (true, _) => (t!("Create an account"), t!("Pick where your account lives.")),
+            (_, true) => (t!("Create an account"), t!("Pick a user name and a password.")),
+            _ => (t!("Sign in with Matrix"), t!("Any Matrix server, like matrix.org.")),
         };
         super::sign_in_screen(
             "matrix-screen",
@@ -376,13 +476,14 @@ impl BeeperApp {
                     .child(super::sign_in_heading(title, hint, cx))
                     .when(!creating, |el| el.child(Input::new(&self.matrix.server).large().disabled(waiting)))
                     .child(ways)
-                    .when(creating, |el| {
-                        el.child(Button::new("create-back").h(px(TAP)).label(t!("Go back")).on_click(cx.listener(|this, _, _, cx| {
-                            this.matrix.creating = false;
+                    .when(creating || registering, |el| {
+                        // Out of the registration form, back to the list it was picked from.
+                        el.child(Button::new("create-back").h(px(TAP)).label(t!("Go back")).on_click(cx.listener(move |this, _, _, cx| {
+                            (this.matrix.creating, this.matrix.registering, this.error) = (registering, false, None);
                             cx.notify();
                         })))
                     })
-                    .when(!creating, |el| {
+                    .when(!creating && !registering, |el| {
                         el.child(Button::new("matrix-back").h(px(TAP)).label(t!("Sign in with Beeper")).on_click(cx.listener(|this, _, _, cx| {
                             this.cancel_browser(cx);
                             this.screen = Screen::Email;
