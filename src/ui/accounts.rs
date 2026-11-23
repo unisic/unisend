@@ -316,6 +316,13 @@ impl BeeperApp {
             self.emoji_fetched(step, cx);
             return;
         }
+        // The settings are the app's: any signed-in account's other devices may ask for them.
+        if !shown && let Ev::SettingsAsked { device, request } = ev {
+            if let Some(a) = self.accounts.get(slot) {
+                let _ = a.cmd.try_send(Cmd::GiveSettings { device, request, settings: super::portable::to_file(&self.settings) });
+            }
+            return;
+        }
         let Some(a) = self.accounts.get_mut(slot) else { return };
         let mut changed = false;
         match &ev {

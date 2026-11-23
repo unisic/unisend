@@ -115,6 +115,11 @@ What leaves the device, and who sees it:
   message fetch nothing.
 - **GitHub**, only when you tap an emoji font to download (Settings, Emoji, on Android and Linux):
   your IP address and which font.
+- **Settings from another device** (Settings, Data and storage): asked through the server, they
+  go end-to-end encrypted between two of your verified devices, so your homeserver sees only that
+  they exchanged a message, when and how large. Over the local network no server takes part: the
+  sending device announces a random key and a port by broadcast to everyone on that network, and
+  your account goes over the encrypted channel only after you compare its number on both screens.
 
 There are no Google services, no telemetry, no crash reporting and no push service.
 

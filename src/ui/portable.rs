@@ -1,9 +1,13 @@
-//! Settings that move between devices: exported to a file and imported from one. What only makes
-//! sense on this device stays as it is: the app lock (its PIN lives here), the own emoji font,
-//! own sounds and wallpaper photos (files here), the accounts' slots and staying connected.
+//! Settings that move between devices: exported to a file and imported from one, or handed over
+//! by another device of the account (`backend/handoff.rs`), through the server or the local
+//! network. What only makes sense on this device stays as it is: the app lock (its PIN lives
+//! here), the own emoji font, own sounds and wallpaper photos (files here), the accounts' slots
+//! and staying connected.
 
 use super::*;
 use crate::Settings;
+use crate::backend::handoff::Step;
+use crate::backend::verify::Trust;
 use crate::i18n::t;
 use crate::tones::Tone;
 use appearance::Wallpaper;
@@ -15,6 +19,17 @@ const VERSION: u32 = 1;
 const MAX_FILE: u64 = 1 << 20;
 /// The exported file's name.
 pub(super) const FILE_NAME: &str = "unisend-settings.json";
+
+/// Settings coming from another device of the account.
+#[derive(Default)]
+pub(super) struct Sync {
+    /// The list of devices to ask is open.
+    picking: bool,
+    /// The device asked through the server, by name, until it answers.
+    asking: Option<String>,
+    /// The local-network exchange, from its first step until closed.
+    pub(super) lan: Option<Step>,
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Exported {
@@ -131,6 +146,121 @@ impl BeeperApp {
             });
         })
         .detach();
+    }
+
+    /// Settings another device sent: they wait for the same confirmation as an imported file.
+    pub(super) fn settings_arrived(&mut self, raw: &[u8]) {
+        let sync = &mut self.storage.sync;
+        (sync.asking, sync.lan, sync.picking) = (None, None, false);
+        match from_file(raw) {
+            Ok(incoming) => (self.pending_settings, self.storage.moved) = (Some(adopt(&self.settings, incoming)), None),
+            Err(e) => self.storage.moved = Some(e.into()),
+        }
+    }
+
+    /// Asking another device, through the server or on the local network, and the steps between.
+    pub(super) fn render_sync(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = Palette::of(cx);
+        let action = |id: &'static str, label: &'static str, icon: IconName, cx: &App| super::panels::link(id, label, "".into(), Some(icon), None, cx);
+        let cancel_lan = |cx: &mut Context<Self>| {
+            action("sync-lan-cancel", t!("Cancel"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
+                let _ = this.cmd.try_send(Cmd::HandoffStop);
+                this.storage.sync.lan = None;
+                cx.notify();
+            }))
+        };
+        let sync = &self.storage.sync;
+        let card = super::panels::card(cx);
+        let card = if let Some(step) = sync.lan.clone() {
+            match step {
+                Step::Offering => card.child(super::panels::row(t!("Waiting for the other device"), t!("On it, open Data and storage and choose Get over local network."), cx)).child(cancel_lan(cx)),
+                Step::Seeking(found) if found.is_empty() => card.child(super::panels::row(t!("Looking for a device"), t!("On the other device, choose Send over local network."), cx)).child(cancel_lan(cx)),
+                Step::Seeking(found) => card
+                    .children(found.into_iter().enumerate().map(|(ix, at)| {
+                        super::panels::option(("sync-peer", ix), &t!("Unisend at {address}", address = at), "", false, cx).on_click(cx.listener(move |this, _, _, cx| {
+                            let _ = this.cmd.try_send(Cmd::HandoffPick(ix));
+                            cx.notify();
+                        }))
+                    }))
+                    .child(cancel_lan(cx)),
+                Step::Code { code, offering } => {
+                    let shown = div().py(px(8.)).text_size(fs(32.)).font_features(tabular()).text_color(p.text).child(code);
+                    let say = if offering { t!("Check that the other device shows the same number, then send.") } else { t!("Check that the other device shows the same number, and send from there.") };
+                    card.child(shown)
+                        .child(div().pb(px(8.)).text_size(fs(13.)).text_color(p.muted).child(say))
+                        .when(offering, |el| {
+                            el.child(action("sync-lan-send", t!("Send"), IconName::Check, cx).on_click(cx.listener(|this, _, _, cx| {
+                                let _ = this.cmd.try_send(Cmd::HandoffConfirm);
+                                cx.notify();
+                            })))
+                        })
+                        .child(cancel_lan(cx))
+                }
+                Step::Sent | Step::Failed(_) => {
+                    let said = match step {
+                        Step::Failed(e) => e,
+                        _ => t!("Settings sent.").to_owned(),
+                    };
+                    card.child(super::panels::row(&said, "", cx)).child(action("sync-lan-done", t!("Close"), IconName::Check, cx).on_click(cx.listener(|this, _, _, cx| {
+                        this.storage.sync.lan = None;
+                        cx.notify();
+                    })))
+                }
+            }
+        } else if let Some(name) = sync.asking.clone() {
+            card.child(super::panels::row(&t!("Waiting for {device}", device = name), t!("It needs Unisend running and online."), cx)).child(
+                action("sync-ask-cancel", t!("Cancel"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
+                    let _ = this.cmd.try_send(Cmd::CancelAsk);
+                    this.storage.sync.asking = None;
+                    cx.notify();
+                })),
+            )
+        } else if sync.picking {
+            let devices = self.verify.devices.as_ref();
+            let this_verified = devices.is_some_and(|d| d.this_verified);
+            let others: Vec<(String, String)> = devices
+                .map(|d| d.list.iter().filter(|d| !d.this && d.trust == Trust::Verified).map(|d| (d.id.clone(), d.name.clone())).collect())
+                .unwrap_or_default();
+            let card = if !this_verified {
+                card.child(super::panels::row(t!("Verify this device first, in Settings, Devices."), "", cx))
+            } else if others.is_empty() {
+                card.child(super::panels::row(t!("No other verified device of this account."), "", cx))
+            } else {
+                card.children(others.into_iter().enumerate().map(|(ix, (id, name))| {
+                    super::panels::option(("sync-device", ix), &name, "", false, cx).on_click(cx.listener(move |this, _, _, cx| {
+                        if this.send(Cmd::AskSettings(id.clone()), cx) {
+                            (this.storage.sync.asking, this.storage.sync.picking) = (Some(name.clone()), false);
+                        }
+                        cx.notify();
+                    }))
+                }))
+            };
+            card.child(action("sync-pick-cancel", t!("Cancel"), IconName::Close, cx).on_click(cx.listener(|this, _, _, cx| {
+                this.storage.sync.picking = false;
+                cx.notify();
+            })))
+        } else {
+            card.child(action("sync-ask", t!("Get from another device"), IconName::ArrowDown, cx).on_click(cx.listener(|this, _, _, cx| {
+                this.storage.sync.picking = true;
+                cx.notify();
+            })))
+            .child(action("sync-lan-get", t!("Get over local network"), IconName::ArrowDown, cx).on_click(cx.listener(|this, _, _, cx| {
+                if this.send(Cmd::HandoffSeek, cx) {
+                    this.storage.sync.lan = Some(Step::Seeking(Vec::new()));
+                }
+                cx.notify();
+            })))
+            .child(action("sync-lan-offer", t!("Send over local network"), IconName::ArrowUp, cx).on_click(cx.listener(|this, _, _, cx| {
+                if this.send(Cmd::HandoffOffer(to_file(&this.settings)), cx) {
+                    this.storage.sync.lan = Some(Step::Offering);
+                }
+                cx.notify();
+            })))
+        };
+        super::panels::section(t!("Sync with another device"), cx).child(card).child(super::panels::footnote(
+            t!("Get from another device: the settings come encrypted from one of your verified devices, through your server, which sees only that two of your devices exchanged a message. Over the local network no server takes part: both devices are on the same network with this page open, and you compare a number on both screens."),
+            cx,
+        ))
     }
 
     /// Puts `new` in place of the settings, with each one's effect, as its own control would.

@@ -277,3 +277,93 @@ async fn device_list_does_not_refresh_itself() {
     assert!(lists <= 2, "{lists} device lists in 4 s");
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A verified device hands its settings to another verified device of the account through the
+/// server; a device not verified is not answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn verified_devices_hand_over_settings() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-handoff-{tag}"));
+    let name = format!("finn{tag}");
+    let (mut a, mut a_rx) = state(root.join("a"), &hs);
+    a.login_jwt(jwt(&secret, &name)).await.unwrap();
+    wait_for(&mut a_rx, "A ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    a.client().unwrap().encryption().bootstrap_cross_signing_if_needed(None).await.unwrap();
+    let a_id = a.client().unwrap().device_id().unwrap().to_string();
+
+    let (mut b, mut b_rx) = state(root.join("b"), &hs);
+    b.login_jwt(jwt(&secret, &name)).await.unwrap();
+    wait_for(&mut b_rx, "B ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let b_id = b.client().unwrap().device_id().unwrap().to_string();
+
+    // Not verified yet: B may not even ask.
+    assert!(b.handle(Cmd::AskSettings(a_id.clone())).await.is_err());
+
+    // The SDK drops a verification request from a device whose keys it has not fetched yet.
+    for _ in 0..50 {
+        let seen = verify::devices(a.client().unwrap()).await.unwrap();
+        if seen.list.iter().any(|d| d.id == b_id && d.trust != Trust::NoKeys) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    to_emoji(&mut a, &mut a_rx, &mut b, &mut b_rx).await;
+    a.handle(Cmd::VerifyMatch(true)).await.unwrap();
+    b.handle(Cmd::VerifyMatch(true)).await.unwrap();
+    assert_eq!(settled(&mut a_rx, "A done").await, Verify::Done);
+    assert_eq!(settled(&mut b_rx, "B done").await, Verify::Done);
+    wait_for(&mut b_rx, "B verified", |e| match e {
+        Ev::Devices(d) if d.this_verified => Some(()),
+        _ => None,
+    })
+    .await;
+    // A takes B's new signature from the server a moment after the verification ends.
+    let a_client = a.client().unwrap().clone();
+    let own = a_client.user_id().unwrap().to_owned();
+    let mut trusted = false;
+    for _ in 0..50 {
+        verify::devices(&a_client).await.unwrap();
+        let seen = a_client.encryption().get_device(&own, b_id.as_str().into()).await.unwrap();
+        if seen.is_some_and(|d| d.is_verified_with_cross_signing()) {
+            trusted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(trusted, "A never trusted B");
+
+    b.handle(Cmd::AskSettings(a_id.clone())).await.unwrap();
+    let (device, request) = wait_for(&mut a_rx, "A asked", |e| match e {
+        Ev::SettingsAsked { device, request } => Some((device, request)),
+        _ => None,
+    })
+    .await;
+    assert_eq!(device, b_id);
+    a.handle(Cmd::GiveSettings { device, request, settings: b"{\"kind\":\"unisend-settings\"}".to_vec() }).await.unwrap();
+    let got = wait_for(&mut b_rx, "B given", |e| match e {
+        Ev::SettingsArrived(s) => Some(s),
+        _ => None,
+    })
+    .await;
+    assert_eq!(got, b"{\"kind\":\"unisend-settings\"}");
+
+    // A third device, not verified, sends a request by hand: A stays silent.
+    let (mut c, mut c_rx) = state(root.join("c"), &hs);
+    c.login_jwt(jwt(&secret, &name)).await.unwrap();
+    wait_for(&mut c_rx, "C ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    verify::devices(c.client().unwrap()).await.unwrap();
+    let enc = c.client().unwrap().encryption();
+    let own = c.client().unwrap().user_id().unwrap().to_owned();
+    let target = enc.get_device(&own, a_id.as_str().into()).await.unwrap().unwrap();
+    let raw = matrix_sdk::ruma::serde::Raw::from_json(serde_json::value::to_raw_value(&serde_json::json!({ "request": "x" })).unwrap());
+    let failed = enc.encrypt_and_send_raw_to_device(vec![&target], "dev.unisend.settings.request", raw, matrix_sdk_crypto::CollectStrategy::AllDevices).await.unwrap();
+    assert!(failed.is_empty());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, a_rx.rx.recv()).await {
+        assert!(!matches!(ev, Ev::SettingsAsked { .. }), "an unverified device was answered");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}

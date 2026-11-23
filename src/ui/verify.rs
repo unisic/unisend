@@ -29,7 +29,7 @@ enum Recovery {
 }
 
 pub(super) struct Ui {
-    devices: Option<Devices>,
+    pub(super) devices: Option<Devices>,
     loading: bool,
     failed: Option<SharedString>,
     renaming: bool,

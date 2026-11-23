@@ -32,7 +32,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 image = { version = "0.25", default-features = false }
 mime_guess = "2"
 qrcode = { version = "0.14", default-features = false }
-matrix-sdk = { version = "=0.19.1", default-features = false, features = ["e2e-encryption", "automatic-room-key-forwarding", "sqlite", "bundled-sqlite", "rustls-aws-lc-rs"] }
+# experimental-send-custom-to-device: Olm-encrypted settings between own devices (backend/handoff.rs).
+matrix-sdk = { version = "=0.19.1", default-features = false, features = ["e2e-encryption", "automatic-room-key-forwarding", "sqlite", "bundled-sqlite", "rustls-aws-lc-rs", "experimental-send-custom-to-device"] }
 # The SDK's own conversation model: local echo and send queue, read receipts, reactions, edits,
 # polls and membership changes as ready-made timeline items. Same release as matrix-sdk.
 matrix-sdk-ui = { version = "=0.19.1", default-features = false, features = ["rustls-aws-lc-rs"] }

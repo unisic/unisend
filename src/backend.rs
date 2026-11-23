@@ -278,6 +278,23 @@ pub enum Cmd {
     /// The user has had the open chat on screen down to this event, as Signal reads: the chat (or
     /// a chat of the open merged chat) is read up to it. A receipt that would go back is dropped.
     Seen(OwnedRoomId, OwnedEventId),
+    /// Asks the account's device with this ID for its settings, through the server; answered by
+    /// `Ev::SettingsArrived`, else `Ev::Error`.
+    AskSettings(String),
+    /// Stops waiting for the answer to `AskSettings`.
+    CancelAsk,
+    /// Sends `settings` (an exported settings file) to the device that asked with `request`.
+    GiveSettings { device: String, request: String, settings: Vec<u8> },
+    /// Offers `settings` on the local network; followed by `Ev::Handoff`.
+    HandoffOffer(Vec<u8>),
+    /// Looks for a device offering its settings on the local network; followed by `Ev::Handoff`.
+    HandoffSeek,
+    /// Takes the settings of the device found at this place in `handoff::Step::Seeking`.
+    HandoffPick(usize),
+    /// The user saw the same code on both screens: the offering side sends.
+    HandoffConfirm,
+    /// Ends the local-network exchange.
+    HandoffStop,
 }
 
 pub enum Ev {
@@ -396,6 +413,13 @@ pub enum Ev {
     Storage(storage::Usage),
     /// The answer to `Cmd::Search` for this room, query and filter.
     Found { room: Option<OwnedRoomId>, query: String, filter: Filter, hits: Vec<Hit> },
+    /// Another device of the account asks for this one's settings; the UI answers with
+    /// `Cmd::GiveSettings`.
+    SettingsAsked { device: String, request: String },
+    /// Settings from another device of the account, as an exported settings file.
+    SettingsArrived(Vec<u8>),
+    /// How the local-network exchange goes.
+    Handoff(handoff::Step),
 }
 
 /// Chat-list actions, stored the way Beeper's own clients store them so they sync both ways.
@@ -1021,6 +1045,7 @@ struct State {
     /// The preview of the link being typed: in the making, then made. One at a time.
     link_task: Option<AbortOnDrop>,
     link_made: Arc<Mutex<Option<linkprev::Preview>>>,
+    handoff: handoff::Handoff,
 }
 
 /// What the composer shows of a link's preview before it is sent.
@@ -1048,7 +1073,7 @@ async fn run(dir: PathBuf, mut cmds: mpsc::Receiver<Cmd>, ev: mpsc::Sender<Ev>) 
     let _ = std::fs::remove_file(dir.join("klipy-id"));
     let mut st = State { dir, homeserver: beeper_homeserver(), beeper: true, http, ev, seal: Seal::Plain, client: None, login_request: None, open: None, merged: None, merge_limit: Arc::new(AtomicI64::new(i64::MIN)),
         rooms: Rooms::default(), blocked: Arc::default(), fetches: Arc::new(tokio::sync::Semaphore::new(ROW_FETCHES)), previews: Arc::new(tokio::sync::Semaphore::new(PROBES)), notif: None,
-        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, browser: None, replaceable: false, update: None, link_task: None, link_made: Arc::default() };
+        incognito: Arc::new(AtomicBool::new(true)), tasks: Vec::new(), verify: verify::Verifier::default(), info: None, peer: None, login: None, browser: None, replaceable: false, update: None, link_task: None, link_made: Arc::default(), handoff: Default::default() };
     tokio::spawn(sweep_media_every(media_dir(&st.dir)));
     // One service shows every account's notifications; the first account's backend, which runs
     // as long as the app, keeps it.
@@ -1301,6 +1326,7 @@ impl State {
         self.tasks = vec![tokio::spawn(watch_recovery(client.clone(), self.ev.clone())), tokio::spawn(block::watch(client.clone(), self.ev.clone(), self.blocked.clone())), self.sync_task(&client, &notif)];
         self.notif = Some(notif);
         self.verify.listen(&client, &self.ev);
+        self.handoff.listen(&client, &self.ev);
         list_typing(&client, &self.ev);
         search::start(&self.dir, &client, &self.seal);
         let user = client.user_id().map(ToOwned::to_owned);
@@ -2058,6 +2084,27 @@ impl State {
                 open.timeline.room().send_queue().set_enabled(true);
                 timeline::retry(&open.timeline, &target).await?;
             }
+            Cmd::AskSettings(device) => self.handoff.ask(self.client()?, &device).await?,
+            Cmd::CancelAsk => self.handoff.cancel_ask(),
+            Cmd::GiveSettings { device, request, settings } => {
+                let client = self.client()?.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handoff::Handoff::give(&client, &device, request, settings).await {
+                        log::warn!("settings handoff: {}", plain(&e));
+                    }
+                });
+            }
+            Cmd::HandoffOffer(settings) => {
+                let client = self.client()?.clone();
+                self.handoff.offer(&client, settings, &self.ev)?;
+            }
+            Cmd::HandoffSeek => self.handoff.seek(&self.ev),
+            Cmd::HandoffPick(ix) => {
+                let client = self.client()?.clone();
+                self.handoff.pick(&client, ix, &self.ev)?;
+            }
+            Cmd::HandoffConfirm => self.handoff.confirm(),
+            Cmd::HandoffStop => self.handoff.stop(),
             Cmd::Devices => {
                 let (client, ev) = (self.client()?.clone(), self.ev.clone());
                 tokio::spawn(async move {
@@ -4561,6 +4608,7 @@ pub(crate) mod forum;
 
 mod export;
 pub use export::Export;
+pub(crate) mod handoff;
 
 mod mentions;
 mod signin;

@@ -1,7 +1,8 @@
 //! Settings, Data and storage, after Signal's: what the account takes on this device and a button
 //! that empties the media cache, and how long messages stay in this device's caches. The sizes
 //! are read when the page opens (`backend/storage.rs`); nothing here changes the server.
-//! The settings file's export and import sit here too (`portable.rs`).
+//! The settings file's export and import, and settings from another device, sit here too
+//! (`portable.rs`).
 
 use super::panels::{card, footnote, option, row, section};
 use super::*;
@@ -26,6 +27,7 @@ pub(super) struct Storage {
     pub(super) held: super::download::Held,
     /// What the last settings export or import came to, for the user to read.
     pub(super) moved: Option<SharedString>,
+    pub(super) sync: super::portable::Sync,
 }
 
 fn keep_label(keep: Keep) -> &'static str {
@@ -99,6 +101,7 @@ impl BeeperApp {
             )
             .child(self.render_download_section(cx))
             .child(self.render_portable(cx))
+            .child(self.render_sync(cx))
             .child(
                 section(t!("Keep messages"), cx)
                     .child(card(cx).children(Keep::ALL.into_iter().enumerate().map(|(ix, choice)| {

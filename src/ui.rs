@@ -1222,6 +1222,11 @@ impl BeeperApp {
             Ev::InfoItems { room, items, scanned, done } => self.info_items(room, items, scanned, done, cx),
             Ev::Storage(usage) => self.storage_usage(usage),
             Ev::Found { room, query, filter, hits } => self.found(room, query, filter, hits, cx),
+            Ev::SettingsAsked { device, request } => {
+                let _ = self.cmd.try_send(Cmd::GiveSettings { device, request, settings: portable::to_file(&self.settings) });
+            }
+            Ev::SettingsArrived(raw) => self.settings_arrived(&raw),
+            Ev::Handoff(step) => self.storage.sync.lan = Some(step),
         }
         cx.notify();
     }

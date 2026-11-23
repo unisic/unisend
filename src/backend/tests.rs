@@ -90,6 +90,7 @@ fn state(dir: PathBuf, hs: &str) -> (State, Seat) {
         update: None,
         link_task: None,
         link_made: Arc::default(),
+        handoff: Default::default(),
     };
     (st, Seat { rx, rows: Vec::new() })
 }
