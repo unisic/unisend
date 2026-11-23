@@ -195,12 +195,11 @@ impl BeeperApp {
                     .w_full()
                     .max_w(px(360.))
                     .gap(px(GAP))
-                    .child(div().text_size(fs(14.)).font_weight(FontWeight::SEMIBOLD).text_color(p.faint).child("Matrix"))
-                    .child(screen_title(t!("Sign in to your server")))
-                    .child(div().pb(px(8.)).text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(t!("Any Matrix server, like matrix.org.")))
+                    .child(super::sign_in_brand(cx))
+                    .child(super::sign_in_heading(t!("Sign in with Matrix"), t!("Any Matrix server, like matrix.org."), cx))
                     .child(Input::new(&self.matrix.server).large().disabled(waiting))
                     .child(ways)
-                    .child(Button::new("matrix-back").ghost().label(t!("Sign in with Beeper instead")).on_click(cx.listener(|this, _, _, cx| {
+                    .child(Button::new("matrix-back").h(px(TAP)).label(t!("Sign in with Beeper")).on_click(cx.listener(|this, _, _, cx| {
                         this.cancel_browser(cx);
                         this.screen = Screen::Email;
                         this.error = None;

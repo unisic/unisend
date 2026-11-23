@@ -881,7 +881,7 @@ impl BeeperApp {
                 self.rooms.clear();
                 self.refilter(cx);
                 self.close_room(cx);
-                self.screen = Screen::Email;
+                self.screen = Screen::Matrix;
                 self.busy = false;
             }
             Ev::LoginMethods(methods) => self.on_login_methods(methods),
@@ -1522,7 +1522,11 @@ impl BeeperApp {
             }
         } else if self.forum.is_some() {
             self.close_forum(cx);
-        } else if self.screen == Screen::Email && self.leave_sign_in(window, cx) {
+        } else if matches!(self.screen, Screen::Email | Screen::Matrix) && self.leave_sign_in(window, cx) {
+        } else if self.screen == Screen::Email {
+            self.screen = Screen::Matrix;
+            self.error = None;
+            cx.notify();
         } else {
             return false;
         }
@@ -2080,7 +2084,7 @@ impl BeeperApp {
         let (title, hint, input, label) = if on_code {
             (t!("Check your email"), t!("Enter the code from the email."), &self.code, t!("Sign in"))
         } else {
-            (t!("Sign in to Beeper"), t!("We will email you a sign-in code."), &self.email, t!("Send code"))
+            (t!("Sign in with Beeper"), t!("We will email you a sign-in code."), &self.email, t!("Send code"))
         };
         let p = Palette::of(cx);
         sign_in_screen(
@@ -2089,9 +2093,8 @@ impl BeeperApp {
                     .w_full()
                     .max_w(px(360.))
                     .gap(px(GAP))
-                    .child(div().text_size(fs(14.)).font_weight(FontWeight::SEMIBOLD).text_color(p.faint).child("Unisend"))
-                    .child(screen_title(title))
-                    .child(div().pb(px(8.)).text_size(fs(14.)).line_height(fs(20.)).text_color(p.muted).child(hint))
+                    .child(sign_in_brand(cx))
+                    .child(sign_in_heading(title, hint, cx))
                     .child(Input::new(input).large())
                     .child(
                         Button::new("login-submit")
@@ -2114,7 +2117,7 @@ impl BeeperApp {
                         ))
                     })
                     .when(!on_code, |el| {
-                        el.child(Button::new("login-matrix").ghost().label(t!("Use another Matrix server")).on_click(
+                        el.child(Button::new("login-matrix").h(px(TAP)).label(t!("Use a Matrix server instead")).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.screen = Screen::Matrix;
                                 this.error = None;
@@ -4322,6 +4325,30 @@ fn header() -> Div {
 /// less room than it needs.
 fn sign_in_screen(id: &'static str, card: impl IntoElement) -> Stateful<Div> {
     div().id(id).size_full().overflow_y_scroll().child(v_flex().w_full().min_h_full().items_center().justify_center().p(px(GUTTER + 8.)).child(card))
+}
+
+/// The app's face over each sign-in screen: its icon, its name and what it is.
+fn sign_in_brand(cx: &App) -> Div {
+    static LOGO: std::sync::LazyLock<Arc<Image>> = std::sync::LazyLock::new(|| {
+        let png = include_bytes!("../packaging/linux/icons/hicolor/256x256/apps/dev.gpui.beeper.png");
+        Arc::new(Image::from_bytes(ImageFormat::Png, png.to_vec()))
+    });
+    v_flex()
+        .items_center()
+        .gap(px(6.))
+        .pb(px(GAP))
+        .child(img(LOGO.clone()).size(px(80.)).mb(px(6.)))
+        .child(screen_title("Unisend"))
+        .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(Palette::of(cx).muted).text_center().child(t!("All your chats in one private app.")))
+}
+
+/// What a sign-in screen asks for, over its fields.
+fn sign_in_heading(title: impl Into<SharedString>, hint: impl Into<SharedString>, cx: &App) -> Div {
+    v_flex()
+        .gap(px(2.))
+        .pb(px(4.))
+        .child(div().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).child(title.into()))
+        .child(div().text_size(fs(14.)).line_height(fs(20.)).text_color(Palette::of(cx).muted).child(hint.into()))
 }
 
 fn screen_title(title: impl Into<SharedString>) -> Div {

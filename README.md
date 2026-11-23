@@ -50,7 +50,8 @@ bridges bring WhatsApp, Signal, Messenger, Instagram, Telegram and other network
 
 ### Networks
 
-- Sign in to any Matrix homeserver with its OAuth 2.0 service, single sign-on or a password
+- Sign in to any Matrix homeserver with its OAuth 2.0 service, single sign-on or a password (the
+  first screen)
 - Sign in to Beeper with an email code
 - With a Beeper account: list your chat networks, sign in to them, see when one needs a new
   sign-in
