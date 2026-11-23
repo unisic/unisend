@@ -889,11 +889,12 @@ fn free_name(folder: &std::path::Path, name: &str) -> PathBuf {
     (2..1000).map(|n| folder.join(format!("{stem} ({n}){ext}"))).find(|p| !p.exists()).filter(|_| first.exists()).unwrap_or(first)
 }
 
-/// Opens a web address in the browser. Addresses come out of other people's messages, so only
-/// http and https ones go any further.
+/// Opens a web address in the browser, a `mailto:` one in the mail app and a `tel:` one in the
+/// dialer, without calling. Addresses come out of other people's messages, so no other scheme goes
+/// any further.
 pub(crate) fn open_link(cx: &mut gpui_kit::App, url: &str) {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return log::warn!("not a web address, not opened");
+    if !["https://", "http://", "mailto:", "tel:"].iter().any(|scheme| url.starts_with(scheme)) {
+        return log::warn!("not a web, mail or phone address, not opened");
     }
     #[cfg(not(target_os = "android"))]
     cx.open_url(url);

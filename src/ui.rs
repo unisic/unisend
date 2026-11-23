@@ -639,6 +639,10 @@ impl BeeperApp {
             }
         }));
         subs.push(cx.observe_window_appearance(window, |_, window, cx| crate::sync_theme(Some(window), cx)));
+        subs.push(cx.observe_global_in::<Tapped>(window, |this, window, cx| {
+            let id = cx.global::<Tapped>().0.clone();
+            this.offer_chat(&id, window, cx);
+        }));
         subs.push(cx.observe_window_activation(window, |this, window, cx| {
             let active = window.is_window_active();
             crate::FOREGROUND.store(active, std::sync::atomic::Ordering::Relaxed);
@@ -2891,8 +2895,8 @@ impl BeeperApp {
                 let bold = HighlightStyle { font_weight: Some(FontWeight::SEMIBOLD), ..Default::default() };
                 let mut marks: Vec<_> = m.mentions.iter().map(|r| (r.clone(), if m.mentioned && m.to_me.contains(r) { ink } else { bold })).collect();
                 let apart = |u: &std::ops::Range<usize>| m.mentions.iter().all(|r| r.end <= u.start || u.end <= r.start);
-                let found: Vec<_> = taps(&m.body).into_iter().filter(apart).collect();
-                marks.extend(found.iter().map(|r| (r.clone(), underline)));
+                let found: Vec<_> = taps(&m.body).into_iter().filter(|(r, _)| apart(r)).collect();
+                marks.extend(found.iter().map(|(r, _)| (r.clone(), underline)));
                 marks.sort_by_key(|(r, _)| r.start);
                 // The preview its sender attached to a link, drawn as Discord draws an embed: the
                 // page's colour down the side, its picture under the text. A touch opens the link.
@@ -3000,8 +3004,7 @@ impl BeeperApp {
                                     None => {
                                         let cut = if collapsed { m.body.char_indices().nth(SHORT_CHARS).map_or(m.body.len(), |(at, _)| at) } else { m.body.len() };
                                         let styled = crate::emoji::styled(m.body[..cut].to_owned(), marks.into_iter().filter(|(r, _)| r.end <= cut).collect());
-                                        let links: Vec<_> = found.into_iter().filter(|r| r.end <= cut).collect();
-                                        let targets = links.iter().map(|r| m.body[r.clone()].to_owned()).collect();
+                                        let (links, targets) = found.into_iter().filter(|(r, _)| r.end <= cut).unzip();
                                         rich::linked(format!("{}-text", m.id), styled, links, targets)
                                     }
                                 }),
@@ -4791,6 +4794,19 @@ fn fresh(since: Instant, length: Duration, window: &mut Window, cx: &App) -> Opt
     })
 }
 
+/// Punctuation after an address ends the sentence, not the address; a closing bracket with no
+/// opening one inside belongs to the sentence too.
+fn trim_end(mut s: &str) -> &str {
+    loop {
+        let cut = s.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'']);
+        let cut = if cut.ends_with(')') && !cut.contains('(') { &cut[..cut.len() - 1] } else { cut };
+        if cut.len() == s.len() {
+            return s;
+        }
+        s = cut;
+    }
+}
+
 /// Byte ranges of the web addresses written in a text.
 fn urls(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
@@ -4805,16 +4821,7 @@ fn urls(text: &str) -> Vec<std::ops::Range<usize>> {
             0
         };
         let len = rest.find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"')).unwrap_or(rest.len());
-        // Punctuation after an address ends the sentence, not the address.
-        let mut url = &rest[..len];
-        loop {
-            let cut = url.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'']);
-            let cut = if cut.ends_with(')') && !cut.contains('(') { &cut[..cut.len() - 1] } else { cut };
-            if cut.len() == url.len() {
-                break;
-            }
-            url = cut;
-        }
+        let url = trim_end(&rest[..len]);
         let inside_word = text[..at].ends_with(|c: char| c.is_alphanumeric());
         if scheme > 0 && !inside_word && url.len() > scheme {
             out.push(at..at + url.len());
@@ -4824,13 +4831,115 @@ fn urls(text: &str) -> Vec<std::ops::Range<usize>> {
     out
 }
 
-/// Codes and other long numbers a tap copies: a run of at least 4 digits, or groups of 3 or 4 joined
-/// by single spaces or hyphens ("123 456"), not inside a word or a decimal. A lone year is left alone.
-fn codes(text: &str) -> Vec<std::ops::Range<usize>> {
+/// A Matrix ID or room alias tapped in a message, which the view offers a chat with.
+pub(super) struct Tapped(pub String);
+
+impl Global for Tapped {}
+
+/// A tap's target in a message, the byte range it covers and what the tap does with it.
+type Tap = (std::ops::Range<usize>, String);
+
+/// What a tap on a message's text follows, as `rich::follow` takes it: a web address, an e-mail
+/// address (`mailto:`), a Matrix ID or room alias, a site named without `https://`, a phone number
+/// (`tel:`) or a code to copy (its digits). An earlier kind wins where two overlap.
+fn taps(text: &str) -> Vec<Tap> {
+    let mut found: Vec<Tap> = urls(text).into_iter().map(|r| (r.clone(), text[r].to_owned())).collect();
+    for more in [emails(text), matrix_ids(text), sites(text), numbers(text)] {
+        let free: Vec<_> = more.into_iter().filter(|(c, _)| found.iter().all(|(u, _)| c.end <= u.start || u.end <= c.start)).collect();
+        found.extend(free);
+    }
+    found.sort_by_key(|(r, _)| r.start);
+    found
+}
+
+/// The character before `at`, which tells whether a find starts a word.
+fn before(text: &str, at: usize) -> Option<char> {
+    text[..at].chars().next_back()
+}
+
+/// A host name as a site or mail server has one: dotted labels, ending in letters.
+fn host_like(host: &str) -> bool {
+    let labels: Vec<_> = host.split('.').collect();
+    labels.len() >= 2 && labels.iter().all(|l| !l.is_empty()) && labels.last().is_some_and(|end| end.len() >= 2 && end.chars().all(|c| c.is_ascii_alphabetic()))
+}
+
+fn emails(text: &str) -> Vec<Tap> {
+    let local = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-');
+    let host = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-');
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices('@') {
+        let start = text[..at].char_indices().rev().find(|&(_, c)| !local(c)).map_or(0, |(i, c)| i + c.len_utf8());
+        let end = text[at + 1..].find(|c: char| !host(c)).map_or(text.len(), |n| at + 1 + n);
+        let address = trim_end(&text[start..end]).trim_end_matches('-');
+        let word = before(text, start).is_none_or(|c| !c.is_alphanumeric());
+        if word && start < at && address.len() > at + 1 - start && host_like(&address[at + 1 - start..]) {
+            out.push((start..start + address.len(), format!("mailto:{address}")));
+        }
+    }
+    out
+}
+
+/// `@name:server` and `#room:server`, with a dotted server, so a hashtag or a time is not one.
+fn matrix_ids(text: &str) -> Vec<Tap> {
+    use matrix_sdk::ruma::{RoomAliasId, UserId};
+    let mut out = Vec::new();
+    for (at, sigil) in text.match_indices(['@', '#']) {
+        if before(text, at).is_some_and(|c| c.is_alphanumeric() || matches!(c, '@' | '#' | '/' | '.' | '_' | '-' | ':')) {
+            continue;
+        }
+        let len = text[at..].find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | ',')).unwrap_or(text.len() - at);
+        let id = trim_end(&text[at..at + len]);
+        let dotted = id.split_once(':').is_some_and(|(_, server)| server.split(':').next().is_some_and(|host| host.contains('.')));
+        let valid = dotted && if sigil == "@" { UserId::parse(id).is_ok() } else { RoomAliasId::parse(id).is_ok() };
+        if valid {
+            out.push((at..at + id.len(), id.to_owned()));
+        }
+    }
+    out
+}
+
+/// Endings a site named without `https://` is taken with; others are too often a file ("main.rs").
+/// Any name that starts with `www.` is a site.
+const SITE_ENDINGS: &[&str] = &["com", "org", "net", "pl", "eu", "de", "uk", "fr", "it", "es", "nl", "io", "app", "dev", "info", "gov", "edu"];
+
+fn sites(text: &str) -> Vec<Tap> {
+    let host = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-');
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(start) = text[from..].find(|c: char| c.is_ascii_alphanumeric()).map(|n| from + n) {
+        let len = text[start..].find(|c: char| !host(c)).unwrap_or(text.len() - start);
+        let name = text[start..start + len].trim_end_matches(['.', '-']);
+        let word = before(text, start).is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '@' | '.' | '/' | ':' | '-' | '_' | '#')));
+        let lower = name.to_ascii_lowercase();
+        let ending = lower.rsplit('.').next().unwrap_or_default();
+        if word && host_like(name) && (lower.starts_with("www.") || SITE_ENDINGS.contains(&ending)) {
+            let mut end = start + name.len();
+            // A path runs on as in a full address.
+            if text[end..].starts_with('/') {
+                let path = text[end..].find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"')).unwrap_or(text.len() - end);
+                end = start + trim_end(&text[start..end + path]).len();
+            }
+            out.push((start..end, format!("https://{}", &text[start..end])));
+        }
+        from = start + len.max(1);
+    }
+    out
+}
+
+/// Phone numbers and codes. A phone number has 9 to 15 digits, or 8 to 15 after a `+`, written
+/// whole or in groups of 2 to 4. A code is a run of at least 4 digits or groups of 3 or 4 ("123
+/// 456"), so a card or account number counts. Groups are joined by one space or hyphen. Digits
+/// inside a word or a decimal are neither, nor is a lone year.
+fn numbers(text: &str) -> Vec<Tap> {
     let b = text.as_bytes();
     let digits_from = |at: usize| b[at..].iter().take_while(|c| c.is_ascii_digit()).count();
     // A letter or a decimal point with a digit beyond it means the digits belong to something else.
     let glued = |c: Option<char>, beyond: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || matches!(c, '.' | ',') && beyond.is_some_and(|d| d.is_ascii_digit()));
+    let apart = |r: &std::ops::Range<usize>| {
+        let (mut back, mut on) = (text[..r.start].chars().rev(), text[r.end..].chars());
+        !glued(back.next(), back.next()) && !glued(on.next(), on.next())
+    };
+    let digits = |r: &std::ops::Range<usize>| text[r.clone()].chars().filter(char::is_ascii_digit).collect::<String>();
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
@@ -4840,33 +4949,38 @@ fn codes(text: &str) -> Vec<std::ops::Range<usize>> {
         }
         let mut groups = vec![(i, i + digits_from(i))];
         while let Some(&(s, e)) = groups.last()
-            && (3..=4).contains(&(e - s))
+            && (1..=4).contains(&(e - s))
             && matches!(b.get(e), Some(b' ' | b'-'))
-            && (3..=4).contains(&digits_from(e + 1))
+            && (2..=4).contains(&digits_from(e + 1))
         {
             groups.push((e + 1, e + 1 + digits_from(e + 1)));
         }
-        let (start, end) = (i, groups.last().map_or(i, |g| g.1));
-        let mut before = text[..start].chars().rev();
-        let mut after = text[end..].chars();
-        let apart = !glued(before.next(), before.next()) && !glued(after.next(), after.next());
-        let year = groups.len() == 1 && text[start..end].parse::<u16>().is_ok_and(|y| (1900..=2099).contains(&y));
-        let all_ok = groups.len() > 1 && groups.iter().all(|(s, e)| (3..=4).contains(&(e - s)));
-        if apart && !year && (all_ok || groups.len() == 1 && end - start >= 4) {
-            out.push(start..end);
+        let lens = |want: std::ops::RangeInclusive<usize>| groups.iter().all(|(s, e)| want.contains(&(e - s)));
+        let count: usize = groups.iter().map(|(s, e)| e - s).sum();
+        let (first, end) = (groups[0].1, groups[groups.len() - 1].1);
+        let plus = i > 0 && b[i - 1] == b'+' && before(text, i - 1).is_none_or(|c| !c.is_alphanumeric());
+        let year = text[i..first].parse::<u16>().is_ok_and(|y| (1900..=2099).contains(&y));
+        let tap = if plus && (8..=15).contains(&count) {
+            Some((i - 1..end, true))
+        } else if (9..=15).contains(&count) && (groups.len() == 1 || lens(2..=4)) {
+            Some((i..end, true))
+        } else if groups.len() > 1 && lens(3..=4) {
+            Some((i..end, false))
+        } else {
+            (first - i >= 4 && !year).then_some((i..first, false))
+        };
+        match tap {
+            Some((span, phone)) => {
+                if apart(&span) {
+                    let target = if phone { format!("tel:{}{}", if plus { "+" } else { "" }, digits(&span)) } else { digits(&span) };
+                    out.push((span.clone(), target));
+                }
+                i = span.end;
+            }
+            None => i = first,
         }
-        i = end;
     }
     out
-}
-
-/// What a tap on a message's text follows: its web addresses, and the codes outside them.
-fn taps(text: &str) -> Vec<std::ops::Range<usize>> {
-    let mut found = urls(text);
-    let codes: Vec<_> = codes(text).into_iter().filter(|c| found.iter().all(|u| c.end <= u.start || u.end <= c.start)).collect();
-    found.extend(codes);
-    found.sort_by_key(|r| r.start);
-    found
 }
 
 /// A pan that began on a message, from its first event until the finger lifts.
@@ -5524,14 +5638,47 @@ mod tests {
         assert_eq!(list_state(true, false, true), RoomsView::List);
     }
 
+    fn tapped(text: &'static str) -> Vec<(&'static str, String)> {
+        taps(text).into_iter().map(|(r, to)| (&text[r], to)).collect()
+    }
+
+    fn pairs<'a>(want: &[(&'a str, &str)]) -> Vec<(&'a str, String)> {
+        want.iter().map(|&(seen, to)| (seen, to.to_owned())).collect()
+    }
+
     #[test]
     fn codes_are_long_numbers_on_their_own() {
-        let found = |text: &'static str| taps(text).into_iter().map(|r| &text[r]).collect::<Vec<_>>();
-        assert_eq!(found("Twój kod: 482913. Nie podawaj go nikomu."), ["482913"]);
-        assert_eq!(found("Code 123 456 or 123-456, PIN 4821"), ["123 456", "123-456", "4821"]);
-        assert_eq!(found("w 2024 roku, 3.14159, 12345.67, abc12345, 12345abc, 12 apples"), Vec::<&str>::new());
-        assert_eq!(found("call +48 600 700 800 now"), ["600 700 800"]);
-        assert_eq!(found("https://x.pl/order/123456 and 98765"), ["https://x.pl/order/123456", "98765"]);
+        assert_eq!(tapped("Twój kod: 482913. Nie podawaj go nikomu."), pairs(&[("482913", "482913")]));
+        assert_eq!(tapped("Code 123 456 or 123-456, PIN 4821"), pairs(&[("123 456", "123456"), ("123-456", "123456"), ("4821", "4821")]));
+        assert_eq!(tapped("card 4111 1111 1111 1111"), pairs(&[("4111 1111 1111 1111", "4111111111111111")]));
+        assert!(tapped("w 2024 roku, 2024-05-12, 12.05.2024, 3.14159, 12345.67, abc12345, 12345abc, 12 apples, 1 500 zł").is_empty());
+    }
+
+    #[test]
+    fn phone_numbers_dial() {
+        assert_eq!(tapped("call +48 600 700 800 now"), pairs(&[("+48 600 700 800", "tel:+48600700800")]));
+        assert_eq!(tapped("600 700 800, 600-700-800, 22 123 45 67, 600700800"), pairs(&[
+            ("600 700 800", "tel:600700800"),
+            ("600-700-800", "tel:600700800"),
+            ("22 123 45 67", "tel:221234567"),
+            ("600700800", "tel:600700800"),
+        ]));
+        assert_eq!(tapped("+1 415 555 2671"), pairs(&[("+1 415 555 2671", "tel:+14155552671")]));
+    }
+
+    #[test]
+    fn mail_addresses_matrix_ids_and_sites() {
+        assert_eq!(tapped("pisz na jan.kowalski+x@poczta.example.pl."), pairs(&[("jan.kowalski+x@poczta.example.pl", "mailto:jan.kowalski+x@poczta.example.pl")]));
+        assert_eq!(tapped("ask @ann:matrix.org or join #team:hs.org!"), pairs(&[("@ann:matrix.org", "@ann:matrix.org"), ("#team:hs.org", "#team:hs.org")]));
+        assert_eq!(tapped("see unisend.app, www.example.xyz/a/b. and allegro.pl/oferta"), pairs(&[
+            ("unisend.app", "https://unisend.app"),
+            ("www.example.xyz/a/b", "https://www.example.xyz/a/b"),
+            ("allegro.pl/oferta", "https://allegro.pl/oferta"),
+        ]));
+        assert!(tapped("main.rs, e.g. this, #hashtag, #1:30, @ann, a@b, ann@localhost, x@y.z9").is_empty());
+        assert_eq!(tapped("https://x.pl/order/123456 and 98765"), pairs(&[("https://x.pl/order/123456", "https://x.pl/order/123456"), ("98765", "98765")]));
+        assert_eq!(tapped("ann@matrix.org"), pairs(&[("ann@matrix.org", "mailto:ann@matrix.org")]));
+        assert!(crate::backend::rooms::room_link("https://matrix.to/#/#team:hs.org").is_some(), "New chat reads a tapped alias");
     }
 
     #[test]

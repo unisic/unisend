@@ -115,8 +115,14 @@ Standing free under a message they read as small messages of their own.
 
 A link is underlined. When its sender attached a preview, the message carries a card: the
 picture in its own shape, the site, the title, two lines about it. Touching the card opens the
-link. A code or other long number (4 digits or more, or groups like "123 456", a lone year aside) is
-underlined too, and a tap copies its digits; Android confirms the copy itself.
+link. More of the text is underlined and acts on a tap, as Signal, Element and Telegram do: an
+e-mail address opens the mail app; a phone number (9 to 15 digits, 8 after a `+`) opens the dialer
+without calling, and is copied on a computer; a Matrix ID or room alias (`@name:server`,
+`#room:server`) opens New chat with it typed, so a second tap starts the chat or joins; a site named
+without `https://` (common endings only, or `www.`) opens in the browser; a code or other long number
+(4 digits or more, or groups like "123 456", a lone year aside) is copied, and Android confirms the
+copy itself. Dates, street addresses and flight numbers are not found: the systems do that with a
+model, and rules alone mistake too much.
 
 A poll is its question, then one row per answer, 44 tall, with the share of votes drawn as a `lifted`
 bar behind the text, the count at the end, and a check before the answer you chose (no accent: a poll

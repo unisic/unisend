@@ -97,11 +97,11 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
     let mentions: Vec<_> = m.mentions.iter().filter(|r| inside(r)).map(shift).collect();
     let to_me: Vec<_> = m.to_me.iter().filter(|r| inside(r)).map(shift).collect();
     let apart = |u: &Range<usize>| mentions.iter().all(|r| r.end <= u.start || u.end <= r.start);
-    let bare: Vec<_> = taps(&m.body).iter().filter(|r| inside(r)).map(shift).filter(apart).collect();
+    let bare: Vec<_> = taps(&m.body).into_iter().filter(|(r, _)| inside(r)).map(|(r, to)| (shift(&r), to)).filter(|(r, _)| apart(r)).collect();
 
     let mut cuts: Vec<usize> = vec![0, text.len()];
     cuts.extend(runs.iter().map(|r| r.at - base));
-    cuts.extend(mentions.iter().chain(&bare).flat_map(|r| [r.start, r.end]));
+    cuts.extend(mentions.iter().chain(bare.iter().map(|(r, _)| r)).flat_map(|r| [r.start, r.end]));
     cuts.sort_unstable();
     cuts.dedup();
 
@@ -129,7 +129,7 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
         if run.code {
             style.background_color = Some(look.p.text.opacity(0.12));
         }
-        let linked = run.href.is_some() || bare.iter().any(|r| r.start <= seg.start && seg.end <= r.end);
+        let linked = run.href.is_some() || bare.iter().any(|(r, _)| r.start <= seg.start && seg.end <= r.end);
         if run.underline || linked {
             style.underline = Some(UnderlineStyle { thickness: px(1.), ..Default::default() });
         }
@@ -141,9 +141,9 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
         if let Some(href) = &run.href {
             links.push(seg.clone());
             targets.push(href.clone());
-        } else if let Some(url) = bare.iter().find(|r| r.start <= seg.start && seg.end <= r.end) {
+        } else if let Some((_, to)) = bare.iter().find(|(r, _)| r.start <= seg.start && seg.end <= r.end) {
             links.push(seg.clone());
-            targets.push(text[url.clone()].to_owned());
+            targets.push(to.clone());
         }
         if style != HighlightStyle::default() {
             marks.push((seg, style));
@@ -204,11 +204,17 @@ pub(super) fn linked(id: String, styled: StyledText, links: Vec<Range<usize>>, t
         .into_any_element()
 }
 
-/// Opens a web address; anything else is a code, whose digits are copied (Android shows that it was).
+/// Follows a target of `taps` or a link's own: an address with a scheme opens in the app for it, a
+/// Matrix ID or room alias goes to the view to offer a chat, and digits are copied (Android shows
+/// that they were). A computer has no dialer, so a phone number is copied there.
 fn follow(cx: &mut App, target: &str) {
-    if target.starts_with("http") {
+    if target.starts_with(['@', '#']) {
+        cx.set_global(super::Tapped(target.to_owned()));
+    } else if let Some(number) = target.strip_prefix("tel:").filter(|_| !cfg!(target_os = "android")) {
+        crate::copy(cx, number.to_owned());
+    } else if target.contains(':') {
         crate::open_link(cx, target);
     } else {
-        crate::copy(cx, target.chars().filter(char::is_ascii_digit).collect());
+        crate::copy(cx, target.to_owned());
     }
 }

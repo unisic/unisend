@@ -550,6 +550,18 @@ impl BeeperApp {
         }
     }
 
+    /// A Matrix ID or room alias tapped in a message: New chat opens with it typed, so its row
+    /// starts the chat or joins the room only on a second tap.
+    pub(super) fn offer_chat(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_new_chat(window, cx);
+        // New chat reads a room by its link, not by its bare alias.
+        let typed = if id.starts_with('#') { format!("https://matrix.to/#/{id}") } else { id.to_owned() };
+        if let Some(new) = &self.people.new {
+            new.query.update(cx, |input, cx| input.set_value(typed, window, cx));
+        }
+        self.query_changed(cx);
+    }
+
     fn choose_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         let Some(new) = self.people.new.as_mut() else { return };
         if new.caps.is_some() && new.target == target {
