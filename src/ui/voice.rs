@@ -49,7 +49,7 @@ fn held_drag(x: f32, y: f32) -> (f32, f32) {
 }
 /// Downloaded files kept for playing again, newest last.
 const MAX_FILES: usize = 8;
-const SPEEDS: [(f32, &str); 3] = [(1., "1×"), (1.5, "1.5×"), (2., "2×")];
+pub(super) const SPEEDS: [(f32, &str); 3] = [(1., "1×"), (1.5, "1.5×"), (2., "2×")];
 /// The waveform's bars: 2 px wide with 2 px between them.
 const BAR_W: f32 = 2.;
 const WAVE_W: f32 = BARS as f32 * 4. - 2.;

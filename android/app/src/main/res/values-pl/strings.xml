@@ -26,4 +26,5 @@
     <string name="play">Odtwórz</string>
     <string name="pause">Wstrzymaj</string>
     <string name="position">Pozycja</string>
+    <string name="speed">Prędkość odtwarzania</string>
 </resources>

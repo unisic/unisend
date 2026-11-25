@@ -62,8 +62,11 @@ of one core.
 A video plays in the app's own player over the window (src/ui/video/linux.rs): `playbin` decodes,
 `videoconvert`, `videoflip` (turns an upright phone video by its orientation tag), `videoscale` and
 `appsink` hand each frame over as BGRA, and the newest is drawn as a picture. Play and pause (click,
-Space or K), seek on the bar, Left and Right skip 5 s, M or the speaker mutes, Esc or the X closes. A
-bridged GIF loops without sound. A video GStreamer cannot decode (a codec its plugins lack) closes
+Space or K), seek on the bar, Left and Right skip 5 s, a double click on the left or right third
+skips 10 s (each further click 10 s more, with the total shown on that side), the speed button steps
+through 1x, 1.5x and 2x (`scaletempo` keeps the pitch, as in voice notes; every seek carries the
+rate, which a plain seek would reset), M or the speaker mutes, Esc or the X closes. A bridged GIF
+loops without sound and has no speed button. A video GStreamer cannot decode (a codec its plugins lack) closes
 the player and opens in the system's app, as before.
 
 Cost while open: one decoded frame waiting (8 MB at 1080p) and one on the screen as a texture, each

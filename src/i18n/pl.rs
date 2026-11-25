@@ -331,6 +331,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Pause", "Wstrzymaj"),
     ("Photos", "Zdjęcia"),
     ("Play", "Odtwórz"),
+    ("Playback speed", "Prędkość odtwarzania"),
     ("Previous chat", "Poprzedni czat"),
     ("Previous unread chat", "Poprzedni nieprzeczytany czat"),
     ("Search index", "Indeks wyszukiwania"),

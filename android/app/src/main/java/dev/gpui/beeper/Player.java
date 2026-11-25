@@ -17,6 +17,8 @@ import android.media.MediaPlayer;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -44,7 +46,8 @@ import java.util.Locale;
 /**
  * Full-screen player for a video attachment that the app has already downloaded and decrypted.
  * Turns to the video's orientation, hides the system bars, and closes with back or by dragging
- * the video down. {@link #play} is called from Rust over JNI.
+ * the video down. A double tap on either side skips 10 s back or ahead, and each further quick tap
+ * another 10 s. {@link #play} is called from Rust over JNI.
  */
 public final class Player extends Activity {
     private static final String PATH = "path";
@@ -53,16 +56,26 @@ public final class Player extends Activity {
     private static final String POSITION = "position";
     private static final String PLAYING = "playing";
     private static final String MUTED = "muted";
+    private static final String SPEED = "speed";
 
     private static final long HIDE_MS = 3000;
     private static final long TICK_MS = 250;
     private static final long FADE_MS = 150;
+    /** What a double tap on either side skips. */
+    private static final int SKIP_MS = 10_000;
+    /** How long the skip label stays after the last tap. */
+    private static final long SKIP_SHOWN_MS = 600;
+    /** The speeds the speed button steps through, as voice notes have them. */
+    private static final float[] SPEEDS = {1f, 1.5f, 2f};
+    private static final String[] SPEED_LABELS = {"1×", "1.5×", "2×"};
     /** Rate of the spring that settles the video back after a short drag, in 1/s. */
     private static final float SETTLE_RATE = 22f;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable hide = () -> showControls(false);
     private final Runnable tick = this::tick;
+    private final Runnable single = this::tapped;
+    private final Runnable unskip = () -> this.skipLabel.animate().alpha(0f).setDuration(FADE_MS);
 
     private String path;
     private String mime;
@@ -72,6 +85,13 @@ public final class Player extends Activity {
     private boolean muted;
     private boolean scrubbing;
     private boolean shown = true;
+    /** Index into {@link #SPEEDS}. */
+    private int speed;
+    /** The last tap, for telling a double tap on a side from two taps. */
+    private long lastTap;
+    private int lastSide;
+    /** What the taps of the current run skipped, for the label. */
+    private int skipped;
 
     private VideoView video;
     /** Set while the video is prepared; VideoView releases it when its surface goes away. */
@@ -82,6 +102,8 @@ public final class Player extends Activity {
     private SeekBar seek;
     private TextView elapsed;
     private TextView total;
+    private TextView speedButton;
+    private TextView skipLabel;
     private ValueAnimator settle;
 
     /** Opens the player for a file in the app's media cache. False when it cannot start. */
@@ -116,6 +138,7 @@ public final class Player extends Activity {
             position = state.getInt(POSITION);
             playing = state.getBoolean(PLAYING, true);
             muted = state.getBoolean(MUTED, muted);
+            speed = Math.min(SPEEDS.length - 1, Math.max(0, state.getInt(SPEED)));
         }
         immersive();
 
@@ -128,6 +151,18 @@ public final class Player extends Activity {
         }
         stage.addView(video, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+        skipLabel = new TextView(this);
+        skipLabel.setTextColor(Color.WHITE);
+        skipLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        skipLabel.setFontFeatureSettings("tnum");
+        skipLabel.setPadding(dp(14), dp(8), dp(14), dp(8));
+        GradientDrawable pill = new GradientDrawable();
+        pill.setColor(0x99000000);
+        pill.setCornerRadius(dp(20));
+        skipLabel.setBackground(pill);
+        skipLabel.setAlpha(0f);
+        stage.addView(skipLabel, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER_VERTICAL));
         controls = buildControls();
         stage.addView(controls, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -189,6 +224,7 @@ public final class Player extends Activity {
         }
         if (playing) {
             video.start();
+            applySpeed();
             hideLater();
         }
         update();
@@ -230,6 +266,7 @@ public final class Player extends Activity {
             } else {
                 video.start();
                 playing = true;
+                applySpeed();
                 hideLater();
             }
             update();
@@ -272,8 +309,28 @@ public final class Player extends Activity {
         });
         bottom.addView(seek, new LinearLayout.LayoutParams(0, dp(48), 1f));
         total = label();
-        total.setPadding(0, 0, dp(16), 0);
         bottom.addView(total);
+        speedButton = label();
+        speedButton.setText(SPEED_LABELS[speed]);
+        speedButton.setContentDescription(getString(R.string.speed));
+        speedButton.setGravity(Gravity.CENTER);
+        speedButton.setMinWidth(dp(48));
+        speedButton.setPadding(dp(8), 0, dp(12), 0);
+        TypedValue ripple = new TypedValue();
+        getTheme().resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true);
+        speedButton.setBackgroundResource(ripple.resourceId);
+        speedButton.setOnClickListener(v -> {
+            speed = (speed + 1) % SPEEDS.length;
+            speedButton.setText(SPEED_LABELS[speed]);
+            applySpeed();
+            hideLater();
+        });
+        bottom.addView(speedButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)));
+        if (loop) {
+            // A GIF has no speed worth choosing.
+            speedButton.setVisibility(View.GONE);
+            total.setPadding(0, 0, dp(16), 0);
+        }
         layer.addView(bottom, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
 
@@ -318,6 +375,67 @@ public final class Player extends Activity {
             float v = muted ? 0f : 1f;
             player.setVolume(v, v);
         }
+    }
+
+    /** The chosen speed, only while playing: MediaPlayer starts a paused video when given a speed. */
+    private void applySpeed() {
+        if (player == null || !playing) {
+            return;
+        }
+        try {
+            player.setPlaybackParams(player.getPlaybackParams().setSpeed(SPEEDS[speed]));
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            Log.w("Player", "playback speed", e);
+        }
+    }
+
+    /**
+     * A tap in the middle shows or hides the controls at once. On either side it waits for a
+     * second tap, which skips; each quick tap after that skips again.
+     */
+    private void tap(float x, int width) {
+        int side = loop ? 0 : x < width * 0.35f ? -1 : x > width * 0.65f ? 1 : 0;
+        long now = SystemClock.uptimeMillis();
+        boolean again = side != 0 && side == lastSide && now - lastTap < ViewConfiguration.getDoubleTapTimeout();
+        handler.removeCallbacks(single);
+        lastSide = side;
+        lastTap = now;
+        if (again) {
+            skip(side);
+        } else if (side == 0) {
+            tapped();
+        } else {
+            handler.postDelayed(single, ViewConfiguration.getDoubleTapTimeout());
+        }
+    }
+
+    private void skip(int side) {
+        if (player == null) {
+            return;
+        }
+        int from = video.getCurrentPosition();
+        int to = Math.max(0, Math.min(video.getDuration(), from + side * SKIP_MS));
+        boolean run = skipLabel.getAlpha() > 0 && Integer.signum(skipped) == side;
+        skipped = (run ? skipped : 0) + to - from;
+        player.seekTo(to, MediaPlayer.SEEK_CLOSEST);
+        position = to;
+        seek.setProgress(to);
+        elapsed.setText(clock(to));
+
+        if (skipped == 0) {
+            // Already at the start or the end: nothing to show.
+            return;
+        }
+        skipLabel.setText(String.format(Locale.ROOT, "%s%d s", side < 0 ? "\u2212" : "+", (Math.abs(skipped) + 500) / 1000));
+        FrameLayout.LayoutParams at = (FrameLayout.LayoutParams) skipLabel.getLayoutParams();
+        at.gravity = Gravity.CENTER_VERTICAL | (side < 0 ? Gravity.START : Gravity.END);
+        at.leftMargin = dp(40);
+        at.rightMargin = dp(40);
+        skipLabel.setLayoutParams(at);
+        skipLabel.animate().cancel();
+        skipLabel.setAlpha(1f);
+        handler.removeCallbacks(unskip);
+        handler.postDelayed(unskip, SKIP_SHOWN_MS);
     }
 
     private void update() {
@@ -389,6 +507,7 @@ public final class Player extends Activity {
         }
         video.pause();
         handler.removeCallbacksAndMessages(null);
+        skipLabel.setAlpha(0f);
     }
 
     @Override
@@ -398,6 +517,7 @@ public final class Player extends Activity {
         // a pause that kept it, such as the notification shade.
         if (player != null && playing && !video.isPlaying()) {
             video.start();
+            applySpeed();
             hideLater();
             update();
         }
@@ -409,6 +529,7 @@ public final class Player extends Activity {
         out.putInt(POSITION, position);
         out.putBoolean(PLAYING, playing);
         out.putBoolean(MUTED, muted);
+        out.putInt(SPEED, speed);
     }
 
     @Override
@@ -517,7 +638,7 @@ public final class Player extends Activity {
                         velocity.computeCurrentVelocity(1000);
                         release(velocity.getYVelocity());
                     } else if (!moved) {
-                        tapped();
+                        tap(ev.getX(), getWidth());
                     }
                     return true;
                 case MotionEvent.ACTION_CANCEL:

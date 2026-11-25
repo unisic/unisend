@@ -1,6 +1,7 @@
 //! The desktop's video player on Linux, through the system's GStreamer: `playbin` decodes, an
 //! `appsink` hands each frame over as BGRA, and the newest one is drawn as a picture filling the
-//! window. Play and pause, seek, mute, and close with Esc or the X, as the Android player has them.
+//! window. Play and pause, seek, mute, speed, and close with Esc or the X, as the Android player has
+//! them; a double click on either side skips 10 s, each further click another 10 s.
 //!
 //! Cost while open: one decoded frame waits for the screen (width x height x 4 bytes, 8 MB at
 //! 1080p) and one is on it as a texture; each new frame replaces both, so a video at 30 frames a
@@ -9,10 +10,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{Icon, h_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use gstreamer as gst;
 use gstreamer::glib;
@@ -20,12 +22,17 @@ use gstreamer::prelude::*;
 
 use crate::backend::Media;
 use crate::i18n::t;
+use crate::ui::voice::SPEEDS;
 use crate::ui::{BeeperApp, fs, length};
 
 /// How often the player looks for a new frame and for the end: below a 120 Hz frame's time.
 const TICK: Duration = Duration::from_millis(8);
 /// What the arrow keys skip.
 const SKIP: Duration = Duration::from_secs(5);
+/// What a double click on either side skips.
+const CLICK_SKIP: Duration = Duration::from_secs(10);
+/// How long the skip label stays after the last skip.
+const SKIP_SHOWN: Duration = Duration::from_millis(600);
 
 /// A decoded frame: BGRA rows without padding.
 struct Picture {
@@ -46,6 +53,10 @@ pub(in crate::ui) struct Player {
     muted: bool,
     /// Where a drag on the bar has put the video, as a share of its length.
     scrub: Option<f32>,
+    /// Index into `SPEEDS`.
+    speed: usize,
+    /// What the skips of the current run moved, in ms (negative back), and when the last one was.
+    skipped: Option<(i64, Instant)>,
     focus: FocusHandle,
     focused: bool,
     app: WeakEntity<BeeperApp>,
@@ -76,6 +87,8 @@ pub(super) fn open(path: &Path, media: &Media, app: WeakEntity<BeeperApp>, cx: &
             ended: false,
             muted: media.looped,
             scrub: None,
+            speed: 0,
+            skipped: None,
             focus: cx.focus_handle(),
             focused: false,
             app,
@@ -106,6 +119,11 @@ fn start(path: &Path, looped: bool, newest: Arc<Mutex<Option<Picture>>>) -> anyh
         });
     }
     playbin.set_property("video-sink", &sink);
+    // Keeps voices at their pitch above 1x, as voice notes do; without it a faster video still plays.
+    match gst::parse::bin_from_description("audioconvert ! scaletempo ! audioconvert", true) {
+        Ok(tempo) => playbin.set_property("audio-filter", &tempo),
+        Err(e) => log::debug!("video player: no scaletempo: {e}"),
+    }
     playbin.set_state(gst::State::Playing)?;
     Ok(playbin)
 }
@@ -142,6 +160,10 @@ impl Player {
             }
             changed = true;
         }
+        if self.skipped.is_some_and(|(_, at)| at.elapsed() >= SKIP_SHOWN) {
+            self.skipped = None;
+            changed = true;
+        }
         if changed {
             cx.notify();
         }
@@ -174,23 +196,56 @@ impl Player {
     }
 
     /// Goes to `share` of the length: to that very frame when `exact`, else to the nearest key
-    /// frame, which is quick enough to follow a drag.
+    /// frame, which is quick enough to follow a drag. Every seek carries the speed, which a seek
+    /// without one would set back to 1x.
     fn seek(&mut self, share: f32, exact: bool) {
         let Some(length) = self.length() else { return };
         let to = gst::ClockTime::from_nseconds((length.nseconds() as f64 * f64::from(share.clamp(0., 1.))) as u64);
         self.ended = false;
         let how = if exact { gst::SeekFlags::ACCURATE } else { gst::SeekFlags::KEY_UNIT };
-        if let Err(e) = self.playbin.seek_simple(gst::SeekFlags::FLUSH | how, to) {
+        let rate = f64::from(SPEEDS[self.speed].0);
+        if let Err(e) = self.playbin.seek(rate, gst::SeekFlags::FLUSH | how, gst::SeekType::Set, to, gst::SeekType::None, gst::ClockTime::NONE) {
             log::warn!("video seek: {e}");
         }
     }
 
-    fn skip(&mut self, forward: bool, cx: &mut Context<Self>) {
+    /// Moves `by` back or ahead and names the run's total over the side it went to.
+    fn skip(&mut self, by: Duration, forward: bool, cx: &mut Context<Self>) {
         let Some(length) = self.length() else { return };
-        let skip = gst::ClockTime::from_nseconds(SKIP.as_nanos() as u64);
-        let to = if forward { self.at().saturating_add(skip).min(length) } else { self.at().saturating_sub(skip) };
+        let (from, by) = (self.at(), gst::ClockTime::from_nseconds(by.as_nanos() as u64));
+        let to = if forward { from.saturating_add(by).min(length) } else { from.saturating_sub(by) };
         self.seek(to.nseconds() as f32 / length.nseconds() as f32, true);
+        let moved = to.mseconds() as i64 - from.mseconds() as i64;
+        let run = self.skipped.filter(|(total, _)| (*total > 0) == forward).map_or(0, |(total, _)| total);
+        self.skipped = (run + moved != 0).then(|| (run + moved, Instant::now()));
         cx.notify();
+    }
+
+    fn next_speed(&mut self, cx: &mut Context<Self>) {
+        self.speed = (self.speed + 1) % SPEEDS.len();
+        // A video at its end starts over at the new speed when played.
+        if !self.ended
+            && let Some(length) = self.length()
+        {
+            self.seek(self.at().nseconds() as f32 / length.nseconds() as f32, true);
+        }
+        cx.notify();
+    }
+
+    /// A click on the picture plays or pauses; a second quick one on either side takes that back
+    /// and skips instead, and each one after skips again.
+    fn clicked(&mut self, e: &ClickEvent, window: &Window, cx: &mut Context<Self>) {
+        let (x, width) = (e.position().x, window.viewport_size().width);
+        let side = if x < width * 0.35 { Some(false) } else if x > width * 0.65 { Some(true) } else { None };
+        match (side, e.click_count()) {
+            (Some(forward), count) if count >= 2 && !self.looped => {
+                if count == 2 {
+                    self.toggle(cx);
+                }
+                self.skip(CLICK_SKIP, forward, cx);
+            }
+            _ => self.toggle(cx),
+        }
     }
 
     /// `window` is the one being drawn when a click or key closes; a timer has none leased, and
@@ -211,8 +266,8 @@ impl Player {
             "escape" => self.close(Some(window), cx),
             "space" | "k" => self.toggle(cx),
             "m" => self.mute(cx),
-            "left" => self.skip(false, cx),
-            "right" => self.skip(true, cx),
+            "left" => self.skip(SKIP, false, cx),
+            "right" => self.skip(SKIP, true, cx),
             _ => return,
         }
         cx.stop_propagation();
@@ -343,6 +398,25 @@ impl Render for Player {
             .child(div().flex_none().child(time(at)))
             .child(bar)
             .child(div().flex_none().child(total.map_or_else(String::new, time)))
+            .when(!self.looped, |el| {
+                el.child(
+                    div()
+                        .id("video-speed")
+                        .flex_none()
+                        .min_w(px(40.))
+                        .h(px(40.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .font_features(crate::ui::tabular())
+                        .hover(|el| el.bg(white().opacity(0.12)))
+                        .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(t!("Playback speed")).build(window, cx))
+                        .on_click(cx.listener(|player, _, _, cx| player.next_speed(cx)))
+                        .child(SPEEDS[self.speed].1),
+                )
+            })
             .child(
                 button("video-mute", if self.muted { IconName::VolumeX } else { IconName::Volume2 }, if self.muted { t!("Unmute") } else { t!("Mute") })
                     .on_click(cx.listener(|player, _, _, cx| player.mute(cx))),
@@ -360,10 +434,16 @@ impl Render for Player {
                 div()
                     .id("video-picture")
                     .size_full()
-                    .on_click(cx.listener(|player, _, _, cx| player.toggle(cx)))
+                    .on_click(cx.listener(|player, e: &ClickEvent, window, cx| player.clicked(e, window, cx)))
                     .children(self.shown.clone().map(|shown| img(ImageSource::Render(shown)).size_full().object_fit(ObjectFit::Contain))),
             )
             .child(div().absolute().top(px(12.)).right(px(12.)).occlude().child(button("video-close", IconName::X, t!("Close")).on_click(cx.listener(|player, _, window, cx| player.close(Some(window), cx)))))
+            .children(self.skipped.map(|(ms, _)| {
+                let label = format!("{}{} s", if ms < 0 { "\u{2212}" } else { "+" }, (ms.unsigned_abs() + 500) / 1000);
+                let pill = div().px(px(14.)).py(px(8.)).rounded_full().bg(black().opacity(0.6)).text_color(white()).text_size(fs(15.)).font_features(crate::ui::tabular()).child(label);
+                let row = h_flex().absolute().inset_0().items_center().px(px(40.));
+                if ms < 0 { row.justify_start() } else { row.justify_end() }.child(pill)
+            }))
             .child(controls)
     }
 }
