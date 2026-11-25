@@ -107,6 +107,7 @@ gpui_kit::assets::icon_assets!(
         Merge,
         Crop,
         Type,
+        TextCursor,
         Droplets,
         Undo2,
         Scissors
@@ -788,29 +789,12 @@ pub(crate) fn show_keyboard(kind: Keyboard) {
     let _ = kind;
 }
 
-/// System clipboard text. gpui-mobile's platform clipboard is an in-process stub, so Android goes through JNI.
+/// System clipboard text; on Android through the patched gpui-mobile (vendor/gpui-mobile/PATCHES.md).
 pub(crate) fn paste(cx: &gpui_kit::App) -> Option<String> {
-    #[cfg(target_os = "android")]
-    {
-        let _ = cx;
-        gpui_mobile::packages::clipboard::get_text().unwrap_or_else(|e| {
-            log::warn!("clipboard: {e}");
-            None
-        })
-    }
-    #[cfg(not(target_os = "android"))]
     cx.read_from_clipboard().and_then(|c| c.text())
 }
 
 pub(crate) fn copy(cx: &mut gpui_kit::App, text: String) {
-    #[cfg(target_os = "android")]
-    {
-        let _ = cx;
-        if let Err(e) = gpui_mobile::packages::clipboard::set_text(&text) {
-            log::warn!("clipboard: {e}");
-        }
-    }
-    #[cfg(not(target_os = "android"))]
     cx.write_to_clipboard(ClipboardItem::new_string(text));
 }
 

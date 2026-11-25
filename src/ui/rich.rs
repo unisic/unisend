@@ -4,6 +4,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
@@ -152,10 +153,11 @@ fn para(m: &Msg, runs: &[Run], look: Look, n: usize) -> AnyElement {
         }
     }
 
-    let styled = crate::emoji::styled(text, marks);
+    let text = SharedString::from(text);
+    let styled = crate::emoji::styled(text.clone(), marks);
     let layout = styled.layout().clone();
     let id = format!("{}-rich-{n}", m.id);
-    let text = div().min_w_0().child(linked(id.clone(), styled, links, targets));
+    let text = div().min_w_0().child(linked(id.clone(), text, styled, links, targets));
     if hidden.is_empty() {
         return text.into_any_element();
     }
@@ -190,30 +192,136 @@ fn link_text(runs: &[Run], run: &Run) -> String {
     runs[first..=last].iter().map(|r| r.text.as_str()).collect()
 }
 
-/// Text whose `links` ranges open the matching `targets` on a click.
-pub(super) fn linked(id: String, styled: StyledText, links: Vec<Range<usize>>, targets: Vec<String>) -> AnyElement {
-    if links.is_empty() {
-        return styled.into_any_element();
-    }
+/// `text`, drawn as `styled`, whose `links` ranges open the matching `targets` on a click.
+pub(super) fn linked(id: String, text: SharedString, styled: StyledText, links: Vec<Range<usize>>, targets: Vec<String>) -> AnyElement {
     let layout = styled.layout().clone();
-    let (ranges, urls) = (links.clone(), targets.clone());
+    let links: Rc<[Range<usize>]> = links.into();
+    let body = Body { id: SharedString::from(id.clone()).into(), text, styled, links: links.clone() };
+    if links.is_empty() {
+        return body.into_any_element();
+    }
     div()
         .id(SharedString::from(format!("{id}-tap")))
         // InteractiveText hears a release only a frame after the press; a tap on Android brings both at once.
-        .on_click(move |e, _, cx| {
+        .on_click(move |e, window, cx| {
             if let Ok(ix) = layout.index_for_position(e.position())
-                && let Some(at) = ranges.iter().position(|r| r.contains(&ix))
+                && let Some(at) = links.iter().position(|r| r.contains(&ix))
+                && !base::TextSelection::has_selection(window, cx)
             {
+                // The bubble under the text opens the message's menu on a click; a link does not. The
+                // selection the press began would miss this release and follow the pointer.
+                base::TextSelection::end(window, cx);
                 cx.stop_propagation();
-                follow(cx, &urls[at]);
+                follow(cx, &targets[at]);
             }
         })
-        .child(InteractiveText::new(SharedString::from(id), styled).on_click(links, move |at, _, cx| {
-            // The bubble under the text opens the message's menu on a click; a link does not.
-            cx.stop_propagation();
-            follow(cx, &targets[at]);
-        }))
+        .child(body)
         .into_any_element()
+}
+
+/// A message's text. On a computer the mouse selects it as in a browser: a drag, a double click for
+/// a word, a triple for a line, and Ctrl+C copies; gpui-kit's `TextSelectionLayer` in the window's
+/// `Root` does that work. Over a link the pointer is a hand.
+struct Body {
+    id: ElementId,
+    text: SharedString,
+    styled: StyledText,
+    links: Rc<[Range<usize>]>,
+}
+
+impl Body {
+    fn on_link(&self, at: Point<Pixels>) -> bool {
+        self.styled.layout().index_for_position(at).is_ok_and(|ix| self.links.iter().any(|r| r.contains(&ix)))
+    }
+}
+
+impl IntoElement for Body {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Body {
+    /// `None` on a phone, where a long press on a bubble is its menu and "Select text" selects.
+    type RequestLayoutState = Option<base::TextSelectionHandle>;
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, id: Option<&GlobalElementId>, inspector: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Self::RequestLayoutState) {
+        let handle = (!gpui_kit::is_mobile()).then(|| {
+            window.with_element_state(id.expect("Body has an id"), |kept: Option<base::TextSelectionHandle>, _| {
+                let handle = kept.unwrap_or_else(|| base::TextSelectionHandle::new(self.text.to_string(), cx));
+                (handle.clone(), handle)
+            })
+        });
+        (self.styled.request_layout(id, inspector, window, cx).0, handle)
+    }
+
+    fn prepaint(&mut self, id: Option<&GlobalElementId>, inspector: Option<&InspectorElementId>, bounds: Bounds<Pixels>, handle: &mut Self::RequestLayoutState, window: &mut Window, cx: &mut App) -> Hitbox {
+        self.styled.prepaint(id, inspector, bounds, &mut (), window, cx);
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        if let Some(handle) = handle {
+            handle.register(base::TextSelectionRegistration::new(hitbox.clone(), bounds).with_text_bounds(vec![bounds]), window, cx);
+        }
+        hitbox
+    }
+
+    fn paint(&mut self, id: Option<&GlobalElementId>, inspector: Option<&InspectorElementId>, bounds: Bounds<Pixels>, handle: &mut Self::RequestLayoutState, hitbox: &mut Hitbox, window: &mut Window, cx: &mut App) {
+        let layout = self.styled.layout().clone();
+        if let Some(handle) = handle {
+            let before = base::TextSelection::selected_text(window, cx);
+            let shown = handle.update_runs(&[base::TextSelectionRun::new(self.text.clone(), layout.clone(), bounds)], cx);
+            if before != base::TextSelection::selected_text(window, cx) {
+                window.refresh();
+            }
+            let color = window.text_style().color.opacity(0.28);
+            for range in shown.ranges().iter().flatten() {
+                let (Some(start), Some(end)) = (layout.position_for_index(range.start), layout.position_for_index(range.end)) else { continue };
+                for quad in selection_quads(start, end, bounds, layout.line_height()) {
+                    window.paint_quad(fill(quad, color));
+                }
+            }
+        }
+        let on_link = !self.links.is_empty() && self.on_link(window.mouse_position());
+        if on_link {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        } else if handle.is_some() {
+            window.set_cursor_style(CursorStyle::IBeam, hitbox);
+        }
+        if !self.links.is_empty() {
+            // The hand comes and goes inside one hitbox, so a move across a link's edge draws again.
+            let ranges = self.links.clone();
+            window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, _| {
+                if phase.bubble() && on_link != layout.index_for_position(e.position).is_ok_and(|ix| ranges.iter().any(|r| r.contains(&ix))) {
+                    window.refresh();
+                }
+            });
+        }
+        self.styled.paint(id, inspector, bounds, &mut (), &mut (), window, cx);
+    }
+}
+
+/// The rectangles a selection from `start` to `end` covers: the rest of the first line, the whole
+/// lines between, the start of the last.
+fn selection_quads(start: Point<Pixels>, end: Point<Pixels>, bounds: Bounds<Pixels>, line: Pixels) -> Vec<Bounds<Pixels>> {
+    if start.y == end.y {
+        return vec![Bounds::from_corners(start, point(end.x, end.y + line))];
+    }
+    let mut quads = vec![Bounds::from_corners(start, point(bounds.right(), start.y + line))];
+    if end.y > start.y + line {
+        quads.push(Bounds::from_corners(point(bounds.left(), start.y + line), point(bounds.right(), end.y)));
+    }
+    quads.push(Bounds::from_corners(point(bounds.left(), end.y), point(end.x, end.y + line)));
+    quads
 }
 
 /// Follows a target of `taps` or a link's own: a misleading link goes to the view to be confirmed, a

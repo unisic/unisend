@@ -169,6 +169,8 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Continue with {provider}", "Dalej przez {provider}"),
     ("Copy number", "Kopiuj numer"),
     ("Copy text", "Kopiuj tekst"),
+    ("Select text", "Zaznacz tekst"),
+    ("Press and hold a word to select it.", "Przytrzymaj słowo, aby je zaznaczyć."),
     ("Copying the font…", "Kopiowanie czcionki…"),
     ("Could not accept: {error}", "Nie udało się zaakceptować: {error}"),
     ("Could not block: {error}", "Nie udało się zablokować: {error}"),

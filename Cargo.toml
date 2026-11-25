@@ -103,7 +103,11 @@ hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
 
-# Local patches; see vendor/gpui-pre/PATCHES.md and vendor/gpui-pre-linux/PATCHES.md.
+# Local patches; see vendor/gpui-pre/PATCHES.md, vendor/gpui-pre-linux/PATCHES.md and
+# vendor/gpui-mobile/PATCHES.md.
 [patch.crates-io]
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+
+[patch."https://github.com/itsbalamurali/gpui-mobile"]
+gpui-mobile = { path = "vendor/gpui-mobile" }

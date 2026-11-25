@@ -411,6 +411,9 @@ pub struct BeeperApp {
     chat_sheet: Option<OwnedRoomId>,
     /// The chat's sheet lists how long to mute instead of the chat's actions.
     mute_picking: bool,
+    /// The chat's sheet shows a message's text to select from (`menu.rs` `select_text`), with the
+    /// subscription that keeps the keyboard down for it.
+    select_text: Option<(Entity<gpui_kit::component::input::TextareaState>, Subscription)>,
     /// Wakes when the soonest timed mute ends.
     mute_timer: Option<Task<()>>,
     /// The sheet came from the open chat's header: what to do inside it, not the list's actions.
@@ -797,6 +800,7 @@ impl BeeperApp {
             strip_epoch: 0,
             chat_sheet: None,
             mute_picking: false,
+            select_text: None,
             mute_timer: None,
             chat_sheet_inside: false,
             sheet_at: None,
@@ -2975,7 +2979,12 @@ impl BeeperApp {
                     .when(!bare, |el| el.bg(if m.own { p.own } else if picked { p.raised } else { p.surface }))
                     .text_color(inside.text)
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| this.bubble_click(&id, event, cx)))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        // A drag or double click that selected text is not a tap on the message.
+                        if !base::TextSelection::has_selection(window, cx) {
+                            this.bubble_click(&id, event, cx);
+                        }
+                    }))
                     // The right button of a mouse; a touch's long press is claimed before it gets here.
                     .on_aux_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         if event.is_secondary() {
@@ -3003,9 +3012,10 @@ impl BeeperApp {
                                     Some(rich) => rich::body(m, rich, inside, ink, cx.entity_id(), cx),
                                     None => {
                                         let cut = if collapsed { m.body.char_indices().nth(SHORT_CHARS).map_or(m.body.len(), |(at, _)| at) } else { m.body.len() };
-                                        let styled = crate::emoji::styled(m.body[..cut].to_owned(), marks.into_iter().filter(|(r, _)| r.end <= cut).collect());
+                                        let text = SharedString::from(m.body[..cut].to_owned());
+                                        let styled = crate::emoji::styled(text.clone(), marks.into_iter().filter(|(r, _)| r.end <= cut).collect());
                                         let (links, targets) = found.into_iter().filter(|(r, _)| r.end <= cut).unzip();
-                                        rich::linked(format!("{}-text", m.id), styled, links, targets)
+                                        rich::linked(format!("{}-text", m.id), text, styled, links, targets)
                                     }
                                 }),
                         )
@@ -3958,7 +3968,7 @@ impl BeeperApp {
         }
         self.chat_sheet = Some(id);
         self.sheet_at = at;
-        (self.disappear.picking, self.mute_picking, self.folders.picking) = (false, false, false);
+        (self.disappear.picking, self.mute_picking, self.folders.picking, self.select_text) = (false, false, false, None);
         (self.info.member, self.look.chat_page) = (None, None);
         cx.notify();
     }
@@ -3970,13 +3980,16 @@ impl BeeperApp {
             self.sheet_last = self.chat_sheet.clone();
         }
         let Some(frame) = self.chat_motion.sample(self.chat_sheet.is_some(), window, cx) else {
-            (self.sheet_last, self.folders.picking, self.merged.picking, self.look.chat_page) = (None, false, false, None);
+            (self.sheet_last, self.folders.picking, self.merged.picking, self.look.chat_page, self.select_text) = (None, false, false, None, None);
             return None;
         };
         let live = frame.live;
         let p = Palette::of(cx);
         let room = self.sheet_last.as_ref().and_then(|id| self.rooms.iter().find(|r| &r.id == id))?;
         let (id, title) = (room.id.clone(), room.name.clone());
+        if let Some(rows) = self.select_text_rows(cx) {
+            return Some(self.sheet(&self.chat_motion, frame, 9, t!("Select text").to_owned(), rows, |this| &mut this.chat_motion, window, cx));
+        }
         if self.info.member.is_some()
             && let Some((key, rows)) = self.member_sheet(live, window, cx)
         {

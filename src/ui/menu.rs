@@ -16,6 +16,8 @@ pub(super) const QUICK_REACTIONS: [&str; 6] = ["❤️", "👍", "👎", "😂",
 
 /// How long a press is held before it is a long press: GPUI's own for touch, used for a mouse too.
 const LONG_PRESS: Duration = Duration::from_millis(500);
+/// Lines the Select text field grows to before it scrolls.
+const SELECT_TEXT_ROWS: usize = 14;
 /// How far a pressed pointer may travel and still be a long press.
 const PRESS_SLOP: f32 = 8.;
 
@@ -114,6 +116,8 @@ pub(super) enum Act {
     CopyLink(String),
     Edit,
     Copy(String),
+    /// The text in a sheet, where any part of it can be selected and copied.
+    SelectText(String),
     Delete,
     EndPoll,
     Save,
@@ -135,6 +139,7 @@ impl Act {
             Act::CopyLink(_) => ("act-copy-link", IconName::Link, t!("Copy link")),
             Act::Edit => ("act-edit", IconName::Pencil, t!("Edit")),
             Act::Copy(_) => ("act-copy", IconName::Copy, t!("Copy text")),
+            Act::SelectText(_) => ("act-select-text", IconName::TextCursor, t!("Select text")),
             Act::Delete => ("act-delete", IconName::Trash, t!("Delete")),
             Act::EndPoll => ("act-end-poll", IconName::Check, t!("End poll")),
             Act::Save => ("act-save", IconName::Download, t!("Save to gallery")),
@@ -173,6 +178,8 @@ fn acts(m: &Msg, kind: MenuKind, extra: bool) -> Vec<Act> {
     out.extend((!sent && failed).then_some(Act::Retry));
     out.extend(link.into_iter().flat_map(|url| [Act::Link(url.clone()), Act::CopyLink(url)]));
     out.extend((!m.body.is_empty()).then(|| Act::Copy(m.body.clone())));
+    // A mouse selects in the bubble itself, as in a browser.
+    out.extend((!m.body.is_empty() && kind == MenuKind::Touch).then(|| Act::SelectText(m.body.clone())));
     out.extend(ends.then_some(Act::EndPoll));
     out.extend(saveable.then_some(Act::Save));
     out.extend(more_acts(m));
@@ -737,6 +744,7 @@ impl BeeperApp {
             Act::Link(url) => crate::open_link(cx, &url),
             Act::CopyLink(url) => crate::copy(cx, url),
             Act::Copy(body) => crate::copy(cx, body),
+            Act::SelectText(body) => self.select_text(body, window, cx),
             Act::Save => self.export_message(id, crate::backend::Export::Save, cx),
             Act::Forward => self.forward_start(vec![id.to_owned()], window, cx),
             Act::Select => self.select_start(id, cx),
@@ -755,6 +763,38 @@ impl BeeperApp {
             }
         }
         self.close_menu(cx);
+    }
+
+    /// Opens the chat's sheet with `body` in a read-only field, where a press and hold (a drag with
+    /// a pointer) selects any part of it and the field's own menu copies it.
+    fn select_text(&mut self, body: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(room) = self.open.clone() else { return };
+        let field = cx.new(|cx| gpui_kit::component::input::TextareaState::new(window, cx).auto_grow(1, SELECT_TEXT_ROWS));
+        field.update(cx, |field, cx| field.set_value(body, window, cx));
+        // The field cannot be typed in, yet focusing it shows the keyboard (gpui-mobile's FocusGained,
+        // in the draw after the focus): hide it again after that draw.
+        let sub = cx.subscribe_in(&field, window, |_, _, ev: &InputEvent, window, _| {
+            if matches!(ev, InputEvent::Focus) {
+                window.on_next_frame(|window, _| window.on_next_frame(|_, _| crate::hide_keyboard()));
+            }
+        });
+        // From the bottom with a mouse too: the list at the pointer has rows of one fixed height.
+        self.open_chat_sheet(room, None, false, cx);
+        self.select_text = Some((field, sub));
+    }
+
+    /// The sheet's one row: the field, and on a phone how to select in it.
+    pub(super) fn select_text_rows(&self, cx: &mut Context<Self>) -> Option<Vec<Stateful<Div>>> {
+        let (field, _) = self.select_text.as_ref()?;
+        let p = Palette::of(cx);
+        let row = v_flex()
+            .id("select-text")
+            .px(px(GUTTER))
+            .pb(px(GAP))
+            .gap(px(8.))
+            .child(gpui_kit::component::input::Textarea::new(field).readonly(true).bordered(false).text_size(fs(16.)))
+            .when(gpui_kit::is_mobile(), |el| el.child(div().text_size(fs(13.)).text_color(p.muted).child(t!("Press and hold a word to select it."))));
+        Some(vec![row])
     }
 
     /// The actions as rows; `picked` is lit, under a finger that will pick it on letting go.
@@ -1063,7 +1103,8 @@ mod tests {
         (m.own, m.body) = (true, "see https://a.example".to_owned());
         let touch = acts(&m, MenuKind::Touch, false);
         assert_eq!(touch[..2], [Act::Reply, Act::Edit]);
-        assert_eq!(acts(&m, MenuKind::List, false), touch[1..]);
+        let pointer: Vec<_> = touch[1..].iter().filter(|a| !matches!(a, Act::SelectText(_))).cloned().collect();
+        assert_eq!(acts(&m, MenuKind::List, false), pointer);
         assert_eq!(acts(&m, MenuKind::List, true)[..3], [Act::Reply, Act::React, Act::Edit]);
         assert_eq!(touch[touch.len() - 3..], [Act::Select, Act::Info, Act::Delete]);
         let mut liked = m.clone();
@@ -1076,9 +1117,9 @@ mod tests {
 
         let mut failed = Msg::bare("~1".to_owned(), Kind::Message, "@me:x".try_into().unwrap());
         (failed.own, failed.body, failed.delivery) = (true, "hi".to_owned(), Delivery::Failed(String::new()));
-        let want = [Act::Retry, Act::Copy("hi".to_owned()), Act::Delete];
+        let want = [Act::Retry, Act::Copy("hi".to_owned()), Act::SelectText("hi".to_owned()), Act::Delete];
         assert_eq!(acts(&failed, MenuKind::Touch, false), want);
-        assert_eq!(acts(&failed, MenuKind::List, true), want);
+        assert_eq!(acts(&failed, MenuKind::List, true), [Act::Retry, Act::Copy("hi".to_owned()), Act::Delete]);
     }
 
     #[test]
