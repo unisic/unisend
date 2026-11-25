@@ -839,7 +839,8 @@ impl BeeperApp {
             .opacity(shade)
             .map(|el| match thumb {
                 Some(image) => el.child(
-                    img(image).absolute().top(px(inset)).left(px(inset)).right(px(inset)).bottom(px(inset)).rounded(px(PICK_RADIUS * pick)).opacity(loaded).object_fit(ObjectFit::Cover),
+                    // A size of its own: left to its insets, gpui sizes the image by its pixels, scale times the cell.
+                    img(image).absolute().top(px(inset)).left(px(inset)).size(px(cell - 2. * inset)).rounded(px(PICK_RADIUS * pick)).opacity(loaded).object_fit(ObjectFit::Cover),
                 ),
                 None => el.child(
                     div()
