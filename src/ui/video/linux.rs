@@ -99,7 +99,7 @@ pub(super) fn open(path: &Path, media: &Media, app: WeakEntity<BeeperApp>, cx: &
 }
 
 fn start(path: &Path, looped: bool, newest: Arc<Mutex<Option<Picture>>>) -> anyhow::Result<gst::Element> {
-    gst::init()?;
+    init()?;
     let uri = glib::filename_to_uri(path, None)?;
     let playbin = gst::ElementFactory::make("playbin").property("uri", uri).property("mute", looped).build()?;
     // `videoflip` turns a phone's upright video the way its orientation tag says.
@@ -134,7 +134,7 @@ fn start(path: &Path, looped: bool, newest: Arc<Mutex<Option<Picture>>>) -> anyh
 pub(in crate::ui) fn frame(path: &Path, max: u32) -> Option<Vec<u8>> {
     const FRAME_WAIT: u64 = 5;
     let read = || -> anyhow::Result<Option<Vec<u8>>> {
-        gst::init()?;
+        init()?;
         let playbin = gst::ElementFactory::make("playbin").property("uri", glib::filename_to_uri(path, None)?).build()?;
         let sink = gst::parse::bin_from_description("videoconvert ! videoflip video-direction=auto ! videoscale ! video/x-raw,format=BGRA,pixel-aspect-ratio=1/1 ! appsink name=sink", true)?;
         let Some(appsink) = sink.by_name("sink") else { anyhow::bail!("no appsink") };
@@ -154,6 +154,20 @@ pub(in crate::ui) fn frame(path: &Path, max: u32) -> Option<Vec<u8>> {
         Ok(Some(crate::backend::caption::jpeg(&still)?))
     };
     read().map_err(|e| log::warn!("video frame: {e:#}")).ok().flatten()
+}
+
+/// GStreamer, with NVIDIA's AV1 decoder set aside: it stamps frames at the stream's nominal rate,
+/// so a screen recording of variable rate played too fast (GStreamer 1.28; its H.264 and VP9
+/// decoders keep the file's times). `dav1ddec` or `av1dec` decode AV1 instead, on the CPU.
+fn init() -> anyhow::Result<()> {
+    static AV1: std::sync::Once = std::sync::Once::new();
+    gst::init()?;
+    AV1.call_once(|| {
+        if let Some(nvidia) = gst::Registry::get().lookup_feature("nvav1dec") {
+            nvidia.set_rank(gst::Rank::NONE);
+        }
+    });
+    Ok(())
 }
 
 /// The frame the sink holds (`pull` names which, `args` its timeout if any), copied out of GStreamer's buffer.
@@ -498,6 +512,7 @@ mod tests {
         let still = image::load_from_memory(&jpeg).unwrap();
         assert_eq!((still.width(), still.height()), (160, 90));
         assert!(super::frame(&dir.join("missing.mkv"), 160).is_none());
+        assert!(gst::Registry::get().lookup_feature("nvav1dec").is_none_or(|f| f.rank() == gst::Rank::NONE), "NVIDIA's AV1 decoder set aside");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

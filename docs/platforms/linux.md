@@ -69,6 +69,11 @@ rate, which a plain seek would reset), M or the speaker mutes, Esc or the X clos
 loops without sound and has no speed button. A video GStreamer cannot decode (a codec its plugins lack) closes
 the player and opens in the system's app, as before.
 
+NVIDIA's AV1 decoder (`nvav1dec`, GStreamer 1.28) is set aside for the app's own pipelines: it
+stamps frames at the stream's nominal rate, so a variable-rate screen recording played too fast.
+AV1 then decodes on the CPU (`dav1ddec`); NVIDIA's H.264 and VP9 decoders, tested the same way, keep the file's
+times and stay. A sent video's thumbnail is its first frame, read by the same `playbin` paused.
+
 Cost while open: one decoded frame waiting (8 MB at 1080p) and one on the screen as a texture, each
 replaced by the next frame, so 30 frames a second copy and upload 30 of them; the decoder's own
 threads and buffers on top. A timer looks for a new frame every 8 ms, which only reads a lock. All
