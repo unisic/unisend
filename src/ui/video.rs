@@ -1,9 +1,30 @@
-//! Videos play in the app's own full-screen player on Android (`dev.gpui.beeper.Player`); the
-//! desktop has no player of its own and hands them to the system's app.
+//! Videos play in the app's own full-screen player: on Android `dev.gpui.beeper.Player`, on Linux
+//! `linux.rs` over the window. macOS and Windows have no player of their own and hand them to the
+//! system's app.
 
 use std::path::Path;
 
+use gpui_kit::{AnyView, App, WeakEntity};
+
 use crate::backend::{Media, MediaKind};
+
+#[cfg(target_os = "linux")]
+mod linux;
+
+/// Opens a downloaded video in a player drawn over the window; None when this is not a video or
+/// the platform draws none (Android starts its own, through `play`).
+pub(super) fn open(path: &Path, media: &Media, app: WeakEntity<super::BeeperApp>, cx: &mut App) -> Option<AnyView> {
+    if media.kind != MediaKind::Video {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    return linux::open(path, media, app, cx);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (path, app, cx);
+        None
+    }
+}
 
 /// Opens a downloaded video in the in-app player. False when this is not a video, the platform
 /// has no player, or it could not start: the caller then hands the file on.

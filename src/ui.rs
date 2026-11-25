@@ -489,6 +489,8 @@ pub struct BeeperApp {
     avatar_tick: u64,
     /// Images let go of; their GPU atlas tiles are freed with the next frame.
     released: Released,
+    /// The video playing over the window (`video.rs`); Android plays in its own activity instead.
+    video: Option<AnyView>,
     /// Pictures of the people writing in the open chat; `None` while loading or when they have
     /// none. At most `MAX_FACES`, 37 kB of pixels each.
     faces: HashMap<OwnedUserId, Option<Arc<Image>>>,
@@ -852,6 +854,7 @@ impl BeeperApp {
             avatar_seen: HashMap::new(),
             avatar_tick: 0,
             released: Released::default(),
+            video: None,
             peeked: HashSet::new(),
             share,
             fwd,
@@ -1020,9 +1023,14 @@ impl BeeperApp {
                     self.sizes.insert(id.clone(), len);
                 }
                 if let Some(path) = path.filter(|path| !self.voice_fetched(&id, path, cx)) {
-                    let media = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()).or_else(|| self.info_media(&id));
-                    if !media.is_some_and(|media| video::play(&path, media)) {
-                        let mime = media.and_then(|media| media.mime.clone());
+                    let media = self.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()).or_else(|| self.info_media(&id)).cloned();
+                    let app = cx.entity().downgrade();
+                    if let Some(player) = media.as_ref().and_then(|media| video::open(&path, media, app, cx)) {
+                        self.stop_player();
+                        self.video = Some(player);
+                        cx.notify();
+                    } else if !media.as_ref().is_some_and(|media| video::play(&path, media)) {
+                        let mime = media.and_then(|media| media.mime);
                         crate::open_file(cx, &path, mime.as_deref());
                     }
                 }
@@ -2215,7 +2223,8 @@ impl BeeperApp {
     /// The keys a desktop chat app answers, as listed in `keys::SHORTCUTS`.
     fn shortcut(&mut self, k: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let locked = self.settings.lock.mode != crate::applock::LockMode::Off && crate::applock::is_locked();
-        if self.screen != Screen::Main || locked {
+        // The video player over the window takes its own keys, Escape among them.
+        if self.screen != Screen::Main || locked || self.video.is_some() {
             return false;
         }
         let Some(act) = keys::find(k) else { return false };
@@ -5572,6 +5581,7 @@ impl BeeperApp {
                     .children(self.render_forward_layers(window, cx))
                     .children(self.render_people(window, cx))
                     .children(viewer)
+                    .children(self.video.clone())
                     .children(self.render_confirm(window, cx))
                     .children(verify)
                     .child(sheet::pan_guard(false))

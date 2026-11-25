@@ -448,7 +448,7 @@ impl BeeperApp {
         self.voice.epoch += 1;
     }
 
-    fn stop_player(&mut self) {
+    pub(super) fn stop_player(&mut self) {
         if self.voice.play.take().is_some() {
             post(native::stop_player);
         }

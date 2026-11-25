@@ -57,6 +57,20 @@ threads (streaming and the sound server's), a recorder about 3 MB and three, all
 GLib's thread pool keeps an idle one for a while. Decoding or encoding a voice note takes under 1%
 of one core.
 
+## Videos (GStreamer)
+
+A video plays in the app's own player over the window (src/ui/video/linux.rs): `playbin` decodes,
+`videoconvert`, `videoflip` (turns an upright phone video by its orientation tag), `videoscale` and
+`appsink` hand each frame over as BGRA, and the newest is drawn as a picture. Play and pause (click,
+Space or K), seek on the bar, Left and Right skip 5 s, M or the speaker mutes, Esc or the X closes. A
+bridged GIF loops without sound. A video GStreamer cannot decode (a codec its plugins lack) closes
+the player and opens in the system's app, as before.
+
+Cost while open: one decoded frame waiting (8 MB at 1080p) and one on the screen as a texture, each
+replaced by the next frame, so 30 frames a second copy and upload 30 of them; the decoder's own
+threads and buffers on top. A timer looks for a new frame every 8 ms, which only reads a lock. All
+of it stops and goes with the player.
+
 ## Signing in to a network in a browser (WebKitGTK)
 
 Networks whose bridge signs in with cookies (Messenger, Instagram and others) open their login page

@@ -110,7 +110,9 @@ gpui_kit::assets::icon_assets!(
         TextCursor,
         Droplets,
         Undo2,
-        Scissors
+        Scissors,
+        Volume2,
+        VolumeX
     ]
 );
 
