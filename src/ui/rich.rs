@@ -258,9 +258,15 @@ impl Element for Body {
 
     fn request_layout(&mut self, id: Option<&GlobalElementId>, inspector: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Self::RequestLayoutState) {
         let handle = (!gpui_kit::is_mobile()).then(|| {
-            window.with_element_state(id.expect("Body has an id"), |kept: Option<base::TextSelectionHandle>, _| {
-                let handle = kept.unwrap_or_else(|| base::TextSelectionHandle::new(self.text.to_string(), cx));
-                (handle.clone(), handle)
+            // A drag changes the selection between frames; without the refresh the window draws it
+            // only when something else redraws, so the highlight trails the pointer in jumps.
+            window.with_element_state(id.expect("Body has an id"), |kept: Option<(base::TextSelectionHandle, Subscription)>, window| {
+                let kept = kept.unwrap_or_else(|| {
+                    let handle = base::TextSelectionHandle::new(self.text.to_string(), cx);
+                    let refresh = handle.refresh_window_on_change(window, cx);
+                    (handle, refresh)
+                });
+                (kept.0.clone(), kept)
             })
         });
         (self.styled.request_layout(id, inspector, window, cx).0, handle)
