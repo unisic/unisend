@@ -10,6 +10,8 @@ use crate::backend::{Media, MediaKind};
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+pub(super) use linux::frame;
 
 /// Opens a downloaded video in a player drawn over the window; None when this is not a video or
 /// the platform draws none (Android starts its own, through `play`).

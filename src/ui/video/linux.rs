@@ -112,7 +112,7 @@ fn start(path: &Path, looped: bool, newest: Arc<Mutex<Option<Picture>>>) -> anyh
     for (signal, pull) in [("new-sample", "pull-sample"), ("new-preroll", "pull-preroll")] {
         let newest = newest.clone();
         appsink.connect(signal, false, move |args| {
-            if let Some(picture) = args[0].get::<gst::Element>().ok().and_then(|sink| take(&sink, pull)) {
+            if let Some(picture) = args[0].get::<gst::Element>().ok().and_then(|sink| take(&sink, pull, &[])) {
                 *newest.lock().unwrap_or_else(|e| e.into_inner()) = Some(picture);
             }
             Some(gst::FlowReturn::Ok.to_value())
@@ -128,9 +128,37 @@ fn start(path: &Path, looped: bool, newest: Arc<Mutex<Option<Picture>>>) -> anyh
     Ok(playbin)
 }
 
-/// The frame the sink holds (`pull` names which), copied out of GStreamer's buffer.
-fn take(sink: &gst::Element, pull: &str) -> Option<Picture> {
-    let sample = sink.emit_by_name::<Option<gst::Sample>>(pull, &[])?;
+/// The first frame of the video at `path` as JPEG, its long side at most `max`, for the thumbnail a
+/// sent video carries; None for a file without a picture. Cost: one decoded frame (8 MB at 1080p)
+/// and a paused pipeline, for the moment it takes; blocks up to `FRAME_WAIT`.
+pub(in crate::ui) fn frame(path: &Path, max: u32) -> Option<Vec<u8>> {
+    const FRAME_WAIT: u64 = 5;
+    let read = || -> anyhow::Result<Option<Vec<u8>>> {
+        gst::init()?;
+        let playbin = gst::ElementFactory::make("playbin").property("uri", glib::filename_to_uri(path, None)?).build()?;
+        let sink = gst::parse::bin_from_description("videoconvert ! videoflip video-direction=auto ! videoscale ! video/x-raw,format=BGRA,pixel-aspect-ratio=1/1 ! appsink name=sink", true)?;
+        let Some(appsink) = sink.by_name("sink") else { anyhow::bail!("no appsink") };
+        playbin.set_property("video-sink", &sink);
+        playbin.set_property("audio-sink", gst::ElementFactory::make("fakesink").build()?);
+        playbin.set_state(gst::State::Paused)?;
+        let picture = take(&appsink, "try-pull-preroll", &[&gst::ClockTime::from_seconds(FRAME_WAIT).nseconds()]);
+        let _ = playbin.set_state(gst::State::Null);
+        let Some(Picture { width, height, bytes }) = picture else { return Ok(None) };
+        let rgb = bytes.as_chunks::<4>().0.iter().flat_map(|&[b, g, r, _]| [r, g, b]).collect();
+        let mut still = image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| anyhow::anyhow!("short frame"))?;
+        if width.max(height) > max {
+            let scale = max as f32 / width.max(height) as f32;
+            let (w, h) = (((width as f32 * scale).round() as u32).max(1), ((height as f32 * scale).round() as u32).max(1));
+            still = image::imageops::resize(&still, w, h, image::imageops::FilterType::Triangle);
+        }
+        Ok(Some(crate::backend::caption::jpeg(&still)?))
+    };
+    read().map_err(|e| log::warn!("video frame: {e:#}")).ok().flatten()
+}
+
+/// The frame the sink holds (`pull` names which, `args` its timeout if any), copied out of GStreamer's buffer.
+fn take(sink: &gst::Element, pull: &str, args: &[&dyn ToValue]) -> Option<Picture> {
+    let sample = sink.emit_by_name::<Option<gst::Sample>>(pull, args)?;
     let caps = sample.caps()?.structure(0)?;
     let (width, height) = (u32::try_from(caps.get::<i32>("width").ok()?).ok()?, u32::try_from(caps.get::<i32>("height").ok()?).ok()?);
     let map = sample.buffer()?.map_readable().ok()?;
@@ -445,5 +473,31 @@ impl Render for Player {
                 if ms < 0 { row.justify_start() } else { row.justify_end() }.child(pill)
             }))
             .child(controls)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gst;
+    use gstreamer::prelude::*;
+
+    #[test]
+    fn a_video_gives_its_first_frame_as_a_fitted_jpeg() {
+        let dir = std::env::temp_dir().join(format!("unisend-frame-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("test.mkv");
+        // Raw frames in Matroska: no encoder plugin needed.
+        let launch = format!("videotestsrc num-buffers=3 ! video/x-raw,width=320,height=180,format=I420,framerate=10/1 ! matroskamux ! filesink location={}", video.display());
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(&launch).unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let bus = pipeline.bus().unwrap();
+        bus.timed_pop_filtered(gst::ClockTime::from_seconds(5), &[gst::MessageType::Eos, gst::MessageType::Error]).unwrap();
+        pipeline.set_state(gst::State::Null).unwrap();
+        let jpeg = super::frame(&video, 160).expect("a frame");
+        let still = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((still.width(), still.height()), (160, 90));
+        assert!(super::frame(&dir.join("missing.mkv"), 160).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

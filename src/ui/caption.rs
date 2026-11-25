@@ -802,8 +802,13 @@ fn page(entry: &Entry, x: f32, width: f32, p: Palette) -> Div {
         })
 }
 
-/// A still from a video, as JPEG with its long side at most `max`. Only Android can read one.
-#[cfg(not(target_os = "android"))]
+/// A still from a video, as JPEG with its long side at most `max`. Android and Linux can read one.
+#[cfg(target_os = "linux")]
+pub(crate) fn video_frame(path: &Path, max: u32) -> Option<Vec<u8>> {
+    super::video::frame(path, max)
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
 pub(crate) fn video_frame(_: &Path, _: u32) -> Option<Vec<u8>> {
     None
 }
