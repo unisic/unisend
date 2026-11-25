@@ -19,6 +19,7 @@ below is read from the source, with no Windows machine behind it.
 | Thing | Windows | Place |
 |---|---|---|
 | Closing the window | quits: there is no tray icon | `CAN_KEEP_RUNNING` in `src/desktop.rs` |
+| The count of waiting chats | a red circle with the number over the taskbar button (`ITaskbarList3::SetOverlayIcon`, drawn with GDI); compiles, not run | `src/desktop/taskbar.rs` |
 | A second launch | ends without raising the first (no socket) | the `shortcut:` note in `src/instance.rs` |
 | Notifications | WinRT toasts with a reply box, under an AppUserModelID the app writes to `HKCU`; buttons answer only while the app runs | `src/notify/windows.rs` |
 | Console | none in release builds, so logs go nowhere; debug builds keep it | `src/main.rs` |

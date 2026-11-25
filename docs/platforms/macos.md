@@ -28,6 +28,7 @@ there. CI's `.app` (the `build` workflow) is in the releases; it has not been op
 |---|---|
 | Running on with the window closed, a Dock click opens it again | `src/desktop.rs`, `app.on_reopen` in `src/lib.rs` |
 | Notifications: buttons, no reply box, picture or sound | `src/notify/macos.rs` |
+| The count of waiting chats on the Dock icon (`NSDockTile` badge) | `src/desktop/dock.rs` |
 | App icon | Liquid Glass on macOS 26 and later from `packaging/macos/Assets.car`, `Unisend.icns` before; both written by `packaging/icon/render.sh` (needs Xcode 26) from `mac_icon` in `packaging/icon/unisend.py` |
 
 App lock is the app PIN only, asked at start and when a window opens after the last one closed

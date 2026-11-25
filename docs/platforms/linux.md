@@ -104,6 +104,7 @@ cookie jar after each probe once the address matches. Nothing is written to disk
 |---|---|
 | Title bar and window buttons drawn by the app | `src/ui/frame.rs`; a compositor that insists on its own title bar wins |
 | Tray icon (an accent dot while a chat waits), running on with the window closed | `src/desktop/tray.rs` (StatusNotifierItem over zbus), `src/desktop.rs` |
+| The count of waiting chats on the launcher in the task manager or dock | `launcher` in `src/desktop/tray.rs`: the Unity launcher signal, read by KDE Plasma and Dash to Dock; it names `dev.gpui.beeper.desktop`, so a copy without that file installed (an AppImage left as it is) shows no count |
 | Notifications with reply, mark as read, mute | `src/notify/linux.rs` (`org.freedesktop.Notifications`; the reply box is KDE's) |
 | One copy per data directory, raise on a second launch | `src/instance.rs` |
 | A video a network refuses, made into an MP4 when the user agrees: the system's `ffmpeg` on `PATH`, optional (without it the offer is not made) | `src/backend/mp4.rs` |

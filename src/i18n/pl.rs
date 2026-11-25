@@ -1046,6 +1046,7 @@ pub(super) static PLURAL: &[(&str, [&str; 3])] = &[
     ("Up to {n} account can be signed in at once.", ["Naraz może być zalogowane najwyżej {n} konto.", "Naraz mogą być zalogowane najwyżej {n} konta.", "Naraz może być zalogowanych najwyżej {n} kont."]),
     ("{name}, {n} unread chat", ["{name}, {n} nieprzeczytany czat", "{name}, {n} nieprzeczytane czaty", "{name}, {n} nieprzeczytanych czatów"]),
     ("{n} chat", ["{n} czat", "{n} czaty", "{n} czatów"]),
+    ("{n} unread chat", ["{n} nieprzeczytany czat", "{n} nieprzeczytane czaty", "{n} nieprzeczytanych czatów"]),
     ("{n} day", ["{n} dzień", "{n} dni", "{n} dni"]),
     ("{n} file could not be read.", ["Nie udało się odczytać {n} pliku.", "Nie udało się odczytać {n} plików.", "Nie udało się odczytać {n} plików."]),
     ("{n} file was left out: one share takes at most {files} files and {mb} MB, each file at most {each} MB.", ["Pominięto {n} plik: jedno udostępnienie to najwyżej {files} plików i {mb} MB, każdy plik najwyżej {each} MB.", "Pominięto {n} pliki: jedno udostępnienie to najwyżej {files} plików i {mb} MB, każdy plik najwyżej {each} MB.", "Pominięto {n} plików: jedno udostępnienie to najwyżej {files} plików i {mb} MB, każdy plik najwyżej {each} MB."]),

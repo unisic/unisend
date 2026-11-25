@@ -70,10 +70,18 @@ gpui-pre-linux = { version = "0.3.6", default-features = false }
 # Voice messages: plays and records through the system's GStreamer, linked at build time.
 gstreamer = "0.25"
 
-# Toasts; the versions GPUI already builds on Windows.
+# Toasts and the taskbar button's count; the versions and features GPUI already builds on Windows.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "Foundation_Collections", "UI_Notifications"] }
+windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "Foundation_Collections", "UI_Notifications", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows-registry = "0.6"
+# The window's HWND for the taskbar; GPUI's own version.
+raw-window-handle = "0.6"
+
+# The Dock icon's count; the versions GPUI's macOS layer already builds.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 gpui-mobile = { git = "https://github.com/itsbalamurali/gpui-mobile", rev = "5fd54f4554263ae06753e90472c7f2e2ff5d7495", default-features = false, features = ["clipboard", "file_selector", "vibration"] }

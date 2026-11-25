@@ -8,6 +8,10 @@ use gpui_kit::*;
 
 use crate::ui::BeeperApp;
 
+#[cfg(target_os = "macos")]
+mod dock;
+#[cfg(target_os = "windows")]
+mod taskbar;
 #[cfg(target_os = "linux")]
 mod tray;
 
@@ -21,12 +25,17 @@ pub(crate) fn keep_running(on: bool) {
     KEEP_RUNNING.store(on && CAN_KEEP_RUNNING, Ordering::Relaxed);
 }
 
-/// Whether a chat waits, for the tray icon's dot. Only Linux has a tray icon here.
-pub(crate) fn tray_waiting(on: bool) {
+/// How many chats wait: the count on the app's icon (the launcher on Linux, the Dock, the taskbar
+/// button on Windows) and the tray icon's dot (Linux). Only this machine's own desktop hears of it.
+pub(crate) fn waiting(count: usize, cx: &mut App) {
     #[cfg(target_os = "linux")]
-    tray::waiting(on);
-    #[cfg(not(target_os = "linux"))]
-    let _ = on;
+    tray::waiting(count);
+    #[cfg(target_os = "macos")]
+    dock::count(count);
+    #[cfg(target_os = "windows")]
+    taskbar::count(count, cx);
+    #[cfg(not(target_os = "windows"))]
+    let _ = cx;
 }
 
 /// The app's view while the process lives, and where its window was when it closed.

@@ -158,7 +158,7 @@ impl Accounts {
                     let handled = this.update(cx, |this, cx| {
                         this.account_event(slot, ev, cx);
                         if lists {
-                            this.tell_tray();
+                            this.tell_tray(cx);
                         }
                     });
                     if handled.is_err() {
@@ -192,11 +192,19 @@ pub(super) fn waiting(r: &RoomSummary) -> bool {
     !r.archived && !r.low_priority && !r.muted && r.is_unread()
 }
 
+/// The chats waiting, as the Unread chip counts them: a forum is one, however many of its topics wait.
+pub(super) fn waiting_count(rooms: &[RoomSummary]) -> usize {
+    let mut forums = HashSet::new();
+    rooms.iter().filter(|r| waiting(r) && !replaced(rooms, r)).filter(|r| r.forum.as_ref().is_none_or(|f| forums.insert(f))).count()
+}
+
 impl BeeperApp {
-    /// The tray icon shows its dot while a chat of any signed-in account waits, as the list's header counts.
-    fn tell_tray(&self) {
+    /// The tray icon's dot and the count on the app's icon: the chats waiting in every signed-in account.
+    fn tell_tray(&self, cx: &mut App) {
         #[cfg(not(target_os = "android"))]
-        crate::desktop::tray_waiting(self.rooms.iter().any(waiting) || self.accounts.others(self.accounts.active).any(|a| !a.unread.is_empty()));
+        crate::desktop::waiting(waiting_count(&self.rooms) + self.accounts.others(self.accounts.active).map(|a| a.unread.len()).sum::<usize>(), cx);
+        #[cfg(target_os = "android")]
+        let _ = cx;
     }
 
     /// The images the screen holds, for their atlas tiles to be freed as it goes.

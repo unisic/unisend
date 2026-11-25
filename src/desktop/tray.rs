@@ -2,6 +2,10 @@
 //! bus. KDE Plasma shows it natively; GNOME only with an extension. Nothing polls: the bus wakes
 //! the task for a click, and for a tray that (re)starts, to register with it again. While a chat
 //! waits, the icon carries an accent dot, as the chat list's header counts.
+//!
+//! The same connection tells the task manager or dock how many chats wait, by the Unity launcher
+//! API (`com.canonical.Unity.LauncherEntry`, a signal to the session bus that KDE Plasma and Dash
+//! to Dock read): it finds the app by its desktop file, so an app not installed shows no count.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -21,6 +25,10 @@ const QUEUE: usize = 4;
 /// Menu entries' ids; 0 is the menu itself.
 const OPEN: i32 = 1;
 const QUIT: i32 = 2;
+/// The launcher API's names; the URI is the installed desktop file's.
+const LAUNCHER: &str = "com.canonical.Unity.LauncherEntry";
+const LAUNCHER_PATH: &str = "/dev/gpui/beeper/Launcher";
+const LAUNCHER_URI: &str = "application://dev.gpui.beeper.desktop";
 /// Shown when the icon theme has no `dev.gpui.beeper` (the app not installed): 64 x 64 x 4 bytes.
 const ICON: &[u8] = include_bytes!("../../packaging/linux/icons/hicolor/64x64/apps/dev.gpui.beeper.png");
 
@@ -29,8 +37,8 @@ const DOT: (f32, f32, f32) = (49.0, 15.0, 12.0);
 const RING: f32 = 4.0;
 const ACCENT: [u8; 3] = [0xc6, 0xf2, 0x4e];
 
-/// Whether a chat waits; the bus task redraws the icon when it changes.
-static WAITING: OnceLock<watch::Sender<bool>> = OnceLock::new();
+/// How many chats wait; the bus task redraws the icon and sends the count when it changes.
+static WAITING: OnceLock<watch::Sender<usize>> = OnceLock::new();
 
 /// The spec's pixmaps: width, height and ARGB32 bytes.
 type Pixmaps = Vec<(i32, i32, Vec<u8>)>;
@@ -43,7 +51,7 @@ enum Click {
 
 pub(super) fn start(cx: &mut App) {
     let (tx, mut rx) = mpsc::channel(QUEUE);
-    let waiting = WAITING.get_or_init(|| watch::channel(false).0).subscribe();
+    let waiting = WAITING.get_or_init(|| watch::channel(0).0).subscribe();
     cx.background_executor().spawn(async move {
         if let Err(e) = serve(tx, waiting).await {
             log::warn!("tray icon: {e}");
@@ -61,18 +69,19 @@ pub(super) fn start(cx: &mut App) {
     .detach();
 }
 
-/// Sets the dot; a no-op when it is already so or there is no tray.
-pub(super) fn waiting(on: bool) {
+/// Sets the count; a no-op when it is already so or there is no tray.
+pub(super) fn waiting(count: usize) {
     if let Some(tx) = WAITING.get() {
-        tx.send_if_modified(|w| std::mem::replace(w, on) != on);
+        tx.send_if_modified(|w| std::mem::replace(w, count) != count);
     }
 }
 
-async fn serve(tx: mpsc::Sender<Click>, mut waiting: watch::Receiver<bool>) -> zbus::Result<()> {
+async fn serve(tx: mpsc::Sender<Click>, mut waiting: watch::Receiver<usize>) -> zbus::Result<()> {
     let name = format!("org.kde.StatusNotifierItem-{}-1", std::process::id());
     let plain = pixmap(false);
     let dotted = pixmap(true);
-    let on = *waiting.borrow_and_update();
+    let count = *waiting.borrow_and_update();
+    let on = count > 0;
     let item = Item { tx: tx.clone(), pixmap: if on { dotted.clone() } else { plain.clone() }, waiting: on };
     let conn = zbus::connection::Builder::session()?
         .name(name.as_str())?
@@ -93,8 +102,15 @@ async fn serve(tx: mpsc::Sender<Click>, mut waiting: watch::Receiver<bool>) -> z
         }
     };
     let redraw = async {
+        launcher(&conn, count).await;
+        let mut dotted_now = on;
         while waiting.changed().await.is_ok() {
-            let on = *waiting.borrow_and_update();
+            let count = *waiting.borrow_and_update();
+            launcher(&conn, count).await;
+            let on = count > 0;
+            if std::mem::replace(&mut dotted_now, on) == on {
+                continue;
+            }
             {
                 let mut it = item.get_mut().await;
                 it.waiting = on;
@@ -107,6 +123,14 @@ async fn serve(tx: mpsc::Sender<Click>, mut waiting: watch::Receiver<bool>) -> z
     };
     futures_util::future::join(reregister, redraw).await;
     Ok(())
+}
+
+/// Sends `count` to the launcher, hidden at 0.
+async fn launcher(conn: &zbus::Connection, count: usize) {
+    let props = HashMap::from([("count", Value::from(count as i64)), ("count-visible", Value::from(count > 0))]);
+    if let Err(e) = conn.emit_signal(None::<&str>, LAUNCHER_PATH, LAUNCHER, "Update", &(LAUNCHER_URI, props)).await {
+        log::warn!("launcher count: {e}");
+    }
 }
 
 async fn register(conn: &zbus::Connection, name: &str) {
