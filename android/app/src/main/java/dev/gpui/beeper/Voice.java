@@ -9,6 +9,9 @@ import android.content.pm.PackageManager;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.media.MediaCodec;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.net.Uri;
@@ -18,6 +21,10 @@ import android.provider.Settings;
 import android.util.Log;
 import java.io.File;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.ShortBuffer;
+import java.util.Arrays;
 
 /**
  * Voice messages: one recorder and one player for the whole app. Called from Rust over JNI, off
@@ -253,6 +260,104 @@ public final class Voice {
     public static synchronized void speed(float speed) {
         if (player != null && player.isPlaying()) {
             player.setPlaybackParams(player.getPlaybackParams().setSpeed(speed));
+        }
+    }
+
+    /** `wave`'s peaks per second at first, the most it keeps, and the longest it decodes. */
+    private static final int PEAKS_PER_S = 20;
+    private static final int MAX_PEAKS = 2048;
+    private static final long DECODE_MS = 10_000;
+
+    /**
+     * The loudest sample (0 to 32767) of each stretch of `path`, at most MAX_PEAKS; null when it
+     * cannot be decoded in time. Not synchronized: it shares nothing, and the player keeps going.
+     */
+    public static int[] wave(String path) {
+        MediaExtractor extractor = new MediaExtractor();
+        MediaCodec codec = null;
+        try {
+            extractor.setDataSource(path);
+            MediaFormat format = null;
+            for (int i = 0; i < extractor.getTrackCount() && format == null; i++) {
+                MediaFormat f = extractor.getTrackFormat(i);
+                String mime = f.getString(MediaFormat.KEY_MIME);
+                if (mime != null && mime.startsWith("audio/")) {
+                    extractor.selectTrack(i);
+                    format = f;
+                }
+            }
+            if (format == null) {
+                return null;
+            }
+            codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME));
+            codec.configure(format, null, null, 0);
+            codec.start();
+            int channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+            long window = Math.max(1, (long) format.getInteger(MediaFormat.KEY_SAMPLE_RATE) * channels / PEAKS_PER_S);
+            int[] peaks = new int[MAX_PEAKS];
+            int n = 0;
+            int peak = 0;
+            long count = 0;
+            boolean inputDone = false;
+            long deadline = SystemClock.elapsedRealtime() + DECODE_MS;
+            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            while (SystemClock.elapsedRealtime() < deadline) {
+                if (!inputDone) {
+                    int in = codec.dequeueInputBuffer(10_000);
+                    if (in >= 0) {
+                        int size = extractor.readSampleData(codec.getInputBuffer(in), 0);
+                        if (size < 0) {
+                            codec.queueInputBuffer(in, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                            inputDone = true;
+                        } else {
+                            codec.queueInputBuffer(in, 0, size, extractor.getSampleTime(), 0);
+                            extractor.advance();
+                        }
+                    }
+                }
+                int out = codec.dequeueOutputBuffer(info, 10_000);
+                if (out < 0) {
+                    continue;
+                }
+                ByteBuffer pcm = codec.getOutputBuffer(out);
+                if (pcm != null) {
+                    pcm.position(info.offset).limit(info.offset + info.size);
+                    // Decoders put out 16-bit PCM unless asked otherwise.
+                    ShortBuffer samples = pcm.order(ByteOrder.nativeOrder()).asShortBuffer();
+                    while (samples.hasRemaining()) {
+                        peak = Math.max(peak, Math.min(32767, Math.abs((int) samples.get())));
+                        if (++count >= window) {
+                            peaks[n++] = peak;
+                            peak = 0;
+                            count = 0;
+                            if (n == MAX_PEAKS) {
+                                for (int i = 0; i < MAX_PEAKS / 2; i++) {
+                                    peaks[i] = Math.max(peaks[2 * i], peaks[2 * i + 1]);
+                                }
+                                n = MAX_PEAKS / 2;
+                                window *= 2;
+                            }
+                        }
+                    }
+                }
+                codec.releaseOutputBuffer(out, false);
+                if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    if (count > 0) {
+                        peaks[n++] = peak;
+                    }
+                    return Arrays.copyOf(peaks, n);
+                }
+            }
+            Log.w(TAG, "voice waveform: decoding took too long");
+            return null;
+        } catch (IOException | RuntimeException e) {
+            Log.w(TAG, "voice waveform", e);
+            return null;
+        } finally {
+            if (codec != null) {
+                codec.release();
+            }
+            extractor.release();
         }
     }
 

@@ -1,12 +1,13 @@
 //! Voice messages on Linux, through the system's GStreamer (base and good plugins): one player
 //! (`playbin`) and one recorder (the default microphone to Ogg Opus) at a time. Every call but
-//! `ready` and `access` runs on the voice thread (`post` in voice.rs), which owns both through a
-//! thread local, so nothing here takes a lock.
+//! `ready`, `access` and `wave` runs on the voice thread (`post` in voice.rs), which owns both
+//! through a thread local. `wave` decodes a file on its own, for the waveform a message lacks and
+//! for the gain that brings a quiet one up to full scale.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use gstreamer as gst;
@@ -23,15 +24,25 @@ const WAIT: gst::ClockTime = gst::ClockTime::from_seconds(3);
 /// What both need; all are in GStreamer's base and good plugins.
 const ELEMENTS: [&str; 10] = ["playbin", "scaletempo", "audioconvert", "audioresample", "capsfilter", "opusenc", "oggmux", "filesink", "autoaudiosrc", "autoaudiosink"];
 
+/// The longest `wave` decodes before giving up: long audio files are not worth a waveform.
+const DECODE_WAIT: gst::ClockTime = gst::ClockTime::from_seconds(10);
+/// `wave`'s samples per peak at first (50 ms at 8 kHz), and the most peaks it keeps: 8 KB.
+const WINDOW: usize = 400;
+const MAX_PEAKS: usize = 2048;
+
 static READY: OnceLock<bool> = OnceLock::new();
 
 thread_local! {
     static RECORDER: RefCell<Option<Recorder>> = const { RefCell::new(None) };
     static PLAYER: RefCell<Option<Player>> = const { RefCell::new(None) };
+    /// The volume for one file, kept for when it is loaded again.
+    static GAIN: RefCell<Option<(PathBuf, f64)>> = const { RefCell::new(None) };
 }
 
 /// Loads GStreamer and checks its plugins; run once, off the UI thread.
 pub fn init() -> bool {
+    // The sound server's mixer lists the app under this name, not the binary's.
+    glib::set_application_name("Unisend");
     *READY.get_or_init(|| match gst::init() {
         Ok(()) => {
             let missing: Vec<_> = ELEMENTS.into_iter().filter(|name| gst::ElementFactory::find(name).is_none()).collect();
@@ -151,6 +162,84 @@ pub fn speed(speed: f32) {
     PLAYER.with_borrow_mut(|p| p.as_mut().map(|p| p.speed(speed)));
 }
 
+/// Sets the volume `path` plays at (1 is as recorded), now if it is loaded, else when it is.
+pub fn gain(path: &Path, gain: f32) {
+    let gain = f64::from(gain);
+    PLAYER.with_borrow(|p| p.as_ref().filter(|p| p.path == path).map(|p| p.playbin.set_property("volume", gain)));
+    GAIN.with_borrow_mut(|g| *g = Some((path.to_owned(), gain)));
+}
+
+/// The peaks of `path`, 0 to 1, at most `MAX_PEAKS`; `None` when it cannot be decoded in time.
+pub fn wave(path: &Path) -> Option<Vec<f32>> {
+    decode_peaks(path).map_err(|e| log::warn!("voice waveform: {e}")).ok()
+}
+
+fn decode_peaks(path: &Path) -> anyhow::Result<Vec<f32>> {
+    let location = path.to_str().ok_or_else(|| anyhow::anyhow!("path is not UTF-8"))?;
+    let pipeline = gst::parse::launch(
+        "filesrc name=file ! decodebin ! audioconvert ! audioresample \
+         ! capsfilter name=pcm caps=audio/x-raw,format=S16LE,rate=8000,channels=1 ! fakesink sync=false",
+    )?
+    .downcast::<gst::Pipeline>()
+    .map_err(|_| anyhow::anyhow!("not a pipeline"))?;
+    let named = |name| pipeline.by_name(name).ok_or_else(|| anyhow::anyhow!("no {name}"));
+    named("file")?.set_property("location", location);
+    let peaks = Arc::new(Mutex::new(Peaks::default()));
+    let sink = peaks.clone();
+    named("pcm")?.static_pad("src").ok_or_else(|| anyhow::anyhow!("no pcm pad"))?.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let (Some(map), Ok(mut peaks)) = (info.buffer().and_then(|b| b.map_readable().ok()), sink.lock()) {
+            peaks.push(&map);
+        }
+        gst::PadProbeReturn::Ok
+    });
+    pipeline.set_state(gst::State::Playing)?;
+    let ended = pipeline.bus().and_then(|bus| bus.timed_pop_filtered(DECODE_WAIT, &[gst::MessageType::Eos, gst::MessageType::Error]));
+    shut(&pipeline);
+    let Some(msg) = ended else { anyhow::bail!("decoding took too long") };
+    if let gst::MessageView::Error(e) = msg.view() {
+        anyhow::bail!("{} ({:?})", e.error(), e.debug());
+    }
+    let peaks = std::mem::take(&mut *peaks.lock().map_err(|_| anyhow::anyhow!("peaks poisoned"))?);
+    Ok(peaks.finish())
+}
+
+/// The loudest sample of each stretch of `window` samples; stretches double when `MAX_PEAKS` are full.
+#[derive(Default)]
+struct Peaks {
+    levels: Vec<f32>,
+    window: usize,
+    peak: i32,
+    count: usize,
+}
+
+impl Peaks {
+    fn push(&mut self, pcm: &[u8]) {
+        for &s in pcm.as_chunks::<2>().0 {
+            self.peak = self.peak.max(i32::from(i16::from_le_bytes(s)).abs());
+            self.count += 1;
+            if self.count >= self.window.max(WINDOW) {
+                self.close();
+            }
+        }
+    }
+
+    fn close(&mut self) {
+        self.levels.push(self.peak.min(32767) as f32 / 32767.);
+        (self.peak, self.count) = (0, 0);
+        if self.levels.len() >= MAX_PEAKS {
+            self.levels = self.levels.chunks(2).map(|p| p.iter().copied().fold(0., f32::max)).collect();
+            self.window = self.window.max(WINDOW) * 2;
+        }
+    }
+
+    fn finish(mut self) -> Vec<f32> {
+        if self.count > 0 {
+            self.close();
+        }
+        self.levels
+    }
+}
+
 pub fn stop_player() {
     PLAYER.with_borrow_mut(|p| *p = None);
 }
@@ -262,9 +351,14 @@ impl Player {
     /// Loads `path` and waits until it is ready to play; `sink` replaces the system's output.
     fn load(path: &Path, sink: Option<gst::Element>) -> anyhow::Result<Self> {
         let uri = glib::filename_to_uri(path, None)?;
-        let playbin = gst::ElementFactory::make("playbin").property("uri", uri).property_from_str("flags", "audio").build()?;
-        // Faster speech keeps its pitch.
-        let tempo = gst::parse::bin_from_description("audioconvert ! scaletempo ! audioconvert", true)?;
+        // `soft-volume` keeps `gain` in the app instead of moving the sound server's slider.
+        let playbin = gst::ElementFactory::make("playbin").property("uri", uri).property_from_str("flags", "audio+soft-volume").build()?;
+        if let Some(gain) = GAIN.with_borrow(|g| g.as_ref().filter(|(p, _)| p == path).map(|&(_, gain)| gain)) {
+            playbin.set_property("volume", gain);
+        }
+        // Faster speech keeps its pitch. Mono goes out as stereo at full level on both sides:
+        // a mono stream can reach PipeWire's stereo outputs attenuated by its channel mixer.
+        let tempo = gst::parse::bin_from_description("audioconvert ! scaletempo ! audioconvert ! capsfilter caps=audio/x-raw,channels=2", true)?;
         playbin.set_property("audio-filter", tempo);
         if let Some(sink) = sink {
             playbin.set_property("audio-sink", sink);
@@ -357,7 +451,7 @@ mod tests {
     use gstreamer as gst;
     use gstreamer::prelude::*;
 
-    use super::{Player, RATE, Recorder, peak};
+    use super::{MAX_PEAKS, Peaks, Player, RATE, Recorder, WINDOW, peak};
 
     fn dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("unisend-voice-{name}-{}", std::process::id()));
@@ -417,6 +511,34 @@ mod tests {
         assert_eq!(peak(&i16::MAX.to_le_bytes()), 32767);
         // A trailing odd byte is not a sample.
         assert_eq!(peak(&[0x00, 0x01, 0x7f]), 256);
+    }
+
+    #[test]
+    fn peaks_stay_bounded() {
+        let mut peaks = Peaks::default();
+        peaks.push(&[&16384i16.to_le_bytes()[..], &[0; 2 * (WINDOW - 1)]].concat());
+        peaks.push(&[0; 2 * WINDOW + 2]);
+        assert_eq!(peaks.levels.len(), 2);
+        let levels = peaks.finish();
+        assert_eq!(levels.len(), 3);
+        assert!((levels[0] - 0.5).abs() < 0.01 && levels[1] == 0.);
+        let mut long = Peaks::default();
+        (0..3 * MAX_PEAKS).for_each(|_| long.push(&[0xff; 2 * WINDOW]));
+        assert!(long.levels.len() < MAX_PEAKS);
+    }
+
+    #[test]
+    fn wave_decodes_a_recording() {
+        let path = dir("wave").join("voice.ogg");
+        let (recorder, _) = record(&path, 2000);
+        recorder.finish().unwrap();
+        let levels = super::wave(&path).unwrap();
+        // 2 s in 50 ms stretches; a half-volume tone peaks near 0.5.
+        assert!(levels.len().abs_diff(40) <= 2, "{} peaks", levels.len());
+        let peak = levels.iter().copied().fold(0., f32::max);
+        assert!((0.4..0.65).contains(&peak), "peak {peak}");
+        assert!(super::wave(&path.with_extension("missing")).is_none());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

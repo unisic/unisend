@@ -73,7 +73,7 @@ Plain on purpose, short-lived:
   photos and picked files on the way out; deleted after sending or when stale.
 - `pasted/`: pasted pictures, edited photos and trimmed videos waiting to send; each is deleted
   after the send or when its item is removed, and the whole folder at start.
-- Saved to gallery (`Pictures/Unisend`): the user asked for a public copy.
+- Saved to gallery (`Pictures/Unisend` on Android) or Downloads (desktop, also every file opened from a chat): the user asked for a public copy.
 
 Backup and transfer: `android:allowBackup="false"`, and `res/xml/data_extraction_rules.xml`
 excludes every file from cloud backup, device-to-device transfer (which Android 12+ runs despite

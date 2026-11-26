@@ -59,6 +59,9 @@ enum Req {
     CloseAccount(usize),
     /// Answered once every notification is closed.
     CloseAll(Option<tokio::sync::oneshot::Sender<()>>),
+    /// A file was copied into Downloads.
+    #[cfg_attr(not(target_os = "linux"), expect(dead_code, reason = "only Linux says so"))]
+    Downloaded(PathBuf),
 }
 
 /// Which notification a platform's event is about: the server's number on Linux, the chat elsewhere.
@@ -129,6 +132,11 @@ pub(crate) fn amend(notice: &crate::Notice, gone: bool) {
 /// A message's line. A direct chat's title already names the sender, as Signal and Android show it.
 fn line(notice: &crate::Notice) -> String {
     if notice.group { format!("{}: {}", notice.note.sender, notice.note.text) } else { notice.note.text.clone() }
+}
+
+/// Says a file has landed in Downloads; Plasma shows it as a file with Open and its folder.
+pub(crate) fn downloaded(path: &std::path::Path) {
+    request(Req::Downloaded(path.to_owned()));
 }
 
 pub(crate) fn close(chat: &str) {
@@ -428,6 +436,14 @@ pub(crate) async fn serve(dir: PathBuf) {
                     if let Some(done) = done {
                         let _ = done.send(());
                     }
+                }
+                Some(Req::Downloaded(path)) => {
+                    #[cfg(target_os = "linux")]
+                    if let Some(sink) = service.sink().await {
+                        sink.downloaded(&path).await;
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = path;
                 }
                 None => break,
             },

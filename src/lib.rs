@@ -843,9 +843,9 @@ pub(crate) fn share_file(path: &std::path::Path, mime: Option<&str>) {
     let _ = (path, mime);
 }
 
-/// Copies a file out to the user: a photo or video into `Pictures/Unisend` (`Movies/Unisend` for a
-/// video on Android, in the gallery), any other kind into `Download/Unisend` (`Downloads/Unisend`
-/// on desktops). Returns where it went, for the user to read. Blocking.
+/// Copies a file out to the user: on Android a photo or video into the gallery, `Pictures/Unisend`
+/// (`Movies/Unisend` for a video), any other kind into `Download/Unisend`; on desktops everything
+/// into the Downloads folder. Returns where it went, for the user to read. Blocking.
 pub(crate) fn save_file(path: &std::path::Path, name: &str, mime: Option<&str>) -> Result<String, String> {
     #[cfg(target_os = "android")]
     {
@@ -854,15 +854,28 @@ pub(crate) fn save_file(path: &std::path::Path, name: &str, mime: Option<&str>) 
     }
     #[cfg(not(target_os = "android"))]
     {
-        let media = mime.is_none_or(|m| m.starts_with("image/") || m.starts_with("video/"));
-        let folder = if media { dirs::picture_dir().or_else(|| dirs::home_dir().map(|h| h.join("Pictures"))) } else { dirs::download_dir().or_else(|| dirs::home_dir().map(|h| h.join("Downloads"))) }
-            .ok_or("no folder to save in")?
-            .join("Unisend");
-        std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-        let target = free_name(&folder, name);
-        std::fs::copy(path, &target).map_err(|e| e.to_string())?;
-        Ok(target.display().to_string())
+        let _ = mime;
+        download(path, name).map(|target| target.display().to_string())
     }
+}
+
+/// Copies a file from the media cache into the Downloads folder and returns the copy; one already
+/// there under that name with the same size is the copy. Blocking.
+#[cfg(not(target_os = "android"))]
+pub(crate) fn download(path: &std::path::Path, name: &str) -> Result<PathBuf, String> {
+    let folder = dirs::download_dir().or_else(|| dirs::home_dir().map(|h| h.join("Downloads"))).ok_or("no downloads folder")?;
+    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    // A sender's name, not a path: nothing may climb out of the folder.
+    let name = std::path::Path::new(name).file_name().and_then(|n| n.to_str()).filter(|n| !n.is_empty()).unwrap_or("file");
+    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let same = folder.join(name);
+    if std::fs::metadata(&same).is_ok_and(|m| m.is_file() && m.len() == len) {
+        return Ok(same);
+    }
+    let target = free_name(&folder, name);
+    std::fs::copy(path, &target).map_err(|e| e.to_string())?;
+    notify::downloaded(&target);
+    Ok(target)
 }
 
 /// `name` in `folder`, or `name (2).ext`, `name (3).ext` when taken. Gives up after 999.
@@ -1673,7 +1686,7 @@ mod tests {
     use gpui_kit::AssetSource as _;
 
     #[test]
-    fn a_taken_name_in_the_pictures_folder_gets_a_number() {
+    fn a_taken_name_in_the_downloads_folder_gets_a_number() {
         let dir = std::env::temp_dir().join(format!("unisend-free-name-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(super::free_name(&dir, "a.jpg"), dir.join("a.jpg"));

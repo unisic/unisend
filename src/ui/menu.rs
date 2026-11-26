@@ -142,7 +142,7 @@ impl Act {
             Act::SelectText(_) => ("act-select-text", IconName::TextCursor, t!("Select text")),
             Act::Delete => ("act-delete", IconName::Trash, t!("Delete")),
             Act::EndPoll => ("act-end-poll", IconName::Check, t!("End poll")),
-            Act::Save => ("act-save", IconName::Download, t!("Save to gallery")),
+            Act::Save => ("act-save", IconName::Download, if cfg!(target_os = "android") { t!("Save to gallery") } else { t!("Save") }),
             Act::Forward => ("act-forward", IconName::Forward, t!("Forward")),
             Act::Select => ("act-select", IconName::ListChecks, t!("Select multiple")),
             Act::Pin => ("act-pin", IconName::Pin, t!("Pin")),

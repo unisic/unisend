@@ -49,6 +49,11 @@ fn held_drag(x: f32, y: f32) -> (f32, f32) {
 }
 /// Downloaded files kept for playing again, newest last.
 const MAX_FILES: usize = 8;
+/// Waveforms and gains worked out from downloaded files, newest last: under 4 KB.
+const MAX_WAVES: usize = 64;
+/// The loudest a quiet file is brought up to, and by at most how much (12 dB).
+const TARGET_PEAK: f32 = 0.9;
+const MAX_GAIN: f32 = 4.;
 pub(super) const SPEEDS: [(f32, &str); 3] = [(1., "1×"), (1.5, "1.5×"), (2., "2×")];
 /// The waveform's bars: 2 px wide with 2 px between them.
 const BAR_W: f32 = 2.;
@@ -66,6 +71,8 @@ pub(super) struct Voice {
     /// Index into `SPEEDS`; kept for every message until the app closes.
     speed: usize,
     files: VecDeque<(String, PathBuf)>,
+    /// Per message: the bars drawn from its file, empty when the event carries its own, and the gain it plays at.
+    waves: VecDeque<(String, Vec<u8>, f32)>,
     /// A message being downloaded to play, from this share of its length.
     want: Option<(String, f32)>,
     /// The microphone was refused: the composer says so until dismissed or allowed.
@@ -494,10 +501,38 @@ impl BeeperApp {
             self.voice.files.pop_front();
         }
         self.voice.files.push_back((id.to_owned(), path.to_owned()));
+        if !self.voice.waves.iter().any(|(w, ..)| w == id) {
+            self.measure(id, path, cx);
+        }
         if let Some((_, from)) = self.voice.want.take_if(|(want, _)| want == id) {
             self.start_player(id, path.to_owned(), from, cx);
         }
         true
+    }
+
+    /// Decodes a downloaded file for the bars its event lacks and for the gain that brings it up to `TARGET_PEAK`.
+    fn measure(&mut self, id: &str, path: &Path, cx: &mut Context<Self>) {
+        let (id, path) = (id.to_owned(), path.to_owned());
+        cx.spawn(async move |this, cx| {
+            let file = path.clone();
+            let Some(levels) = cx.background_spawn(async move { native::wave(&file) }).await else { return };
+            let peak = levels.iter().copied().fold(0., f32::max);
+            if peak <= 0. {
+                return;
+            }
+            let gain = (TARGET_PEAK / peak).clamp(1., MAX_GAIN);
+            post(move || native::gain(&path, gain));
+            let _ = this.update(cx, |this, cx| {
+                let carried = this.msgs.iter().find(|m| m.id == id).and_then(|m| m.media.as_ref()).is_some_and(|m| !m.waveform.is_empty());
+                let bars = if carried { Vec::new() } else { resample(&levels, BARS).iter().map(|v| (v / peak * 255.).round() as u8).collect() };
+                if this.voice.waves.len() >= MAX_WAVES {
+                    this.voice.waves.pop_front();
+                }
+                this.voice.waves.push_back((id, bars, gain));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn start_player(&mut self, id: &str, path: PathBuf, from: f32, cx: &mut Context<Self>) {
@@ -507,6 +542,10 @@ impl BeeperApp {
         let at = (from * length as f32) as u32;
         self.voice.play = Some(Play { epoch, id: id.to_owned(), path: path.clone(), length, at, playing: true, scrub: None });
         let speed = SPEEDS[self.voice.speed].0;
+        if let Some(&(.., gain)) = self.voice.waves.iter().find(|(w, ..)| w == id) {
+            let path = path.clone();
+            post(move || native::gain(&path, gain));
+        }
         cx.notify();
         cx.spawn(async move |this, cx| {
             let file = path.clone();
@@ -593,7 +632,9 @@ impl BeeperApp {
             Some(play) => length(Duration::from_millis(play.at.into())),
             None => total.map(length).unwrap_or_default(),
         };
-        let heights: Vec<f32> = if media.waveform.is_empty() { vec![0.; BARS] } else { media.waveform.iter().map(|&h| f32::from(h) / 255.).collect() };
+        let measured = self.voice.waves.iter().find(|(w, ..)| *w == m.id).map(|(_, bars, _)| bars).filter(|bars| !bars.is_empty());
+        let bars = if media.waveform.is_empty() { measured } else { Some(&media.waveform) };
+        let heights: Vec<f32> = bars.map_or(vec![0.; BARS], |bars| bars.iter().map(|&h| f32::from(h) / 255.).collect());
         let (id, owned) = (m.id.clone(), media.clone());
         let button = cx.listener(move |this, _: &ClickEvent, _, cx| {
             cx.stop_propagation();
@@ -1038,6 +1079,25 @@ mod native {
         call("speed", |env, class, _| env.call_static_method(class, jni_str!("speed"), jni_sig!("(F)V"), &[JValue::Float(speed)])?.v());
     }
 
+    /// The peaks of `path`, 0 to 1; `None` when it cannot be decoded.
+    pub fn wave(path: &Path) -> Option<Vec<f32>> {
+        call("wave", |env, class, _| {
+            let path = env.new_string(path.to_string_lossy())?;
+            let peaks = env.call_static_method(class, jni_str!("wave"), jni_sig!("(Ljava/lang/String;)[I"), &[JValue::Object(&path)])?.l()?;
+            if peaks.is_null() {
+                return Ok(None);
+            }
+            let peaks = env.cast_local::<jni::objects::JIntArray>(peaks)?;
+            let mut buf = vec![0; peaks.len(env)?];
+            peaks.get_region(env, 0, &mut buf)?;
+            Ok(Some(buf.into_iter().map(|p| p.clamp(0, 32767) as f32 / 32767.).collect()))
+        })
+        .flatten()
+    }
+
+    /// `MediaPlayer` cannot play louder than recorded; the file plays as it is.
+    pub fn gain(_: &Path, _: f32) {}
+
     pub fn stop_player() {
         call("stopPlayer", |env, class, _| env.call_static_method(class, jni_str!("stopPlayer"), jni_sig!("()V"), &[])?.v());
     }
@@ -1081,6 +1141,10 @@ mod native {
     }
     pub fn seek(_: u32) {}
     pub fn speed(_: f32) {}
+    pub fn wave(_: &Path) -> Option<Vec<f32>> {
+        None
+    }
+    pub fn gain(_: &Path, _: f32) {}
     pub fn stop_player() {}
 }
 

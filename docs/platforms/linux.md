@@ -49,13 +49,21 @@ voice message. Recordings wait in
 `~/.cache/beeper-gpui/voice` (mode 700) and are deleted once sent, thrown away, on leaving the chat,
 on closing the window and on quitting; one left by a crash goes when the next recording starts, if
 a day old. Nothing leaves the device but the sent message. The sound server (PipeWire or
-PulseAudio) picks the microphone and the speakers.
+PulseAudio) picks the microphone and the speakers, and lists the app as Unisend
+(`glib::set_application_name`).
+
+A downloaded voice message or audio file is decoded once more, off the voice thread, for its peaks:
+they draw the waveform when the event has none (Signal, Messenger and Instagram send none), and
+set a gain that brings its loudest sample to 0.9, at most 12 dB up, applied by `playbin`'s soft
+volume so the mixer's slider stays where the user left it. Playback goes out as stereo: a mono
+stream can reach PipeWire's stereo outputs attenuated by its channel mixer.
 
 Cost, measured with `gst-launch-1.0` on the same pipelines: GStreamer loads at startup on the
 voice thread (about 8 MB). One player and one recorder at a time: a player about 8 MB and five
 threads (streaming and the sound server's), a recorder about 3 MB and three, all stopped with it;
 GLib's thread pool keeps an idle one for a while. Decoding or encoding a voice note takes under 1%
-of one core.
+of one core. The peaks pass decodes at full speed and gives up after 10 s; it keeps at most 2048
+peaks (8 KB), and the app keeps the bars and gain of the last 64 messages (under 4 KB).
 
 ## Videos (GStreamer)
 

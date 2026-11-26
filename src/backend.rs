@@ -85,6 +85,8 @@ const THUMB_PX: u32 = 800;
 const VIEW_PX: u32 = 2048;
 /// Larger files are not fetched to make a thumbnail, and not sent.
 const MAX_THUMB_SOURCE: u64 = 16 * 1024 * 1024;
+/// Larger videos are not fetched to read a first frame for their poster.
+const MAX_POSTER_SOURCE: u64 = 50 * 1024 * 1024;
 pub(crate) const MAX_UPLOAD: u64 = 100 * 1024 * 1024;
 /// Pictures pasted into the composer, under the data directory: each goes once it is sent, and
 /// what a closed preview left goes at the next start.
@@ -1741,7 +1743,14 @@ impl State {
                             }),
                             false => None,
                         };
-                        match if looped.is_some() { Ok(looped) } else { thumbnail(&client, &media).await } {
+                        let made = if looped.is_some() {
+                            Ok(looped)
+                        } else if media.kind == MediaKind::Video && media.thumb.is_none() {
+                            poster(&client, &media, &id, &dir, generation).await
+                        } else {
+                            thumbnail(&client, &media).await
+                        };
+                        match made {
                             Ok(Some(bytes)) => {
                                 let _ = ev.send(Ev::Thumb(id, bytes)).await;
                             }
@@ -2780,6 +2789,23 @@ async fn thumbnail(client: &Client, media: &Media) -> Result<Option<Vec<u8>>> {
         return Ok(Some(bytes));
     }
     Ok(Some(tokio::task::spawn_blocking(move || shrink(&bytes, THUMB_PX)).await??))
+}
+
+/// A video sent without a thumbnail (bridges often leave it out) gets its first frame, read from
+/// the file, which stays in the media cache for a play. `None` past `MAX_POSTER_SOURCE`, where no
+/// frame can be read, and on Windows and macOS, which cannot read one.
+async fn poster(client: &Client, media: &Media, id: &str, dir: &Path, generation: u64) -> Result<Option<Vec<u8>>> {
+    if cfg!(not(any(target_os = "android", target_os = "linux"))) || media.size.is_some_and(|s| s > MAX_POSTER_SOURCE) {
+        return Ok(None);
+    }
+    let request = MediaRequestParameters { source: media.source.clone(), format: MediaFormat::File };
+    let bytes = client.media().get_media_content(&request, true).await?;
+    if bytes.len() as u64 > MAX_POSTER_SOURCE {
+        return Ok(None);
+    }
+    let path = save_media(dir, generation, id, &media.name, &bytes)?;
+    drop(bytes);
+    Ok(tokio::task::spawn_blocking(move || crate::ui::video_frame(&path, THUMB_PX)).await?)
 }
 
 /// A bridged GIF as a loop for its bubble (`video::looping`), made once and kept in memory.

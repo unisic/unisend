@@ -105,6 +105,21 @@ impl Sink {
         }
     }
 
+    /// A one-off, not kept track of: its clicks are the server's own (`x-kde-urls`), not the app's.
+    pub(super) async fn downloaded(&mut self, path: &std::path::Path) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut hints: HashMap<&str, Value> = HashMap::new();
+        hints.insert("desktop-entry", APP_ID.into());
+        hints.insert("category", "transfer.complete".into());
+        hints.insert("urgency", 0u8.into());
+        hints.insert("suppress-sound", true.into());
+        hints.insert("x-kde-urls", vec![file_uri(&path.to_string_lossy())].into());
+        let args = ("Unisend", 0u32, APP_ID, t!("Download finished"), name.as_str(), Vec::<&str>::new(), hints, -1i32);
+        if let Err(e) = self.proxy.call::<_, _, u32>("Notify", &args).await {
+            log::warn!("download notification: {e}");
+        }
+    }
+
     pub(super) async fn close(&mut self, entry: &Entry) {
         forget(entry.id);
         if entry.id != 0

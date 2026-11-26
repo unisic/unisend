@@ -580,6 +580,7 @@ pub(super) static TEXT: &[(&str, &str)] = &[
     ("Save", "Zapisz"),
     ("Save to gallery", "Zapisz w galerii"),
     ("Saved to {place}", "Zapisano w: {place}"),
+    ("Download finished", "Pobieranie zakończone"),
     ("Saving…", "Zapisywanie…"),
     ("Could not read the file.", "Nie udało się odczytać pliku."),
     ("No device offers its settings on this network.", "Żadne urządzenie w tej sieci nie udostępnia ustawień."),

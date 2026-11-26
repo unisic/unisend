@@ -1030,7 +1030,23 @@ impl BeeperApp {
                         self.video = Some(player);
                         cx.notify();
                     } else if !media.as_ref().is_some_and(|media| video::play(&path, media)) {
-                        let mime = media.and_then(|media| media.mime);
+                        let mime = media.as_ref().and_then(|media| media.mime.clone());
+                        // On desktop a file lands in Downloads, as a browser's would, and opens from there.
+                        #[cfg(not(target_os = "android"))]
+                        if let Some(name) = media.filter(|m| m.kind == MediaKind::File).map(|m| m.name) {
+                            let copy = cx.background_spawn(async move { crate::download(&path, &name).map_err(|e| (e, path)) });
+                            cx.spawn(async move |_, cx| {
+                                let path = copy.await.unwrap_or_else(|(e, path)| {
+                                    log::warn!("download: {e}");
+                                    path
+                                });
+                                cx.update(|cx| crate::open_file(cx, &path, mime.as_deref()));
+                            })
+                            .detach();
+                        } else {
+                            crate::open_file(cx, &path, mime.as_deref());
+                        }
+                        #[cfg(target_os = "android")]
                         crate::open_file(cx, &path, mime.as_deref());
                     }
                 }
