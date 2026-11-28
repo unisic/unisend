@@ -480,7 +480,7 @@ pub(super) async fn open(client: &Client, union: &Room, ev: &mpsc::Sender<Ev>) -
     let task = tokio::spawn(follow(union.room_id().to_owned(), merge.clone(), rx, ev.clone()));
     let mut lanes = Vec::with_capacity(rooms.len());
     for room in &rooms {
-        lanes.push(timeline::open(room, &tx).await?);
+        lanes.push(timeline::open(room, None, &tx).await?);
     }
     Ok(Merged { id: union.room_id().to_owned(), lanes, target: ids.first().cloned(), merge, _task: AbortOnDrop(task) })
 }

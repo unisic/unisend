@@ -116,10 +116,36 @@ gpui_kit::assets::icon_assets!(
     ]
 );
 
+/// Chat networks' marks (assets/networks/README.md): the slug, the network names that take it
+/// (lowercase), the brand color (0: the text color, for a black mark) and the SVG, about 1 KB each.
+pub(crate) const NETWORK_MARKS: [(&str, &[&str], u32, &[u8]); 12] = [
+    ("whatsapp", &["whatsapp"], 0x25D366, include_bytes!("../assets/networks/whatsapp.svg")),
+    ("signal", &["signal"], 0x3B45FD, include_bytes!("../assets/networks/signal.svg")),
+    ("telegram", &["telegram"], 0x26A5E4, include_bytes!("../assets/networks/telegram.svg")),
+    ("messenger", &["messenger", "facebook messenger", "facebook"], 0x0866FF, include_bytes!("../assets/networks/messenger.svg")),
+    ("instagram", &["instagram"], 0xFF0069, include_bytes!("../assets/networks/instagram.svg")),
+    ("discord", &["discord"], 0x5865F2, include_bytes!("../assets/networks/discord.svg")),
+    ("x", &["x", "twitter"], 0x000000, include_bytes!("../assets/networks/x.svg")),
+    ("googlemessages", &["google messages"], 0x1A73E8, include_bytes!("../assets/networks/googlemessages.svg")),
+    ("imessage", &["imessage"], 0x34DA50, include_bytes!("../assets/networks/imessage.svg")),
+    ("googlechat", &["google chat"], 0x34A853, include_bytes!("../assets/networks/googlechat.svg")),
+    ("bluesky", &["bluesky"], 0x1185FE, include_bytes!("../assets/networks/bluesky.svg")),
+    ("line", &["line"], 0x00C300, include_bytes!("../assets/networks/line.svg")),
+];
+
+/// The asset path and brand color of a network's mark, by the name a chat row has for it.
+pub(crate) fn network_mark(name: &str) -> Option<(SharedString, u32)> {
+    let name = name.to_lowercase();
+    NETWORK_MARKS.iter().find(|(_, names, ..)| names.contains(&name.as_str())).map(|(slug, _, color, _)| (format!("networks/{slug}.svg").into(), *color))
+}
+
 struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some((.., svg)) = path.strip_prefix("networks/").and_then(|file| NETWORK_MARKS.iter().find(|(slug, ..)| file.strip_suffix(".svg") == Some(slug))) {
+            return Ok(Some(std::borrow::Cow::Borrowed(svg)));
+        }
         match ExtraIcons.load(path)? {
             Some(bytes) => Ok(Some(bytes)),
             None => gpui_kit::assets::Assets.load(path),
@@ -178,12 +204,21 @@ fn open(cx: &mut App, dir: PathBuf, window_bounds: Option<WindowBounds>) {
     cx.activate(true);
 }
 
+/// The developer build (UNISEND_DEV=1 at compile time) is a separate app beside the installed one:
+/// its own name, gray icon (packaging/linux/icons-dev), launcher, data directory and instance.
+pub(crate) const APP_NAME: &str = if backend::update::DEV { "Unisend Dev" } else { "Unisend" };
+/// The Wayland app id, notification app and launcher name.
+pub(crate) const APP_ID: &str = if backend::update::DEV { "dev.gpui.beeper.dev" } else { "dev.gpui.beeper" };
+/// The folder under the platform's data and cache directories; Android's app id keeps them apart.
+#[cfg(not(target_os = "android"))]
+pub(crate) const DATA_NAME: &str = if backend::update::DEV { "beeper-gpui-dev" } else { "beeper-gpui" };
+
 fn window_options(window_bounds: Option<WindowBounds>) -> WindowOptions {
     WindowOptions {
         window_bounds,
-        titlebar: Some(TitlebarOptions { title: Some("Unisend".into()), ..Default::default() }),
-        // Wayland app id; matches packaging/linux/dev.gpui.beeper.desktop so the shell finds the icon.
-        app_id: Some("dev.gpui.beeper".into()),
+        titlebar: Some(TitlebarOptions { title: Some(APP_NAME.into()), ..Default::default() }),
+        // Wayland app id; matches the launcher packaging/linux/install.sh writes, so the shell finds the icon.
+        app_id: Some(APP_ID.into()),
         // The app draws its own title bar (`ui/frame.rs`); a compositor that insists on drawing one wins.
         #[cfg(target_os = "linux")]
         window_decorations: Some(WindowDecorations::Client),
@@ -717,7 +752,7 @@ pub fn run_desktop() {
     let dir = std::env::var_os("BEEPER_GPUI_DATA_DIR")
         .map(PathBuf::from)
         // Local, not roaming, on Windows: the store is large and belongs to one device.
-        .or_else(|| dirs::data_local_dir().map(|d| d.join("beeper-gpui")))
+        .or_else(|| dirs::data_local_dir().map(|d| d.join(DATA_NAME)))
         .expect("no data directory");
     private_dir(&dir).expect("create data directory");
     let Some(claim) = instance::claim(&dir) else { return };
@@ -1697,6 +1732,20 @@ mod tests {
         assert_eq!(super::free_name(&dir, "a.jpg"), dir.join("a (3).jpg"));
         assert_eq!(super::free_name(&dir, "b"), dir.join("b (2)"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_network_mark_loads_and_a_chat_row_name_finds_its_mark() {
+        for (slug, ..) in super::NETWORK_MARKS {
+            let svg = Assets.load(&format!("networks/{slug}.svg")).unwrap().unwrap_or_else(|| panic!("{slug} loads"));
+            assert!(svg.starts_with(b"<svg") && svg.trim_ascii_end().ends_with(b"</svg>"), "{slug} is an SVG");
+        }
+        let slug = |name: &str| super::network_mark(name).map(|(path, _)| path.to_string());
+        assert_eq!(slug("WhatsApp").as_deref(), Some("networks/whatsapp.svg"));
+        assert_eq!(slug("Messenger").as_deref(), Some("networks/messenger.svg"));
+        assert_eq!(slug("Twitter").as_deref(), Some("networks/x.svg"));
+        assert_eq!(slug("Slack"), None);
+        assert_eq!(slug("Matrix"), None);
     }
 
     #[test]

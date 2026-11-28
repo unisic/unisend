@@ -65,9 +65,16 @@ the user's own folders, and Low priority last. Settings, Chats, Chat folders hid
 makes, renames, orders and deletes the user's folders; a chat joins one from its sheet, "Add to folder".
 The folders and the chip last chosen are kept on this device only, in `settings.json`.
 
+On a desktop, Tab walks the icon buttons and Enter or Space presses them; the button under the
+keyboard gets a 2 px `accent` border, which a pointer never shows. The chat list and the messages
+are one Tab stop each: the arrows, Home, End, Page Up and Page Down move a ring (2 px `accent`,
+radius 8) through their rows, Enter opens the chat or the message's actions, whose first act takes
+the focus. Every icon button, row and act carries a role and a spoken label for a screen reader.
+
 ## Chat list
 
-Rows 72 tall, avatar 48. Line one: the name, then the network and the time on the right in
+Rows 72 tall, avatar 48, with the network's mark (12, its brand color, black marks in `text`) on
+a `ground` disc over the avatar's lower right corner. Line one: the name, then the network and the time on the right in
 `faint`. Line two: the preview in `muted`, then what needs you: an accent count, an accent `@`
 when you were mentioned. Unread rows have a white bold name and a white preview. A muted chat
 counts every unread message (push rules count none there) in a gray `raised` pill, and stays out

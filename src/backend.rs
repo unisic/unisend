@@ -48,7 +48,7 @@ use matrix_sdk::{
             room::{
                 EncryptedFile, MediaSource,
                 message::{
-                    AddMentions, MessageFormat, MessageType, Relation, RoomMessageEventContent, TextMessageEventContent,
+                    AddMentions, MessageFormat, MessageType, Relation, ReplyWithinThread, RoomMessageEventContent, TextMessageEventContent,
                     sanitize::remove_plain_reply_fallback,
                 },
             },
@@ -123,6 +123,8 @@ pub enum Cmd {
     /// A notification as a message brings one, with the user's picture, to try its look and buttons.
     TestNotice,
     Open(OwnedRoomId),
+    /// Shows one thread of the open chat instead of it, by the thread's first message; `Open` goes back.
+    OpenThread(OwnedRoomId, String),
     /// The conversation left the screen.
     Close,
     LoadOlder,
@@ -572,6 +574,8 @@ pub struct Msg {
     pub link: Option<Link>,
     /// One per emoji, in the order they were first used.
     pub reactions: Vec<Reaction>,
+    /// Replies in the thread this message starts (`m.thread`); they are not rows of the chat.
+    pub replies: u32,
     /// Where a message of the user's is on its way to the others.
     pub delivery: Delivery,
     /// The other people whose read receipt stands on this row, with when they sent it (ms, 0 when
@@ -686,6 +690,7 @@ impl Msg {
             to_me: Vec::new(),
             link: None,
             reactions: Vec::new(),
+            replies: 0,
             delivery: Delivery::Sent,
             seen: Vec::new(),
             disappear: 0,
@@ -1197,6 +1202,9 @@ impl State {
             .sqlite_store_with_config_and_cache_path(store, None::<PathBuf>)
             .http_client(self.http.clone())
             .with_encryption_settings(e2ee)
+            // Counts a thread's replies on its first message (`Msg::replies`); a reply in a thread no
+            // longer makes the chat unread on its own. No MSC4306 subscriptions.
+            .with_threading_support(matrix_sdk::ThreadingSupport::Enabled { with_subscriptions: false })
             .handle_refresh_tokens()
     }
 
@@ -1618,6 +1626,12 @@ impl State {
                 };
                 self.emit(Ev::RecoveryCode(made)).await;
             }
+            Cmd::OpenThread(room_id, root) => {
+                self.open = None;
+                let open = timeline::open(&self.room(&room_id)?, Some(EventId::parse(root)?), &self.ev).await?;
+                self.older(&open, true);
+                self.open = Some(open);
+            }
             Cmd::Open(room_id) => {
                 // The old conversation stops being followed before the new one starts.
                 (self.open, self.merged) = (None, None);
@@ -1641,7 +1655,7 @@ impl State {
                     self.merged = Some(merged);
                     return Ok(());
                 }
-                let open = timeline::open(&room, &self.ev).await?;
+                let open = timeline::open(&room, None, &self.ev).await?;
                 self.older(&open, true);
                 self.open = Some(open);
             }
@@ -1844,13 +1858,14 @@ impl State {
                     Cmd::AttachMedia { room, path, reply_to, caption, hd } => (room, path, reply_to, caption, hd),
                     _ => unreachable!("matched above"),
                 };
+                let reply = self.reply(&room, reply_to.clone())?;
                 // `Attached` follows every attachment, sent or not: the next one waits for it.
                 let target = self.room(&room);
                 let ev = self.ev.clone();
                 let pasted = self.pasted_folder(&path);
                 tokio::spawn(async move {
                     let sent = match target {
-                        Ok(target) => attach(&target, &path, reply_to.clone(), &caption, hd).await,
+                        Ok(target) => attach(&target, &path, reply, &caption, hd).await,
                         Err(e) => Err(e),
                     };
                     let why = sent.as_ref().err().and_then(|e| e.downcast_ref::<mp4::Unfit>().copied());
@@ -1875,6 +1890,7 @@ impl State {
                 });
             }
             Cmd::Mp4 { room, path, reply_to, caption } => {
+                let reply = self.reply(&room, reply_to)?;
                 let target = self.room(&room);
                 let ev = self.ev.clone();
                 let pasted = self.pasted_folder(&path);
@@ -1887,7 +1903,7 @@ impl State {
                         let out = scratch.join("video.mp4");
                         let (source, made) = (path.clone(), out.clone());
                         tokio::task::spawn_blocking(move || mp4::convert(&source, &made)).await??;
-                        attach(&target, &out, reply_to, &caption, true).await
+                        attach(&target, &out, reply, &caption, true).await
                     }
                     .await;
                     for folder in std::iter::once(scratch).chain(pasted) {
@@ -2046,16 +2062,14 @@ impl State {
                     self.link_made.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take().filter(|p| p.url == url)
                 });
                 if let Some(made) = made {
+                    let reply = self.reply(&room, reply_to)?;
                     let (room, ev) = (self.room(&room)?, self.ev.clone());
                     // shortcut: a message sent while this picture uploads can arrive before it; upload
                     // as the preview is made if users hit that, at the cost of unsent pictures on the server.
                     tokio::spawn(async move {
                         let sent = async {
-                            let content = match reply_to {
-                                Some(id) => {
-                                    let reply = matrix_sdk::room::reply::Reply { event_id: EventId::parse(id)?, enforce_thread: matrix_sdk::room::reply::EnforceThread::MaybeThreaded, add_mentions: matrix_sdk::ruma::events::room::message::AddMentions::Yes };
-                                    room.make_reply_event(text, reply).await?
-                                }
+                            let content = match reply {
+                                Some(reply) => room.make_reply_event(text, reply).await?,
                                 None => RoomMessageEventContent::from(text),
                             };
                             let mut content = serde_json::to_value(content)?;
@@ -2251,11 +2265,12 @@ impl State {
             }
             Cmd::SendGif { room, gif, query, reply_to } => {
                 let network = self.rooms.lock().unwrap().get(&room).and_then(|r| r.network.clone());
+                let reply = self.reply(&room, reply_to)?;
                 let room = self.room(&room);
                 let (http, ev) = (self.http.clone(), self.ev.clone());
                 tokio::spawn(async move {
                     let sent = match room {
-                        Ok(room) => gifs::send(&http, &room, &gif, &query, network.as_deref(), reply_to).await,
+                        Ok(room) => gifs::send(&http, &room, &gif, &query, network.as_deref(), reply).await,
                         Err(e) => Err(e),
                     };
                     if let Err(e) = sent {
@@ -2312,11 +2327,12 @@ impl State {
             }
             Cmd::Voice { room, path, duration, levels, reply_to } => {
                 // Sent through the attachment queue: `Attached` follows it as well.
+                let reply = self.reply(&room, reply_to)?;
                 let room = self.room(&room);
                 let ev = self.ev.clone();
                 tokio::spawn(async move {
                     let sent = match room {
-                        Ok(room) => voice::send(&room, &path, duration, levels, reply_to).await,
+                        Ok(room) => voice::send(&room, &path, duration, levels, reply).await,
                         Err(e) => Err(e),
                     };
                     if let Err(e) = sent {
@@ -2500,6 +2516,21 @@ impl State {
             }
             let _ = ev.send(Ev::Paged { room: id, more }).await;
         });
+    }
+
+    /// How a message sent outside the timeline (a file, voice, GIF, a text with its preview) answers:
+    /// to `reply_to`, and inside the thread shown, if one is.
+    fn reply(&self, room: &RoomId, reply_to: Option<String>) -> Result<Option<Reply>> {
+        let thread = self.open.as_ref().filter(|open| open.room == room).and_then(|open| open.thread.clone());
+        let to = reply_to.map(EventId::parse).transpose()?;
+        let enforce_thread = match (&thread, &to) {
+            (Some(_), Some(_)) => EnforceThread::Threaded(ReplyWithinThread::Yes),
+            (Some(_), None) => EnforceThread::Threaded(ReplyWithinThread::No),
+            (None, _) => EnforceThread::MaybeThreaded,
+        };
+        // In a thread with nothing quoted, the reply goes to the thread's first message, which the
+        // thread relation then carries without quoting it.
+        Ok(to.or(thread).map(|event_id| Reply { event_id, enforce_thread, add_mentions: AddMentions::Yes }))
     }
 
     /// Access to Beeper's account API and the bridges behind the homeserver.
@@ -2845,7 +2876,7 @@ async fn looping(client: &Client, media: &Media, id: &str, dir: &Path, generatio
 /// send queue uploads it, keeps it across restarts and offers a retry when it fails. A picture
 /// goes out scaled down and without metadata unless `hd`; `caption` becomes the message's body
 /// (MSC2530), or a text message right after it where the network drops captions of that type.
-async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &str, hd: bool) -> Result<()> {
+async fn attach(room: &Room, path: &Path, reply: Option<Reply>, caption: &str, hd: bool) -> Result<()> {
     let size = tokio::fs::metadata(path).await?.len();
     if size > MAX_UPLOAD {
         return Err(anyhow!(t!("the file is larger than {mb} MB", mb = MAX_UPLOAD / 1024 / 1024)));
@@ -2947,14 +2978,7 @@ async fn attach(room: &Room, path: &Path, reply_to: Option<String>, caption: &st
     if !caption.is_empty() && !apart {
         config = config.caption(Some(TextMessageEventContent::plain(caption)));
     }
-    if let Some(id) = reply_to {
-        let reply = Reply {
-            event_id: EventId::parse(id)?,
-            enforce_thread: EnforceThread::MaybeThreaded,
-            add_mentions: AddMentions::Yes,
-        };
-        config = config.reply(Some(reply));
-    }
+    config = config.reply(reply);
     let queue = room.send_queue();
     queue.send_attachment(name, mime, data, config).await?;
     if apart {

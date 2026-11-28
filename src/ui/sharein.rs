@@ -296,7 +296,7 @@ impl BeeperApp {
             .pl(px(GUTTER - 10.))
             .pr(px(GUTTER))
             .gap(px(4.))
-            .child(round_button("share-close", IconName::X, cx).on_click(cx.listener(|this, _, _, cx| this.close_share(cx))))
+            .child(round_button("share-close", IconName::X, t!("Close"), cx).on_click(cx.listener(|this, _, _, cx| this.close_share(cx))))
             .child(div().flex_1().min_w_0().child(screen_title(t!("Send to"))));
 
         let status = if s.copying > 0 {

@@ -48,7 +48,7 @@ const RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 const RETRY_SOON: Duration = Duration::from_secs(5);
 /// macOS takes the bundle's identifier, the same.
 #[cfg(not(target_os = "macos"))]
-const APP_ID: &str = "dev.gpui.beeper";
+use crate::APP_ID;
 
 enum Req {
     Show { chat: String, name: String, icon: String, id: String, line: String, alert: bool, quiet: bool, kind: crate::tones::Kind },
@@ -170,7 +170,7 @@ pub(crate) fn attach(window: AnyWindowHandle, app: WeakEntity<crate::ui::BeeperA
     // A window that never had the focus since it opened (started behind others) is not in front.
     let _ = window.update(cx, |_, window, _| crate::FOREGROUND.store(window.is_window_active(), Ordering::Relaxed));
     #[cfg(target_os = "windows")]
-    cx.set_app_identity(APP_ID, "Unisend");
+    cx.set_app_identity(APP_ID, crate::APP_NAME);
     #[cfg(target_os = "macos")]
     macos::attach(cx);
     // GPUI waits a moment for this before the process ends.

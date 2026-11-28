@@ -18,7 +18,15 @@ the app's own crate compiles again, in parallel (`Cargo.toml` says how). Shipped
 Needs a stable Rust toolchain and the development packages for xcb, xkbcommon (with x11),
 fontconfig, freetype, wayland and GStreamer (voice messages, below). A second copy on the same
 data directory hands over to the first and ends (`src/instance.rs`): run a test copy with
-`BEEPER_GPUI_DATA_DIR` set ([development.md](../development.md)).
+`BEEPER_GPUI_DATA_DIR` set ([development.md](../development.md)), or build the developer copy.
+
+The developer copy: `UNISEND_DEV=1` on `cargo build` (or `cargo run`) and on `install.sh` makes
+"Unisend Dev", app id `dev.gpui.beeper.dev`, with a gray icon (`packaging/linux/icons-dev`), its own
+launcher, `~/.local/bin/beeper-gpui-dev` and data in `~/.local/share/beeper-gpui-dev`. It runs
+beside the installed Unisend with its own sign-in. Both share `~/.local/bin/beeper-gpui-weblogin`.
+
+    UNISEND_DEV=1 cargo build --profile fast
+    UNISEND_DEV=1 packaging/linux/install.sh target/fast/beeper-gpui
 
 Fedora without `libxkbcommon-x11-devel`: the linker needs the unversioned `libxkbcommon-x11.so`.
 Without root:

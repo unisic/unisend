@@ -110,6 +110,7 @@ pub(super) struct Press {
 #[derive(Clone, PartialEq, Debug)]
 pub(super) enum Act {
     Reply,
+    Thread,
     React,
     Retry,
     Link(String),
@@ -133,6 +134,7 @@ impl Act {
     fn look(&self) -> (&'static str, IconName, &'static str) {
         match self {
             Act::Reply => ("act-reply", IconName::Reply, t!("Reply")),
+            Act::Thread => ("act-thread", IconName::Reply, t!("Reply in thread")),
             Act::React => ("act-react", IconName::Heart, t!("React")),
             Act::Retry => ("act-retry", IconName::RotateCw, t!("Try again")),
             Act::Link(_) => ("act-link", IconName::ExternalLink, t!("Open link")),
@@ -194,6 +196,7 @@ fn taken(mut acts: Vec<Act>, m: &Msg, caps: &Features) -> Vec<Act> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
     acts.retain(|act| match act {
         Act::Reply => caps.reply >= 1,
+        Act::Thread => caps.thread >= 1,
         Act::React => caps.reaction >= 1,
         Act::Edit => caps.editable(m.ts, now),
         _ => true,
@@ -201,12 +204,13 @@ fn taken(mut acts: Vec<Act>, m: &Msg, caps: &Features) -> Vec<Act> {
     acts
 }
 
-/// Forward, Select, Reactions (when it has any) and Info, for a message that reached the server.
+/// Reply in thread, Forward, Select, Reactions (when it has any) and Info, for a message that
+/// reached the server.
 fn more_acts(m: &Msg) -> Vec<Act> {
     if !m.id.starts_with('$') {
         return Vec::new();
     }
-    let mut out = Vec::new();
+    let mut out = vec![Act::Thread];
     out.extend(super::forward::forwardable(m).then_some(Act::Forward));
     out.push(Act::Select);
     // Who reacted, without a long press on a badge, where a slip toggles a reaction.
@@ -397,8 +401,11 @@ impl MessageMenu {
 
 impl BeeperApp {
     /// Pin or Unpin before Select, for a message that reached the server where the user's power
-    /// level allows `m.room.pinned_events`.
+    /// level allows `m.room.pinned_events`; no Reply in thread inside a thread.
     fn with_pin(&self, mut acts: Vec<Act>, m: &Msg) -> Vec<Act> {
+        if self.thread.is_some() {
+            acts.retain(|a| *a != Act::Thread);
+        }
         if let Some(pinned) = self.pin_offer(&m.id).filter(|_| m.id.starts_with('$') && !m.deleted) {
             let at = acts.iter().position(|a| *a == Act::Select).unwrap_or(acts.len());
             acts.insert(at, if pinned { Act::Unpin } else { Act::Pin });
@@ -719,6 +726,7 @@ impl BeeperApp {
     pub(super) fn act(&mut self, id: &str, act: Act, window: &mut Window, cx: &mut Context<Self>) {
         match act {
             Act::Reply => self.start_compose(Compose::Reply(id.to_owned()), window, cx),
+            Act::Thread => self.switch_thread(Some(id.to_owned()), cx),
             Act::Edit => self.start_compose(Compose::Edit(id.to_owned()), window, cx),
             Act::React => {
                 let at = self.menu.as_ref().map_or_else(Point::default, |m| m.at);
@@ -808,6 +816,11 @@ impl BeeperApp {
                 let id = id.to_owned();
                 h_flex()
                     .id(name)
+                    .role(Role::MenuItem)
+                    .aria_label(label)
+                    // The first act takes the focus when the keyboard opened the menu.
+                    .when(n == 0 && !gpui_kit::is_mobile(), |el| el.track_focus(&self.keynav.menu))
+                    .when(!gpui_kit::is_mobile(), |el| super::keynav::reachable(el, cx))
                     .h(px(h))
                     .px(px(GUTTER))
                     .gap(px(GUTTER))
@@ -977,8 +990,8 @@ impl BeeperApp {
             let shown = if still { 1. } else { ease_out_expo(phase(t, 10. * n as f32, 400.)) };
             let grow = (!still && hover == Some(n)) as u8 as f32;
             let grow = transition((("pick", n), "grow"), grow, Transition::new(Duration::from_millis(120)).easing(motion::EASE_OUT), window, cx);
-            // The cell, its ring and its hover stay in the bar; only the emoji rises and grows, so the
-            // ring never leaves the pill and the pointer never loses the cell it lifted.
+            // The cell, its disc and its hover stay in the bar; only the emoji rises and grows, so the
+            // disc never leaves the pill and the pointer never loses the cell it lifted.
             div()
                 .id(("picker-reaction", n))
                 .relative()

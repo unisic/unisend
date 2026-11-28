@@ -757,7 +757,7 @@ impl BeeperApp {
                         .pl(px(GUTTER))
                         .child(div().flex_1().min_w_0().text_size(fs(14.)).text_color(p.muted).child(t!("Voice messages need the microphone.")))
                         .child(Button::new("mic-allow").primary().h(px(TAP)).label(t!("Allow")).on_click(cx.listener(|this, _, _, cx| this.ask_mic(cx))))
-                        .child(round_button("mic-dismiss", IconName::X, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| {
+                        .child(round_button("mic-dismiss", IconName::X, t!("Close"), cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| {
                             this.voice.denied = false;
                             cx.notify();
                         })))
@@ -808,7 +808,7 @@ impl BeeperApp {
                     std::iter::repeat_n(0., LIVE_BARS - tail.len()).chain(tail.iter().copied()).collect()
                 };
                 bar()
-                    .child(round_button("rec-delete", IconName::Trash, cx).text_color(p.negative).on_click(cx.listener(|this, _, _, cx| this.cancel_recording(cx))))
+                    .child(round_button("rec-delete", IconName::Trash, t!("Delete recording"), cx).text_color(p.negative).on_click(cx.listener(|this, _, _, cx| this.cancel_recording(cx))))
                     .when(stopped, |el| {
                         let playing = draft.is_some_and(|d| d.playing);
                         el.child(play_button(playing, rec.state == RecState::Stopped(None), p).on_click(cx.listener(|this, _, _, cx| this.toggle_play(DRAFT, None, cx))))
@@ -818,7 +818,7 @@ impl BeeperApp {
                     .when(stopped, |el| el.child(div().flex_none().text_size(fs(12.)).font_features(tabular()).text_color(p.muted).child(length(elapsed))))
                     .when(!stopped, |el| {
                         el.child(
-                            round_button("rec-stop", IconName::Square, cx)
+                            round_button("rec-stop", IconName::Square, t!("Stop recording"), cx)
                                 .text_color(p.negative)
                                 .on_click(cx.listener(|this, _, _, cx| this.stop_recording(false, cx))),
                         )

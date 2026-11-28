@@ -657,7 +657,7 @@ impl BeeperApp {
             .px(px(GUTTER - 10.))
             .justify_between()
             .text_color(white)
-            .child(round_button("edit-close", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| {
+            .child(round_button("edit-close", IconName::X, t!("Close"), cx).on_click(cx.listener(|this, _, window, cx| {
                 window.blur(cx);
                 this.close_editor(cx);
             })))
@@ -666,7 +666,7 @@ impl BeeperApp {
                     .gap(px(8.))
                     .items_center()
                     .child(
-                        round_button("edit-undo", IconName::Undo2, cx)
+                        round_button("edit-undo", IconName::Undo2, t!("Undo"), cx)
                             .when(!can_undo, |el| el.opacity(0.4))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if can_undo {
@@ -799,7 +799,7 @@ impl BeeperApp {
                 .child(t!("Blur faces"))
         });
         let turn = (ed.tool == Tool::Crop).then(|| {
-            round_button("edit-turn", IconName::RotateCw, cx).text_color(white).on_click(cx.listener(|this, _, _, cx| this.turn_edit(cx)))
+            round_button("edit-turn", IconName::RotateCw, t!("Rotate"), cx).text_color(white).on_click(cx.listener(|this, _, _, cx| this.turn_edit(cx)))
         });
         let options = h_flex()
             .id("edit-options")

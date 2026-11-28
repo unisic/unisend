@@ -31,7 +31,7 @@ use matrix_sdk::{
 use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
     AnyOtherStateEventContentChange, EncryptedMessage, EventSendState, EventTimelineItem, InReplyToDetails, MembershipChange, MsgLikeKind, PollState,
-    Profile, RoomMembershipChange, Timeline, TimelineBuilder, TimelineDetails, TimelineEventItemId, TimelineItem, TimelineItemContent,
+    Profile, RoomMembershipChange, Timeline, TimelineBuilder, TimelineDetails, TimelineEventItemId, TimelineFocus, TimelineItem, TimelineItemContent,
     TimelineItemKind, TimelineReadReceiptTracking, VirtualTimelineItem, default_event_filter,
 };
 use tokio::sync::{broadcast, mpsc};
@@ -68,6 +68,8 @@ const LINE_MAX: usize = 120;
 /// The conversation on screen. Dropping it stops following the room.
 pub(super) struct Open {
     pub room: OwnedRoomId,
+    /// The thread shown instead of the chat, by its first message.
+    pub thread: Option<OwnedEventId>,
     pub timeline: Arc<Timeline>,
     /// Builds every row again, as after a change of the interface language.
     pub relabel: Arc<tokio::sync::Notify>,
@@ -89,9 +91,10 @@ struct Viewer {
     unlocked: std::sync::Mutex<HashMap<String, Quote>>,
 }
 
-/// Starts following a room: sends the rows it has now, then every change to them, and who is
-/// typing. While the window is in front, a message that arrives is marked read.
-pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>) -> Result<Open> {
+/// Starts following a room, or one thread of it: sends the rows it has now, then every change to
+/// them, and who is typing. While the window is in front, a message that arrives is marked read.
+/// The chat leaves out the replies in threads; its first message counts them (`Msg::replies`).
+pub(super) async fn open(room: &Room, thread: Option<OwnedEventId>, ev: &mpsc::Sender<Ev>) -> Result<Open> {
     // A note to self reads like a direct chat: no "You created the group" line on top.
     let dm = other_person(room).await.is_some() || super::is_note(room).await;
     // Past this many people, who comes and goes is noise: Beeper draws the same line.
@@ -103,7 +106,12 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>) -> Result<Open> {
         creators: room.creators().unwrap_or_default(),
         unlocked: Default::default(),
     });
+    let focus = match thread.clone() {
+        Some(root_event_id) => TimelineFocus::Thread { root_event_id },
+        None => TimelineFocus::Live { hide_threaded_events: true },
+    };
     let timeline = TimelineBuilder::new(room)
+        .with_focus(focus)
         .track_read_marker_and_receipts(TimelineReadReceiptTracking::AllEvents)
         .event_filter({
             let viewer = viewer.clone();
@@ -253,7 +261,7 @@ pub(super) async fn open(room: &Room, ev: &mpsc::Sender<Ev>) -> Result<Open> {
     let _features = follow_features(room, ev).await;
     let _pins = super::pins::follow(room, ev).await;
     let _tasks = [AbortOnDrop(rows), AbortOnDrop(lookup), AbortOnDrop(typing), AbortOnDrop(reads), AbortOnDrop(identities)];
-    Ok(Open { room: id, timeline, relabel, _tasks, _features, _pins })
+    Ok(Open { room: id, thread, timeline, relabel, _tasks, _features, _pins })
 }
 
 /// Reads only what the SDK keeps; never sends a receipt.
@@ -510,6 +518,7 @@ fn event_row(event: &EventTimelineItem, viewer: &Viewer) -> Msg {
                     by: by.keys().filter(|user| **user != viewer.own).take(MAX_SEEN).cloned().collect(),
                 })
                 .collect();
+            m.replies = like.thread_summary.as_ref().map_or(0, |t| t.num_replies);
             let timer = json.as_ref().and_then(|c| c.get(disappear::TIMER)).map(disappear::timer);
             m.disappear = timer.map_or(0, |(ms, _)| ms);
             match &like.kind {

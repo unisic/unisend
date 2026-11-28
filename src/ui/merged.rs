@@ -295,7 +295,7 @@ impl BeeperApp {
                         .child(t!("Merge"))
                         .on_click(cx.listener(move |this, _, _, cx| this.merge(rooms.clone(), cx))),
                 )
-                .child(round_button("merge-dismiss", IconName::X, cx).on_click(cx.listener(move |this, _, _, cx| {
+                .child(round_button("merge-dismiss", IconName::X, t!("Close"), cx).on_click(cx.listener(move |this, _, _, cx| {
                     if this.merged.dismissed.len() < MAX_DISMISSED {
                         this.merged.dismissed.insert(id.clone());
                     }

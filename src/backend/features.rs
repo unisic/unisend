@@ -19,6 +19,8 @@ pub struct Features {
     pub location: i64,
     pub poll: i64,
     pub reply: i64,
+    /// Replies in a thread (`m.thread`); a bridge that lists no level flattens them, so it takes none.
+    pub thread: i64,
     pub edit: i64,
     /// Seconds after sending past which the network takes no edit or deletion.
     pub edit_max_age: Option<u64>,
@@ -57,6 +59,7 @@ impl Features {
         location: 2,
         poll: 2,
         reply: 2,
+        thread: 2,
         edit: 2,
         edit_max_age: None,
         delete: 2,
@@ -138,6 +141,7 @@ struct Wire {
     poll_max_options: i64,
     max_text_length: i64,
     reply: i64,
+    thread: i64,
     edit: i64,
     edit_max_age: Option<f64>,
     delete: i64,
@@ -188,6 +192,7 @@ pub fn parse(content: &Value) -> Features {
         location: wire.location_message,
         poll: wire.poll,
         reply: wire.reply,
+        thread: wire.thread,
         edit: wire.edit,
         edit_max_age: age(wire.edit_max_age),
         delete: wire.delete,
@@ -332,7 +337,8 @@ mod tests {
     #[test]
     fn whatsapp_announcement_group_takes_no_reply() {
         let f = parse(&json!({ "reply": 0, "thread": 2, "edit": 2, "delete": 2, "reaction": 2 }));
-        assert_eq!(f.reply, 0);
+        assert_eq!((f.reply, f.thread), (0, 2));
+        assert_eq!(parse(&json!({ "reply": 2 })).thread, 0, "a bridge that lists no thread level takes none");
         assert!(!f.file && !f.contact && !f.voice && !f.gif(false) && !f.gif(true), "no file map, no files");
     }
 

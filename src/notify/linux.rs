@@ -87,7 +87,7 @@ impl Sink {
         } else {
             hints.insert("suppress-sound", true.into());
         }
-        let args = ("Unisend", entry.id, APP_ID, entry.name.as_str(), body, actions, hints, -1i32);
+        let args = (crate::APP_NAME, entry.id, APP_ID, entry.name.as_str(), body, actions, hints, -1i32);
         match self.proxy.call("Notify", &args).await {
             Ok(id) => {
                 if id != entry.id {

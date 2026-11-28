@@ -1,5 +1,6 @@
 //! Chat folders as Signal has them: chips over the chat list. The built-in ones (All, Unread,
-//! Direct, Groups, one per chat network, Low priority) are computed from the chats; the custom
+//! Direct, Groups, Unanswered, Drafts, one per chat network, Low priority) are computed from the
+//! chats and the drafts on this device; the custom
 //! ones are a name and a set of chats the user picks. Custom folders, the hidden built-ins and the
 //! chosen chip live in `settings.json` on this device and nowhere else.
 
@@ -32,6 +33,10 @@ pub(crate) enum Pick {
     Unread,
     Direct,
     Groups,
+    /// Direct chats whose newest message is someone else's.
+    Unanswered,
+    /// Chats with a draft on this device.
+    Drafts,
     /// A chat network, by the name the chat row shows.
     Network(String),
     /// A custom folder, by its `id`.
@@ -54,19 +59,23 @@ pub(crate) enum Builtin {
     Unread,
     Direct,
     Groups,
+    Unanswered,
+    Drafts,
     /// The chips of the chat networks, as one switch.
     Networks,
     LowPriority,
 }
 
 impl Builtin {
-    const ALL: [Self; 5] = [Self::Unread, Self::Direct, Self::Groups, Self::Networks, Self::LowPriority];
+    const ALL: [Self; 7] = [Self::Unread, Self::Direct, Self::Groups, Self::Unanswered, Self::Drafts, Self::Networks, Self::LowPriority];
 
     fn label(self) -> &'static str {
         match self {
             Self::Unread => t!("Unread"),
             Self::Direct => t!("Direct"),
             Self::Groups => t!("Groups"),
+            Self::Unanswered => t!("Unanswered"),
+            Self::Drafts => t!("Drafts"),
             Self::Networks => t!("Networks"),
             Self::LowPriority => t!("Low priority"),
         }
@@ -77,6 +86,8 @@ impl Builtin {
             Self::Unread => "folder-show-unread",
             Self::Direct => "folder-show-direct",
             Self::Groups => "folder-show-groups",
+            Self::Unanswered => "folder-show-unanswered",
+            Self::Drafts => "folder-show-drafts",
             Self::Networks => "folder-show-networks",
             Self::LowPriority => "folder-show-low",
         }
@@ -96,28 +107,34 @@ fn networks(rooms: &[RoomSummary]) -> Vec<String> {
     names
 }
 
-/// Whether a chat is in what `pick` narrows the list to; the section (inbox, low priority) and the
-/// search are the caller's.
-fn matches(pick: &Pick, folders: &[Folder], r: &RoomSummary) -> bool {
+/// Whether a chat is in what `pick` narrows the list to (`drafted`: it has a draft); the section
+/// (inbox, low priority) and the search are the caller's.
+fn matches(pick: &Pick, folders: &[Folder], drafted: bool, r: &RoomSummary) -> bool {
     match pick {
         Pick::All | Pick::LowPriority => true,
         Pick::Unread => r.is_unread(),
         Pick::Direct => r.dm,
         Pick::Groups => !r.dm,
+        Pick::Unanswered => r.dm && !r.note && !r.own_last && r.preview.is_some() && r.pending.is_none(),
+        Pick::Drafts => drafted,
         Pick::Network(name) => network_of(r) == name,
         Pick::Custom(id) => folders.iter().find(|f| f.id == *id).is_some_and(|f| f.rooms.contains(&r.id)),
     }
 }
 
-/// The chips, in order: All, Unread, Direct, Groups, one per network (when there are two or more),
-/// the custom folders, and Low priority last: it is where chats are put away, so it is the one
-/// the user reaches for least and the row's end is where it costs the others least.
-fn chips(settings: &crate::Settings, rooms: &[RoomSummary]) -> Vec<Pick> {
+/// The chips, in order: All, Unread, Direct, Groups, Unanswered and Drafts (while a chat is in
+/// them), one per network (when there are two or more), the custom folders, and Low priority last:
+/// it is where chats are put away, so it is the one the user reaches for least and the row's end
+/// is where it costs the others least. `drafted` says whether a chat has a draft.
+fn chips(settings: &crate::Settings, rooms: &[RoomSummary], drafted: &dyn Fn(&OwnedRoomId) -> bool) -> Vec<Pick> {
     let shown = |b: Builtin| !settings.folders_hidden.contains(&b);
+    let any = |pick: &Pick| rooms.iter().any(|r| in_view(View::Inbox, r) && matches(pick, &[], drafted(&r.id), r));
     let mut out = vec![Pick::All];
     out.extend(shown(Builtin::Unread).then_some(Pick::Unread));
     out.extend(shown(Builtin::Direct).then_some(Pick::Direct));
     out.extend(shown(Builtin::Groups).then_some(Pick::Groups));
+    out.extend((shown(Builtin::Unanswered) && any(&Pick::Unanswered)).then_some(Pick::Unanswered));
+    out.extend((shown(Builtin::Drafts) && any(&Pick::Drafts)).then_some(Pick::Drafts));
     if shown(Builtin::Networks) {
         let names = networks(rooms);
         if names.len() >= 2 {
@@ -132,12 +149,12 @@ fn chips(settings: &crate::Settings, rooms: &[RoomSummary]) -> Vec<Pick> {
 /// The chip in force: the stored one unless its folder is gone, hidden or (once the chats are
 /// known) has no chats left to be a chip. Not written back, so a chat list still loading does not
 /// lose the choice.
-fn effective(pick: &Pick, settings: &crate::Settings, rooms: &[RoomSummary]) -> Pick {
+fn effective(pick: &Pick, settings: &crate::Settings, rooms: &[RoomSummary], drafted: &dyn Fn(&OwnedRoomId) -> bool) -> Pick {
     let known = match pick {
         Pick::Network(_) => rooms.is_empty() && !settings.folders_hidden.contains(&Builtin::Networks),
         _ => false,
     };
-    if known || chips(settings, rooms).contains(pick) { pick.clone() } else { Pick::All }
+    if known || chips(settings, rooms, drafted).contains(pick) { pick.clone() } else { Pick::All }
 }
 
 fn label(pick: &Pick, folders: &[Folder]) -> SharedString {
@@ -146,6 +163,8 @@ fn label(pick: &Pick, folders: &[Folder]) -> SharedString {
         Pick::Unread => t!("Unread").into(),
         Pick::Direct => t!("Direct").into(),
         Pick::Groups => t!("Groups").into(),
+        Pick::Unanswered => t!("Unanswered").into(),
+        Pick::Drafts => t!("Drafts").into(),
         Pick::Network(name) => name.clone().into(),
         Pick::Custom(id) => folders.iter().find(|f| f.id == *id).map(|f| f.name.clone()).unwrap_or_default().into(),
         Pick::LowPriority => t!("Low priority").into(),
@@ -234,12 +253,12 @@ impl Ui {
 
 impl BeeperApp {
     pub(super) fn effective_pick(&self) -> Pick {
-        effective(&self.folders.pick, &self.settings, &self.rooms)
+        effective(&self.folders.pick, &self.settings, &self.rooms, &|id| self.drafts.get(id).is_some())
     }
 
     /// Whether `r` is in the chip in force, for `refilter`; the archive ignores the chips.
     pub(super) fn in_folder(&self, pick: &Pick, r: &RoomSummary) -> bool {
-        matches(pick, &self.settings.folders, r)
+        matches(pick, &self.settings.folders, self.drafts.get(&r.id).is_some(), r)
     }
 
     pub(super) fn set_pick(&mut self, pick: Pick, cx: &mut Context<Self>) {
@@ -264,7 +283,7 @@ impl BeeperApp {
         let p = Palette::of(cx);
         let current = self.effective_pick();
         let waiting = super::accounts::waiting_count(&self.rooms);
-        let picks = chips(&self.settings, &self.rooms);
+        let picks = chips(&self.settings, &self.rooms, &|id| self.drafts.get(id).is_some());
         let seg = press::Segments::new("filters", window, cx);
         let chosen = picks.iter().position(|pick| *pick == current);
         let slider = chosen.and_then(|ix| seg.pill("filters-pill", ix, p.raised, window, cx));
@@ -430,8 +449,8 @@ impl BeeperApp {
             row(b.label(), "", cx).child(switch)
         }));
         let count = self.settings.folders.len();
-        let tool = |id: (&'static str, u32), icon: IconName, on: bool, cx: &App| {
-            let el = round_button(id, icon, cx);
+        let tool = |id: (&'static str, u32), icon: IconName, label: &'static str, on: bool, cx: &App| {
+            let el = round_button(id, icon, label, cx);
             if on { el } else { el.opacity(0.4).cursor_default() }
         };
         let add = (self.folders.edit.is_none() && count < MAX_FOLDERS).then(|| {
@@ -444,10 +463,10 @@ impl BeeperApp {
             h_flex()
                 .min_h(px(ROW_H))
                 .child(v_flex().flex_1().min_w_0().py(px(8.)).child(div().text_size(fs(16.)).line_height(fs(22.)).truncate().child(f.name.clone())).child(div().text_size(fs(13.)).line_height(fs(18.)).text_color(p.muted).child(detail)))
-                .child(tool(("folder-up", id), IconName::ArrowUp, ix > 0, cx).when(ix > 0, |el| el.on_click(cx.listener(move |this, _, _, cx| this.move_folder(id, false, cx)))))
-                .child(tool(("folder-down", id), IconName::ArrowDown, ix + 1 < count, cx).when(ix + 1 < count, |el| el.on_click(cx.listener(move |this, _, _, cx| this.move_folder(id, true, cx)))))
-                .child(tool(("folder-rename", id), IconName::Pencil, true, cx).on_click(cx.listener(move |this, _, window, cx| this.start_edit(Some(id), window, cx))))
-                .child(tool(("folder-delete", id), IconName::Trash, true, cx).on_click(cx.listener(move |this, _, _, cx| this.delete_folder(id, cx))))
+                .child(tool(("folder-up", id), IconName::ArrowUp, t!("Move up"), ix > 0, cx).when(ix > 0, |el| el.on_click(cx.listener(move |this, _, _, cx| this.move_folder(id, false, cx)))))
+                .child(tool(("folder-down", id), IconName::ArrowDown, t!("Move down"), ix + 1 < count, cx).when(ix + 1 < count, |el| el.on_click(cx.listener(move |this, _, _, cx| this.move_folder(id, true, cx)))))
+                .child(tool(("folder-rename", id), IconName::Pencil, t!("Rename"), true, cx).on_click(cx.listener(move |this, _, window, cx| this.start_edit(Some(id), window, cx))))
+                .child(tool(("folder-delete", id), IconName::Trash, t!("Delete"), true, cx).on_click(cx.listener(move |this, _, _, cx| this.delete_folder(id, cx))))
         })).children(add);
         let editor = self.folders.edit.map(|target| {
             card(cx)
@@ -588,7 +607,7 @@ mod tests {
     }
 
     fn ids(rooms: &[RoomSummary], pick: &Pick, folders: &[Folder]) -> Vec<String> {
-        rooms.iter().filter(|r| in_view(View::Inbox, r) && matches(pick, folders, r)).map(|r| r.id.to_string()).collect()
+        rooms.iter().filter(|r| in_view(View::Inbox, r) && matches(pick, folders, false, r)).map(|r| r.id.to_string()).collect()
     }
 
     fn sample() -> Vec<RoomSummary> {
@@ -615,6 +634,23 @@ mod tests {
     }
 
     #[test]
+    fn unanswered_holds_direct_chats_waiting_on_the_user_and_drafts_their_drafts() {
+        let mut rooms = sample();
+        rooms[0].preview = Some("hi".into());
+        rooms[1].preview = Some("ok".into());
+        rooms[1].own_last = true;
+        rooms[2].preview = Some("group".into());
+        let none: &[Folder] = &[];
+        assert_eq!(ids(&rooms, &Pick::Unanswered, none), ["!a:x"]);
+        let drafted = |id: &OwnedRoomId| id.as_str() == "!d:x";
+        let settings = Settings::parse(b"{}").unwrap();
+        let picks = chips(&settings, &rooms, &drafted);
+        assert!(picks.contains(&Pick::Unanswered) && picks.contains(&Pick::Drafts));
+        assert!(!chips(&settings, &rooms, &|_| false).contains(&Pick::Drafts), "no chip while no chat has a draft");
+        assert!(matches(&Pick::Drafts, none, true, &rooms[3]));
+    }
+
+    #[test]
     fn a_custom_folder_shows_its_chats_and_an_unknown_one_none() {
         let rooms = sample();
         let folders = [Folder { id: 3, name: "Work".into(), rooms: vec!["!b:x".try_into().unwrap(), "!d:x".try_into().unwrap(), "!e:x".try_into().unwrap()] }];
@@ -626,14 +662,14 @@ mod tests {
     fn network_chips_need_two_networks_and_hiding_removes_them() {
         let mut settings = Settings::parse(b"{}").unwrap();
         let rooms = sample();
-        assert_eq!(chips(&settings, &rooms[..1]), [Pick::All, Pick::Unread, Pick::Direct, Pick::Groups, Pick::LowPriority]);
+        assert_eq!(chips(&settings, &rooms[..1], &|_| false), [Pick::All, Pick::Unread, Pick::Direct, Pick::Groups, Pick::LowPriority]);
         assert_eq!(
-            chips(&settings, &rooms),
+            chips(&settings, &rooms, &|_| false),
             [Pick::All, Pick::Unread, Pick::Direct, Pick::Groups, Pick::Network("Matrix".into()), Pick::Network("Messenger".into()), Pick::Network("WhatsApp".into()), Pick::LowPriority]
         );
         settings.folders_hidden = vec![Builtin::Networks, Builtin::Direct, Builtin::LowPriority];
         settings.folders = vec![Folder { id: 1, name: "A".into(), rooms: vec![] }];
-        assert_eq!(chips(&settings, &rooms), [Pick::All, Pick::Unread, Pick::Groups, Pick::Custom(1)]);
+        assert_eq!(chips(&settings, &rooms, &|_| false), [Pick::All, Pick::Unread, Pick::Groups, Pick::Custom(1)]);
     }
 
     #[test]
@@ -641,12 +677,12 @@ mod tests {
         let mut settings = Settings::parse(b"{}").unwrap();
         let rooms = sample();
         let whatsapp = Pick::Network("WhatsApp".into());
-        assert_eq!(effective(&whatsapp, &settings, &rooms), whatsapp);
-        assert_eq!(effective(&whatsapp, &settings, &rooms[..1]), Pick::All);
-        assert_eq!(effective(&whatsapp, &settings, &[]), whatsapp, "chats not loaded yet");
-        assert_eq!(effective(&Pick::Custom(4), &settings, &rooms), Pick::All);
+        assert_eq!(effective(&whatsapp, &settings, &rooms, &|_| false), whatsapp);
+        assert_eq!(effective(&whatsapp, &settings, &rooms[..1], &|_| false), Pick::All);
+        assert_eq!(effective(&whatsapp, &settings, &[], &|_| false), whatsapp, "chats not loaded yet");
+        assert_eq!(effective(&Pick::Custom(4), &settings, &rooms, &|_| false), Pick::All);
         settings.folders_hidden = vec![Builtin::Groups];
-        assert_eq!(effective(&Pick::Groups, &settings, &rooms), Pick::All);
+        assert_eq!(effective(&Pick::Groups, &settings, &rooms, &|_| false), Pick::All);
     }
 
     #[test]

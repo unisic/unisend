@@ -16,7 +16,7 @@ N impossible over Matrix or bridges.
 | Reactions | Y | Y | Y | Y | `ui/heart.rs`, `ui/emojipick.rs` | B |
 | Mentions | Y | Y | Y | Y | `backend/mentions.rs` | B |
 | Formatting (bold, code, spoiler) | Y | P | N | N | `backend/rich.rs`, `ui/rich.rs`; `\|\|spoiler\|\|` sent, covered until tapped | Y (HTML) |
-| Threads | N | N | N | P | missing (`m.thread`) | Y natively, bridges flatten |
+| Threads | N | N | N | P | part (`m.thread`, see parity.md) | Y natively, bridges flatten |
 | Photos, video, files | Y | Y | Y | Y | `ui/gallery.rs`, `ui/viewer.rs`, `ui/video.rs` | Y |
 | Edit photo, trim video before sending | Y | Y | Y | P | `ui/caption/edit.rs`, `ui/caption/trim.rs`; face blur Android only, trim Android and Linux | Y |
 | Media gallery per chat | Y | Y | P | Y | `ui/info.rs` (Media, Links, Files) | Y |
@@ -57,7 +57,7 @@ N impossible over Matrix or bridges.
 | No read receipts / typing | Y | Y | N | P | default on | Y |
 | Chat history backup | Y (local) | Y (cloud) | N | ? | key backup through the recovery code | Y |
 | Linked devices list, sign one out | Y | Y | Y | Y | Settings, Devices (`backend/verify.rs` `devices`, `delete_devices`) | Y |
-| Accessibility (screen reader, scaling) | Y | Y | Y | Y | text size steps; no screen reader (GPUI) | Y (client) |
+| Accessibility (screen reader, scaling) | Y | Y | Y | Y | text size steps; desktop: Tab, arrow keys in the chat list and messages, roles and spoken labels (AccessKit, untested with a real reader) | Y (client) |
 | Chat colors, wallpaper | Y | Y | Y | Y | `ui/appearance.rs` | Y (local) |
 | Per-chat wallpaper and color | Y | Y | Y | Y | `ui/chatlook.rs` | Y (local) |
 | Language switch in app | Y | Y | Y | Y | Settings, Language (`ui/panels.rs`) | Y |
@@ -101,10 +101,10 @@ Effort: S small, M medium, L large.
    homeserver sees the link through its `preview_url`). Medium, M.
 10. Push without Google through UnifiedPush, for phones that kill the background connection.
     Medium, L. The push server sees an opaque wake-up only.
-11. Threads for Matrix-native rooms. Medium, L.
+11. Threads for Matrix-native rooms: a thread view exists (parity.md); a thread list and per-thread unread remain. Medium, M.
 12. Per-chat wallpaper and color: done (`ui/chatlook.rs`).
 13. Desktop hotkeys and a command bar. Medium, M.
-14. Screen reader support (depends on GPUI). High for some users, L.
+14. Screen reader support: labels and keyboard reach are in (desktop); tested with Orca and TalkBack, and settings rows and sheets reachable by Tab, remain. High for some users, M.
 15. Matrix-native calls. Only Matrix peers, needs a LiveKit server. L, last.
 
 Not worth chasing: view-once, stories, calls through bridges, bridge-side backups.

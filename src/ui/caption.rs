@@ -473,7 +473,7 @@ impl BeeperApp {
             .flex_none()
             .px(px(GUTTER - 10.))
             .justify_between()
-            .child(round_button("preview-close", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| this.close_preview(true, window, cx))))
+            .child(round_button("preview-close", IconName::X, t!("Close"), cx).on_click(cx.listener(|this, _, window, cx| this.close_preview(true, window, cx))))
             .child(div().text_size(fs(14.)).text_color(p.muted).when(count > 1, |el| el.child(t!("{index} of {count}", index = pv.cur + 1, count = count))))
             .child(
                 h_flex().h(px(TAP)).min_w(px(TAP)).flex_none().items_center().justify_end().when(any_photo, |el| {
@@ -521,7 +521,7 @@ impl BeeperApp {
                     .gap(px(8.))
                     .when(trim_cur, |el| {
                         el.child(
-                            round_button("preview-trim", IconName::Scissors, cx)
+                            round_button("preview-trim", IconName::Scissors, t!("Trim"), cx)
                                 .bg(gpui_kit::black().opacity(0.5))
                                 .text_color(gpui_kit::white())
                                 .on_click(cx.listener(|this, _, _, cx| this.open_trim(this.preview.cur, cx))),
@@ -529,14 +529,14 @@ impl BeeperApp {
                     })
                     .when(edit_cur, |el| {
                         el.child(
-                            round_button("preview-edit", IconName::Pencil, cx)
+                            round_button("preview-edit", IconName::Pencil, t!("Edit"), cx)
                                 .bg(gpui_kit::black().opacity(0.5))
                                 .text_color(gpui_kit::white())
                                 .on_click(cx.listener(|this, _, window, cx| this.open_editor(this.preview.cur, window, cx))),
                         )
                     })
                     .child(
-                        round_button("preview-remove", IconName::Trash, cx)
+                        round_button("preview-remove", IconName::Trash, t!("Remove"), cx)
                             .bg(gpui_kit::black().opacity(0.5))
                             .text_color(gpui_kit::white())
                             .on_click(cx.listener(|this, _, window, cx| this.remove_item(window, cx))),

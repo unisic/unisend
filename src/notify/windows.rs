@@ -25,11 +25,15 @@ pub(super) struct Sink {
 /// app has them only from its AppUserModelID's key. The icon is a file in the app's data folder.
 pub(super) fn register(dir: &Path) {
     let icon = dir.join("icon.png");
-    if let Err(e) = std::fs::write(&icon, include_bytes!("../../packaging/linux/icons/hicolor/256x256/apps/dev.gpui.beeper.png")) {
+    if let Err(e) = std::fs::write(&icon, if crate::backend::update::DEV {
+        include_bytes!("../../packaging/linux/icons-dev/hicolor/256x256/apps/dev.gpui.beeper.dev.png").as_slice()
+    } else {
+        include_bytes!("../../packaging/linux/icons/hicolor/256x256/apps/dev.gpui.beeper.png").as_slice()
+    }) {
         log::warn!("notification icon: {e}");
     }
     let registered = windows_registry::CURRENT_USER.create(format!(r"Software\Classes\AppUserModelId\{APP_ID}")).and_then(|key| {
-        key.set_string("DisplayName", "Unisend")?;
+        key.set_string("DisplayName", crate::APP_NAME)?;
         key.set_string("IconUri", icon.to_string_lossy().as_ref())
     });
     if let Err(e) = registered {

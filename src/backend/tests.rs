@@ -1947,6 +1947,59 @@ async fn a_forward_reuses_the_file_and_drops_the_reply() {
     }
 }
 
+/// A thread: a reply that arrives while the chat is open is counted on its first message and not
+/// shown in the chat; text and a picture sent with the thread open go into it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a local homeserver with JWT login, see module docs"]
+async fn a_thread_holds_its_replies_and_the_chat_counts_them() {
+    let hs = std::env::var("MATRIX_TEST_HS").expect("MATRIX_TEST_HS");
+    let secret = std::env::var("MATRIX_TEST_JWT_SECRET").expect("MATRIX_TEST_JWT_SECRET");
+    let tag = tag();
+    let root = std::env::temp_dir().join(format!("beeper-gpui-thread-{tag}"));
+    let (mut alice, mut seat) = state(root.join("alice"), &hs);
+    alice.login_jwt(jwt(&secret, &format!("alice{tag}"))).await.unwrap();
+    wait_for(&mut seat, "Ready", |e| matches!(e, Ev::Ready { .. }).then_some(())).await;
+    let bob = Client::builder().homeserver_url(&hs).sqlite_store(root.join("bob"), None).build().await.unwrap();
+    let mut data = JsonObject::new();
+    data.insert("token".into(), jwt(&secret, &format!("bob{tag}")).into());
+    bob.matrix_auth().login_custom("org.matrix.login.jwt", data).unwrap().await.unwrap();
+    let mut req = matrix_sdk::ruma::api::client::room::create_room::v3::Request::new();
+    req.invite = vec![bob.user_id().unwrap().to_owned()];
+    let room = alice.client().unwrap().create_room(req).await.unwrap().room_id().to_owned();
+    let bob_room = bob.join_room_by_id(&room).await.unwrap();
+    let send = |body: &str| Cmd::Send { room: room.clone(), body: body.into(), reply_to: None, edit: None, mentions: Vec::new(), preview: None };
+
+    alice.handle(Cmd::Open(room.clone())).await.unwrap();
+    alice.handle(send("question")).await.unwrap();
+    until(&mut seat, "the first message", |rows| rows.iter().any(|m| m.body == "question" && m.id.starts_with('$'))).await;
+    let first = seat.rows.iter().find(|m| m.body == "question").unwrap().id.clone();
+    let first_id = OwnedEventId::try_from(first.as_str()).unwrap();
+    let mut answer = RoomMessageEventContent::text_plain("from bob");
+    answer.relates_to = Some(matrix_sdk::ruma::events::room::message::Relation::Thread(matrix_sdk::ruma::events::relation::Thread::plain(first_id.clone(), first_id)));
+    bob_room.send(answer).await.unwrap();
+    until(&mut seat, "bob's reply counted", |rows| rows.iter().any(|m| m.id == first && m.replies == 1)).await;
+    assert!(!seat.rows.iter().any(|m| m.body == "from bob"), "a reply in a thread stays out of the chat");
+
+    alice.handle(Cmd::OpenThread(room.clone(), first.clone())).await.unwrap();
+    seat.rows.clear();
+    alice.handle(send("answer")).await.unwrap();
+    let picture = root.join("cat.png");
+    image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([x as u8, y as u8, 40])).save(&picture).unwrap();
+    alice.handle(Cmd::Attach { room: room.clone(), path: picture, reply_to: None }).await.unwrap();
+    let all = |rows: &[Msg]| {
+        let sent = |m: &&Msg| m.id.starts_with('$');
+        rows.iter().filter(sent).any(|m| m.body == "from bob") && rows.iter().filter(sent).any(|m| m.body == "answer") && rows.iter().filter(sent).any(|m| m.media.is_some())
+    };
+    until(&mut seat, "the thread's three replies", all).await;
+    assert_eq!(seat.rows.iter().find(|m| m.kind == Kind::Message).map(|m| m.id.as_str()), Some(first.as_str()), "the thread opens with its first message");
+
+    alice.handle(Cmd::Open(room.clone())).await.unwrap();
+    seat.rows.clear();
+    until(&mut seat, "all three counted", |rows| rows.iter().any(|m| m.id == first && m.replies == 3)).await;
+    let lines = bodies(&seat.rows);
+    assert!(!seat.rows.iter().any(|m| m.body == "answer" || m.media.is_some()), "replies stay out of the chat: {lines:?}");
+}
+
 mod sessions;
 
 /// A bridge's timer: read with what the bridge takes, set from here, told as a line, and marked on

@@ -323,21 +323,21 @@ impl BeeperApp {
             .bg(p.ground)
             .occlude()
             .opacity(shown.progress)
-            .child(round_button("select-close", IconName::X, cx).on_click(cx.listener(|this, _, _, cx| {
+            .child(round_button("select-close", IconName::X, t!("Cancel selection"), cx).on_click(cx.listener(|this, _, _, cx| {
                 this.forward_back(cx);
             })))
             .child(div().flex_1().min_w_0().pl(px(8.)).truncate().text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD).font_features(tabular()).child(count))
             .when(!picked.is_empty(), |el| {
-                el.child(round_button("select-copy", IconName::Copy, cx).on_click(cx.listener(move |this, _, _, cx| {
+                el.child(round_button("select-copy", IconName::Copy, t!("Copy"), cx).on_click(cx.listener(move |this, _, _, cx| {
                     crate::copy(cx, text.clone());
                     this.forward_back(cx);
                 })))
                 .when(can_forward, |el| {
-                    el.child(round_button("select-forward", IconName::Forward, cx).on_click(cx.listener(move |this, _, window, cx| {
+                    el.child(round_button("select-forward", IconName::Forward, t!("Forward"), cx).on_click(cx.listener(move |this, _, window, cx| {
                         this.forward_start(forward_ids.clone(), window, cx)
                     })))
                 })
-                .child(round_button("select-delete", IconName::Trash, cx).text_color(p.negative).on_click(cx.listener(move |this, _, _, cx| {
+                .child(round_button("select-delete", IconName::Trash, t!("Delete"), cx).text_color(p.negative).on_click(cx.listener(move |this, _, _, cx| {
                     this.ask_delete(ids.clone(), cx);
                 })))
             });

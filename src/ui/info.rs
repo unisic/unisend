@@ -415,7 +415,8 @@ impl BeeperApp {
             Some(page) => page,
             None => body.into_any_element(),
         };
-        let close = round_button("info-close", if beside && page_title.is_none() { IconName::X } else { IconName::ArrowLeft }, cx)
+        let shut = beside && page_title.is_none();
+        let close = round_button("info-close", if shut { IconName::X } else { IconName::ArrowLeft }, if shut { t!("Close") } else { t!("Back") }, cx)
             .on_click(cx.listener(|this, _, _, cx| this.close_info(cx)));
         let slide = self.info_slide(cx).filter(|_| self.info.nav.is_some_and(|(_, push)| push));
         if slide.is_some() {

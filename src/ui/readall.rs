@@ -25,7 +25,7 @@ impl BeeperApp {
     /// The list header's button, while the list holds an unread chat and no search runs.
     pub(super) fn read_all_button(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         (!self.searching && self.unread_in_list().next().is_some())
-            .then(|| round_button("read-all", IconName::CheckCheck, cx).on_click(cx.listener(|this, _, _, cx| this.read_all(cx))))
+            .then(|| round_button("read-all", IconName::CheckCheck, t!("Mark all as read"), cx).on_click(cx.listener(|this, _, _, cx| this.read_all(cx))))
     }
 
     fn read_all(&mut self, cx: &mut Context<Self>) {

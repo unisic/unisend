@@ -11,12 +11,12 @@ use anyhow::{Result, anyhow, bail};
 use futures_util::StreamExt as _;
 use matrix_sdk::{
     Client, Room, reqwest,
-    room::reply::{EnforceThread, Reply},
+    room::reply::Reply,
     ruma::{
-        EventId, TransactionId, UInt,
+        TransactionId, UInt,
         events::room::{
             ImageInfo, MediaSource, ThumbnailInfo,
-            message::{AddMentions, ImageMessageEventContent, MessageType, RoomMessageEventContent, VideoInfo, VideoMessageEventContent},
+            message::{ImageMessageEventContent, MessageType, RoomMessageEventContent, VideoInfo, VideoMessageEventContent},
         },
     },
 };
@@ -324,7 +324,7 @@ fn mark(content: &mut Value, as_file: bool) {
 }
 
 /// Downloads the GIF from KLIPY, sends it to the room and tells KLIPY it was shared.
-pub(super) async fn send(http: &reqwest::Client, room: &Room, gif: &Gif, query: &str, network: Option<&str>, reply_to: Option<String>) -> Result<()> {
+pub(super) async fn send(http: &reqwest::Client, room: &Room, gif: &Gif, query: &str, network: Option<&str>, reply: Option<Reply>) -> Result<()> {
     let as_file = wants_gif_file(network);
     let sent = if as_file { gif.file_for_meta() } else { &gif.mp4 };
     let (data, still) = tokio::try_join!(get(http.get(&sent.url), MAX_MEDIA), get(http.get(&gif.still.url), MAX_STILL))?;
@@ -336,8 +336,7 @@ pub(super) async fn send(http: &reqwest::Client, room: &Room, gif: &Gif, query: 
     sized.size = data.len() as u64;
     let (source, thumb) = tokio::try_join!(upload(&client, encrypted, &mime, data), upload(&client, encrypted, &mime_guess::mime::IMAGE_JPEG, still))?;
     let mut content = message(gif, as_file, &sized, source, thumb, thumb_size)?;
-    if let Some(id) = reply_to {
-        let reply = Reply { event_id: EventId::parse(id)?, enforce_thread: EnforceThread::MaybeThreaded, add_mentions: AddMentions::Yes };
+    if let Some(reply) = reply {
         let plain: RoomMessageEventContent = serde_json::from_value(content)?;
         content = serde_json::to_value(room.make_reply_event(plain.into(), reply).await?)?;
         mark(&mut content, as_file);

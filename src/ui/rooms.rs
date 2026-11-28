@@ -976,7 +976,7 @@ impl BeeperApp {
             .size_full()
             .child(
                 header()
-                    .child(round_button("new-chat-back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.back(cx))))
+                    .child(round_button("new-chat-back", IconName::ArrowLeft, t!("Back"), cx).on_click(cx.listener(|this, _, _, cx| this.back(cx))))
                     .child(screen_title(title)),
             )
             .child(v_flex().flex_none().w_full().max_w(px(SHEET_W)).gap(px(8.)).children(chips).children(name_field).child(field).children(picked))

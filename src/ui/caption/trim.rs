@@ -390,7 +390,7 @@ impl BeeperApp {
             .px(px(GUTTER - 10.))
             .justify_between()
             .text_color(white)
-            .child(round_button("trim-close", IconName::X, cx).on_click(cx.listener(|this, _, _, cx| this.close_trim(cx))))
+            .child(round_button("trim-close", IconName::X, t!("Close"), cx).on_click(cx.listener(|this, _, _, cx| this.close_trim(cx))))
             .child(
                 div()
                     .id("trim-done")

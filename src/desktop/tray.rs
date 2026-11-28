@@ -29,8 +29,12 @@ const QUIT: i32 = 2;
 const LAUNCHER: &str = "com.canonical.Unity.LauncherEntry";
 const LAUNCHER_PATH: &str = "/dev/gpui/beeper/Launcher";
 const LAUNCHER_URI: &str = "application://dev.gpui.beeper.desktop";
-/// Shown when the icon theme has no `dev.gpui.beeper` (the app not installed): 64 x 64 x 4 bytes.
-const ICON: &[u8] = include_bytes!("../../packaging/linux/icons/hicolor/64x64/apps/dev.gpui.beeper.png");
+/// Shown when the icon theme has no `crate::APP_ID` (the app not installed): 64 x 64 x 4 bytes.
+const ICON: &[u8] = if crate::backend::update::DEV {
+    include_bytes!("../../packaging/linux/icons-dev/hicolor/64x64/apps/dev.gpui.beeper.dev.png")
+} else {
+    include_bytes!("../../packaging/linux/icons/hicolor/64x64/apps/dev.gpui.beeper.png")
+};
 
 /// The dot: center and radius in the icon's 64 x 64, the clear ring around it, and `Palette::accent`.
 const DOT: (f32, f32, f32) = (49.0, 15.0, 12.0);
@@ -196,12 +200,12 @@ impl Item {
 
     #[zbus(property)]
     fn id(&self) -> &str {
-        "dev.gpui.beeper"
+        crate::APP_ID
     }
 
     #[zbus(property)]
     fn title(&self) -> &str {
-        "Unisend"
+        crate::APP_NAME
     }
 
     #[zbus(property)]
@@ -217,7 +221,7 @@ impl Item {
     /// The theme's icon has no dot, so a waiting chat sends the pixmap alone.
     #[zbus(property)]
     fn icon_name(&self) -> &str {
-        if self.waiting { "" } else { "dev.gpui.beeper" }
+        if self.waiting { "" } else { crate::APP_ID }
     }
 
     #[zbus(property)]
@@ -227,7 +231,7 @@ impl Item {
 
     #[zbus(property)]
     fn tool_tip(&self) -> (&str, Pixmaps, &str, &str) {
-        ("", Vec::new(), "Unisend", "")
+        ("", Vec::new(), crate::APP_NAME, "")
     }
 
     #[zbus(property)]

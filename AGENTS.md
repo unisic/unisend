@@ -71,9 +71,9 @@ the platform's file before changing its code or building for it.
 - `cargo test --lib` passes, and the changed code compiles for every platform whose `cfg` blocks
   it touches, by that platform's proof above.
 - A platform this machine cannot build is named in the report as "unverified on <platform>".
-- A running test copy uses `BEEPER_GPUI_DATA_DIR=<scratch directory>` on desktop and the
-  `UNISEND_DEV=1` build on a phone: the default directory and `dev.gpui.beeper` hold the owner's
-  signed-in account.
+- A running test copy is the `UNISEND_DEV=1` build ("Unisend Dev", data in `beeper-gpui-dev`), or
+  `BEEPER_GPUI_DATA_DIR=<scratch directory>` on desktop: the default directory and
+  `dev.gpui.beeper` hold the owner's signed-in account.
 - The docs move with the code: a feature's row in `docs/parity.md`, the Privacy section of
   `README.md` when something new leaves the device, and the platform's status in its file.
 - The website moves with the app, by the section below.

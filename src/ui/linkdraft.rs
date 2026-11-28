@@ -101,7 +101,7 @@ impl BeeperApp {
                             .child(line(14., 19.).font_weight(FontWeight::SEMIBOLD).text_color(if reading { p.faint } else { p.text }).child(title))
                             .child(line(12., 16.).text_color(p.faint).child(site)),
                     )
-                    .child(round_button("link-card-close", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| {
+                    .child(round_button("link-card-close", IconName::X, t!("Remove link preview"), cx).on_click(cx.listener(|this, _, window, cx| {
                         this.close_link(true, cx);
                         this.composer.update(cx, |c, cx| c.focus(window, cx));
                     }))),

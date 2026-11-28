@@ -455,7 +455,7 @@ impl BeeperApp {
             .size_full()
             .child(
                 header()
-                    .when(deep, |el| el.child(round_button("panel-back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
+                    .when(deep, |el| el.child(round_button("panel-back", IconName::ArrowLeft, t!("Back"), cx).on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
                     .when(!deep, |el| el.pl(px(edge)))
                     .when(end > 0., |el| el.pr(px(GUTTER - 10. + end)))
                     .child(title),
@@ -512,7 +512,7 @@ impl BeeperApp {
                 .items_center()
                 .gap(px(4.))
                 .px(px(edge - 10.))
-                .when(deep, |el| el.child(round_button("panel-back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
+                .when(deep, |el| el.child(round_button("panel-back", IconName::ArrowLeft, t!("Back"), cx).on_click(cx.listener(|this, _, _, cx| this.back(cx)))))
                 .when(!deep, |el| el.pl(px(edge)))
                 .child(frame::drag(div().flex_1().min_w_0().h_full().flex().items_center().child(title), window, cx)),
         );
@@ -900,7 +900,7 @@ impl BeeperApp {
             let on = current == tone;
             option(("sound", ix), &tone.label(), "", on, cx)
                 .when_some(file, |el, file| {
-                    el.child(round_button(("sound-remove", ix), IconName::Trash, cx).on_click(cx.listener(move |this, _, _, cx| {
+                    el.child(round_button(("sound-remove", ix), IconName::Trash, t!("Delete"), cx).on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.settings.sounds.remove_own(&this.dir, &file);
                         this.settings.sounds.apply();

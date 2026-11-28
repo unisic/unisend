@@ -73,7 +73,7 @@ pub fn ask() {}
 pub fn start() -> Option<PathBuf> {
     discard();
     stop_player();
-    let dir = dirs::cache_dir()?.join("beeper-gpui").join("voice");
+    let dir = dirs::cache_dir()?.join(crate::DATA_NAME).join("voice");
     if let Err(e) = private_dir(&dir) {
         log::warn!("voice dir: {e}");
         return None;

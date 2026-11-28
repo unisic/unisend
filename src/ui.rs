@@ -51,6 +51,7 @@ mod info;
 mod group;
 mod profile;
 mod keys;
+mod keynav;
 mod linkdraft;
 mod block;
 mod nick;
@@ -105,6 +106,8 @@ const ROOM_ROW_H: f32 = 72.;
 const AVATAR: f32 = 48.;
 /// The account's picture on a row's avatar in the shared inbox.
 const ACCOUNT_BADGE: f32 = 16.;
+/// The network's mark on a chat's avatar.
+const NETWORK_BADGE: f32 = 12.;
 /// From the screen edge to content.
 const GUTTER: f32 = 16.;
 /// Between neighboring things.
@@ -345,6 +348,8 @@ pub struct BeeperApp {
     own_read: OwnRead,
     /// Someone else's message whose status line a tap showed.
     tapped: Option<String>,
+    /// The thread of the open chat shown instead of it, by its first message.
+    thread: Option<String>,
     /// Long messages of the open chat the user opened in full with Show more.
     expanded: HashSet<String>,
     /// What the typing line said last, drawn while it leaves.
@@ -477,6 +482,7 @@ pub struct BeeperApp {
     nicks: nick::People,
     place: navigate::Place,
     rooms_scroll: UniformListScrollHandle,
+    keynav: keynav::KeyNav,
     /// Kept here so the settings return to where they were after the lock keypad replaces them.
     settings_scroll: ScrollHandle,
     /// The pages open under the settings list, deepest last: a category, then a choice in it.
@@ -768,6 +774,7 @@ impl BeeperApp {
             list_typing: HashMap::new(),
             own_read: OwnRead::default(),
             tapped: None,
+            thread: None,
             expanded: HashSet::new(),
             typing_last: SharedString::default(),
             typing_sent: None,
@@ -844,6 +851,7 @@ impl BeeperApp {
             loading: false,
             timeline,
             rooms_scroll: UniformListScrollHandle::new(),
+            keynav: keynav::KeyNav::new(cx),
             settings_scroll: ScrollHandle::new(),
             settings_pages: Vec::new(),
             page_scroll: ScrollHandle::new(),
@@ -1568,6 +1576,8 @@ impl BeeperApp {
             self.close_find(window, cx);
         } else if self.searching {
             self.set_searching(false, window, cx);
+        } else if self.thread.is_some() {
+            self.switch_thread(None, cx);
         } else if narrow && self.open.is_some() {
             if cfg!(target_os = "android") {
                 self.pop_room(cx);
@@ -2050,6 +2060,10 @@ impl BeeperApp {
         }
         self.slide.leaving = None;
         if self.open.as_ref() == Some(&id) {
+            // The chat picked again while one of its threads is shown leads back to the chat.
+            if self.thread.is_some() {
+                self.switch_thread(None, cx);
+            }
             return;
         }
         self.close_room(cx);
@@ -2065,6 +2079,19 @@ impl BeeperApp {
         self.show_draft(Some(&id));
         self.loading = self.send(Cmd::Open(id), cx);
         self.seed_target(cx);
+    }
+
+    /// Shows a thread of the open chat in its place (`root`, the thread's first message), or the
+    /// chat again (`None`). The rows start over as for another chat; the draft stays the chat's.
+    fn switch_thread(&mut self, root: Option<String>, cx: &mut Context<Self>) {
+        let Some(room) = self.open.clone() else { return };
+        self.close_room(cx);
+        self.open = Some(room.clone());
+        self.opened_at = Some(Instant::now());
+        self.show_draft(Some(&room));
+        self.thread = root.clone();
+        self.loading = self.send(root.map_or(Cmd::Open(room.clone()), |root| Cmd::OpenThread(room, root)), cx);
+        cx.notify();
     }
 
     fn open_forum(&mut self, forum: String, cx: &mut Context<Self>) {
@@ -2110,7 +2137,7 @@ impl BeeperApp {
         self.fetching.clear();
         self.sizes.clear();
         (self.swipe, self.swipe_back, self.flash, self.seek, self.fresh_reaction, self.strip_last) = (None, None, None, None, None, None);
-        (self.bubble_press, self.status_last, self.tapped) = (None, None, None);
+        (self.bubble_press, self.status_last, self.tapped, self.thread) = (None, None, None, None);
         (self.pins, self.pin_shown) = (None, None);
         self.expanded.clear();
         self.own_read = OwnRead::default();
@@ -2123,6 +2150,7 @@ impl BeeperApp {
         self.find.close();
         self.compose = Compose::New;
         self.timeline.reset(0);
+        self.keynav.msg = None;
         self.drafts.save();
         self.show_draft(None);
         self.more = false;
@@ -2383,7 +2411,7 @@ impl BeeperApp {
             h_flex().flex_none().h(px(NAV_H)).bg(p.ground).border_t_1().border_color(p.rule).children(items)
         } else {
             let name = h_flex().h(px(BAR_H)).text_size(fs(16.)).font_weight(FontWeight::SEMIBOLD);
-            let name = if rail || gpui_kit::is_mobile() { name } else { name.px(px(GAP)).child("Unisend") };
+            let name = if rail || gpui_kit::is_mobile() { name } else { name.px(px(GAP)).child(crate::APP_NAME) };
             v_flex()
                 .flex_none()
                 .w(px(Self::nav_w(window)))
@@ -2489,8 +2517,27 @@ impl BeeperApp {
                             (None, time) => time,
                         };
                         let pan_id = id.clone();
+                        // What a screen reader says for the row: the chat, where and when, what is unread, the newest message.
+                        let spoken = {
+                            let name = topic.as_deref().or(forum_row.as_ref().and(room.parent.as_deref())).unwrap_or(&room.name);
+                            let mut parts = vec![name.to_owned()];
+                            parts.extend((!meta.is_empty()).then(|| meta.clone()));
+                            match (totals.unread, unread) {
+                                (0, true) => parts.push(t!("Unread").to_owned()),
+                                (0, false) => {}
+                                (n, _) => parts.push(tn!(n, "{n} unread", "{n} unread")),
+                            }
+                            parts.extend((totals.mentions > 0).then(|| t!("Mentions you").to_owned()));
+                            parts.extend(totals.muted.then(|| t!("Muted").to_owned()));
+                            parts.extend(preview.map(str::to_owned));
+                            parts.join(", ")
+                        };
                         let row = h_flex()
                             .id("row")
+                            .role(Role::ListItem)
+                            .aria_label(spoken)
+                            .aria_selected(selected)
+                            .when(this.keynav.chat == Some(ix) && this.keynav.chats.is_focused(window), |el| el.aria_active_descendant().child(keynav::ring(cx)))
                             .w_full()
                             .h(px(ROOM_ROW_H))
                             .px(px(GUTTER))
@@ -2518,6 +2565,14 @@ impl BeeperApp {
                                 el.relative().child(
                                     div().absolute().right(px(-3.)).bottom(px(-3.)).p(px(2.)).rounded_full().bg(p.ground).child(avatar(name, Some(picture), ACCOUNT_BADGE, cx)),
                                 )
+                            })
+                            // The network's mark on the avatar's corner, as Beeper's apps have it; the
+                            // account's face takes the lower corner in the shared inbox, so it goes up.
+                            .when_some(network.and_then(crate::network_mark), |el, (path, color)| {
+                                let tint = if color == 0 { p.text } else { rgb(color).into() };
+                                let badge = div().absolute().right(px(-3.)).p(px(3.)).rounded_full().bg(p.ground).child(svg().path(path).size(px(NETWORK_BADGE)).text_color(tint));
+                                let badge = if faces.contains_key(&this.slot_of_room(&room.id)) { badge.top(px(-3.)) } else { badge.bottom(px(-3.)) };
+                                el.relative().child(badge)
                             }))
                             .child(
                                 v_flex()
@@ -2634,6 +2689,16 @@ impl BeeperApp {
             window.request_animation_frame();
         }
         let list = div()
+            .id("chat-list")
+            .role(Role::List)
+            .aria_label(t!("Chats"))
+            .when(!gpui_kit::is_mobile(), |el| {
+                el.track_focus(&self.keynav.chats).on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    if this.chat_list_key(&e.keystroke, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
+            })
             .size_full()
             .when_some(fade.filter(|t| *t < 1.), |el, t| el.opacity(motion::ease_out(t)))
             .child(list)
@@ -2677,7 +2742,7 @@ impl BeeperApp {
                 .flex_1()
                 .min_w_0()
                 .gap(px(4.))
-                .child(round_button("leave-forum", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.close_forum(cx))))
+                .child(round_button("leave-forum", IconName::ArrowLeft, t!("Back"), cx).on_click(cx.listener(|this, _, _, cx| this.close_forum(cx))))
                 .child(frame::drag(
                     div().flex_1().min_w_0().when(!gpui_kit::is_mobile(), |el| el.h_full().flex().items_center()).child(screen_title(name).min_w_0().truncate()),
                     window,
@@ -2693,7 +2758,7 @@ impl BeeperApp {
                 .bg(p.surface)
                 .child(Icon::new(IconName::Search).size_4().flex_none().text_color(p.faint))
                 .child(div().flex_1().min_w_0().child(Input::new(&self.search).appearance(false)).child(crate::ime::marks(&self.search)))
-                .child(round_button("close-search", IconName::X, cx).on_click(cx.listener(|this, _, window, cx| {
+                .child(round_button("close-search", IconName::X, t!("Close search"), cx).on_click(cx.listener(|this, _, window, cx| {
                     this.set_searching(false, window, cx);
                 })))
         } else {
@@ -2705,8 +2770,8 @@ impl BeeperApp {
                     cx,
                 ))
                 .children(self.read_all_button(cx))
-                .child(round_button("new-chat", IconName::Plus, cx).on_click(cx.listener(|this, _, window, cx| this.open_new_chat(window, cx))))
-                .child(round_button("search", IconName::Search, cx).on_click(cx.listener(|this, _, window, cx| {
+                .child(round_button("new-chat", IconName::Plus, t!("New chat"), cx).on_click(cx.listener(|this, _, window, cx| this.open_new_chat(window, cx))))
+                .child(round_button("search", IconName::Search, t!("Search"), cx).on_click(cx.listener(|this, _, window, cx| {
                     this.set_searching(true, window, cx);
                 })))
         };
@@ -2799,6 +2864,8 @@ impl BeeperApp {
             (Some(network), Some(parent)) => Some(format!("{network} · {parent}")),
             (network, _) => network.clone(),
         });
+        // A thread is titled as one, with its chat under it.
+        let (name, network) = if self.thread.is_some() { (t!("Thread").to_owned(), Some(name)) } else { (name, network) };
         let header_avatar = room.map(|r| room_avatar(r, &self.avatars, 36., cx));
         let dm = room.is_some_and(|r| r.dm);
         // The newest message: the user's tells its way to the others, someone else's what its sender sees.
@@ -3065,6 +3132,22 @@ impl BeeperApp {
                     .children(link_card)
                     .children(poll_card)
                     .children(place_card);
+                // Replies in a thread stay out of the chat: a line under its first message opens them.
+                let thread_link = (m.replies > 0 && this.thread.is_none()).then(|| {
+                    let root = m.id.clone();
+                    h_flex()
+                        .id(SharedString::from(format!("{}-thread", m.id)))
+                        .px(px(8.))
+                        .py(px(4.))
+                        .gap(px(4.))
+                        .text_size(fs(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.accent_ink)
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| this.switch_thread(Some(root.clone()), cx)))
+                        .child(Icon::new(IconName::Reply).size_4())
+                        .child(tn!(m.replies, "{n} reply", "{n} replies"))
+                });
                 // Badges pinned over the bubble's lower edge, ringed in the ground's color: standing
                 // free under it they read as small messages of their own.
                 let reactions = (!m.reactions.is_empty()).then(|| {
@@ -3136,6 +3219,10 @@ impl BeeperApp {
                 let m = &this.msgs[ix];
                 let side = if faces { px(SENDER + 8.) } else { px(0.) };
                 let row = v_flex()
+                    .id(SharedString::from(format!("{}-row", m.id)))
+                    .role(Role::ListItem)
+                    .aria_label(spoken(m))
+                    .when(this.keynav.msg == Some(ix) && this.keynav.msgs.is_focused(window), |el| el.aria_active_descendant().child(keynav::ring(cx)))
                     .group("message")
                     .w_full()
                     .relative()
@@ -3217,6 +3304,7 @@ impl BeeperApp {
                             .pl(side)
                             .map(|el| if m.own { el.items_end() } else { el.items_start() })
                             .children(reactions)
+                            .children(thread_link)
                             .when(last || state.is_some() || shrink.is_some() || edited, |el| {
                                 let failed = state.as_ref().is_some_and(|(_, r)| matches!(r, Receipt::Failed(_)));
                                 // Words follow the time after a dot, icons after a space.
@@ -3273,7 +3361,7 @@ impl BeeperApp {
                             }),
                     )
                     .children(this.selection_mark(m, cx));
-                let row = if this.place.unread.as_ref() == Some(&m.id) { v_flex().w_full().child(Self::unread_line(this.place.unread_count, cx)).child(row) } else { row };
+                let row = if this.place.unread.as_ref() == Some(&m.id) { v_flex().w_full().child(Self::unread_line(this.place.unread_count, cx)).child(row) } else { div().w_full().child(row) };
                 // A list lays its items out across its full width, ignoring side padding, so each row keeps the column itself.
                 let row = div().w_full().px(px(column)).child(row);
                 match arriving {
@@ -3313,10 +3401,13 @@ impl BeeperApp {
                 header()
                     .when(self.find.open, |el| el.hidden())
                     .when(end > 0., |el| el.pr(px(GUTTER - 10. + end)))
-                    .when(narrow, |el| {
-                        el.child(round_button("back", IconName::ArrowLeft, cx).on_click(cx.listener(|this, _, _, cx| this.pop_room(cx))))
+                    .when(narrow || self.thread.is_some(), |el| {
+                        el.child(round_button("back", IconName::ArrowLeft, t!("Back"), cx).on_click(cx.listener(|this, _, _, cx| match this.thread {
+                            Some(_) => this.switch_thread(None, cx),
+                            None => this.pop_room(cx),
+                        })))
                     })
-                    .when(!narrow, |el| el.pl(px(GUTTER)))
+                    .when(!narrow && self.thread.is_none(), |el| el.pl(px(GUTTER)))
                     .child(
                         h_flex()
                             .id("chat-title")
@@ -3339,7 +3430,7 @@ impl BeeperApp {
                     .when(own_frame, |el| el.child(frame::drag(div().flex_1().h_full(), window, cx)))
                     .when(room.is_some(), |el| el.child(self.find_button(cx)))
                     .when(room.is_some(), |el| {
-                        el.child(round_button("chat-menu", IconName::Ellipsis, cx).on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
+                        el.child(round_button("chat-menu", IconName::Ellipsis, t!("More options"), cx).on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
                             if let Some(id) = this.open.clone() {
                                 this.open_chat_sheet(id, Some(e.position()), true, cx);
                             }
@@ -3355,7 +3446,21 @@ impl BeeperApp {
                     .flex_1()
                     .min_h_0()
                     .children(self.wallpaper_layer(0., cx))
-                    .child(timeline)
+                    .child(
+                        div()
+                            .id("messages")
+                            .role(Role::List)
+                            .aria_label(t!("Messages"))
+                            .size_full()
+                            .when(!gpui_kit::is_mobile(), |el| {
+                                el.track_focus(&self.keynav.msgs).on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                                    if this.msg_list_key(&e.keystroke, window, cx) {
+                                        cx.stop_propagation();
+                                    }
+                                }))
+                            })
+                            .child(timeline),
+                    )
                     .when(!gpui_kit::is_mobile(), |el| el.vertical_scrollbar(&self.timeline))
                     .child(self.press_tracker(cx))
                     .child(self.bubble_release(cx))
@@ -3442,7 +3547,7 @@ impl BeeperApp {
                                     .overflow_hidden()
                                     .bg(p.surface)
                                     .child(
-                                        round_button("emoji", IconName::FaceSlightlySmiling, cx)
+                                        round_button("emoji", IconName::FaceSlightlySmiling, t!("Emoji picker"), cx)
                                             .relative()
                                             .child({
                                                 let button = self.emoji_pick.button.clone();
@@ -3476,14 +3581,14 @@ impl BeeperApp {
                                     )
                                     .map(|el| {
                                         if typed {
-                                            el.child(round_button("attach-in", IconName::Plus, cx).text_color(p.muted).on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.attach(e.position(), cx))))
+                                            el.child(round_button("attach-in", IconName::Plus, t!("Attach"), cx).text_color(p.muted).on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.attach(e.position(), cx))))
                                         } else {
                                             el.when(cfg!(target_os = "android") && self.open.is_some(), |el| {
-                                                el.child(round_button("camera", IconName::Camera, cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| this.capture(false, cx))))
+                                                el.child(round_button("camera", IconName::Camera, t!("Camera"), cx).text_color(p.muted).on_click(cx.listener(|this, _, _, cx| this.capture(false, cx))))
                                             })
                                             .when(mic, |el| {
                                                 el.child(
-                                                    round_button("mic", IconName::Mic, cx)
+                                                    round_button("mic", IconName::Mic, t!("Record voice message"), cx)
                                                         .relative()
                                                         .text_color(p.muted)
                                                         .when(cfg!(not(target_os = "android")), |el| el.on_click(cx.listener(|this, _, _, cx| this.mic_click(cx))))
@@ -3502,7 +3607,7 @@ impl BeeperApp {
                                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                                     .on_click(cx.listener(|this, _, window, cx| this.send_message(window, cx)))
                             } else {
-                                round_button("attach", IconName::Plus, cx).bg(p.raised).on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.attach(e.position(), cx)))
+                                round_button("attach", IconName::Plus, t!("Attach"), cx).bg(p.raised).on_click(cx.listener(|this, e: &ClickEvent, _, cx| this.attach(e.position(), cx)))
                             })
                             .relative()
                             .children(self.render_recorder(window, cx)),
@@ -4243,7 +4348,7 @@ impl BeeperApp {
                     .rounded(px(RADIUS))
                     .bg(p.surface)
                     .child(quote_inset(&quote, Some((icon, title)), p, thumb).flex_1())
-                    .child(round_button("cancel-compose", IconName::X, cx).when(!leaving, |el| {
+                    .child(round_button("cancel-compose", IconName::X, t!("Cancel"), cx).when(!leaving, |el| {
                         el.on_click(cx.listener(|this, _, window, cx| {
                             this.start_compose(Compose::New, window, cx);
                         }))
@@ -4453,10 +4558,14 @@ fn screen_title(title: impl Into<SharedString>) -> Div {
 }
 
 /// An icon to tap, with a finger-sized target.
-fn round_button(id: impl Into<ElementId>, icon: IconName, cx: &App) -> Stateful<Div> {
+/// A round icon button; `label` is what a screen reader says for it and, on a desktop, its tooltip.
+fn round_button(id: impl Into<ElementId>, icon: IconName, label: &'static str, cx: &App) -> Stateful<Div> {
     let p = Palette::of(cx);
     div()
         .id(id)
+        .role(Role::Button)
+        .aria_label(label)
+        .when(!gpui_kit::is_mobile(), |el| el.tooltip(move |window, cx| Tooltip::new(label).build(window, cx)))
         .size(px(TAP))
         .flex()
         .flex_none()
@@ -4466,6 +4575,7 @@ fn round_button(id: impl Into<ElementId>, icon: IconName, cx: &App) -> Stateful<
         .cursor_pointer()
         .when(!gpui_kit::is_mobile(), |el| el.hover(|el| el.bg(p.surface)))
         .active(|el| el.bg(p.raised))
+        .when(!gpui_kit::is_mobile(), |el| keynav::reachable(el, cx))
         .child(Icon::new(icon).size_5())
 }
 
@@ -4767,6 +4877,31 @@ fn quote_inset(q: &Quote, heading: Option<(Option<IconName>, SharedString)>, ins
 
 /// What a quote says about a message's content: an icon for what is not text, and its caption or
 /// a label.
+/// What a screen reader says for a message: who, what, when, and what became of it.
+fn spoken(m: &Msg) -> String {
+    let who = if m.own { t!("You").to_owned() } else { m.sender.clone() };
+    let media = m.media.as_ref().map(|media| match media.kind {
+        MediaKind::Image => t!("Photo").to_owned(),
+        MediaKind::Video => t!("Video").to_owned(),
+        MediaKind::Sticker => t!("Sticker").to_owned(),
+        MediaKind::Voice => t!("Voice message").to_owned(),
+        MediaKind::Audio => format!("{}, {}", t!("Audio"), media.name),
+        MediaKind::File => media.name.clone(),
+    });
+    let what = if m.deleted {
+        t!("Message deleted").to_owned()
+    } else if let Some(poll) = &m.poll {
+        t!("Poll: {text}", text = poll.question)
+    } else {
+        [media, (!m.body.is_empty()).then(|| m.body.clone()), m.place.is_some().then(|| t!("Location").to_owned())].into_iter().flatten().collect::<Vec<_>>().join(", ")
+    };
+    let mut parts = vec![format!("{who}: {what}"), clock(m.ts)];
+    parts.extend(m.edited.then(|| t!("Edited").to_owned()));
+    parts.extend(m.reactions.iter().map(|r| format!("{} {}", r.key, r.count)));
+    parts.extend((m.replies > 0).then(|| tn!(m.replies, "{n} reply", "{n} replies")));
+    parts.join(", ")
+}
+
 fn quote_label(q: &Quote) -> (Option<IconName>, String) {
     let or = |label: &str| if q.text.is_empty() { label.to_owned() } else { q.text.clone() };
     if q.poll {
@@ -5395,7 +5530,9 @@ impl BeeperApp {
         self.apply_draft(window, cx);
         self.composer_drawn = false;
         if window.focused(cx).is_none() {
-            window.focus(&self.focus, cx);
+            // A message's menu opened from the keyboard hands the focus back to the messages.
+            let back = if self.keynav.msg.is_some() && self.open.is_some() { &self.keynav.msgs } else { &self.focus };
+            window.focus(back, cx);
         }
         let root = v_flex()
             .track_focus(&self.focus)

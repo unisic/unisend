@@ -224,7 +224,7 @@ impl BeeperApp {
                                 .child(div().text_size(fs(16.)).line_height(fs(22.)).truncate().child(profile.name.clone()))
                                 .child(div().text_size(fs(13.)).line_height(fs(18.)).text_color(if on { p.accent_ink } else { p.muted }).child(state)),
                         )
-                        .child(round_button(("profile-delete", id), IconName::Trash, cx).on_click(cx.listener(move |this, _, _, cx| {
+                        .child(round_button(("profile-delete", id), IconName::Trash, t!("Delete"), cx).on_click(cx.listener(move |this, _, _, cx| {
                             this.settings.profiles.remove(id);
                             this.save_quiet(cx);
                         }))),
@@ -243,7 +243,7 @@ impl BeeperApp {
                         .min_h(px(TAP))
                         .gap(px(GAP))
                         .child(div().flex_1().min_w_0().text_size(fs(15.)).truncate().child(name))
-                        .child(round_button(SharedString::from(format!("profile-{id}-drop-{room}")), IconName::X, cx).on_click(cx.listener(move |this, _, _, cx| {
+                        .child(round_button(SharedString::from(format!("profile-{id}-drop-{room}")), IconName::X, t!("Remove"), cx).on_click(cx.listener(move |this, _, _, cx| {
                             if this.settings.profiles.toggle(id, &room) {
                                 this.save_quiet(cx);
                             }
@@ -318,9 +318,9 @@ impl BeeperApp {
                 this.change_profile(id, |p| p.schedule = p.schedule.map(|s| if start { Schedule { start: next(s.start), ..s } } else { Schedule { end: next(s.end), ..s } }), cx);
             };
             row(label, "", cx)
-                .child(round_button((key, id * 2), IconName::Minus, cx).on_click(cx.listener(move |this, _, _, cx| shift(this, true, cx))))
+                .child(round_button((key, id * 2), IconName::Minus, t!("Earlier"), cx).on_click(cx.listener(move |this, _, _, cx| shift(this, true, cx))))
                 .child(div().w(px(56.)).text_center().text_size(fs(16.)).child(clock(minute)))
-                .child(round_button((key, id * 2 + 1), IconName::Plus, cx).on_click(cx.listener(move |this, _, _, cx| shift(this, false, cx))))
+                .child(round_button((key, id * 2 + 1), IconName::Plus, t!("Later"), cx).on_click(cx.listener(move |this, _, _, cx| shift(this, false, cx))))
         };
         v_flex().child(days).child(time("profile-start", t!("From"), s.start, true, cx)).child(time("profile-end", t!("Until"), s.end, false, cx))
     }
